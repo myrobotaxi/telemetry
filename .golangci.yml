@@ -1,7 +1,14 @@
+version: "2"
+
 run:
-  timeout: 5m
-  tests: true
   modules-download-mode: readonly
+  tests: true
+
+output:
+  sort-order:
+    - severity
+    - linter
+    - file
 
 linters:
   enable:
@@ -40,86 +47,98 @@ linters:
     # Code hygiene
     - errname            # error type naming convention (ErrFoo)
 
-linters-settings:
-  cyclop:
-    max-complexity: 15
+  settings:
+    cyclop:
+      max-complexity: 15
 
-  gocognit:
-    min-complexity: 20
+    gocognit:
+      min-complexity: 20
 
-  funlen:
-    lines: 80
-    statements: 50
+    funlen:
+      lines: 80
+      statements: 50
 
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - style
-      - performance
-    disabled-checks:
-      - ifElseChain      # Too opinionated
-      - hugeParam        # Noisy for request/response structs
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+      disabled-checks:
+        - ifElseChain      # Too opinionated
+        - hugeParam        # Noisy for request/response structs
 
-  revive:
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unreachable-code
+
+    gosec:
+      excludes:
+        - G307  # Deferring error-returning Close methods (too noisy)
+
+    wrapcheck:
+      ignore-sigs:
+        - .Errorf(
+        - errors.New(
+        - errors.Unwrap(
+        - errors.Join(
+        - .Wrap(
+        - .Wrapf(
+        - .WithMessage(
+        - .WithMessagef(
+        - .WithStack(
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
     rules:
-      - name: blank-imports
-      - name: context-as-argument
-      - name: context-keys-type
-      - name: dot-imports
-      - name: error-return
-      - name: error-strings
-      - name: error-naming
-      - name: exported
-      - name: if-return
-      - name: increment-decrement
-      - name: var-naming
-      - name: range
-      - name: receiver-naming
-      - name: time-naming
-      - name: unexported-return
-      - name: indent-error-flow
-      - name: errorf
-      - name: empty-block
-      - name: superfluous-else
-      - name: unreachable-code
-
-  gosec:
-    excludes:
-      - G307  # Deferring error-returning Close methods (too noisy)
-
-  wrapcheck:
-    ignoreSigs:
-      - .Errorf(
-      - errors.New(
-      - errors.Unwrap(
-      - errors.Join(
-      - .Wrap(
-      - .Wrapf(
-      - .WithMessage(
-      - .WithMessagef(
-      - .WithStack(
+      # Relax rules in test files
+      - path: _test\.go
+        linters:
+          - funlen
+          - cyclop
+          - gocognit
+          - wrapcheck
+          - gocritic
+      # Relax wrapcheck in cmd/ (entrypoints log and exit)
+      - path: cmd/
+        linters:
+          - wrapcheck
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
-  exclude-rules:
-    # Relax rules in test files
-    - path: _test\.go
-      linters:
-        - funlen
-        - cyclop
-        - gocognit
-        - wrapcheck
-        - gocritic
-    # Relax wrapcheck in cmd/ (entrypoints log and exit)
-    - path: cmd/
-      linters:
-        - wrapcheck
 
-output:
-  sort-results: true
-  sort-order:
-    - severity
-    - linter
-    - file
-  show-stats: true
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
