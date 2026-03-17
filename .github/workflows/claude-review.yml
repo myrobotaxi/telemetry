@@ -1,0 +1,105 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write
+
+concurrency:
+  # One review at a time per PR to avoid duplicate comments
+  group: claude-review-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  # ─── Automatic PR Review ────────────────────────────────────────────
+  # Runs on every PR open/update. Reads labels to determine domain focus.
+  review:
+    name: Claude Review
+    if: >-
+      github.event_name == 'pull_request' &&
+      !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for accurate diff
+
+      - name: Collect PR context
+        id: context
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR_NUM="${{ github.event.pull_request.number }}"
+
+          # Get agent labels for domain-aware review
+          AGENT_LABELS=$(gh pr view "$PR_NUM" --json labels -q '[.labels[].name | select(startswith("agent:"))] | join(", ")')
+          echo "agent_labels=${AGENT_LABELS}" >> "$GITHUB_OUTPUT"
+
+          # Get phase label for milestone context
+          PHASE_LABEL=$(gh pr view "$PR_NUM" --json labels -q '[.labels[].name | select(startswith("phase:"))] | join(", ")')
+          echo "phase_label=${PHASE_LABEL}" >> "$GITHUB_OUTPUT"
+
+          # Get linked issue number (if any) for requirements context
+          ISSUE_NUM=$(gh pr view "$PR_NUM" --json body -q '.body' | grep -oP '(?:closes|fixes|resolves)\s*#(\d+)' | head -1 | grep -oP '\d+' || echo "")
+          echo "issue_num=${ISSUE_NUM}" >> "$GITHUB_OUTPUT"
+
+          echo "Agent labels: ${AGENT_LABELS:-none}"
+          echo "Phase: ${PHASE_LABEL:-none}"
+          echo "Linked issue: ${ISSUE_NUM:-none}"
+
+      - name: Run Claude review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          track_progress: true
+          claude_args: >-
+            --agent pr-reviewer
+            --max-turns 15
+          prompt: |
+            Review this pull request.
+
+            ## PR Context
+            - **PR #${{ github.event.pull_request.number }}**: ${{ github.event.pull_request.title }}
+            - **Agent labels**: ${{ steps.context.outputs.agent_labels || 'none (apply general review only)' }}
+            - **Phase**: ${{ steps.context.outputs.phase_label || 'unknown' }}
+            - **Linked issue**: ${{ steps.context.outputs.issue_num && format('#{0}', steps.context.outputs.issue_num) || 'none' }}
+
+            ## Instructions
+
+            1. Run `gh pr diff ${{ github.event.pull_request.number }}` to see all changes
+            2. Read CLAUDE.md for project rules
+            3. If there is a linked issue, run `gh issue view ${{ steps.context.outputs.issue_num }}` to understand requirements
+            4. Apply BOTH general Go review AND domain-specific review based on the agent labels listed above
+            5. Post your review using `gh pr review` with the appropriate verdict (--approve, --request-changes, or --comment)
+
+            Focus on real issues, not style nits. If the code is clean and well-tested, approve it.
+
+  # ─── Interactive @claude Responses ──────────────────────────────────
+  # Responds to @claude mentions in PR comments for follow-up questions.
+  interactive:
+    name: Claude Interactive
+    if: >-
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: >-
+            --max-turns 10

@@ -1,0 +1,125 @@
+run:
+  timeout: 5m
+  tests: true
+  modules-download-mode: readonly
+
+linters:
+  enable:
+    # Bug detection
+    - bodyclose          # HTTP response body must be closed
+    - nilerr             # returning nil when err is not nil
+    - nilnil             # no (nil, nil) returns
+    - sqlclosecheck      # SQL rows/stmt must be closed
+    - durationcheck      # wrong time.Duration multiplication
+    - noctx              # HTTP requests without context.Context
+    - rowserrcheck       # sql.Rows.Err() must be checked
+
+    # Error handling
+    - errorlint          # proper error wrapping (Go 1.13+)
+    - wrapcheck          # external errors must be wrapped
+
+    # Security
+    - gosec              # security problems
+
+    # Style & maintainability
+    - gocritic           # opinionated but catches real issues
+    - revive             # fast, configurable replacement for golint
+    - misspell           # catches typos in comments/strings
+    - unconvert          # unnecessary type conversions
+    - unparam            # unused function parameters
+    - wastedassign       # useless assignments
+
+    # Complexity
+    - cyclop             # cyclomatic complexity
+    - gocognit           # cognitive complexity
+    - funlen             # function length
+
+    # Performance
+    - prealloc           # slice pre-allocation opportunities
+
+    # Code hygiene
+    - errname            # error type naming convention (ErrFoo)
+
+linters-settings:
+  cyclop:
+    max-complexity: 15
+
+  gocognit:
+    min-complexity: 20
+
+  funlen:
+    lines: 80
+    statements: 50
+
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - style
+      - performance
+    disabled-checks:
+      - ifElseChain      # Too opinionated
+      - hugeParam        # Noisy for request/response structs
+
+  revive:
+    rules:
+      - name: blank-imports
+      - name: context-as-argument
+      - name: context-keys-type
+      - name: dot-imports
+      - name: error-return
+      - name: error-strings
+      - name: error-naming
+      - name: exported
+      - name: if-return
+      - name: increment-decrement
+      - name: var-naming
+      - name: range
+      - name: receiver-naming
+      - name: time-naming
+      - name: unexported-return
+      - name: indent-error-flow
+      - name: errorf
+      - name: empty-block
+      - name: superfluous-else
+      - name: unreachable-code
+
+  gosec:
+    excludes:
+      - G307  # Deferring error-returning Close methods (too noisy)
+
+  wrapcheck:
+    ignoreSigs:
+      - .Errorf(
+      - errors.New(
+      - errors.Unwrap(
+      - errors.Join(
+      - .Wrap(
+      - .Wrapf(
+      - .WithMessage(
+      - .WithMessagef(
+      - .WithStack(
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    # Relax rules in test files
+    - path: _test\.go
+      linters:
+        - funlen
+        - cyclop
+        - gocognit
+        - wrapcheck
+        - gocritic
+    # Relax wrapcheck in cmd/ (entrypoints log and exit)
+    - path: cmd/
+      linters:
+        - wrapcheck
+
+output:
+  sort-results: true
+  sort-order:
+    - severity
+    - linter
+    - file
+  show-stats: true
