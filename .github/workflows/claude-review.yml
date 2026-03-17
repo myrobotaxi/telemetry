@@ -93,10 +93,12 @@ jobs:
         run: |
           PR_NUM="${{ github.event.pull_request.number }}"
 
-          # Find Claude's sticky comment and extract the verdict tag
-          VERDICT=$(gh api "repos/${{ github.repository }}/issues/${PR_NUM}/comments" \
-            --jq '[.[] | select(.user.login == "github-actions[bot]" or .user.login == "claude[bot]") | .body] | last' \
-            | grep -oP '(?<=<!-- VERDICT: )\w+(?= -->)' || echo "")
+          # Find Claude's review comment and extract the verdict.
+          # Try HTML tag first, fall back to plain-text "Verdict: APPROVE" pattern.
+          LAST_COMMENT=$(gh api "repos/${{ github.repository }}/issues/${PR_NUM}/comments" \
+            --jq 'last | .body')
+          VERDICT=$(echo "$LAST_COMMENT" | grep -oP '(?<=<!-- VERDICT: )\w+(?= -->)' || \
+                    echo "$LAST_COMMENT" | grep -oP '(?<=\*\*Verdict: )(APPROVE|REQUEST_CHANGES|COMMENT)' || echo "")
 
           if [ -z "$VERDICT" ]; then
             echo "::warning::No verdict tag found in Claude's review comment, defaulting to COMMENT"
