@@ -152,13 +152,55 @@ Issues carry one or more `agent:<name>` labels that map directly to `.claude/age
 | `agent:infra` | `infra.md` | Docker, CI/CD, deployment, monitoring |
 | `agent:frontend-integration` | `frontend-integration.md` | MyRoboTaxi frontend compatibility |
 
-### Workflow
+### Workflow (MUST FOLLOW)
 
-1. Read the issue title, body, labels, and milestone
-2. Identify `agent:*` labels — these are your implementation agents
-3. If multiple agents are labeled, use the **architect** first to plan, then delegate to specialists
-4. Reference the milestone for phase context and priority
-5. Follow the branching strategy below
+When picking up an issue, execute these steps in order:
+
+1. **Read the issue** — title, body, labels, milestone, and acceptance criteria
+2. **Create a feature branch** from main (see Branching Strategy below)
+3. **Identify ALL `agent:*` labels** on the issue — these are your implementation agents
+4. **Spin up the tagged agents** using the Agent tool following the execution order below
+5. **Commit in reasonable chunks** with the issue number in every commit message
+6. **Open a PR** when the issue is complete, carrying over the issue's labels
+
+### Agent Execution Order (ENFORCED)
+
+When multiple agents are tagged on an issue, you MUST spin them up in this order:
+
+**Phase 1 — Design (if `agent:architect` is tagged):**
+Spin up the `architect` agent FIRST to define interfaces, module boundaries, and design decisions before any code is written. Wait for its output before proceeding.
+
+**Phase 2 — Implementation (spin up in parallel where possible):**
+Spin up ALL of these tagged agents to do the work. Launch independent agents in parallel using multiple Agent tool calls in a single message:
+- `agent:go-engineer` — writes the implementation code
+- `agent:tesla-telemetry` — handles Tesla-specific protocol work
+- `agent:event-system` — handles event bus and concurrency work
+- `agent:websocket-sdk` — handles WebSocket server and SDK work
+- `agent:infra` — handles Docker, CI, deployment work
+
+**Phase 3 — Testing (if `agent:testing` is tagged):**
+Spin up the `testing` agent AFTER implementation is complete to write/verify tests.
+
+**Phase 4 — Security review (if `agent:security` is tagged):**
+Spin up the `security` agent LAST to review the completed code for vulnerabilities.
+
+**Phase 5 — Frontend compatibility (if `agent:frontend-integration` is tagged):**
+Spin up the `frontend-integration` agent to verify protocol compatibility with the MyRoboTaxi Next.js app.
+
+### Examples
+
+**Issue with labels `agent:go-engineer, agent:testing`:**
+1. Spin up `go-engineer` → writes implementation + inline tests
+2. Spin up `testing` → reviews test coverage, adds missing tests
+
+**Issue with labels `agent:architect, agent:event-system, agent:go-engineer, agent:testing`:**
+1. Spin up `architect` → defines interfaces and design (WAIT for output)
+2. Spin up `event-system` + `go-engineer` in parallel → implement
+3. Spin up `testing` → verify tests and coverage
+
+**Issue with labels `agent:tesla-telemetry, agent:go-engineer, agent:security`:**
+1. Spin up `tesla-telemetry` + `go-engineer` in parallel → implement
+2. Spin up `security` → audit the completed code
 
 ### Milestones
 
