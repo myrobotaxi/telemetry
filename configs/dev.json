@@ -1,0 +1,38 @@
+{
+  "server": {
+    "tesla_port": 8443,
+    "client_port": 8080,
+    "metrics_port": 9090
+  },
+  "tls": {
+    "cert_file": "certs/server.crt",
+    "key_file": "certs/server.key",
+    "ca_file": "certs/ca.crt"
+  },
+  "database": {
+    "max_conns": 10,
+    "min_conns": 2
+  },
+  "telemetry": {
+    "max_vehicles": 100,
+    "event_buffer_size": 1000,
+    "batch_write_interval": "5s",
+    "batch_write_size": 100
+  },
+  "drives": {
+    "min_duration": "2m",
+    "min_distance_miles": 0.1,
+    "end_debounce": "30s",
+    "geocode_timeout": "5s"
+  },
+  "websocket": {
+    "heartbeat_interval": "15s",
+    "write_timeout": "10s",
+    "max_connections_per_user": 5,
+    "read_limit": 4096
+  },
+  "auth": {
+    "token_issuer": "myrobotaxi",
+    "token_audience": "telemetry"
+  }
+}

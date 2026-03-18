@@ -34,10 +34,9 @@ func run() error {
 		vehicles     = flag.Int("vehicles", 1, "number of simultaneous vehicles")
 		vinPrefix    = flag.String("vin", "5YJ3SIM", "VIN prefix for simulated vehicles")
 		interval     = flag.Duration("interval", time.Second, "telemetry send interval")
-		certPath     = flag.String("cert", "certs/client.crt", "path to client TLS certificate")
-		keyPath      = flag.String("key", "certs/client.key", "path to client TLS key")
-		caPath       = flag.String("ca", "certs/server.crt", "path to CA certificate")
-		insecure     = flag.Bool("insecure", false, "skip TLS verification (for local dev)")
+		certPath = flag.String("cert", "certs/client.crt", "path to client TLS certificate")
+		keyPath  = flag.String("key", "certs/client.key", "path to client TLS key")
+		caPath   = flag.String("ca", "certs/ca.crt", "path to CA certificate")
 	)
 	flag.Parse()
 
@@ -49,7 +48,7 @@ func run() error {
 		Level: slog.LevelInfo,
 	}))
 
-	tlsConfig, err := buildTLSConfig(*certPath, *keyPath, *caPath, *insecure)
+	tlsConfig, err := buildTLSConfig(*certPath, *keyPath, *caPath)
 	if err != nil {
 		return fmt.Errorf("configuring TLS: %w", err)
 	}
@@ -63,7 +62,6 @@ func run() error {
 		slog.Int("vehicles", *vehicles),
 		slog.String("vin_prefix", *vinPrefix),
 		slog.Duration("interval", *interval),
-		slog.Bool("insecure", *insecure),
 	)
 
 	g, gctx := errgroup.WithContext(ctx)
@@ -87,29 +85,32 @@ func run() error {
 	return nil
 }
 
-func buildTLSConfig(certPath, keyPath, caPath string, insecure bool) (*tls.Config, error) {
-	if insecure {
-		return &tls.Config{InsecureSkipVerify: true}, nil //nolint:gosec // intentional for local dev
+func buildTLSConfig(certPath, keyPath, caPath string) (*tls.Config, error) {
+	cfg := &tls.Config{
+		MinVersion: tls.VersionTLS12,
 	}
 
-	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
-	if err != nil {
-		return nil, fmt.Errorf("loading client certificate: %w", err)
+	// Load client certificate if provided (needed for mTLS).
+	if certPath != "" && keyPath != "" {
+		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+		if err != nil {
+			return nil, fmt.Errorf("loading client certificate: %w", err)
+		}
+		cfg.Certificates = []tls.Certificate{cert}
 	}
 
-	caCert, err := os.ReadFile(caPath)
-	if err != nil {
-		return nil, fmt.Errorf("reading CA certificate: %w", err)
+	// Load CA certificate if provided (for server verification).
+	if caPath != "" {
+		caCert, err := os.ReadFile(caPath) // #nosec G304 -- operator-configured cert path
+		if err != nil {
+			return nil, fmt.Errorf("reading CA certificate: %w", err)
+		}
+		caPool := x509.NewCertPool()
+		if !caPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("failed to parse CA certificate from %s", caPath)
+		}
+		cfg.RootCAs = caPool
 	}
 
-	caPool := x509.NewCertPool()
-	if !caPool.AppendCertsFromPEM(caCert) {
-		return nil, fmt.Errorf("failed to parse CA certificate from %s", caPath)
-	}
-
-	return &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		RootCAs:      caPool,
-		MinVersion:   tls.VersionTLS12,
-	}, nil
+	return cfg, nil
 }

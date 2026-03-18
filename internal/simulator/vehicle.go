@@ -31,7 +31,7 @@ func NewVehicle(vin string, scenario Scenario, logger *slog.Logger, interval tim
 
 // Run connects to the telemetry server and sends protobuf payloads at
 // the configured interval until the scenario completes or the context
-// is cancelled. The tlsConfig may be nil for insecure connections.
+// is cancelled.
 func (v *Vehicle) Run(ctx context.Context, serverURL string, tlsConfig *tls.Config) error {
 	v.logger.Info("connecting to server", slog.String("url", serverURL))
 
@@ -60,8 +60,11 @@ func (v *Vehicle) dial(ctx context.Context, serverURL string, tlsConfig *tls.Con
 	}
 
 	conn, resp, err := websocket.Dial(ctx, serverURL, opts)
-	if resp != nil && resp.Body != nil {
-		resp.Body.Close()
+	if resp != nil {
+		v.logger.Debug("dial response", slog.Int("status", resp.StatusCode))
+		if resp.Body != nil {
+			resp.Body.Close()
+		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("websocket dial: %w", err)
@@ -88,7 +91,7 @@ func (v *Vehicle) sendLoop(ctx context.Context, conn *websocket.Conn) error {
 				return err
 			}
 			sent++
-			if sent%60 == 0 {
+			if sent%10 == 0 {
 				v.logger.Info("progress",
 					slog.Int("messages_sent", sent),
 					slog.Bool("done", v.scenario.Done()),

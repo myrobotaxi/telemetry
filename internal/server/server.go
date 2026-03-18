@@ -6,6 +6,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -85,6 +86,12 @@ func (s *Server) SetTeslaHandler(h http.Handler) {
 	s.tesla.Handler = s.logMiddleware(h)
 }
 
+// SetTeslaTLS configures mTLS on the Tesla server. If set, the Tesla
+// port serves TLS and optionally verifies client certificates.
+func (s *Server) SetTeslaTLS(tlsConfig *tls.Config) {
+	s.tesla.TLSConfig = tlsConfig
+}
+
 // SetClientHandler replaces the client server's placeholder handler with
 // the given handler. Must be called before Start.
 func (s *Server) SetClientHandler(h http.Handler) {
@@ -118,6 +125,12 @@ func (s *Server) serve(ctx context.Context, name string, srv *http.Server) error
 		slog.String("name", name),
 		slog.String("addr", ln.Addr().String()),
 	)
+
+	// If TLS is configured, wrap the listener.
+	if srv.TLSConfig != nil {
+		ln = tls.NewListener(ln, srv.TLSConfig)
+		s.logger.Info("TLS enabled", slog.String("name", name))
+	}
 
 	errCh := make(chan error, 1)
 	go func() {

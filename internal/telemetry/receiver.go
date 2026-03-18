@@ -213,7 +213,13 @@ func (r *Receiver) handleConnection(ctx context.Context, vc *vehicleConn) {
 			return
 		}
 
-		r.metrics.ObserveMessageLatency(time.Since(start).Seconds())
+		latency := time.Since(start)
+		r.metrics.ObserveMessageLatency(latency.Seconds())
+		r.logger.Debug("telemetry received",
+			slog.String("vin", redacted),
+			slog.Int("fields", len(evt.Fields)),
+			slog.Duration("latency", latency),
+		)
 	}
 }
 

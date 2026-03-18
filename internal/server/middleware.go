@@ -1,13 +1,17 @@
 package server
 
 import (
+	"bufio"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 )
 
 // responseRecorder wraps http.ResponseWriter to capture the status code
-// written by downstream handlers.
+// written by downstream handlers. It implements http.Hijacker so that
+// WebSocket upgrades work through the middleware.
 type responseRecorder struct {
 	http.ResponseWriter
 	statusCode int
@@ -16,6 +20,19 @@ type responseRecorder struct {
 func (rr *responseRecorder) WriteHeader(code int) {
 	rr.statusCode = code
 	rr.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack implements http.Hijacker, required for WebSocket upgrades.
+func (rr *responseRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := rr.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
+	}
+	conn, buf, err := hj.Hijack()
+	if err != nil {
+		return nil, nil, fmt.Errorf("hijack: %w", err)
+	}
+	return conn, buf, nil
 }
 
 // requestLogger returns middleware that logs every HTTP request with
