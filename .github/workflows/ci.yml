@@ -67,7 +67,7 @@ jobs:
       - name: Run unit tests with race detector
         run: |
           # Use ./... to catch all packages; skip if no test files exist yet
-          PKGS=$(go list ./... 2>/dev/null | grep -v '/cmd/' || true)
+          PKGS=$(go list ./... 2>/dev/null | grep -v '/cmd/' | grep -v '/proto/' || true)
           if [ -z "$PKGS" ]; then
             echo "No testable packages found, skipping"
             exit 0
