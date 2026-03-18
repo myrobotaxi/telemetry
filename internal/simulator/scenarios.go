@@ -236,5 +236,6 @@ func clampSpeed(v, lo, hi float64) float64 {
 // scenarios to add realism to speed and heading values. math/rand is
 // intentional — simulation data does not require cryptographic randomness.
 func jitter(spread float64) float64 {
-	return rand.Float64()*spread - spread/2 //nolint:gosec // #nosec G404 -- simulation data, not security
+	// #nosec G404 -- simulation jitter, not security-sensitive
+	return rand.Float64()*spread - spread/2 //nolint:gosec // simulation jitter
 }
