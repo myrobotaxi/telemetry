@@ -13,3 +13,12 @@ var (
 	// closed database connection pool.
 	ErrDatabaseClosed = errors.New("database connection closed")
 )
+
+// redactVIN returns a VIN with only the last 4 characters visible.
+// Used in error messages to avoid leaking full VINs into logs.
+func redactVIN(vin string) string {
+	if len(vin) <= 4 {
+		return vin
+	}
+	return "***" + vin[len(vin)-4:]
+}

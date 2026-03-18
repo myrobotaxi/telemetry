@@ -31,7 +31,7 @@ func (r *VehicleRepo) GetByVIN(ctx context.Context, vin string) (Vehicle, error)
 	r.metrics.ObserveQueryDuration("vehicle.get_by_vin", time.Since(start).Seconds())
 	if err != nil {
 		r.metrics.IncQueryError("vehicle.get_by_vin")
-		return Vehicle{}, fmt.Errorf("VehicleRepo.GetByVIN(%s): %w", vin, err)
+		return Vehicle{}, fmt.Errorf("VehicleRepo.GetByVIN(%s): %w", redactVIN(vin), err)
 	}
 	return v, nil
 }
@@ -62,7 +62,7 @@ func (r *VehicleRepo) UpdateTelemetry(ctx context.Context, vin string, update Ve
 	r.metrics.ObserveQueryDuration("vehicle.update_telemetry", time.Since(start).Seconds())
 	if err != nil {
 		r.metrics.IncQueryError("vehicle.update_telemetry")
-		return fmt.Errorf("VehicleRepo.UpdateTelemetry(%s): %w", vin, err)
+		return fmt.Errorf("VehicleRepo.UpdateTelemetry(%s): %w", redactVIN(vin), err)
 	}
 
 	if tag.RowsAffected() == 0 {
@@ -78,7 +78,7 @@ func (r *VehicleRepo) UpdateStatus(ctx context.Context, vin string, status Vehic
 	r.metrics.ObserveQueryDuration("vehicle.update_status", time.Since(start).Seconds())
 	if err != nil {
 		r.metrics.IncQueryError("vehicle.update_status")
-		return fmt.Errorf("VehicleRepo.UpdateStatus(%s): %w", vin, err)
+		return fmt.Errorf("VehicleRepo.UpdateStatus(%s): %w", redactVIN(vin), err)
 	}
 
 	if tag.RowsAffected() == 0 {

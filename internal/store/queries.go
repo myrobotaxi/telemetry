@@ -69,6 +69,8 @@ func buildTelemetryUpdate(vin string, u VehicleUpdate) (query string, args []any
 	var setClauses []string
 	argIdx := 1
 
+	// %q produces Go double-quoted strings which match PostgreSQL's
+	// double-quoted identifier syntax. Column names are hardcoded constants.
 	addClause := func(col string, val any) {
 		setClauses = append(setClauses, fmt.Sprintf("%q = $%d", col, argIdx))
 		args = append(args, val)
