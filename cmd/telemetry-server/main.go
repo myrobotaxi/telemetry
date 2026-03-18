@@ -17,8 +17,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/config"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/server"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/telemetry"
 )
 
 // Build-time variables set via ldflags (see .goreleaser.yml).
@@ -84,15 +86,31 @@ func run() error {
 	}
 	defer db.Close()
 
-	// --- Dependency wiring ---
-	// TODO: Initialize event bus.
-	// TODO: Initialize telemetry receiver (mTLS WebSocket from Tesla vehicles).
+	// --- Event bus ---
+	bus := events.NewChannelBus(events.BusConfig{
+		BufferSize: cfg.Telemetry().EventBufferSize,
+	}, events.NoopBusMetrics{}, logger.With(slog.String("component", "events")))
+
+	// --- Telemetry receiver ---
+	recv := telemetry.NewReceiver(
+		telemetry.NewDecoder(),
+		bus,
+		logger.With(slog.String("component", "receiver")),
+		telemetry.NoopReceiverMetrics{},
+		telemetry.ReceiverConfig{
+			MaxVehicles:       cfg.Telemetry().MaxVehicles,
+			MaxMessagesPerSec: 10,
+		},
+	)
+
 	// TODO: Initialize drive detector (subscribes to telemetry events).
 	// TODO: Initialize client WebSocket server (subscribes to events, pushes to browsers).
 	// TODO: Initialize auth middleware.
 
 	// --- HTTP servers ---
 	srv := server.New(cfg.Server(), logger, db, reg)
+	srv.SetTeslaHandler(recv.Handler())
+	srv.SetClientHandler(recv.Handler()) // also serve on client port for dev (no mTLS required)
 
 	logger.Info("starting HTTP servers")
 	if err := srv.Start(ctx); err != nil {

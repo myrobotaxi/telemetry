@@ -85,6 +85,12 @@ func (s *Server) SetTeslaHandler(h http.Handler) {
 	s.tesla.Handler = s.logMiddleware(h)
 }
 
+// SetClientHandler replaces the client server's placeholder handler with
+// the given handler. Must be called before Start.
+func (s *Server) SetClientHandler(h http.Handler) {
+	s.client.Handler = s.logMiddleware(h)
+}
+
 // Start begins serving on all three ports. It blocks until ctx is
 // cancelled or one of the servers returns a fatal error. On context
 // cancellation it initiates a graceful shutdown with a fixed timeout.
