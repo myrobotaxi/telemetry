@@ -9,7 +9,7 @@ import (
 // all errors rather than stopping at the first, so the operator sees every
 // problem in one pass.
 func validate(cfg *Config) error {
-	var errs []string
+	errs := make([]string, 0, 8) //nolint:mnd // reasonable initial capacity
 
 	errs = append(errs, validateServer(cfg.server)...)
 	errs = append(errs, validateDatabase(cfg.database)...)

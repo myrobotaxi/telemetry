@@ -33,5 +33,9 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 
 // MarshalJSON serializes the Duration as a JSON string (e.g. "5s").
 func (d Duration) MarshalJSON() ([]byte, error) {
-	return json.Marshal(d.d.String())
+	b, err := json.Marshal(d.d.String())
+	if err != nil {
+		return nil, fmt.Errorf("marshal duration: %w", err)
+	}
+	return b, nil
 }

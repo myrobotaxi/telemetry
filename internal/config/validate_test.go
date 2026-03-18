@@ -151,7 +151,7 @@ func TestLoad_InvalidDurationString(t *testing.T) {
 			"batch_write_interval": "not-a-duration"
 		}
 	}`)
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	setRequiredEnv(t)

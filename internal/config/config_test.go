@@ -64,7 +64,7 @@ func writeTestConfig(t *testing.T, dir string, overrides map[string]any) string 
 	}
 
 	path := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatalf("write test config: %v", err)
 	}
 	return path
@@ -104,7 +104,8 @@ func TestLoad_ValidConfig(t *testing.T) {
 	}
 
 	// Database
-	if cfg.Database().URL != "postgres://user:pass@localhost:5432/testdb" {
+	wantURL := "postgres://user:pass@localhost:5432/testdb" //nolint:gosec // test credential
+	if cfg.Database().URL != wantURL {
 		t.Errorf("Database().URL = %q, want test URL", cfg.Database().URL)
 	}
 	if cfg.Database().MaxConns != 20 {
@@ -146,7 +147,7 @@ func TestLoad_DefaultsApplied(t *testing.T) {
 
 	// Write a minimal config (empty JSON object) — all defaults should apply.
 	path := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(path, []byte(`{}`), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(`{}`), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	setRequiredEnv(t)
@@ -311,7 +312,7 @@ func TestLoad_FileNotFound(t *testing.T) {
 func TestLoad_InvalidJSON(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(path, []byte(`{not valid json`), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(`{not valid json`), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	setRequiredEnv(t)
