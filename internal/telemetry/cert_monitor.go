@@ -119,7 +119,7 @@ func (m *CertMonitor) checkAll() {
 // readCertExpiry reads a PEM-encoded certificate file and returns its
 // NotAfter timestamp.
 func readCertExpiry(path string) (time.Time, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is operator-configured cert file, not user input
 	if err != nil {
 		return time.Time{}, fmt.Errorf("reading cert file %s: %w", path, err)
 	}
