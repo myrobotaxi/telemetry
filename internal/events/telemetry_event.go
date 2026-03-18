@@ -21,6 +21,7 @@ type TelemetryValue struct {
 	StringVal   *string
 	FloatVal    *float64
 	IntVal      *int64
+	BoolVal     *bool
 	LocationVal *Location
 }
 

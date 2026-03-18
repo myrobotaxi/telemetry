@@ -473,8 +473,8 @@ func TestDecoder_DecodePayload_BooleanField(t *testing.T) {
 	}
 
 	locked := evt.Fields["locked"]
-	if locked.StringVal == nil || *locked.StringVal != "true" {
-		t.Errorf("locked = %v, want 'true'", locked)
+	if locked.BoolVal == nil || !*locked.BoolVal {
+		t.Errorf("locked = %v, want true", locked)
 	}
 }
 

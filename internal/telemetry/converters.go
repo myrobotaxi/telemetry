@@ -128,11 +128,11 @@ func convertSentryMode(v *tpb.Value) (events.TelemetryValue, error) {
 func convertBool(v *tpb.Value) (events.TelemetryValue, error) {
 	switch val := v.Value.(type) {
 	case *tpb.Value_BooleanValue:
-		s := strconv.FormatBool(val.BooleanValue)
-		return events.TelemetryValue{StringVal: &s}, nil
+		b := val.BooleanValue
+		return events.TelemetryValue{BoolVal: &b}, nil
 	case *tpb.Value_StringValue:
-		s := val.StringValue
-		return events.TelemetryValue{StringVal: &s}, nil
+		b := val.StringValue == "true"
+		return events.TelemetryValue{BoolVal: &b}, nil
 	default:
 		return events.TelemetryValue{}, fmt.Errorf(
 			"%w: expected bool or string, got %T", ErrUnexpectedValueType, v.Value,
@@ -163,8 +163,8 @@ func convertNumericOrString(v *tpb.Value) (events.TelemetryValue, error) {
 	case *tpb.Value_LongValue:
 		return events.TelemetryValue{IntVal: &val.LongValue}, nil
 	case *tpb.Value_BooleanValue:
-		s := strconv.FormatBool(val.BooleanValue)
-		return events.TelemetryValue{StringVal: &s}, nil
+		b := val.BooleanValue
+		return events.TelemetryValue{BoolVal: &b}, nil
 	default:
 		return events.TelemetryValue{}, fmt.Errorf(
 			"%w: expected numeric or string, got %T", ErrUnexpectedValueType, v.Value,
