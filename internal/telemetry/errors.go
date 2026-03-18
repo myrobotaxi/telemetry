@@ -27,8 +27,4 @@ var (
 	// across firmware versions.
 	ErrUnexpectedValueType = errors.New("unexpected value type for field")
 
-	// ErrParseStringValue indicates a string value could not be parsed
-	// into the expected numeric type. Tesla sends many numeric fields as
-	// stringValue.
-	ErrParseStringValue = errors.New("failed to parse string value")
 )

@@ -174,7 +174,7 @@ func convertNumericOrString(v *tpb.Value) (events.TelemetryValue, error) {
 
 // parseStringValue attempts to parse a string into a numeric TelemetryValue.
 // Tesla sends many numeric fields as strings ("65.2", "42", "0").
-// We try float first, then int, falling back to keeping it as a string
+// We try parsing as float64, falling back to keeping it as a string
 // for genuinely string-typed fields (VehicleName, Version, RouteLine, etc).
 func parseStringValue(s string) (events.TelemetryValue, error) {
 	if s == "" {
