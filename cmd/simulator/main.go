@@ -48,6 +48,20 @@ func run() error {
 		Level: slog.LevelInfo,
 	}))
 
+	// Validate cert files exist before attempting TLS setup.
+	for _, f := range []struct{ flag, path string }{
+		{"--cert", *certPath},
+		{"--key", *keyPath},
+		{"--ca", *caPath},
+	} {
+		if f.path == "" {
+			continue
+		}
+		if _, err := os.Stat(f.path); err != nil {
+			return fmt.Errorf("%s %q not found: run scripts/generate-certs.sh first: %w", f.flag, f.path, err)
+		}
+	}
+
 	tlsConfig, err := buildTLSConfig(*certPath, *keyPath, *caPath)
 	if err != nil {
 		return fmt.Errorf("configuring TLS: %w", err)

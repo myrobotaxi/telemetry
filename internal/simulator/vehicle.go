@@ -39,11 +39,11 @@ func (v *Vehicle) Run(ctx context.Context, serverURL string, tlsConfig *tls.Conf
 	if err != nil {
 		return fmt.Errorf("vehicle.Run(vin=%s): %w", v.vin, err)
 	}
-	defer func() { _ = conn.CloseNow() }()
 
 	v.logger.Info("connected, starting scenario")
 
 	if err := v.sendLoop(ctx, conn); err != nil {
+		_ = conn.CloseNow()
 		return fmt.Errorf("vehicle.Run(vin=%s): %w", v.vin, err)
 	}
 
