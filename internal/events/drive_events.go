@@ -52,11 +52,16 @@ type RoutePoint struct {
 
 // DriveStats are the summary statistics calculated when a drive ends.
 type DriveStats struct {
-	Distance      float64       // miles
-	Duration      time.Duration // wall-clock drive time
-	AvgSpeed      float64       // mph
-	MaxSpeed      float64       // mph
-	EnergyDelta   float64       // kWh (negative = consumed)
-	StartLocation Location
-	EndLocation   Location
+	Distance         float64       // miles (haversine sum of route points)
+	Duration         time.Duration // wall-clock drive time
+	AvgSpeed         float64       // mph
+	MaxSpeed         float64       // mph
+	EnergyDelta      float64       // kWh consumed (positive = used)
+	StartLocation    Location
+	EndLocation      Location
+	StartChargeLevel int           // SOC percent at drive start
+	EndChargeLevel   int           // SOC percent at drive end
+	FSDMiles         float64       // FSD miles this trip
+	FSDPercentage    float64       // (FSDMiles / Distance) * 100
+	RoutePoints      []RoutePoint  // full route for persistence
 }
