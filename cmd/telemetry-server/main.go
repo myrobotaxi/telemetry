@@ -9,11 +9,16 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+
+	"github.com/tnando/my-robo-taxi-telemetry/internal/config"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/server"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
 )
 
 // Build-time variables set via ldflags (see .goreleaser.yml).
@@ -35,7 +40,6 @@ func run() error {
 	var (
 		configPath = flag.String("config", "", "path to JSON configuration file")
 		logLevel   = flag.String("log-level", "info", "log level: debug, info, warn, error")
-		addr       = flag.String("addr", ":8080", "HTTP listen address")
 	)
 	flag.Parse()
 
@@ -50,7 +54,6 @@ func run() error {
 		slog.String("version", version),
 		slog.String("commit", commit),
 		slog.String("date", date),
-		slog.String("addr", *addr),
 		slog.String("config", *configPath),
 	)
 
@@ -59,78 +62,45 @@ func run() error {
 	defer stop()
 
 	// --- Configuration loading ---
-	// TODO: Load config from *configPath and environment variables.
-	// config, err := config.Load(*configPath)
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+	logger.Info("configuration loaded",
+		slog.Int("tesla_port", cfg.Server().TeslaPort),
+		slog.Int("client_port", cfg.Server().ClientPort),
+		slog.Int("metrics_port", cfg.Server().MetricsPort),
+	)
+
+	// --- Prometheus registry ---
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(collectors.NewGoCollector())
+	reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+
+	// --- Database connection ---
+	db, err := store.NewDB(ctx, cfg.Database(), logger.With(slog.String("component", "store")), store.NoopMetrics{})
+	if err != nil {
+		return fmt.Errorf("connecting to database: %w", err)
+	}
+	defer db.Close()
 
 	// --- Dependency wiring ---
 	// TODO: Initialize event bus.
-	// TODO: Initialize database connection pool (pgx).
 	// TODO: Initialize telemetry receiver (mTLS WebSocket from Tesla vehicles).
 	// TODO: Initialize drive detector (subscribes to telemetry events).
-	// TODO: Initialize store (subscribes to events, persists to PostgreSQL).
 	// TODO: Initialize client WebSocket server (subscribes to events, pushes to browsers).
 	// TODO: Initialize auth middleware.
 
-	// --- HTTP server ---
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", handleHealthz)
-	// TODO: Mount WebSocket upgrade handler, readiness check, metrics endpoint.
+	// --- HTTP servers ---
+	srv := server.New(cfg.Server(), logger, db, reg)
 
-	srv := &http.Server{
-		Addr:              *addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
+	logger.Info("starting HTTP servers")
+	if err := srv.Start(ctx); err != nil {
+		return fmt.Errorf("server: %w", err)
 	}
-
-	// --- Start server in background ---
-	errCh := make(chan error, 1)
-	go func() {
-		logger.Info("HTTP server listening", slog.String("addr", *addr))
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- fmt.Errorf("HTTP server: %w", err)
-		}
-		close(errCh)
-	}()
-
-	// --- Wait for shutdown signal or server error ---
-	select {
-	case <-ctx.Done():
-		logger.Info("shutdown signal received, draining connections")
-	case err := <-errCh:
-		if err != nil {
-			return err
-		}
-	}
-
-	// --- Graceful shutdown ---
-	return shutdown(ctx, logger, srv)
-}
-
-const shutdownTimeout = 15 * time.Second
-
-func shutdown(ctx context.Context, logger *slog.Logger, srv *http.Server) error {
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-
-	// TODO: Shut down telemetry receiver (stop accepting new vehicle connections).
-	// TODO: Shut down event bus (drain in-flight events).
-	// TODO: Close client WebSocket connections gracefully.
-	// TODO: Close database connection pool.
-
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("HTTP server shutdown: %w", err)
-	}
-
-	_ = ctx // parent ctx already cancelled; shutdownCtx governs deadline
 
 	logger.Info("telemetry-server stopped cleanly")
 	return nil
-}
-
-func handleHealthz(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintln(w, "ok")
 }
 
 func newLogger(level string) (*slog.Logger, error) {
