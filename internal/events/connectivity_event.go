@@ -16,6 +16,18 @@ const (
 	StatusDisconnected
 )
 
+// String returns a human-readable representation of the connectivity status.
+func (s ConnectivityStatus) String() string {
+	switch s {
+	case StatusConnected:
+		return "connected"
+	case StatusDisconnected:
+		return "disconnected"
+	default:
+		return "unknown"
+	}
+}
+
 // ConnectivityEvent is published when a vehicle connects to or disconnects
 // from the telemetry server.
 type ConnectivityEvent struct {

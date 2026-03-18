@@ -29,16 +29,17 @@ const (
 // their lifecycle. Create one with New, call Start to begin serving, and
 // cancel the context passed to Start to stop gracefully.
 type Server struct {
-	tesla   *http.Server
-	client  *http.Server
-	metrics *http.Server
-	logger  *slog.Logger
+	tesla         *http.Server
+	client        *http.Server
+	metrics       *http.Server
+	logger        *slog.Logger
+	logMiddleware func(http.Handler) http.Handler
 }
 
 // New creates a Server with three HTTP servers configured on the ports
 // specified in cfg. The metrics server exposes /healthz, /readyz, and
-// /metrics. Tesla and client servers return 404 until their handlers are
-// wired in future issues.
+// /metrics. Tesla and client servers use placeholder handlers until wired
+// via SetTeslaHandler / SetClientHandler.
 func New(cfg config.ServerConfig, logger *slog.Logger, checker ReadinessChecker, reg *prometheus.Registry) *Server {
 	metricsMux := http.NewServeMux()
 	metricsMux.HandleFunc("GET /healthz", handleHealthz)
@@ -72,8 +73,16 @@ func New(cfg config.ServerConfig, logger *slog.Logger, checker ReadinessChecker,
 			Handler:           logMiddleware(metricsMux),
 			ReadHeaderTimeout: readHeaderTimeout,
 		},
-		logger: logger,
+		logger:        logger,
+		logMiddleware: logMiddleware,
 	}
+}
+
+// SetTeslaHandler replaces the Tesla server's placeholder handler with
+// the given handler (typically the telemetry receiver). Must be called
+// before Start.
+func (s *Server) SetTeslaHandler(h http.Handler) {
+	s.tesla.Handler = s.logMiddleware(h)
 }
 
 // Start begins serving on all three ports. It blocks until ctx is
