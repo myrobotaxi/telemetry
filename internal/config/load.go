@@ -68,15 +68,15 @@ type fileAuthConfig struct {
 
 // loadFile reads and decodes the JSON configuration from disk.
 func loadFile(path string) (*fileConfig, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // path is caller-controlled startup config
 	if err != nil {
-		return nil, fmt.Errorf("config.Load: open %q: %w", path, ErrConfigLoad)
+		return nil, fmt.Errorf("config.Load: open %q: %w: %w", path, ErrConfigLoad, err)
 	}
 	defer f.Close()
 
 	var fc fileConfig
 	if err := json.NewDecoder(f).Decode(&fc); err != nil {
-		return nil, fmt.Errorf("config.Load: decode %q: %w", path, ErrConfigLoad)
+		return nil, fmt.Errorf("config.Load: decode %q: %w: %w", path, ErrConfigLoad, err)
 	}
 	return &fc, nil
 }

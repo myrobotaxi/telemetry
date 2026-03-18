@@ -50,6 +50,9 @@ func validateServer(s ServerConfig) []string {
 
 func validateDatabase(d DatabaseConfig) []string {
 	var errs []string
+	if d.URL == "" {
+		errs = append(errs, "database.url: must not be empty")
+	}
 	if d.MaxConns < 1 {
 		errs = append(errs, fmt.Sprintf("database.max_conns: %d must be >= 1", d.MaxConns))
 	}

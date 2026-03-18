@@ -268,23 +268,26 @@ func TestValidate_ZeroValues(t *testing.T) {
 
 func TestValidPort(t *testing.T) {
 	tests := []struct {
+		name string
 		port int
 		want bool
 	}{
-		{0, false},
-		{-1, false},
-		{1, true},
-		{80, true},
-		{443, true},
-		{8080, true},
-		{65535, true},
-		{65536, false},
-		{100000, false},
+		{"zero", 0, false},
+		{"negative", -1, false},
+		{"min valid", 1, true},
+		{"http", 80, true},
+		{"https", 443, true},
+		{"alt http", 8080, true},
+		{"max valid", 65535, true},
+		{"one over max", 65536, false},
+		{"way over max", 100000, false},
 	}
 
 	for _, tt := range tests {
-		if got := validPort(tt.port); got != tt.want {
-			t.Errorf("validPort(%d) = %v, want %v", tt.port, got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			if got := validPort(tt.port); got != tt.want {
+				t.Errorf("validPort(%d) = %v, want %v", tt.port, got, tt.want)
+			}
+		})
 	}
 }
