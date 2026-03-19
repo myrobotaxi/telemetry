@@ -28,7 +28,7 @@ func NewBroadcaster(hub *Hub, bus events.Bus, resolver VINResolver, logger *slog
 		hub:      hub,
 		bus:      bus,
 		resolver: resolver,
-		logger:   logger.With(slog.String("component", "broadcaster")),
+		logger:   logger,
 	}
 }
 
