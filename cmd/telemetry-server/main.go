@@ -19,10 +19,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/config"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/drives"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/server"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/telemetry"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/ws"
 )
 
 // Build-time variables set via ldflags (see .goreleaser.yml).
@@ -39,7 +41,7 @@ func main() {
 	}
 }
 
-func run() error {
+func run() error { //nolint:funlen // composition root — sequential dependency wiring
 	// --- Flag parsing ---
 	var (
 		configPath = flag.String("config", "", "path to JSON configuration file")
@@ -105,13 +107,51 @@ func run() error {
 		},
 	)
 
-	// TODO: Initialize drive detector (subscribes to telemetry events).
-	// TODO: Initialize client WebSocket server (subscribes to events, pushes to browsers).
-	// TODO: Initialize auth middleware.
+	// --- Drive detector ---
+	detector := drives.NewDetector(bus, cfg.Drives(), logger.With(slog.String("component", "drives")), drives.NoopDetectorMetrics{})
+	if err := detector.Start(ctx); err != nil {
+		return fmt.Errorf("starting drive detector: %w", err)
+	}
+	defer func() { _ = detector.Stop() }()
+
+	// --- Store repos ---
+	vehicleRepo := store.NewVehicleRepo(db.Pool(), store.NoopMetrics{})
+	driveRepo := store.NewDriveRepo(db.Pool(), store.NoopMetrics{})
+
+	// --- Persistence writer ---
+	writer := store.NewWriter(
+		vehicleRepo, driveRepo, vehicleRepo, bus,
+		logger.With(slog.String("component", "writer")),
+		store.WriterConfig{
+			FlushInterval: cfg.Telemetry().BatchWriteInterval,
+			BatchSize:     cfg.Telemetry().BatchWriteSize,
+		},
+	)
+	if err := writer.Start(ctx); err != nil {
+		return fmt.Errorf("starting persistence writer: %w", err)
+	}
+	defer func() { _ = writer.Stop() }()
+
+	// --- WebSocket hub + broadcaster ---
+	hub := ws.NewHub(logger.With(slog.String("component", "ws")), ws.NoopHubMetrics{})
+	defer hub.Stop()
+
+	vinResolver := &vinResolverAdapter{repo: vehicleRepo}
+	broadcaster := ws.NewBroadcaster(hub, bus, vinResolver, logger.With(slog.String("component", "broadcaster")))
+	if err := broadcaster.Start(ctx); err != nil {
+		return fmt.Errorf("starting broadcaster: %w", err)
+	}
+	defer func() { _ = broadcaster.Stop() }()
+
+	go hub.RunHeartbeat(ctx, cfg.WebSocket().HeartbeatInterval)
 
 	// --- HTTP servers ---
 	srv := server.New(cfg.Server(), logger, db, reg)
 	srv.SetTeslaHandler(recv.Handler())
+	srv.SetClientHandler(hub.Handler(&ws.NoopAuthenticator{}, ws.HandlerConfig{
+		WriteTimeout:   cfg.WebSocket().WriteTimeout,
+		OriginPatterns: []string{"*"}, // TODO: restrict to frontend origin in production
+	}))
 
 	// Configure mTLS on Tesla port if TLS cert files are available.
 	if cfg.TLS().CertFile != "" && cfg.TLS().KeyFile != "" {
@@ -180,4 +220,18 @@ func buildTeslaTLS(cfg config.TLSConfig) (*tls.Config, error) {
 	}
 
 	return tlsCfg, nil
+}
+
+// vinResolverAdapter adapts store.VehicleRepo (returns Vehicle) to the
+// ws.VINResolver interface (returns vehicleID string).
+type vinResolverAdapter struct {
+	repo *store.VehicleRepo
+}
+
+func (a *vinResolverAdapter) GetByVIN(ctx context.Context, vin string) (string, error) {
+	v, err := a.repo.GetByVIN(ctx, vin)
+	if err != nil {
+		return "", fmt.Errorf("resolve VIN: %w", err)
+	}
+	return v.ID, nil
 }
