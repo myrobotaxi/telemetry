@@ -111,6 +111,12 @@ func (b *Broadcaster) handleTelemetry(ctx context.Context, event events.Event) {
 		return
 	}
 
+	// Inject lastUpdated so the frontend can display the latest update time.
+	fields["lastUpdated"] = payload.CreatedAt.Format(time.RFC3339)
+
+	// Derive vehicle status from gear and speed for the frontend UI.
+	fields["status"] = deriveVehicleStatus(fields)
+
 	msg, err := marshalWSMessage(msgTypeVehicleUpdate, vehicleUpdatePayload{
 		VehicleID: vehicleID,
 		Fields:    fields,
