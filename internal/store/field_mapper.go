@@ -74,6 +74,8 @@ func applyString(target func(u *VehicleUpdate) **string) fieldApplier {
 }
 
 // applyLocation applies a LocationVal to Latitude and Longitude fields.
+// The pointers reference the event payload struct, which is safe because
+// events are immutable after publish.
 func applyLocation(u *VehicleUpdate, val events.TelemetryValue) bool {
 	if val.LocationVal == nil {
 		return false
