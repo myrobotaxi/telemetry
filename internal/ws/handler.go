@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/coder/websocket"
+	"golang.org/x/sync/errgroup"
 )
 
 // HandlerConfig holds tuning parameters for the WebSocket handler.
@@ -47,15 +49,13 @@ func (h *Hub) Handler(auth Authenticator, cfg HandlerConfig) http.Handler {
 // handleUpgrade performs the WebSocket upgrade, runs the auth handshake,
 // and starts the read/write pumps.
 func (h *Hub) handleUpgrade(w http.ResponseWriter, r *http.Request, auth Authenticator, cfg HandlerConfig) {
+	clientIP := resolveClientIP(r)
+
 	// Per-IP connection limit.
 	if cfg.MaxConnectionsPerIP > 0 {
-		ip := r.RemoteAddr
-		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-			ip = fwd
-		}
-		if h.ipConnectionCount(ip) >= cfg.MaxConnectionsPerIP {
+		if h.ipConnectionCount(clientIP) >= cfg.MaxConnectionsPerIP {
 			h.logger.Warn("connection rate limited",
-				slog.String("remote_addr", ip),
+				slog.String("remote_addr", clientIP),
 			)
 			http.Error(w, "too many connections", http.StatusTooManyRequests)
 			return
@@ -68,13 +68,13 @@ func (h *Hub) handleUpgrade(w http.ResponseWriter, r *http.Request, auth Authent
 	if err != nil {
 		h.logger.Error("websocket accept failed",
 			slog.Any("error", err),
-			slog.String("remote_addr", r.RemoteAddr),
+			slog.String("remote_addr", clientIP),
 		)
 		return
 	}
 
 	client := newClient(conn, h, h.logger)
-	client.remoteAddr = r.RemoteAddr
+	client.remoteAddr = clientIP
 
 	// Authenticate: the client must send an auth message within the timeout.
 	if err := h.authenticateClient(r.Context(), client, auth, cfg); err != nil {
@@ -98,15 +98,18 @@ func (h *Hub) handleUpgrade(w http.ResponseWriter, r *http.Request, auth Authent
 	h.Register(client)
 
 	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
 
-	// Write pump runs in a separate goroutine; read pump blocks this one.
-	go client.writePump(ctx, cfg.WriteTimeout)
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		client.writePump(gctx, cfg.WriteTimeout)
+		return nil
+	})
+	g.Go(func() error {
+		client.readPump(gctx)
+		return nil
+	})
 
-	// readPump blocks until the client disconnects.
-	client.readPump(ctx)
-
-	// Client disconnected — clean up.
+	_ = g.Wait()
 	cancel()
 	h.Unregister(client)
 }
@@ -186,4 +189,17 @@ func applyHandlerDefaults(cfg HandlerConfig) HandlerConfig {
 		cfg.WriteTimeout = 10 * time.Second
 	}
 	return cfg
+}
+
+// resolveClientIP returns the client's IP address, preferring the
+// X-Forwarded-For header (leftmost entry) when behind a reverse proxy.
+func resolveClientIP(r *http.Request) string {
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		// X-Forwarded-For: client, proxy1, proxy2 — take the leftmost.
+		if ip, _, ok := strings.Cut(fwd, ","); ok {
+			return strings.TrimSpace(ip)
+		}
+		return strings.TrimSpace(fwd)
+	}
+	return r.RemoteAddr
 }
