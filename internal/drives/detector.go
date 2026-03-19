@@ -37,8 +37,8 @@ type Detector struct {
 	// Updated atomically on drive start/end to avoid iterating all states.
 	activeCount atomic.Int32
 
-	// sub is the telemetry subscription used by Stop to unsubscribe.
-	sub events.Subscription
+	// subs holds bus subscriptions used by Stop to unsubscribe.
+	subs []events.Subscription
 
 	// ctx is the parent context for debounce timer goroutines.
 	ctx    context.Context
@@ -62,18 +62,26 @@ func NewDetector(
 	}
 }
 
-// Start subscribes to TopicVehicleTelemetry and begins processing telemetry
-// events. The provided context governs the lifetime of background goroutines
-// (debounce timers). Returns an error if subscribing to the bus fails.
+// Start subscribes to TopicVehicleTelemetry and TopicConnectivity and begins
+// processing events. The provided context governs the lifetime of background
+// goroutines (debounce timers). Returns an error if subscribing to the bus fails.
 func (d *Detector) Start(ctx context.Context) error {
 	d.ctx, d.cancel = context.WithCancel(ctx)
 
-	sub, err := d.bus.Subscribe(events.TopicVehicleTelemetry, d.handleEvent)
+	telSub, err := d.bus.Subscribe(events.TopicVehicleTelemetry, d.handleEvent)
 	if err != nil {
 		d.cancel()
-		return fmt.Errorf("drives.Detector.Start: %w", err)
+		return fmt.Errorf("drives.Detector.Start(telemetry): %w", err)
 	}
-	d.sub = sub
+
+	connSub, err := d.bus.Subscribe(events.TopicConnectivity, d.handleConnectivityEvent)
+	if err != nil {
+		d.cancel()
+		_ = d.bus.Unsubscribe(telSub)
+		return fmt.Errorf("drives.Detector.Start(connectivity): %w", err)
+	}
+
+	d.subs = []events.Subscription{telSub, connSub}
 
 	d.logger.Info("drive detector started")
 	return nil
@@ -96,8 +104,14 @@ func (d *Detector) Stop() error {
 		return true
 	})
 
-	if err := d.bus.Unsubscribe(d.sub); err != nil {
-		return fmt.Errorf("drives.Detector.Stop: %w", err)
+	var firstErr error
+	for _, sub := range d.subs {
+		if err := d.bus.Unsubscribe(sub); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr != nil {
+		return fmt.Errorf("drives.Detector.Stop: %w", firstErr)
 	}
 
 	d.logger.Info("drive detector stopped")
@@ -117,6 +131,53 @@ func (d *Detector) handleEvent(event events.Event) {
 	}
 
 	d.handleTelemetry(te)
+}
+
+// handleConnectivityEvent is the bus handler callback for connectivity events.
+// It type-asserts the payload and dispatches to handleConnectivity.
+func (d *Detector) handleConnectivityEvent(event events.Event) {
+	ce, ok := event.Payload.(events.ConnectivityEvent)
+	if !ok {
+		d.logger.Warn("drives.Detector: unexpected connectivity payload type",
+			slog.String("event_id", event.ID),
+		)
+		return
+	}
+
+	d.handleConnectivity(ce)
+}
+
+// handleConnectivity ends any active drive for a vehicle that has
+// disconnected. This prevents orphaned drives when the vehicle drops
+// off without sending a gear=P transition (e.g. network loss, crash).
+func (d *Detector) handleConnectivity(ce events.ConnectivityEvent) {
+	if ce.Status != events.StatusDisconnected {
+		return
+	}
+
+	vin := ce.VIN
+	if vin == "" {
+		return
+	}
+
+	val, ok := d.states.Load(vin)
+	if !ok {
+		return
+	}
+	state := val.(*vehicleState)
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	if state.status != StatusDriving {
+		return
+	}
+
+	d.logger.Info("ending drive on disconnect",
+		slog.String("vin", redactVIN(vin)),
+	)
+
+	d.endDrive(state, vin)
 }
 
 // handleTelemetry is the main dispatch function. It extracts the VIN,
