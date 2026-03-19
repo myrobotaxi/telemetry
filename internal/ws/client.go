@@ -137,7 +137,7 @@ func (c *Client) writeMessage(ctx context.Context, msg []byte, timeout time.Dura
 // isNormalClose reports whether the error represents a normal WebSocket
 // closure (client disconnecting cleanly or context cancelled).
 func isNormalClose(err error) bool {
-	if err == context.Canceled { //nolint:errorlint,goerr113 // exact sentinel match intentional
+	if err == context.Canceled { //nolint:errorlint // exact sentinel match intentional
 		return true
 	}
 	status := websocket.CloseStatus(err)

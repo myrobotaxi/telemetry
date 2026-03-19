@@ -133,7 +133,10 @@ func sendError(ctx context.Context, conn *websocket.Conn, code, message string, 
 		return fmt.Errorf("sendError: marshal message: %w", err)
 	}
 
-	return conn.Write(writeCtx, websocket.MessageText, msg)
+	if err = conn.Write(writeCtx, websocket.MessageText, msg); err != nil {
+		return fmt.Errorf("sendError: write: %w", err)
+	}
+	return nil
 }
 
 // applyHandlerDefaults fills in zero-value fields with sensible defaults.
