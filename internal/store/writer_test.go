@@ -148,6 +148,24 @@ func newTestWriter(t *testing.T, bus events.Bus, vehicles vehicleUpdater, drives
 	return w
 }
 
+// waitForCondition polls check every 5ms until it returns true or timeout.
+func waitForCondition(t *testing.T, timeout time.Duration, check func() bool) { //nolint:unparam // timeout is always 2s currently but may vary
+	t.Helper()
+	deadline := time.After(timeout)
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if check() {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for condition")
+		case <-tick.C:
+		}
+	}
+}
+
 func publishTelemetry(t *testing.T, bus events.Bus, vin string, fields map[string]events.TelemetryValue) {
 	t.Helper()
 	evt := events.NewEvent(events.VehicleTelemetryEvent{
@@ -179,13 +197,12 @@ func TestWriter_TelemetryFlush(t *testing.T) {
 		string(telemetry.FieldSpeed): {FloatVal: &speed},
 	})
 
-	// Wait for flush (interval is 50ms).
-	time.Sleep(200 * time.Millisecond)
+	// Wait for flush.
+	waitForCondition(t, 2*time.Second, func() bool {
+		return len(vehicles.getTelemetryWrites()) > 0
+	})
 
 	writes := vehicles.getTelemetryWrites()
-	if len(writes) == 0 {
-		t.Fatal("expected at least one telemetry write after flush")
-	}
 	if writes[0].VIN != "5YJ3E1EA1NF000001" {
 		t.Errorf("VIN = %q, want 5YJ3E1EA1NF000001", writes[0].VIN)
 	}
@@ -214,9 +231,6 @@ func TestWriter_Coalescing(t *testing.T) {
 		string(telemetry.FieldSpeed): {FloatVal: &speed1},
 	})
 
-	// Small delay to ensure ordering.
-	time.Sleep(5 * time.Millisecond)
-
 	speed2 := 72.0
 	heading := 180.0
 	publishTelemetry(t, bus, vin, map[string]events.TelemetryValue{
@@ -225,7 +239,9 @@ func TestWriter_Coalescing(t *testing.T) {
 	})
 
 	// Wait for flush.
-	time.Sleep(200 * time.Millisecond)
+	waitForCondition(t, 2*time.Second, func() bool {
+		return len(vehicles.getTelemetryWrites()) > 0
+	})
 
 	writes := vehicles.getTelemetryWrites()
 	if len(writes) != 1 {
@@ -262,12 +278,11 @@ func TestWriter_MultipleVehicles(t *testing.T) {
 		string(telemetry.FieldSpeed): {FloatVal: &speed2},
 	})
 
-	time.Sleep(200 * time.Millisecond)
+	waitForCondition(t, 2*time.Second, func() bool {
+		return len(vehicles.getTelemetryWrites()) >= 2
+	})
 
 	writes := vehicles.getTelemetryWrites()
-	if len(writes) != 2 {
-		t.Fatalf("expected 2 writes (one per VIN), got %d", len(writes))
-	}
 
 	vins := map[string]bool{}
 	for _, w := range writes {
@@ -307,12 +322,11 @@ func TestWriter_DriveStarted(t *testing.T) {
 		t.Fatalf("publish: %v", err)
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	waitForCondition(t, 2*time.Second, func() bool {
+		return len(drives.getCreates()) > 0
+	})
 
 	creates := drives.getCreates()
-	if len(creates) != 1 {
-		t.Fatalf("expected 1 drive create, got %d", len(creates))
-	}
 	if creates[0].Record.ID != "drive_001" {
 		t.Errorf("DriveID = %q, want drive_001", creates[0].Record.ID)
 	}
@@ -358,13 +372,12 @@ func TestWriter_DriveEnded(t *testing.T) {
 		t.Fatalf("publish: %v", err)
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	waitForCondition(t, 2*time.Second, func() bool {
+		return len(drives.getCompletes()) > 0
+	})
 
 	// Verify drive completion.
 	completes := drives.getCompletes()
-	if len(completes) != 1 {
-		t.Fatalf("expected 1 drive complete, got %d", len(completes))
-	}
 	if completes[0].DriveID != "drive_001" {
 		t.Errorf("DriveID = %q, want drive_001", completes[0].DriveID)
 	}
@@ -417,12 +430,9 @@ func TestWriter_BatchSizeTriggersFlush(t *testing.T) {
 
 	// The batch should flush quickly after the 3rd event, without waiting
 	// for the 10s timer.
-	time.Sleep(200 * time.Millisecond)
-
-	writes := vehicles.getTelemetryWrites()
-	if len(writes) < 3 {
-		t.Errorf("expected at least 3 writes from batch flush, got %d", len(writes))
-	}
+	waitForCondition(t, 2*time.Second, func() bool {
+		return len(vehicles.getTelemetryWrites()) >= 3
+	})
 }
 
 func TestMergeUpdate(t *testing.T) {

@@ -54,9 +54,11 @@ type Writer struct {
 	pending   map[string]*VehicleUpdate // VIN → coalesced update
 	count     int                       // total telemetry events since last flush
 
-	subs   []events.Subscription
-	cancel context.CancelFunc
-	done   chan struct{}
+	subs      []events.Subscription
+	cancel    context.CancelFunc
+	done      chan struct{}
+	closeOnce sync.Once
+	flushDone chan struct{} // closed when flushLoop goroutine exits
 }
 
 // NewWriter creates a Writer that will subscribe to telemetry and drive
@@ -83,7 +85,8 @@ func NewWriter(
 		logger:   logger,
 		cfg:      cfg,
 		pending:  make(map[string]*VehicleUpdate),
-		done:     make(chan struct{}),
+		done:      make(chan struct{}),
+		flushDone: make(chan struct{}),
 	}
 }
 
@@ -113,7 +116,11 @@ func (w *Writer) Start(ctx context.Context) error {
 
 	tickCtx, cancel := context.WithCancel(ctx)
 	w.cancel = cancel
-	go w.flushLoop(tickCtx)
+	go func() {
+		defer cancel() // also called via Stop(); cancel is idempotent
+		defer close(w.flushDone)
+		w.flushLoop(tickCtx)
+	}()
 
 	w.logger.Info("store writer started",
 		slog.Duration("flush_interval", w.cfg.FlushInterval),
@@ -129,6 +136,9 @@ func (w *Writer) Stop() error {
 		w.cancel()
 	}
 
+	// Wait for flushLoop goroutine to exit.
+	<-w.flushDone
+
 	for _, sub := range w.subs {
 		if err := w.bus.Unsubscribe(sub); err != nil {
 			w.logger.Warn("failed to unsubscribe",
@@ -143,7 +153,7 @@ func (w *Writer) Stop() error {
 	defer cancel()
 	w.flush(ctx)
 
-	close(w.done)
+	w.closeOnce.Do(func() { close(w.done) })
 
 	w.logger.Info("store writer stopped")
 	return nil
