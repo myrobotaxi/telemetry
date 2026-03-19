@@ -114,8 +114,12 @@ func (c *Client) enqueue(msg []byte) bool {
 }
 
 // hasVehicle reports whether this client is authorized to receive updates
-// for the given vehicle ID.
+// for the given vehicle ID. A nil/empty vehicleIDs slice grants access to
+// all vehicles (used by NoopAuthenticator in dev mode).
 func (c *Client) hasVehicle(vehicleID string) bool {
+	if len(c.vehicleIDs) == 0 {
+		return true
+	}
 	for _, id := range c.vehicleIDs {
 		if id == vehicleID {
 			return true
