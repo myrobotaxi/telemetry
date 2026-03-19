@@ -429,10 +429,16 @@ func TestClient_HasVehicle(t *testing.T) {
 			want:       false,
 		},
 		{
-			name:       "empty list",
+			name:       "nil list grants all-vehicle access",
 			vehicleIDs: nil,
 			query:      "v-1",
-			want:       false,
+			want:       true,
+		},
+		{
+			name:       "empty slice grants all-vehicle access",
+			vehicleIDs: []string{},
+			query:      "v-1",
+			want:       true,
 		},
 	}
 
