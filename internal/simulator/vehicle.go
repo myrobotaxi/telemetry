@@ -75,7 +75,9 @@ func (v *Vehicle) dial(ctx context.Context, serverURL string, tlsConfig *tls.Con
 }
 
 // sendLoop runs the scenario tick loop, building and sending protobuf
-// payloads until the scenario completes or the context is done.
+// payloads until the scenario completes or the context is done. On
+// context cancellation it sends a final gear=P tick so the drive
+// detector receives a clean end signal.
 func (v *Vehicle) sendLoop(ctx context.Context, conn *websocket.Conn) error {
 	ticker := time.NewTicker(v.interval)
 	defer ticker.Stop()
@@ -84,9 +86,10 @@ func (v *Vehicle) sendLoop(ctx context.Context, conn *websocket.Conn) error {
 	for !v.scenario.Done() {
 		select {
 		case <-ctx.Done():
-			v.logger.Info("context cancelled, stopping",
+			v.logger.Info("context cancelled, sending final park tick",
 				slog.Int("messages_sent", sent),
 			)
+			v.sendParkTick(conn)
 			return nil
 		case <-ticker.C:
 			if err := v.sendTick(ctx, conn); err != nil {
@@ -104,6 +107,32 @@ func (v *Vehicle) sendLoop(ctx context.Context, conn *websocket.Conn) error {
 
 	v.logger.Info("scenario finished", slog.Int("messages_sent", sent))
 	return nil
+}
+
+// sendParkTick sends a final telemetry tick with gear=P and speed=0.
+// This gives the drive detector a clean end signal on graceful shutdown.
+// Uses a short-lived background context because the parent ctx is already
+// cancelled.
+func (v *Vehicle) sendParkTick(conn *websocket.Conn) {
+	state := v.scenario.Next()
+	state.GearPosition = "P"
+	state.Speed = 0
+	state.ETA = 0
+
+	writeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	data, err := MarshalPayload(v.vin, state)
+	if err != nil {
+		v.logger.Error("failed to marshal park tick", slog.Any("error", err))
+		return
+	}
+
+	if err := conn.Write(writeCtx, websocket.MessageBinary, data); err != nil {
+		v.logger.Warn("failed to send park tick", slog.Any("error", err))
+		return
+	}
+	v.logger.Info("sent final park tick")
 }
 
 // sendTick advances the scenario, builds the payload, and sends it.
