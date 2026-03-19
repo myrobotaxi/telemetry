@@ -358,16 +358,29 @@ func TestFleetAPIClient_GetTelemetryErrors_Success(t *testing.T) {
 	}
 }
 
-func TestFleetAPIClient_GetTelemetryErrors_EmptyVIN(t *testing.T) {
+func TestFleetAPIClient_GetTelemetryErrors_InvalidVIN(t *testing.T) {
 	t.Parallel()
 
 	client := NewFleetAPIClient(FleetAPIConfig{
 		BaseURL: "http://unused",
 	}, fleetTestLogger())
 
-	_, err := client.GetTelemetryErrors(context.Background(), "token", "")
-	if err == nil {
-		t.Fatal("expected error for empty VIN, got nil")
+	tests := []struct {
+		name string
+		vin  string
+	}{
+		{"empty", ""},
+		{"too short", "ABC123"},
+		{"too long", "12345678901234567890"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := client.GetTelemetryErrors(context.Background(), "token", tt.vin)
+			if err == nil {
+				t.Fatal("expected error for invalid VIN, got nil")
+			}
+		})
 	}
 }
 

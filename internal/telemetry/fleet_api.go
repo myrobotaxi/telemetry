@@ -28,6 +28,10 @@ type FleetAPIConfig struct {
 	BaseURL    string
 	Timeout    time.Duration
 	MaxRetries int
+	// HTTPClient is an optional pre-configured HTTP client. If nil, a default
+	// client is created with the configured Timeout. Use this to inject a
+	// custom transport (e.g., for mTLS or proxy support).
+	HTTPClient *http.Client
 }
 
 // FleetAPIClient communicates with Tesla's Fleet API to push telemetry
@@ -58,9 +62,14 @@ func NewFleetAPIClient(cfg FleetAPIConfig, logger *slog.Logger) *FleetAPIClient 
 		rp.MaxRetries = cfg.MaxRetries
 	}
 
+	httpClient := cfg.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: timeout}
+	}
+
 	return &FleetAPIClient{
 		baseURL:    baseURL,
-		httpClient: &http.Client{Timeout: timeout},
+		httpClient: httpClient,
 		logger:     logger,
 		retry:      rp,
 	}
@@ -79,6 +88,11 @@ func (c *FleetAPIClient) PushTelemetryConfig(
 	}
 	if len(req.VINs) == 0 {
 		return nil, fmt.Errorf("PushTelemetryConfig: no VINs provided")
+	}
+	for _, vin := range req.VINs {
+		if len(vin) != 17 {
+			return nil, fmt.Errorf("PushTelemetryConfig: invalid VIN %q (must be 17 characters)", redactVIN(vin))
+		}
 	}
 
 	body, err := json.Marshal(req)
@@ -125,8 +139,8 @@ func (c *FleetAPIClient) GetTelemetryErrors(
 	if token == "" {
 		return nil, fmt.Errorf("GetTelemetryErrors: auth token is required")
 	}
-	if vin == "" {
-		return nil, fmt.Errorf("GetTelemetryErrors: empty VIN")
+	if len(vin) != 17 {
+		return nil, fmt.Errorf("GetTelemetryErrors: invalid VIN %q (must be 17 characters)", redactVIN(vin))
 	}
 
 	url := c.baseURL + "/api/1/vehicles/" + vin + "/fleet_telemetry_errors"
@@ -190,8 +204,10 @@ func (c *FleetAPIClient) doWithRetry(
 			return nil, lastErr
 		}
 
-		respBody, readErr := readLimitedBody(resp)
-		resp.Body.Close()
+		respBody, readErr := func() ([]byte, error) {
+			defer resp.Body.Close()
+			return readLimitedBody(resp)
+		}()
 
 		if readErr != nil {
 			return nil, fmt.Errorf("read response: %w", readErr)
