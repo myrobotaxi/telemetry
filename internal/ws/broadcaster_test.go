@@ -731,6 +731,30 @@ func TestMarshalWSMessage_Connectivity_Payload(t *testing.T) {
 	}
 }
 
+func TestDeriveVehicleStatus(t *testing.T) {
+	tests := []struct {
+		name   string
+		fields map[string]any
+		want   string
+	}{
+		{"gear D speed 0", map[string]any{"gearPosition": "D", "speed": 0.0}, "driving"},
+		{"gear R speed 0", map[string]any{"gearPosition": "R", "speed": 0.0}, "driving"},
+		{"gear P speed 0", map[string]any{"gearPosition": "P", "speed": 0.0}, "parked"},
+		{"no gear speed 65", map[string]any{"speed": 65.0}, "driving"},
+		{"gear N speed 0", map[string]any{"gearPosition": "N", "speed": 0.0}, "parked"},
+		{"empty fields", map[string]any{}, "parked"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := deriveVehicleStatus(tt.fields)
+			if got != tt.want {
+				t.Fatalf("deriveVehicleStatus(%v) = %q, want %q", tt.fields, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTranslateFieldName(t *testing.T) {
 	tests := []struct {
 		internal string
@@ -744,6 +768,8 @@ func TestTranslateFieldName(t *testing.T) {
 		{"odometer", "odometerMiles"},
 		{"insideTemp", "interiorTemp"},
 		{"outsideTemp", "exteriorTemp"},
+		{"minutesToArrival", "etaMinutes"},
+		{"fsdMilesSinceReset", "fsdMilesToday"},
 		{"unknownField", "unknownField"}, // passthrough
 	}
 

@@ -7,11 +7,13 @@ import "github.com/tnando/my-robo-taxi-telemetry/internal/events"
 // the MyRoboTaxi Next.js app. Fields not in this map are passed through
 // with their internal name.
 var internalToClientField = map[string]string{
-	"soc":         "chargeLevel",
-	"gear":        "gearPosition",
-	"odometer":    "odometerMiles",
-	"insideTemp":  "interiorTemp",
-	"outsideTemp": "exteriorTemp",
+	"soc":                    "chargeLevel",
+	"gear":                   "gearPosition",
+	"odometer":               "odometerMiles",
+	"insideTemp":             "interiorTemp",
+	"outsideTemp":            "exteriorTemp",
+	"minutesToArrival":       "etaMinutes",
+	"fsdMilesSinceReset":     "fsdMilesToday",
 	// These fields map 1:1 and are listed for explicitness:
 	// speed, heading, estimatedRange, location (handled separately)
 }
@@ -47,6 +49,20 @@ func translateFieldName(internal string) string {
 		return client
 	}
 	return internal
+}
+
+// deriveVehicleStatus infers the vehicle status from the mapped client fields.
+// The frontend reads vehicle.status to decide which UI to render.
+func deriveVehicleStatus(fields map[string]any) string {
+	gear, _ := fields["gearPosition"].(string)
+	speed, _ := fields["speed"].(float64)
+
+	switch {
+	case gear == "D" || gear == "R" || speed > 0:
+		return "driving"
+	default:
+		return "parked"
+	}
 }
 
 // unwrapValue extracts the plain value from a TelemetryValue union. Returns
