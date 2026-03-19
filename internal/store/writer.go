@@ -114,10 +114,11 @@ func (w *Writer) Start(ctx context.Context) error {
 
 	w.subs = []events.Subscription{telSub, startSub, endSub}
 
+	// #nosec G118 -- cancel is deferred in the goroutine and also stored in w.cancel for Stop()
 	tickCtx, cancel := context.WithCancel(ctx)
 	w.cancel = cancel
 	go func() {
-		defer cancel() // also called via Stop(); cancel is idempotent
+		defer cancel()
 		defer close(w.flushDone)
 		w.flushLoop(tickCtx)
 	}()
