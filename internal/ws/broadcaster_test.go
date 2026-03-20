@@ -740,7 +740,8 @@ func TestDeriveVehicleStatus(t *testing.T) {
 		{"gear D speed 0", map[string]any{"gearPosition": "D", "speed": 0.0}, "driving"},
 		{"gear R speed 0", map[string]any{"gearPosition": "R", "speed": 0.0}, "driving"},
 		{"gear P speed 0", map[string]any{"gearPosition": "P", "speed": 0.0}, "parked"},
-		{"no gear speed 65", map[string]any{"speed": 65.0}, "driving"},
+		{"no gear speed 65 float", map[string]any{"speed": 65.0}, "driving"},
+		{"no gear speed 65 int", map[string]any{"speed": 65}, "driving"},
 		{"gear N speed 0", map[string]any{"gearPosition": "N", "speed": 0.0}, "parked"},
 		{"empty fields", map[string]any{}, "parked"},
 	}

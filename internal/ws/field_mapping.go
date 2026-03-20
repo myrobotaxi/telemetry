@@ -84,7 +84,14 @@ func translateFieldName(internal string) string {
 // The frontend reads vehicle.status to decide which UI to render.
 func deriveVehicleStatus(fields map[string]any) string {
 	gear, _ := fields["gearPosition"].(string)
-	speed, _ := fields["speed"].(float64)
+
+	var speed float64
+	switch v := fields["speed"].(type) {
+	case float64:
+		speed = v
+	case int:
+		speed = float64(v)
+	}
 
 	switch {
 	case gear == "D" || gear == "R" || speed > 0:
