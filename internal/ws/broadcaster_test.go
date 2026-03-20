@@ -315,7 +315,7 @@ func TestFieldMapping(t *testing.T) {
 			wantKeys: []string{"speed"},
 			check: func(t *testing.T, result map[string]any) {
 				t.Helper()
-				assertFloat(t, result, "speed", 65.5)
+				assertInt(t, result, "speed", 66)
 			},
 		},
 		{
@@ -341,7 +341,7 @@ func TestFieldMapping(t *testing.T) {
 			wantKeys: []string{"heading"},
 			check: func(t *testing.T, result map[string]any) {
 				t.Helper()
-				assertFloat(t, result, "heading", 180.0)
+				assertInt(t, result, "heading", 180)
 			},
 		},
 		{
@@ -383,7 +383,7 @@ func TestFieldMapping(t *testing.T) {
 			wantKeys: []string{"estimatedRange"},
 			check: func(t *testing.T, result map[string]any) {
 				t.Helper()
-				assertFloat(t, result, "estimatedRange", 200.5)
+				assertInt(t, result, "estimatedRange", 201)
 			},
 		},
 		{
@@ -394,7 +394,7 @@ func TestFieldMapping(t *testing.T) {
 			wantKeys: []string{"interiorTemp"},
 			check: func(t *testing.T, result map[string]any) {
 				t.Helper()
-				assertFloat(t, result, "interiorTemp", 72.0)
+				assertInt(t, result, "interiorTemp", 72)
 			},
 		},
 		{
@@ -405,7 +405,7 @@ func TestFieldMapping(t *testing.T) {
 			wantKeys: []string{"exteriorTemp"},
 			check: func(t *testing.T, result map[string]any) {
 				t.Helper()
-				assertFloat(t, result, "exteriorTemp", 55.0)
+				assertInt(t, result, "exteriorTemp", 55)
 			},
 		},
 		{
@@ -416,7 +416,7 @@ func TestFieldMapping(t *testing.T) {
 			wantKeys: []string{"odometerMiles"},
 			check: func(t *testing.T, result map[string]any) {
 				t.Helper()
-				assertFloat(t, result, "odometerMiles", 12345.6)
+				assertInt(t, result, "odometerMiles", 12346)
 			},
 		},
 		{
@@ -813,6 +813,18 @@ func assertFloat(t *testing.T, m map[string]any, key string, want float64) {
 	got, ok := m[key].(float64)
 	if !ok {
 		t.Fatalf("expected %s to be float64, got %T (%v)", key, m[key], m[key])
+	}
+	if got != want {
+		t.Fatalf("expected %s=%v, got %v", key, want, got)
+	}
+}
+
+// assertInt asserts a map value is an int equal to the expected value.
+func assertInt(t *testing.T, m map[string]any, key string, want int) {
+	t.Helper()
+	got, ok := m[key].(int)
+	if !ok {
+		t.Fatalf("expected %s to be int, got %T (%v)", key, m[key], m[key])
 	}
 	if got != want {
 		t.Fatalf("expected %s=%v, got %v", key, want, got)

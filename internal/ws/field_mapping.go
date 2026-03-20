@@ -1,6 +1,10 @@
 package ws
 
-import "github.com/tnando/my-robo-taxi-telemetry/internal/events"
+import (
+	"math"
+
+	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
+)
 
 // internalToClientField maps internal telemetry field names (from the
 // telemetry package) to the frontend Vehicle model field names expected by
@@ -16,6 +20,19 @@ var internalToClientField = map[string]string{
 	"fsdMilesSinceReset":     "fsdMilesToday",
 	// These fields map 1:1 and are listed for explicitness:
 	// speed, heading, estimatedRange, location (handled separately)
+}
+
+// integerFields are client field names that the frontend Vehicle model types
+// as integers. Float values for these fields are rounded before serialization.
+var integerFields = map[string]struct{}{
+	"speed":          {},
+	"heading":        {},
+	"chargeLevel":    {},
+	"estimatedRange": {},
+	"etaMinutes":     {},
+	"interiorTemp":   {},
+	"exteriorTemp":   {},
+	"odometerMiles":  {},
 }
 
 // mapFieldsForClient converts a map of internal TelemetryValue fields into
@@ -36,10 +53,22 @@ func mapFieldsForClient(fields map[string]events.TelemetryValue) map[string]any 
 
 		clientName := translateFieldName(name)
 		if v := unwrapValue(val); v != nil {
-			out[clientName] = v
+			out[clientName] = roundIfInteger(clientName, v)
 		}
 	}
 	return out
+}
+
+// roundIfInteger rounds float64 values to integers for fields the frontend
+// types as int. Non-float values and fields not in integerFields pass through.
+func roundIfInteger(field string, v any) any {
+	if _, ok := integerFields[field]; !ok {
+		return v
+	}
+	if f, ok := v.(float64); ok {
+		return int(math.Round(f))
+	}
+	return v
 }
 
 // translateFieldName returns the frontend field name for an internal field
