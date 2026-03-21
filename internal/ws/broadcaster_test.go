@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -433,6 +434,123 @@ func TestFieldMapping(t *testing.T) {
 			},
 		},
 		{
+			name: "destinationLocation splits into lat/lng",
+			fields: map[string]events.TelemetryValue{
+				"destinationLocation": {LocationVal: &events.Location{
+					Latitude:  40.7128,
+					Longitude: -74.0060,
+				}},
+			},
+			wantKeys: []string{"destinationLatitude", "destinationLongitude"},
+			check: func(t *testing.T, result map[string]any) {
+				t.Helper()
+				assertFloat(t, result, "destinationLatitude", 40.7128)
+				assertFloat(t, result, "destinationLongitude", -74.0060)
+			},
+		},
+		{
+			name: "originLocation splits into lat/lng",
+			fields: map[string]events.TelemetryValue{
+				"originLocation": {LocationVal: &events.Location{
+					Latitude:  37.7749,
+					Longitude: -122.4194,
+				}},
+			},
+			wantKeys: []string{"originLatitude", "originLongitude"},
+			check: func(t *testing.T, result map[string]any) {
+				t.Helper()
+				assertFloat(t, result, "originLatitude", 37.7749)
+				assertFloat(t, result, "originLongitude", -122.4194)
+			},
+		},
+		{
+			name: "nil destinationLocation is skipped",
+			fields: map[string]events.TelemetryValue{
+				"destinationLocation": {},
+			},
+			wantKeys: nil,
+			check: func(t *testing.T, result map[string]any) {
+				t.Helper()
+				if _, ok := result["destinationLatitude"]; ok {
+					t.Fatal("expected no destinationLatitude key for nil location")
+				}
+			},
+		},
+		{
+			name: "milesToArrival maps to tripDistanceRemaining",
+			fields: map[string]events.TelemetryValue{
+				"milesToArrival": {FloatVal: ptrFloat64(42.5)},
+			},
+			wantKeys: []string{"tripDistanceRemaining"},
+			check: func(t *testing.T, result map[string]any) {
+				t.Helper()
+				got, ok := result["tripDistanceRemaining"].(float64)
+				if !ok {
+					t.Fatalf("expected tripDistanceRemaining to be float64, got %T", result["tripDistanceRemaining"])
+				}
+				if got != 42.5 {
+					t.Fatalf("expected tripDistanceRemaining=42.5, got %v", got)
+				}
+			},
+		},
+		{
+			name: "routeLine decodes to routeCoordinates in lng/lat order",
+			fields: map[string]events.TelemetryValue{
+				"routeLine": {StringVal: ptrString("_p~iF~ps|U_ulLnnqC_mqNvxq`@")},
+			},
+			wantKeys: []string{"routeCoordinates"},
+			check: func(t *testing.T, result map[string]any) {
+				t.Helper()
+				coords, ok := result["routeCoordinates"].([][]float64)
+				if !ok {
+					t.Fatalf("expected routeCoordinates to be [][]float64, got %T", result["routeCoordinates"])
+				}
+				if len(coords) != 3 {
+					t.Fatalf("expected 3 coordinates, got %d", len(coords))
+				}
+				// Mapbox format: [lng, lat]
+				if coords[0][0] != coords[0][0] { // sanity: not NaN
+					t.Fatal("coordinate is NaN")
+				}
+				// First point: lat=38.5, lng=-120.2 -> [lng, lat] = [-120.2, 38.5]
+				wantLng, wantLat := -120.2, 38.5
+				if !floatClose(coords[0][0], wantLng) || !floatClose(coords[0][1], wantLat) {
+					t.Fatalf("first coord = [%f, %f], want [%f, %f]",
+						coords[0][0], coords[0][1], wantLng, wantLat)
+				}
+			},
+		},
+		{
+			name: "empty routeLine is skipped",
+			fields: map[string]events.TelemetryValue{
+				"routeLine": {StringVal: ptrString("")},
+			},
+			wantKeys: nil,
+			check: func(t *testing.T, result map[string]any) {
+				t.Helper()
+				if _, ok := result["routeCoordinates"]; ok {
+					t.Fatal("expected no routeCoordinates for empty routeLine")
+				}
+			},
+		},
+		{
+			name: "routeLastUpdated passes through",
+			fields: map[string]events.TelemetryValue{
+				"routeLastUpdated": {StringVal: ptrString("2026-03-20T12:00:00Z")},
+			},
+			wantKeys: []string{"routeLastUpdated"},
+			check: func(t *testing.T, result map[string]any) {
+				t.Helper()
+				got, ok := result["routeLastUpdated"].(string)
+				if !ok {
+					t.Fatalf("expected routeLastUpdated to be string, got %T", result["routeLastUpdated"])
+				}
+				if got != "2026-03-20T12:00:00Z" {
+					t.Fatalf("expected routeLastUpdated=2026-03-20T12:00:00Z, got %q", got)
+				}
+			},
+		},
+		{
 			name: "nil location is skipped",
 			fields: map[string]events.TelemetryValue{
 				"location": {}, // no LocationVal set
@@ -771,6 +889,7 @@ func TestTranslateFieldName(t *testing.T) {
 		{"outsideTemp", "exteriorTemp"},
 		{"minutesToArrival", "etaMinutes"},
 		{"fsdMilesSinceReset", "fsdMilesToday"},
+		{"milesToArrival", "tripDistanceRemaining"},
 		{"unknownField", "unknownField"}, // passthrough
 	}
 
@@ -848,4 +967,9 @@ func waitForCondition(t *testing.T, fn func() bool) {
 		case <-tick.C:
 		}
 	}
+}
+
+// floatClose returns true if a and b are within 1e-4 of each other.
+func floatClose(a, b float64) bool {
+	return math.Abs(a-b) < 1e-4
 }
