@@ -163,7 +163,7 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	}
 
 	// --- HTTP servers ---
-	srv := server.New(cfg.Server(), logger, db, reg)
+	srv := server.New(cfg.Server(), logger, db, reg, cfg.TeslaPublicKey())
 	srv.SetTeslaHandler(recv.Handler())
 	originPatterns := cfg.WebSocket().AllowedOrigins
 	if len(originPatterns) == 0 {
