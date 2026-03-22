@@ -165,9 +165,13 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	// --- HTTP servers ---
 	srv := server.New(cfg.Server(), logger, db, reg)
 	srv.SetTeslaHandler(recv.Handler())
+	originPatterns := cfg.WebSocket().AllowedOrigins
+	if len(originPatterns) == 0 {
+		originPatterns = []string{"*"} // default: allow all (restrict in production config)
+	}
 	srv.SetClientHandler(hub.Handler(authenticator, ws.HandlerConfig{
 		WriteTimeout:   cfg.WebSocket().WriteTimeout,
-		OriginPatterns: []string{"*"}, // TODO: restrict to frontend origin in production
+		OriginPatterns: originPatterns,
 	}))
 
 	// Configure mTLS on Tesla port if TLS cert files are available.

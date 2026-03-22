@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // vehicleCacheTTL is how long cached vehicle IDs remain valid before a
@@ -30,6 +32,7 @@ type vehicleCache struct {
 	entries sync.Map // userID -> *cacheEntry
 	ttl     time.Duration
 	now     func() time.Time // injectable for testing
+	group   singleflight.Group
 }
 
 // newVehicleCache creates a vehicle cache that resolves misses using the
@@ -49,17 +52,26 @@ func (c *vehicleCache) lookup(ctx context.Context, userID string) ([]string, err
 		return entry.vehicleIDs, nil
 	}
 
-	ids, err := c.querier.GetUserVehicleIDs(ctx, userID)
-	if err != nil {
-		return nil, fmt.Errorf("vehicleCache.lookup(user=%s): %w", userID, err)
-	}
-
-	c.entries.Store(userID, &cacheEntry{
-		vehicleIDs: ids,
-		fetchedAt:  c.now(),
+	// Coalesce concurrent lookups for the same user via singleflight.
+	val, err, _ := c.group.Do(userID, func() (any, error) {
+		// Double-check cache after acquiring the singleflight slot.
+		if entry, ok := c.loadValid(userID); ok {
+			return entry.vehicleIDs, nil
+		}
+		ids, err := c.querier.GetUserVehicleIDs(ctx, userID)
+		if err != nil {
+			return nil, fmt.Errorf("vehicleCache.lookup(user=%s): %w", userID, err)
+		}
+		c.entries.Store(userID, &cacheEntry{
+			vehicleIDs: ids,
+			fetchedAt:  c.now(),
+		})
+		return ids, nil
 	})
-
-	return ids, nil
+	if err != nil {
+		return nil, fmt.Errorf("vehicleCache.lookup: %w", err)
+	}
+	return val.([]string), nil
 }
 
 // loadValid returns the cache entry if it exists and has not expired.

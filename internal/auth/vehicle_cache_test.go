@@ -18,8 +18,8 @@ func TestVehicleCache_Lookup_CacheMiss(t *testing.T) {
 	if len(ids) != 2 || ids[0] != "v1" || ids[1] != "v2" {
 		t.Errorf("got %v, want [v1 v2]", ids)
 	}
-	if querier.callCount != 1 {
-		t.Errorf("querier called %d times, want 1", querier.callCount)
+	if querier.callCount.Load() != 1 {
+		t.Errorf("querier called %d times, want 1", querier.callCount.Load())
 	}
 }
 
@@ -40,8 +40,8 @@ func TestVehicleCache_Lookup_CacheHit(t *testing.T) {
 	if len(ids) != 1 || ids[0] != "v1" {
 		t.Errorf("got %v, want [v1]", ids)
 	}
-	if querier.callCount != 1 {
-		t.Errorf("querier called %d times, want 1 (cache should have been hit)", querier.callCount)
+	if querier.callCount.Load() != 1 {
+		t.Errorf("querier called %d times, want 1 (cache should have been hit)", querier.callCount.Load())
 	}
 }
 
@@ -64,8 +64,8 @@ func TestVehicleCache_Lookup_Expiry(t *testing.T) {
 	if _, err := cache.lookup(context.Background(), "user-1"); err != nil {
 		t.Fatalf("second lookup: %v", err)
 	}
-	if querier.callCount != 2 {
-		t.Errorf("querier called %d times, want 2 (entry should have expired)", querier.callCount)
+	if querier.callCount.Load() != 2 {
+		t.Errorf("querier called %d times, want 2 (entry should have expired)", querier.callCount.Load())
 	}
 }
 

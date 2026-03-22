@@ -62,6 +62,7 @@ type WebSocketConfig struct {
 	WriteTimeout          time.Duration
 	MaxConnectionsPerUser int
 	ReadLimit             int64
+	AllowedOrigins        []string
 }
 
 // AuthConfig holds JWT validation parameters shared with NextAuth.js.

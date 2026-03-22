@@ -59,6 +59,7 @@ type fileWebSocketConfig struct {
 	WriteTimeout          Duration `json:"write_timeout"`
 	MaxConnectionsPerUser int      `json:"max_connections_per_user"`
 	ReadLimit             int64    `json:"read_limit"`
+	AllowedOrigins        []string `json:"allowed_origins"`
 }
 
 type fileAuthConfig struct {
@@ -160,6 +161,7 @@ func buildConfig(fc *fileConfig) *Config {
 			WriteTimeout:          fc.WebSocket.WriteTimeout.Dur(),
 			MaxConnectionsPerUser: fc.WebSocket.MaxConnectionsPerUser,
 			ReadLimit:             fc.WebSocket.ReadLimit,
+			AllowedOrigins:        fc.WebSocket.AllowedOrigins,
 		},
 		auth: AuthConfig{
 			Secret:        fc.authSecret,

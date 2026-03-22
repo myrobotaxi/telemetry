@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -234,8 +235,8 @@ func TestJWTAuthenticator_GetUserVehicles(t *testing.T) {
 		t.Errorf("vehicle IDs = %v, want [vehicle-1 vehicle-2]", ids)
 	}
 
-	if querier.callCount != 1 {
-		t.Errorf("querier called %d times, want 1", querier.callCount)
+	if querier.callCount.Load() != 1 {
+		t.Errorf("querier called %d times, want 1", querier.callCount.Load())
 	}
 }
 
@@ -258,11 +259,11 @@ func TestJWTAuthenticator_GetUserVehicles_QueryError(t *testing.T) {
 type stubQuerier struct {
 	ids       []string
 	err       error
-	callCount int
+	callCount atomic.Int32
 }
 
 func (s *stubQuerier) GetUserVehicleIDs(_ context.Context, _ string) ([]string, error) {
-	s.callCount++
+	s.callCount.Add(1)
 	if s.err != nil {
 		return nil, s.err
 	}
