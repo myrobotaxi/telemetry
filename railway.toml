@@ -1,0 +1,10 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# This overrides the Dockerfile ENTRYPOINT+CMD. Keep in sync with Dockerfile.
+startCommand = "telemetry-server -config /etc/telemetry/config.json"
+healthcheckPath = "/healthz"
+healthcheckTimeout = 10
+restartPolicyType = "on_failure"

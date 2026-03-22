@@ -1,0 +1,32 @@
+# Integration test environment.
+# Used by CI to run tests/integration/... against a real PostgreSQL.
+# Usage: docker compose -f docker-compose.test.yml up --abort-on-container-exit
+
+services:
+  postgres-test:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: telemetry_test
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: test
+    ports:
+      - "5433:5432"  # host 5433 avoids conflicting with a local dev Postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  integration-tests:
+    build:
+      context: .
+      target: builder
+    working_dir: /app
+    entrypoint: ["go", "test", "-v", "-race", "-tags=integration", "./tests/integration/..."]
+    environment:
+      DATABASE_URL: postgres://postgres:test@postgres-test:5432/telemetry_test
+      AUTH_SECRET: test-secret-not-for-production
+      LOG_FORMAT: json
+    depends_on:
+      postgres-test:
+        condition: service_healthy

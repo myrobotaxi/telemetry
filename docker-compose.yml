@@ -1,0 +1,63 @@
+# Local development stack.
+# Copy .env.example to .env and populate before running.
+# Usage: docker compose up --build
+
+services:
+  telemetry-server:
+    build: .
+    ports:
+      - "8443:443"   # Tesla vehicle mTLS WebSocket (host 8443 → container 443)
+      - "8080:8080"  # Browser client WebSocket
+      - "9090:9090"  # Prometheus metrics
+    volumes:
+      # TLS certs mounted read-only — never bake certs into the image.
+      - ./certs:/certs:ro
+      # Operational config override (secrets still come from env vars).
+      - ./configs:/etc/telemetry:ro
+    env_file:
+      - .env
+    environment:
+      # Override: JSON structured logging in the containerised environment.
+      LOG_FORMAT: json
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # Local PostgreSQL — use this instead of Supabase during development.
+  # Set DATABASE_URL=postgres://postgres:dev@postgres:5432/myrobotaxi in .env.
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: myrobotaxi
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Prometheus scrapes /metrics on port 9090.
+  prometheus:
+    image: prom/prometheus:v3.3.0
+    ports:
+      - "9091:9090"  # host 9091 avoids clashing with the server's metrics port
+    volumes:
+      - ./deployments/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+
+volumes:
+  postgres_data:

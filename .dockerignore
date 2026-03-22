@@ -1,0 +1,29 @@
+# Version control
+.git
+.gitignore
+.github
+
+# Claude agent memory and worktrees
+.claude
+
+# TLS certificates — never bake secrets into the image
+certs/
+
+# Documentation
+*.md
+docs/
+
+# Load tests — not needed in the Docker image.
+# Note: tests/integration/ is kept so docker-compose.test.yml can run them.
+tests/load/
+
+# Local development artifacts
+bin/
+telemetry-server
+
+# Editor and OS noise
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
