@@ -37,7 +37,7 @@ func TestNewScenario(t *testing.T) {
 }
 
 func TestHighwayDrive_StartsParked(t *testing.T) {
-	s := newHighwayDrive()
+	s := newHighwayDrive(scenarioConfig{})
 	state := s.Next()
 
 	if state.GearPosition != "P" {
@@ -49,7 +49,7 @@ func TestHighwayDrive_StartsParked(t *testing.T) {
 }
 
 func TestHighwayDrive_EndsParked(t *testing.T) {
-	s := newHighwayDrive()
+	s := newHighwayDrive(scenarioConfig{})
 
 	var lastState ScenarioState
 	for !s.Done() {
@@ -65,7 +65,7 @@ func TestHighwayDrive_EndsParked(t *testing.T) {
 }
 
 func TestHighwayDrive_ReachesHighwaySpeed(t *testing.T) {
-	s := newHighwayDrive()
+	s := newHighwayDrive(scenarioConfig{})
 
 	var maxSpeed float64
 	for !s.Done() {
@@ -81,7 +81,7 @@ func TestHighwayDrive_ReachesHighwaySpeed(t *testing.T) {
 }
 
 func TestHighwayDrive_DrainsCharge(t *testing.T) {
-	s := newHighwayDrive()
+	s := newHighwayDrive(scenarioConfig{})
 
 	first := s.Next()
 	var last ScenarioState
@@ -95,7 +95,7 @@ func TestHighwayDrive_DrainsCharge(t *testing.T) {
 }
 
 func TestHighwayDrive_AdvancesPosition(t *testing.T) {
-	s := newHighwayDrive()
+	s := newHighwayDrive(scenarioConfig{})
 
 	first := s.Next()
 	var last ScenarioState
@@ -113,7 +113,7 @@ func TestHighwayDrive_AdvancesPosition(t *testing.T) {
 }
 
 func TestCityDrive_HasStopAndGo(t *testing.T) {
-	s := newCityDrive()
+	s := newCityDrive(scenarioConfig{})
 
 	var transitions int
 	var wasMoving bool
@@ -183,7 +183,7 @@ func TestEtaMinutes(t *testing.T) {
 }
 
 func TestHighwayDrive_ETACountdown(t *testing.T) {
-	s := newHighwayDrive()
+	s := newHighwayDrive(scenarioConfig{})
 
 	first := s.Next()
 	if first.ETA <= 0 {
@@ -210,7 +210,7 @@ func TestHighwayDrive_ETACountdown(t *testing.T) {
 }
 
 func TestCityDrive_ETACountdown(t *testing.T) {
-	s := newCityDrive()
+	s := newCityDrive(scenarioConfig{})
 
 	first := s.Next()
 	if first.ETA <= 0 {
@@ -242,6 +242,76 @@ func TestParkingLot_ETACountdown(t *testing.T) {
 
 	if last.ETA > 0.1 {
 		t.Errorf("final ETA = %f, want < 0.1 (nearly done)", last.ETA)
+	}
+}
+
+func TestHighwayDrive_WithRoute_SetsNavFields(t *testing.T) {
+	rf := &RouteFile{
+		Name:               "Test Highway",
+		Origin:             RoutePoint{Name: "Start", Lat: 32.7767, Lng: -96.7970},
+		Destination:        RoutePoint{Name: "Dest", Lat: 33.1972, Lng: -96.6153},
+		TotalDistanceMiles: 34.5,
+		Coordinates: [][2]float64{
+			{-96.7970, 32.7767},
+			{-96.7000, 32.9000},
+			{-96.6153, 33.1972},
+		},
+	}
+	s := newHighwayDrive(scenarioConfig{routeFile: rf})
+
+	first := s.Next()
+	if first.Nav.TripDistanceMiles != 34.5 {
+		t.Errorf("TripDistanceMiles = %f, want 34.5", first.Nav.TripDistanceMiles)
+	}
+	if first.Nav.DestinationName != "Dest" {
+		t.Errorf("DestinationName = %q, want %q", first.Nav.DestinationName, "Dest")
+	}
+	if first.Nav.DestinationLat != 33.1972 {
+		t.Errorf("DestinationLat = %f, want 33.1972", first.Nav.DestinationLat)
+	}
+	if first.Nav.RouteLine == "" {
+		t.Error("RouteLine should not be empty")
+	}
+}
+
+func TestHighwayDrive_WithRoute_FollowsRoad(t *testing.T) {
+	rf := &RouteFile{
+		Name:               "Test Highway",
+		Origin:             RoutePoint{Name: "Start", Lat: 32.0, Lng: -96.0},
+		Destination:        RoutePoint{Name: "End", Lat: 33.0, Lng: -96.0},
+		TotalDistanceMiles: 69.0,
+		Coordinates: [][2]float64{
+			{-96.0, 32.0},
+			{-96.0, 32.5},
+			{-96.0, 33.0},
+		},
+	}
+	s := newHighwayDrive(scenarioConfig{routeFile: rf})
+
+	// Run through ~100 ticks to get past park phase and into driving.
+	var latitudes []float64
+	for i := 0; i < 100 && !s.Done(); i++ {
+		state := s.Next()
+		latitudes = append(latitudes, state.Latitude)
+	}
+
+	// After accelerating (tick 5-30), latitude should increase along the route.
+	// The vehicle starts at 32.0 and should move northward.
+	lastLat := latitudes[len(latitudes)-1]
+	if lastLat <= 32.0 {
+		t.Errorf("highway drive with north-bound route should move north, got lat=%f", lastLat)
+	}
+}
+
+func TestHighwayDrive_WithoutRoute_RandomWalk(t *testing.T) {
+	s := newHighwayDrive(scenarioConfig{})
+
+	first := s.Next()
+	if first.Nav.RouteLine != "" {
+		t.Error("RouteLine should be empty without route file")
+	}
+	if first.Nav.TripDistanceMiles != 0 {
+		t.Errorf("TripDistanceMiles = %f, want 0", first.Nav.TripDistanceMiles)
 	}
 }
 

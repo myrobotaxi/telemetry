@@ -164,6 +164,87 @@ func TestBuildPayload_ETAOmittedWhenZero(t *testing.T) {
 	}
 }
 
+func TestBuildPayload_NavFields(t *testing.T) {
+	state := scenarioDefaults()
+	state.GearPosition = "D"
+	state.Speed = 65
+	state.ETA = 15.0
+	state.Nav.TripDistanceRemain = 20.5
+	state.Nav.RouteLine = "_p~iF~ps|U"
+	state.Nav.DestinationName = "McKinney Town Center"
+	state.Nav.DestinationLat = 33.1972
+	state.Nav.DestinationLng = -96.6153
+
+	payload := BuildPayload("5YJ3SIM00001", state)
+
+	fieldMap := make(map[tpb.Field]*tpb.Value)
+	for _, d := range payload.GetData() {
+		fieldMap[d.GetKey()] = d.GetValue()
+	}
+
+	// MilesToArrival
+	if val := fieldMap[tpb.Field_MilesToArrival]; val == nil {
+		t.Error("MilesToArrival datum missing")
+	} else if sv, ok := val.Value.(*tpb.Value_StringValue); !ok {
+		t.Errorf("MilesToArrival type = %T, want StringValue", val.Value)
+	} else if sv.StringValue != "20.50" {
+		t.Errorf("MilesToArrival = %q, want %q", sv.StringValue, "20.50")
+	}
+
+	// RouteLine
+	if val := fieldMap[tpb.Field_RouteLine]; val == nil {
+		t.Error("RouteLine datum missing")
+	} else if sv, ok := val.Value.(*tpb.Value_StringValue); !ok {
+		t.Errorf("RouteLine type = %T, want StringValue", val.Value)
+	} else if sv.StringValue != "_p~iF~ps|U" {
+		t.Errorf("RouteLine = %q, want %q", sv.StringValue, "_p~iF~ps|U")
+	}
+
+	// DestinationName
+	if val := fieldMap[tpb.Field_DestinationName]; val == nil {
+		t.Error("DestinationName datum missing")
+	} else if sv, ok := val.Value.(*tpb.Value_StringValue); !ok {
+		t.Errorf("DestinationName type = %T, want StringValue", val.Value)
+	} else if sv.StringValue != "McKinney Town Center" {
+		t.Errorf("DestinationName = %q, want %q", sv.StringValue, "McKinney Town Center")
+	}
+
+	// DestinationLocation
+	if val := fieldMap[tpb.Field_DestinationLocation]; val == nil {
+		t.Error("DestinationLocation datum missing")
+	} else {
+		loc := val.GetLocationValue()
+		if loc == nil {
+			t.Fatal("DestinationLocation is not a LocationValue")
+		}
+		if loc.GetLatitude() != 33.1972 {
+			t.Errorf("DestinationLocation.Lat = %f, want 33.1972", loc.GetLatitude())
+		}
+		if loc.GetLongitude() != -96.6153 {
+			t.Errorf("DestinationLocation.Lng = %f, want -96.6153", loc.GetLongitude())
+		}
+	}
+}
+
+func TestBuildPayload_NavFieldsOmittedWhenEmpty(t *testing.T) {
+	state := scenarioDefaults()
+
+	payload := BuildPayload("5YJ3SIM00001", state)
+
+	for _, d := range payload.GetData() {
+		switch d.GetKey() {
+		case tpb.Field_MilesToArrival:
+			t.Error("MilesToArrival should not be present without nav data")
+		case tpb.Field_RouteLine:
+			t.Error("RouteLine should not be present without nav data")
+		case tpb.Field_DestinationName:
+			t.Error("DestinationName should not be present without nav data")
+		case tpb.Field_DestinationLocation:
+			t.Error("DestinationLocation should not be present without nav data")
+		}
+	}
+}
+
 func TestMarshalPayload_RoundTrip(t *testing.T) {
 	state := scenarioDefaults()
 	state.Speed = 42.0

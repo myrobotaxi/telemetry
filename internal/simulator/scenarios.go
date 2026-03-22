@@ -1,6 +1,8 @@
 package simulator
 
 import (
+	"log/slog"
+
 	"math/rand/v2" //nolint:gosec // simulation data does not require crypto/rand
 )
 
@@ -28,17 +30,44 @@ func scenarioDefaults() ScenarioState {
 
 // NewScenario creates a named scenario. Returns nil if the name is unknown.
 // Supported names: highway-drive, city-drive, parking-lot.
-func NewScenario(name string) Scenario {
+//
+// For highway-drive and city-drive, pass WithRouteFile to drive along
+// pre-baked road coordinates. Without a route file, the scenario falls
+// back to random-walk positioning.
+func NewScenario(name string, opts ...ScenarioOption) Scenario {
+	cfg := scenarioConfig{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	switch name {
 	case "highway-drive":
-		return newHighwayDrive()
+		return newHighwayDrive(cfg)
 	case "city-drive":
-		return newCityDrive()
+		return newCityDrive(cfg)
 	case "parking-lot":
 		return newParkingLot()
 	default:
 		return nil
 	}
+}
+
+// ScenarioOption configures scenario construction.
+type ScenarioOption func(*scenarioConfig)
+
+type scenarioConfig struct {
+	routeFile *RouteFile
+	logger    *slog.Logger
+}
+
+// WithRouteFile provides a pre-loaded route file for the scenario.
+func WithRouteFile(rf *RouteFile) ScenarioOption {
+	return func(c *scenarioConfig) { c.routeFile = rf }
+}
+
+// WithLogger provides a logger for the scenario.
+func WithLogger(l *slog.Logger) ScenarioOption {
+	return func(c *scenarioConfig) { c.logger = l }
 }
 
 // ScenarioNames returns the list of supported scenario names.
@@ -49,18 +78,30 @@ func ScenarioNames() []string {
 // --- Highway Drive ---
 
 // highwayDrive simulates a ~30-minute highway trip: park -> accelerate -> cruise
-// at 65-75 mph -> decelerate -> park.
+// at 65-75 mph -> decelerate -> park. When a route file is loaded, the vehicle
+// follows pre-baked road coordinates instead of random-walking.
 type highwayDrive struct {
-	state ScenarioState
-	tick  int
-	total int // total ticks (1 tick = 1 second at default interval)
+	state    ScenarioState
+	tick     int
+	total    int // total ticks (1 tick = 1 second at default interval)
+	follower *RouteFollower
 }
 
-func newHighwayDrive() *highwayDrive {
-	return &highwayDrive{
+func newHighwayDrive(cfg scenarioConfig) *highwayDrive {
+	h := &highwayDrive{
 		state: scenarioDefaults(),
 		total: 1800, // 30 minutes
 	}
+	if cfg.routeFile != nil {
+		h.follower = NewRouteFollower(cfg.routeFile)
+		h.state.Nav.TripDistanceMiles = cfg.routeFile.TotalDistanceMiles
+		h.state.Nav.TripDistanceRemain = cfg.routeFile.TotalDistanceMiles
+		h.state.Nav.RouteLine = EncodePolyline(cfg.routeFile.Coordinates)
+		h.state.Nav.DestinationName = cfg.routeFile.Destination.Name
+		h.state.Nav.DestinationLat = cfg.routeFile.Destination.Lat
+		h.state.Nav.DestinationLng = cfg.routeFile.Destination.Lng
+	}
+	return h
 }
 
 func (h *highwayDrive) Name() string { return "highway-drive" }
@@ -107,7 +148,25 @@ func (h *highwayDrive) updateSpeed() {
 }
 
 func (h *highwayDrive) updatePosition() {
-	// Small heading drift for realism.
+	if h.follower != nil {
+		h.updatePositionFromRoute()
+		return
+	}
+	h.updatePositionRandomWalk()
+}
+
+func (h *highwayDrive) updatePositionFromRoute() {
+	pos := h.follower.Advance(h.state.Speed, 1.0)
+	h.state.Latitude = pos.Lat
+	h.state.Longitude = pos.Lng
+	h.state.Heading = pos.Heading
+	h.state.Nav.TripDistanceRemain = pos.DistanceRemain
+	if h.state.Speed > 0 {
+		h.state.OdometerMiles += h.state.Speed / 3600.0
+	}
+}
+
+func (h *highwayDrive) updatePositionRandomWalk() {
 	h.state.Heading = normalizeHeading(h.state.Heading + jitter(2))
 	h.state.Latitude, h.state.Longitude = advancePosition(
 		h.state.Latitude, h.state.Longitude,
@@ -123,105 +182,6 @@ func (h *highwayDrive) drainCharge() {
 	if h.tick > 0 && h.tick%90 == 0 && h.state.Speed > 0 {
 		h.state.ChargeLevel = max(h.state.ChargeLevel-1, 10)
 		h.state.EstimatedRange = max(h.state.EstimatedRange-3, 25)
-	}
-}
-
-// --- City Drive ---
-
-// cityDrive simulates a ~15-minute city drive with stop-and-go segments.
-type cityDrive struct {
-	state    ScenarioState
-	tick     int
-	total    int
-	segments []segment
-	segIdx   int
-}
-
-type segment struct {
-	targetSpeed float64
-	duration    int
-}
-
-func newCityDrive() *cityDrive {
-	return &cityDrive{
-		state: scenarioDefaults(),
-		total: 900, // 15 minutes
-		segments: []segment{
-			{0, 5},    // parked start
-			{25, 60},  // residential
-			{0, 30},   // stop light
-			{35, 90},  // main road
-			{0, 20},   // stop sign
-			{30, 80},  // side street
-			{0, 25},   // red light
-			{35, 120}, // arterial
-			{0, 15},   // stop
-			{20, 60},  // neighborhood
-			{0, 5},    // park
-		},
-	}
-}
-
-func (c *cityDrive) Name() string { return "city-drive" }
-func (c *cityDrive) Done() bool   { return c.tick >= c.total }
-
-func (c *cityDrive) Next() ScenarioState {
-	defer func() { c.tick++ }()
-
-	c.advanceSegment()
-	c.applySegment()
-	c.updateCityPosition()
-	c.drainCityCharge()
-	c.state.ETA = etaMinutes(c.tick, c.total, 1.0)
-
-	return c.state
-}
-
-func (c *cityDrive) advanceSegment() {
-	if c.segIdx >= len(c.segments) {
-		return
-	}
-	c.segments[c.segIdx].duration--
-	if c.segments[c.segIdx].duration <= 0 && c.segIdx < len(c.segments)-1 {
-		c.segIdx++
-	}
-}
-
-func (c *cityDrive) applySegment() {
-	if c.segIdx >= len(c.segments) {
-		c.state.Speed = 0
-		c.state.GearPosition = "P"
-		return
-	}
-	seg := c.segments[c.segIdx]
-	if seg.targetSpeed == 0 {
-		c.state.Speed = clampSpeed(c.state.Speed-3, 0, 45)
-		if c.state.Speed == 0 {
-			c.state.GearPosition = "P"
-		}
-	} else {
-		c.state.GearPosition = "D"
-		diff := seg.targetSpeed - c.state.Speed
-		c.state.Speed = clampSpeed(c.state.Speed+clampSpeed(diff*0.3, -5, 5), 0, 45)
-	}
-}
-
-func (c *cityDrive) updateCityPosition() {
-	// Heading drift for city turns.
-	c.state.Heading = normalizeHeading(c.state.Heading + jitter(6))
-	c.state.Latitude, c.state.Longitude = advancePosition(
-		c.state.Latitude, c.state.Longitude,
-		c.state.Heading, c.state.Speed, 1.0,
-	)
-	if c.state.Speed > 0 {
-		c.state.OdometerMiles += c.state.Speed / 3600.0
-	}
-}
-
-func (c *cityDrive) drainCityCharge() {
-	if c.tick > 0 && c.tick%120 == 0 && c.state.Speed > 0 {
-		c.state.ChargeLevel = max(c.state.ChargeLevel-1, 10)
-		c.state.EstimatedRange = max(c.state.EstimatedRange-2, 25)
 	}
 }
 
