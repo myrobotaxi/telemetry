@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"os"
 	"net/http"
 	"time"
 
@@ -31,18 +30,21 @@ const (
 // their lifecycle. Create one with New, call Start to begin serving, and
 // cancel the context passed to Start to stop gracefully.
 type Server struct {
-	tesla         *http.Server
-	client        *http.Server
-	metrics       *http.Server
-	logger        *slog.Logger
-	logMiddleware func(http.Handler) http.Handler
+	tesla          *http.Server
+	client         *http.Server
+	metrics        *http.Server
+	logger         *slog.Logger
+	logMiddleware  func(http.Handler) http.Handler
+	teslaPublicKey string // PEM-encoded public key for Tesla .well-known endpoint
 }
 
 // New creates a Server with three HTTP servers configured on the ports
 // specified in cfg. The metrics server exposes /healthz, /readyz, and
 // /metrics. Tesla and client servers use placeholder handlers until wired
 // via SetTeslaHandler / SetClientHandler.
-func New(cfg config.ServerConfig, logger *slog.Logger, checker ReadinessChecker, reg *prometheus.Registry) *Server {
+// TeslaPublicKey is the PEM-encoded public key served at the .well-known
+// endpoint. Pass empty string to disable the endpoint.
+func New(cfg config.ServerConfig, logger *slog.Logger, checker ReadinessChecker, reg *prometheus.Registry, teslaPublicKey string) *Server {
 	metricsMux := http.NewServeMux()
 	metricsMux.HandleFunc("GET /healthz", handleHealthz)
 	metricsMux.HandleFunc("GET /readyz", handleReadyz(checker, logger))
@@ -60,14 +62,11 @@ func New(cfg config.ServerConfig, logger *slog.Logger, checker ReadinessChecker,
 	clientMux := http.NewServeMux()
 	clientMux.HandleFunc("GET /healthz", handleHealthz)
 
-	// Tesla Fleet Telemetry requires the app's public key at this path.
-	// The key is read from the TESLA_PUBLIC_KEY env var.
-	if pubKey := os.Getenv("TESLA_PUBLIC_KEY"); pubKey != "" {
-		clientMux.HandleFunc("GET /.well-known/appspecific/com.tesla.3p.public-key.pem", func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "application/x-pem-file")
-			w.Header().Set("Cache-Control", "public, max-age=86400")
-			fmt.Fprint(w, pubKey)
-		})
+	if teslaPublicKey != "" {
+		registerWellKnown(clientMux, teslaPublicKey)
+		logger.Info("Tesla public key endpoint registered at /.well-known/appspecific/com.tesla.3p.public-key.pem")
+	} else {
+		logger.Warn("TESLA_PUBLIC_KEY not set — .well-known endpoint disabled")
 	}
 
 	placeholder := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -90,8 +89,9 @@ func New(cfg config.ServerConfig, logger *slog.Logger, checker ReadinessChecker,
 			Handler:           logMiddleware(metricsMux),
 			ReadHeaderTimeout: readHeaderTimeout,
 		},
-		logger:        logger,
-		logMiddleware: logMiddleware,
+		logger:         logger,
+		logMiddleware:  logMiddleware,
+		teslaPublicKey: teslaPublicKey,
 	}
 }
 
@@ -109,12 +109,14 @@ func (s *Server) SetTeslaTLS(tlsConfig *tls.Config) {
 }
 
 // SetClientHandler adds routes from the given handler to the client server.
-// The client server always retains /healthz for Railway healthchecks.
+// The client server always retains /healthz and the Tesla .well-known endpoint.
 // Must be called before Start.
 func (s *Server) SetClientHandler(h http.Handler) {
-	// Create a new mux that has /healthz + the provided handler as fallback.
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
+	if s.teslaPublicKey != "" {
+		registerWellKnown(mux, s.teslaPublicKey)
+	}
 	mux.Handle("/", h)
 	s.client.Handler = s.logMiddleware(mux)
 }
@@ -174,4 +176,14 @@ func (s *Server) serve(ctx context.Context, name string, srv *http.Server) error
 	case err := <-errCh:
 		return err
 	}
+}
+
+// registerWellKnown adds the Tesla public key endpoint to a mux.
+// Tesla Fleet Telemetry verifies app identity by fetching this key.
+func registerWellKnown(mux *http.ServeMux, publicKey string) {
+	mux.HandleFunc("GET /.well-known/appspecific/com.tesla.3p.public-key.pem", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-pem-file")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		fmt.Fprint(w, publicKey)
+	})
 }

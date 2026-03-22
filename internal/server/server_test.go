@@ -48,7 +48,7 @@ func TestServer_StartShutdown(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	checker := &mockChecker{}
 
-	srv := New(cfg, testLogger(), checker, reg)
+	srv := New(cfg, testLogger(), checker, reg, "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -81,7 +81,7 @@ func TestServer_HealthzEndpoint(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	checker := &mockChecker{}
 
-	srv := New(cfg, testLogger(), checker, reg)
+	srv := New(cfg, testLogger(), checker, reg, "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -119,12 +119,120 @@ func TestServer_HealthzEndpoint(t *testing.T) {
 	}
 }
 
+func TestServer_WellKnownEndpoint(t *testing.T) {
+	cfg := testServerConfig(t)
+	reg := prometheus.NewRegistry()
+	checker := &mockChecker{}
+	testKey := "-----BEGIN PUBLIC KEY-----\nTESTKEY\n-----END PUBLIC KEY-----"
+
+	srv := New(cfg, testLogger(), checker, reg, testKey)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	go func() { _ = srv.Start(ctx) }()
+
+	clientAddr := fmt.Sprintf("http://127.0.0.1:%d", cfg.ClientPort)
+	if err := waitForReady(t, clientAddr+"/healthz"); err != nil {
+		t.Fatalf("server did not become ready: %v", err)
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, clientAddr+"/.well-known/appspecific/com.tesla.3p.public-key.pem", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET .well-known: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/x-pem-file" {
+		t.Errorf("content-type = %q, want application/x-pem-file", ct)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != testKey {
+		t.Errorf("body = %q, want %q", string(body), testKey)
+	}
+}
+
+func TestServer_WellKnownSurvivesSetClientHandler(t *testing.T) {
+	cfg := testServerConfig(t)
+	reg := prometheus.NewRegistry()
+	checker := &mockChecker{}
+	testKey := "-----BEGIN PUBLIC KEY-----\nTESTKEY\n-----END PUBLIC KEY-----"
+
+	srv := New(cfg, testLogger(), checker, reg, testKey)
+	// SetClientHandler should NOT drop the .well-known route
+	srv.SetClientHandler(http.NotFoundHandler())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	go func() { _ = srv.Start(ctx) }()
+
+	clientAddr := fmt.Sprintf("http://127.0.0.1:%d", cfg.ClientPort)
+	if err := waitForReady(t, clientAddr+"/healthz"); err != nil {
+		t.Fatalf("server did not become ready: %v", err)
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, clientAddr+"/.well-known/appspecific/com.tesla.3p.public-key.pem", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET .well-known after SetClientHandler: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200 (route should survive SetClientHandler)", resp.StatusCode)
+	}
+}
+
+func TestServer_WellKnownDisabledWhenKeyEmpty(t *testing.T) {
+	cfg := testServerConfig(t)
+	reg := prometheus.NewRegistry()
+	checker := &mockChecker{}
+
+	srv := New(cfg, testLogger(), checker, reg, "") // empty key
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	go func() { _ = srv.Start(ctx) }()
+
+	clientAddr := fmt.Sprintf("http://127.0.0.1:%d", cfg.ClientPort)
+	if err := waitForReady(t, clientAddr+"/healthz"); err != nil {
+		t.Fatalf("server did not become ready: %v", err)
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, clientAddr+"/.well-known/appspecific/com.tesla.3p.public-key.pem", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET .well-known: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		t.Error("expected non-200 when key is empty, got 200")
+	}
+}
+
 func TestServer_HealthzOnClientPort(t *testing.T) {
 	cfg := testServerConfig(t)
 	reg := prometheus.NewRegistry()
 	checker := &mockChecker{}
 
-	srv := New(cfg, testLogger(), checker, reg)
+	srv := New(cfg, testLogger(), checker, reg, "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -181,7 +289,7 @@ func TestServer_ReadyzEndpoint(t *testing.T) {
 			reg := prometheus.NewRegistry()
 			checker := &mockChecker{err: tt.pingErr}
 
-			srv := New(cfg, testLogger(), checker, reg)
+			srv := New(cfg, testLogger(), checker, reg, "")
 
 			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
@@ -227,7 +335,7 @@ func TestServer_MetricsEndpoint(t *testing.T) {
 	reg.MustRegister(collectors.NewGoCollector())
 	checker := &mockChecker{}
 
-	srv := New(cfg, testLogger(), checker, reg)
+	srv := New(cfg, testLogger(), checker, reg, "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -273,7 +381,7 @@ func TestServer_PlaceholderEndpoints(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	checker := &mockChecker{}
 
-	srv := New(cfg, testLogger(), checker, reg)
+	srv := New(cfg, testLogger(), checker, reg, "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
