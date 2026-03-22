@@ -34,9 +34,10 @@ func run() error {
 		vehicles     = flag.Int("vehicles", 1, "number of simultaneous vehicles")
 		vinPrefix    = flag.String("vin", "5YJ3SIM", "VIN prefix for simulated vehicles")
 		interval     = flag.Duration("interval", time.Second, "telemetry send interval")
-		certPath = flag.String("cert", "certs/client.crt", "path to client TLS certificate")
-		keyPath  = flag.String("key", "certs/client.key", "path to client TLS key")
-		caPath   = flag.String("ca", "certs/ca.crt", "path to CA certificate")
+		routePath    = flag.String("route", "", "path to custom route JSON file (default: configs/routes/<scenario>.json)")
+		certPath     = flag.String("cert", "certs/client.crt", "path to client TLS certificate")
+		keyPath      = flag.String("key", "certs/client.key", "path to client TLS key")
+		caPath       = flag.String("ca", "certs/ca.crt", "path to CA certificate")
 	)
 	flag.Parse()
 
@@ -67,6 +68,9 @@ func run() error {
 		return fmt.Errorf("configuring TLS: %w", err)
 	}
 
+	// Load route file for scenarios that support it.
+	scenarioOpts := loadRouteOpts(*scenarioName, *routePath, logger)
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -81,7 +85,7 @@ func run() error {
 	g, gctx := errgroup.WithContext(ctx)
 	for i := range *vehicles {
 		vin := fmt.Sprintf("%s%05d", *vinPrefix, i+1)
-		scenario := simulator.NewScenario(*scenarioName)
+		scenario := simulator.NewScenario(*scenarioName, scenarioOpts...)
 		if scenario == nil {
 			return fmt.Errorf("unknown scenario %q (valid: %s)", *scenarioName, strings.Join(simulator.ScenarioNames(), ", "))
 		}
@@ -97,6 +101,37 @@ func run() error {
 
 	logger.Info("all vehicles finished")
 	return nil
+}
+
+// loadRouteOpts attempts to load a route file for the given scenario.
+// Returns scenario options that include the route if found, or empty
+// options if no route is available (the scenario will fall back to
+// random-walk positioning).
+func loadRouteOpts(scenarioName, routePath string, logger *slog.Logger) []simulator.ScenarioOption {
+	// Only highway-drive and city-drive support routes.
+	if scenarioName != "highway-drive" && scenarioName != "city-drive" {
+		return nil
+	}
+
+	rf, err := simulator.LoadRouteForScenario(scenarioName, routePath)
+	if err != nil {
+		logger.Warn("route file not found, using random-walk positioning",
+			slog.String("scenario", scenarioName),
+			slog.Any("error", err),
+		)
+		return nil
+	}
+
+	logger.Info("loaded route file",
+		slog.String("route", rf.Name),
+		slog.Float64("distance_miles", rf.TotalDistanceMiles),
+		slog.Int("waypoints", len(rf.Coordinates)),
+	)
+
+	return []simulator.ScenarioOption{
+		simulator.WithRouteFile(rf),
+		simulator.WithLogger(logger),
+	}
 }
 
 func buildTLSConfig(certPath, keyPath, caPath string) (*tls.Config, error) {

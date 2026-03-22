@@ -52,6 +52,20 @@ func buildData(state ScenarioState) []*tpb.Datum {
 		data = append(data, stringDatum(tpb.Field_MinutesToArrival, state.ETA))
 	}
 
+	// Navigation fields — emitted when a route is active.
+	if state.TripDistanceRemain > 0 {
+		data = append(data, stringDatum(tpb.Field_MilesToArrival, state.TripDistanceRemain))
+	}
+	if state.RouteLine != "" {
+		data = append(data, textDatum(tpb.Field_RouteLine, state.RouteLine))
+	}
+	if state.DestinationName != "" {
+		data = append(data, textDatum(tpb.Field_DestinationName, state.DestinationName))
+	}
+	if state.DestinationLat != 0 || state.DestinationLng != 0 {
+		data = append(data, destLocationDatum(state.DestinationLat, state.DestinationLng))
+	}
+
 	return data
 }
 
@@ -72,6 +86,35 @@ func stringDatum(field tpb.Field, val float64) *tpb.Datum {
 func locationDatum(lat, lng float64) *tpb.Datum {
 	return &tpb.Datum{
 		Key: tpb.Field_Location,
+		Value: &tpb.Value{
+			Value: &tpb.Value_LocationValue{
+				LocationValue: &tpb.LocationValue{
+					Latitude:  lat,
+					Longitude: lng,
+				},
+			},
+		},
+	}
+}
+
+// textDatum creates a Datum with a raw string value (non-numeric).
+// Used for fields like RouteLine and DestinationName.
+func textDatum(field tpb.Field, val string) *tpb.Datum {
+	return &tpb.Datum{
+		Key: field,
+		Value: &tpb.Value{
+			Value: &tpb.Value_StringValue{
+				StringValue: val,
+			},
+		},
+	}
+}
+
+// destLocationDatum creates a Datum with a LocationValue for the
+// DestinationLocation field.
+func destLocationDatum(lat, lng float64) *tpb.Datum {
+	return &tpb.Datum{
+		Key: tpb.Field_DestinationLocation,
 		Value: &tpb.Value{
 			Value: &tpb.Value_LocationValue{
 				LocationValue: &tpb.LocationValue{
