@@ -23,13 +23,13 @@ func TestCityDrive_WithRoute_FollowsRoad(t *testing.T) {
 
 	// Verify nav fields are populated.
 	first := s.Next()
-	if first.DestinationName != "End" {
-		t.Errorf("DestinationName = %q, want %q", first.DestinationName, "End")
+	if first.Nav.DestinationName != "End" {
+		t.Errorf("DestinationName = %q, want %q", first.Nav.DestinationName, "End")
 	}
-	if first.TripDistanceMiles != 5.0 {
-		t.Errorf("TripDistanceMiles = %f, want 5.0", first.TripDistanceMiles)
+	if first.Nav.TripDistanceMiles != 5.0 {
+		t.Errorf("TripDistanceMiles = %f, want 5.0", first.Nav.TripDistanceMiles)
 	}
-	if first.RouteLine == "" {
+	if first.Nav.RouteLine == "" {
 		t.Error("RouteLine should not be empty with route file")
 	}
 }
@@ -38,11 +38,11 @@ func TestCityDrive_WithoutRoute_RandomWalk(t *testing.T) {
 	s := newCityDrive(scenarioConfig{})
 
 	first := s.Next()
-	if first.RouteLine != "" {
+	if first.Nav.RouteLine != "" {
 		t.Error("RouteLine should be empty without route file")
 	}
-	if first.DestinationName != "" {
-		t.Errorf("DestinationName = %q, want empty", first.DestinationName)
+	if first.Nav.DestinationName != "" {
+		t.Errorf("DestinationName = %q, want empty", first.Nav.DestinationName)
 	}
 }
 

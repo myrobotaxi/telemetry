@@ -169,11 +169,11 @@ func TestBuildPayload_NavFields(t *testing.T) {
 	state.GearPosition = "D"
 	state.Speed = 65
 	state.ETA = 15.0
-	state.TripDistanceRemain = 20.5
-	state.RouteLine = "_p~iF~ps|U"
-	state.DestinationName = "McKinney Town Center"
-	state.DestinationLat = 33.1972
-	state.DestinationLng = -96.6153
+	state.Nav.TripDistanceRemain = 20.5
+	state.Nav.RouteLine = "_p~iF~ps|U"
+	state.Nav.DestinationName = "McKinney Town Center"
+	state.Nav.DestinationLat = 33.1972
+	state.Nav.DestinationLng = -96.6153
 
 	payload := BuildPayload("5YJ3SIM00001", state)
 

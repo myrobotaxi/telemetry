@@ -36,12 +36,12 @@ func newCityDrive(cfg scenarioConfig) *cityDrive {
 	}
 	if cfg.routeFile != nil {
 		c.follower = NewRouteFollower(cfg.routeFile)
-		c.state.TripDistanceMiles = cfg.routeFile.TotalDistanceMiles
-		c.state.TripDistanceRemain = cfg.routeFile.TotalDistanceMiles
-		c.state.RouteLine = EncodePolyline(cfg.routeFile.Coordinates)
-		c.state.DestinationName = cfg.routeFile.Destination.Name
-		c.state.DestinationLat = cfg.routeFile.Destination.Lat
-		c.state.DestinationLng = cfg.routeFile.Destination.Lng
+		c.state.Nav.TripDistanceMiles = cfg.routeFile.TotalDistanceMiles
+		c.state.Nav.TripDistanceRemain = cfg.routeFile.TotalDistanceMiles
+		c.state.Nav.RouteLine = EncodePolyline(cfg.routeFile.Coordinates)
+		c.state.Nav.DestinationName = cfg.routeFile.Destination.Name
+		c.state.Nav.DestinationLat = cfg.routeFile.Destination.Lat
+		c.state.Nav.DestinationLng = cfg.routeFile.Destination.Lng
 	}
 	return c
 }
@@ -103,7 +103,7 @@ func (c *cityDrive) updateCityPositionFromRoute() {
 	c.state.Latitude = pos.Lat
 	c.state.Longitude = pos.Lng
 	c.state.Heading = pos.Heading
-	c.state.TripDistanceRemain = pos.DistanceRemain
+	c.state.Nav.TripDistanceRemain = pos.DistanceRemain
 	if c.state.Speed > 0 {
 		c.state.OdometerMiles += c.state.Speed / 3600.0
 	}

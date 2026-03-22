@@ -94,12 +94,12 @@ func newHighwayDrive(cfg scenarioConfig) *highwayDrive {
 	}
 	if cfg.routeFile != nil {
 		h.follower = NewRouteFollower(cfg.routeFile)
-		h.state.TripDistanceMiles = cfg.routeFile.TotalDistanceMiles
-		h.state.TripDistanceRemain = cfg.routeFile.TotalDistanceMiles
-		h.state.RouteLine = EncodePolyline(cfg.routeFile.Coordinates)
-		h.state.DestinationName = cfg.routeFile.Destination.Name
-		h.state.DestinationLat = cfg.routeFile.Destination.Lat
-		h.state.DestinationLng = cfg.routeFile.Destination.Lng
+		h.state.Nav.TripDistanceMiles = cfg.routeFile.TotalDistanceMiles
+		h.state.Nav.TripDistanceRemain = cfg.routeFile.TotalDistanceMiles
+		h.state.Nav.RouteLine = EncodePolyline(cfg.routeFile.Coordinates)
+		h.state.Nav.DestinationName = cfg.routeFile.Destination.Name
+		h.state.Nav.DestinationLat = cfg.routeFile.Destination.Lat
+		h.state.Nav.DestinationLng = cfg.routeFile.Destination.Lng
 	}
 	return h
 }
@@ -160,7 +160,7 @@ func (h *highwayDrive) updatePositionFromRoute() {
 	h.state.Latitude = pos.Lat
 	h.state.Longitude = pos.Lng
 	h.state.Heading = pos.Heading
-	h.state.TripDistanceRemain = pos.DistanceRemain
+	h.state.Nav.TripDistanceRemain = pos.DistanceRemain
 	if h.state.Speed > 0 {
 		h.state.OdometerMiles += h.state.Speed / 3600.0
 	}

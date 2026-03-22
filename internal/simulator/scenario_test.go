@@ -260,16 +260,16 @@ func TestHighwayDrive_WithRoute_SetsNavFields(t *testing.T) {
 	s := newHighwayDrive(scenarioConfig{routeFile: rf})
 
 	first := s.Next()
-	if first.TripDistanceMiles != 34.5 {
-		t.Errorf("TripDistanceMiles = %f, want 34.5", first.TripDistanceMiles)
+	if first.Nav.TripDistanceMiles != 34.5 {
+		t.Errorf("TripDistanceMiles = %f, want 34.5", first.Nav.TripDistanceMiles)
 	}
-	if first.DestinationName != "Dest" {
-		t.Errorf("DestinationName = %q, want %q", first.DestinationName, "Dest")
+	if first.Nav.DestinationName != "Dest" {
+		t.Errorf("DestinationName = %q, want %q", first.Nav.DestinationName, "Dest")
 	}
-	if first.DestinationLat != 33.1972 {
-		t.Errorf("DestinationLat = %f, want 33.1972", first.DestinationLat)
+	if first.Nav.DestinationLat != 33.1972 {
+		t.Errorf("DestinationLat = %f, want 33.1972", first.Nav.DestinationLat)
 	}
-	if first.RouteLine == "" {
+	if first.Nav.RouteLine == "" {
 		t.Error("RouteLine should not be empty")
 	}
 }
@@ -307,11 +307,11 @@ func TestHighwayDrive_WithoutRoute_RandomWalk(t *testing.T) {
 	s := newHighwayDrive(scenarioConfig{})
 
 	first := s.Next()
-	if first.RouteLine != "" {
+	if first.Nav.RouteLine != "" {
 		t.Error("RouteLine should be empty without route file")
 	}
-	if first.TripDistanceMiles != 0 {
-		t.Errorf("TripDistanceMiles = %f, want 0", first.TripDistanceMiles)
+	if first.Nav.TripDistanceMiles != 0 {
+		t.Errorf("TripDistanceMiles = %f, want 0", first.Nav.TripDistanceMiles)
 	}
 }
 

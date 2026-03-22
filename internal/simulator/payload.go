@@ -53,17 +53,17 @@ func buildData(state ScenarioState) []*tpb.Datum {
 	}
 
 	// Navigation fields — emitted when a route is active.
-	if state.TripDistanceRemain > 0 {
-		data = append(data, stringDatum(tpb.Field_MilesToArrival, state.TripDistanceRemain))
+	if state.Nav.TripDistanceRemain > 0 {
+		data = append(data, stringDatum(tpb.Field_MilesToArrival, state.Nav.TripDistanceRemain))
 	}
-	if state.RouteLine != "" {
-		data = append(data, textDatum(tpb.Field_RouteLine, state.RouteLine))
+	if state.Nav.RouteLine != "" {
+		data = append(data, textDatum(tpb.Field_RouteLine, state.Nav.RouteLine))
 	}
-	if state.DestinationName != "" {
-		data = append(data, textDatum(tpb.Field_DestinationName, state.DestinationName))
+	if state.Nav.DestinationName != "" {
+		data = append(data, textDatum(tpb.Field_DestinationName, state.Nav.DestinationName))
 	}
-	if state.DestinationLat != 0 || state.DestinationLng != 0 {
-		data = append(data, destLocationDatum(state.DestinationLat, state.DestinationLng))
+	if state.Nav.DestinationLat != 0 || state.Nav.DestinationLng != 0 {
+		data = append(data, destLocationDatum(state.Nav.DestinationLat, state.Nav.DestinationLng))
 	}
 
 	return data
