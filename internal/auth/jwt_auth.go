@@ -30,17 +30,32 @@ const queryUserVehicleIDs = `SELECT "id" FROM "Vehicle" WHERE "userId" = $1`
 // user's vehicle IDs from the database. It caches vehicle lookups to
 // avoid hitting the DB on every WebSocket reconnect.
 type JWTAuthenticator struct {
-	secret []byte
-	cache  *vehicleCache
+	secret   []byte
+	issuer   string
+	audience string
+	cache    *vehicleCache
+}
+
+// Compile-time interface check.
+var _ wsAuthenticator = (*JWTAuthenticator)(nil)
+
+// wsAuthenticator mirrors the ws.Authenticator interface to avoid an
+// import cycle. The types are structurally identical.
+type wsAuthenticator interface {
+	ValidateToken(ctx context.Context, token string) (string, error)
+	GetUserVehicles(ctx context.Context, userID string) ([]string, error)
 }
 
 // NewJWTAuthenticator creates an authenticator that verifies HS256 JWTs
 // using the given secret and queries the pool for vehicle ownership.
-func NewJWTAuthenticator(secret string, pool *pgxpool.Pool) *JWTAuthenticator {
+// Issuer and audience are validated if non-empty.
+func NewJWTAuthenticator(secret, issuer, audience string, pool *pgxpool.Pool) *JWTAuthenticator {
 	querier := &pgVehicleQuerier{pool: pool}
 	return &JWTAuthenticator{
-		secret: []byte(secret),
-		cache:  newVehicleCache(querier, vehicleCacheTTL),
+		secret:   []byte(secret),
+		issuer:   issuer,
+		audience: audience,
+		cache:    newVehicleCache(querier, vehicleCacheTTL),
 	}
 }
 
@@ -51,12 +66,20 @@ func (a *JWTAuthenticator) ValidateToken(_ context.Context, token string) (strin
 		return "", fmt.Errorf("auth.ValidateToken: %w", ErrInvalidToken)
 	}
 
+	opts := []jwt.ParserOption{jwt.WithValidMethods([]string{"HS256"})}
+	if a.issuer != "" {
+		opts = append(opts, jwt.WithIssuer(a.issuer))
+	}
+	if a.audience != "" {
+		opts = append(opts, jwt.WithAudience(a.audience))
+	}
+
 	parsed, err := jwt.Parse(token, func(t *jwt.Token) (any, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 		}
 		return a.secret, nil
-	}, jwt.WithValidMethods([]string{"HS256"}))
+	}, opts...)
 
 	if err != nil {
 		return "", fmt.Errorf("auth.ValidateToken: %w: %w", ErrInvalidToken, err)

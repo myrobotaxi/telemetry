@@ -153,7 +153,12 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 		logger.Warn("dev mode enabled: WebSocket auth disabled, accepting any token")
 		authenticator = &ws.NoopAuthenticator{}
 	} else {
-		authenticator = auth.NewJWTAuthenticator(cfg.Auth().Secret, db.Pool())
+		authenticator = auth.NewJWTAuthenticator(
+			cfg.Auth().Secret,
+			cfg.Auth().TokenIssuer,
+			cfg.Auth().TokenAudience,
+			db.Pool(),
+		)
 		logger.Info("JWT authentication enabled for WebSocket clients")
 	}
 
