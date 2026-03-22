@@ -9,14 +9,15 @@ import "time"
 // Config holds the fully-validated, immutable application configuration.
 // All access is through getter methods — there are no exported setters.
 type Config struct {
-	server      ServerConfig
-	tls         TLSConfig
-	database    DatabaseConfig
-	telemetry   TelemetryConfig
-	drives      DrivesConfig
-	websocket   WebSocketConfig
-	auth        AuthConfig
-	mapboxToken string
+	server         ServerConfig
+	tls            TLSConfig
+	database       DatabaseConfig
+	telemetry      TelemetryConfig
+	drives         DrivesConfig
+	websocket      WebSocketConfig
+	auth           AuthConfig
+	mapboxToken    string
+	teslaPublicKey string
 }
 
 // ServerConfig holds port bindings for the three HTTP listeners.
@@ -98,6 +99,10 @@ func (c *Config) Auth() AuthConfig { return c.auth }
 // MapboxToken returns the Mapbox API token. Empty string means geocoding
 // is disabled.
 func (c *Config) MapboxToken() string { return c.mapboxToken }
+
+// TeslaPublicKey returns the PEM-encoded public key for the Tesla
+// .well-known endpoint. Empty string disables the endpoint.
+func (c *Config) TeslaPublicKey() string { return c.teslaPublicKey }
 
 // Load reads configuration from the JSON file at configPath, overlays
 // environment variable overrides, applies defaults for missing optional

@@ -18,9 +18,10 @@ type fileConfig struct {
 	Auth      fileAuthConfig      `json:"auth"`
 
 	// Populated from environment, not JSON.
-	databaseURL string
-	authSecret  string
-	mapboxToken string
+	databaseURL    string
+	authSecret     string
+	mapboxToken    string
+	teslaPublicKey string
 }
 
 type fileServerConfig struct {
@@ -107,7 +108,8 @@ func applyEnvOverrides(fc *fileConfig) error {
 		missing = append(missing, "AUTH_SECRET")
 	}
 
-	fc.mapboxToken = os.Getenv("MAPBOX_TOKEN") // optional
+	fc.mapboxToken = os.Getenv("MAPBOX_TOKEN")         // optional
+	fc.teslaPublicKey = os.Getenv("TESLA_PUBLIC_KEY") // optional
 
 	// TLS env vars override JSON values.
 	if v := os.Getenv("TLS_CERT_FILE"); v != "" {
@@ -168,6 +170,7 @@ func buildConfig(fc *fileConfig) *Config {
 			TokenIssuer:   fc.Auth.TokenIssuer,
 			TokenAudience: fc.Auth.TokenAudience,
 		},
-		mapboxToken: fc.mapboxToken,
+		mapboxToken:    fc.mapboxToken,
+		teslaPublicKey: fc.teslaPublicKey,
 	}
 }
