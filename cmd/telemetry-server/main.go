@@ -18,6 +18,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
+	"github.com/tnando/my-robo-taxi-telemetry/internal/auth"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/config"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/drives"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
@@ -46,6 +47,7 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	var (
 		configPath = flag.String("config", "", "path to JSON configuration file")
 		logLevel   = flag.String("log-level", "info", "log level: debug, info, warn, error")
+		devMode    = flag.Bool("dev", false, "dev mode: skip JWT auth, accept any token")
 	)
 	flag.Parse()
 
@@ -145,12 +147,31 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 
 	go hub.RunHeartbeat(ctx, cfg.WebSocket().HeartbeatInterval)
 
+	// --- Client authenticator ---
+	var authenticator ws.Authenticator
+	if *devMode {
+		logger.Warn("dev mode enabled: WebSocket auth disabled, accepting any token")
+		authenticator = &ws.NoopAuthenticator{}
+	} else {
+		authenticator = auth.NewJWTAuthenticator(
+			cfg.Auth().Secret,
+			cfg.Auth().TokenIssuer,
+			cfg.Auth().TokenAudience,
+			db.Pool(),
+		)
+		logger.Info("JWT authentication enabled for WebSocket clients")
+	}
+
 	// --- HTTP servers ---
 	srv := server.New(cfg.Server(), logger, db, reg)
 	srv.SetTeslaHandler(recv.Handler())
-	srv.SetClientHandler(hub.Handler(&ws.NoopAuthenticator{}, ws.HandlerConfig{
+	originPatterns := cfg.WebSocket().AllowedOrigins
+	if len(originPatterns) == 0 {
+		originPatterns = []string{"*"} // default: allow all (restrict in production config)
+	}
+	srv.SetClientHandler(hub.Handler(authenticator, ws.HandlerConfig{
 		WriteTimeout:   cfg.WebSocket().WriteTimeout,
-		OriginPatterns: []string{"*"}, // TODO: restrict to frontend origin in production
+		OriginPatterns: originPatterns,
 	}))
 
 	// Configure mTLS on Tesla port if TLS cert files are available.

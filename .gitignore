@@ -45,5 +45,7 @@ docker-compose.override.yml
 /dist/
 /bin/
 
-# Agent memory (local, not checked in)
+# Agent memory and worktrees (development artifacts, not checked in)
 .claude/agent-memory-local/
+.claude/agent-memory/
+.claude/worktrees/
