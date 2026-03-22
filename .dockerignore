@@ -13,10 +13,9 @@ certs/
 *.md
 docs/
 
-# Test infrastructure — not needed in runtime image.
-# Note: *_test.go files are kept in the build context so
-# docker-compose.test.yml can run tests from the builder stage.
-tests/
+# Load tests — not needed in the Docker image.
+# Note: tests/integration/ is kept so docker-compose.test.yml can run them.
+tests/load/
 
 # Local development artifacts
 bin/

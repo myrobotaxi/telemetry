@@ -14,15 +14,11 @@ services:
       - ./certs:/certs:ro
       # Operational config override (secrets still come from env vars).
       - ./configs:/etc/telemetry:ro
-    environment:
-      # Supabase connection string — required at runtime.
-      DATABASE_URL: ${DATABASE_URL}
-      # JWT signing secret for browser client auth.
-      AUTH_SECRET: ${AUTH_SECRET}
-      # Use JSON structured logging in the containerised environment.
-      LOG_FORMAT: json
     env_file:
       - .env
+    environment:
+      # Override: JSON structured logging in the containerised environment.
+      LOG_FORMAT: json
     depends_on:
       postgres:
         condition: service_healthy
