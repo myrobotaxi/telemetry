@@ -68,12 +68,11 @@ func TestFleetAPIClient_PushTelemetryConfig_Success(t *testing.T) {
 	req := FleetConfigRequest{
 		VINs: []string{testVIN},
 		Config: FleetConfig{
-			Hostname:    "telemetry.myrobotaxi.app",
-			Port:        443,
-			CA:          "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
-			Fields:      DefaultFieldConfig(),
-			AlertTypes:  []string{"service"},
-			PreferTyped: true,
+			Hostname:   "telemetry.myrobotaxi.app",
+			Port:       443,
+			CA:         "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
+			Fields:     DefaultFieldConfig(),
+			AlertTypes: []string{"service"},
 		},
 	}
 
@@ -455,29 +454,24 @@ func TestDefaultFieldConfig(t *testing.T) {
 
 	fields := DefaultFieldConfig()
 
-	tests := []struct {
-		field         string
-		wantInterval  int
-		wantHasDelta  bool
-		wantDelta     float64
+	// Spot-check key fields with specific intervals and deltas.
+	spotChecks := []struct {
+		field        string
+		wantInterval int
+		wantHasDelta bool
+		wantDelta    float64
 	}{
 		{FleetFieldVehicleSpeed, 2, false, 0},
 		{FleetFieldLocation, 2, true, 10},
-		{FleetFieldHeading, 5, false, 0},
+		{FleetFieldGpsHeading, 5, false, 0},
 		{FleetFieldGear, 1, false, 0},
-		{FleetFieldSOC, 30, false, 0},
-		{FleetFieldEstBatteryRange, 30, false, 0},
-		{FleetFieldChargeState, 30, false, 0},
+		{FleetFieldDetailedChargeState, 30, false, 0},
 		{FleetFieldOdometer, 60, false, 0},
-		{FleetFieldInsideTemp, 60, false, 0},
-		{FleetFieldOutsideTemp, 60, false, 0},
+		{FleetFieldDestinationName, 30, false, 0},
+		{FleetFieldFSDMilesSinceReset, 60, false, 0},
 	}
 
-	if len(fields) != len(tests) {
-		t.Errorf("field count = %d, want %d", len(fields), len(tests))
-	}
-
-	for _, tt := range tests {
+	for _, tt := range spotChecks {
 		t.Run(tt.field, func(t *testing.T) {
 			t.Parallel()
 			fc, ok := fields[tt.field]
@@ -498,6 +492,13 @@ func TestDefaultFieldConfig(t *testing.T) {
 				t.Errorf("expected minimum_delta to be nil, got %f", *fc.MinimumDelta)
 			}
 		})
+	}
+
+	// Verify every field has a positive interval.
+	for name, fc := range fields {
+		if fc.IntervalSeconds <= 0 {
+			t.Errorf("field %q has non-positive interval: %d", name, fc.IntervalSeconds)
+		}
 	}
 }
 

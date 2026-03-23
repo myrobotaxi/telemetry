@@ -126,11 +126,11 @@ func (h *FleetConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	req := FleetConfigRequest{
 		VINs: []string{vin},
 		Config: FleetConfig{
-			Hostname:    h.endpoint.Hostname,
-			Port:        h.endpoint.Port,
-			CA:          h.endpoint.CA,
-			Fields:      DefaultFieldConfig(),
-			PreferTyped: true,
+			Hostname:   h.endpoint.Hostname,
+			Port:       h.endpoint.Port,
+			CA:         h.endpoint.CA,
+			Fields:     DefaultFieldConfig(),
+			AlertTypes: []string{"service"},
 		},
 	}
 
