@@ -32,6 +32,9 @@ func TestFleetAPIClient_PushTelemetryConfig_Success(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Errorf("method = %s, want POST", r.Method)
 		}
+		if r.URL.Path != "/api/1/vehicles/fleet_telemetry_config" {
+			t.Errorf("path = %q, want /api/1/vehicles/fleet_telemetry_config", r.URL.Path)
+		}
 		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
 			t.Errorf("auth header = %q, want %q", got, "Bearer test-token")
 		}
