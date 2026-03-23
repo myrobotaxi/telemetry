@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/tnando/my-robo-taxi-telemetry/pkg/sdk"
 )
 
 // vinLength is the standard length of a Vehicle Identification Number.
@@ -20,10 +22,18 @@ type tokenValidator interface {
 }
 
 // VehicleOwnerLookup resolves a VIN to its owning user ID. Implementations
-// should return an error wrapping store.ErrVehicleNotFound when the VIN is
-// not registered.
+// should return an error wrapping sdk.ErrNotFound when the VIN is not
+// registered.
 type VehicleOwnerLookup interface {
 	GetVehicleOwner(ctx context.Context, vin string) (userID string, err error)
+}
+
+// EndpointConfig describes the telemetry server that vehicles
+// should connect to after fleet config is pushed.
+type EndpointConfig struct {
+	Hostname string
+	Port     int
+	CA       string // PEM-encoded CA cert
 }
 
 // FleetConfigHandler handles POST /api/fleet-config/{vin} requests. It
@@ -33,31 +43,25 @@ type FleetConfigHandler struct {
 	auth     tokenValidator
 	vehicles VehicleOwnerLookup
 	fleet    *FleetAPIClient
-	hostname string
-	port     int
-	ca       string
+	endpoint EndpointConfig
 	logger   *slog.Logger
 }
 
 // NewFleetConfigHandler creates a handler that pushes fleet telemetry config
-// for a single vehicle. The hostname, port, and ca describe the telemetry
-// server that the vehicle should connect to after configuration.
+// for a single vehicle. The endpoint describes the telemetry server that the
+// vehicle should connect to after configuration.
 func NewFleetConfigHandler(
 	auth tokenValidator,
 	vehicles VehicleOwnerLookup,
 	fleet *FleetAPIClient,
-	hostname string,
-	port int,
-	ca string,
+	endpoint EndpointConfig,
 	logger *slog.Logger,
 ) *FleetConfigHandler {
 	return &FleetConfigHandler{
 		auth:     auth,
 		vehicles: vehicles,
 		fleet:    fleet,
-		hostname: hostname,
-		port:     port,
-		ca:       ca,
+		endpoint: endpoint,
 		logger:   logger,
 	}
 }
@@ -106,9 +110,9 @@ func (h *FleetConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	req := FleetConfigRequest{
 		VINs: []string{vin},
 		Config: FleetConfig{
-			Hostname:    h.hostname,
-			Port:        h.port,
-			CA:          h.ca,
+			Hostname:    h.endpoint.Hostname,
+			Port:        h.endpoint.Port,
+			CA:          h.endpoint.CA,
 			Fields:      DefaultFieldConfig(),
 			PreferTyped: true,
 		},
@@ -139,10 +143,7 @@ func (h *FleetConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // handleVehicleLookupError maps vehicle lookup errors to HTTP responses.
 func (h *FleetConfigHandler) handleVehicleLookupError(w http.ResponseWriter, vin string, err error) {
-	// Check for a "not found" error by inspecting the error chain.
-	// We use string matching on the unwrapped sentinel rather than importing
-	// store (which would create a dependency from telemetry → store).
-	if isNotFoundError(err) {
+	if errors.Is(err, sdk.ErrNotFound) {
 		h.writeError(w, http.StatusNotFound, "vehicle not found")
 		return
 	}
@@ -182,7 +183,9 @@ func (h *FleetConfigHandler) handleFleetAPIError(w http.ResponseWriter, vin stri
 func (h *FleetConfigHandler) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		h.logger.Error("writeJSON: encode failed", slog.String("error", err.Error()))
+	}
 }
 
 // writeError writes a JSON error response.
@@ -202,18 +205,6 @@ func extractBearerToken(r *http.Request) string {
 		return ""
 	}
 	return auth[len(prefix):]
-}
-
-// isNotFoundError checks whether err (or any wrapped error) has an Error()
-// string containing "not found". This avoids a direct import of the store
-// package from the telemetry package.
-func isNotFoundError(err error) bool {
-	for e := err; e != nil; e = errors.Unwrap(e) {
-		if e.Error() == "vehicle not found" {
-			return true
-		}
-	}
-	return false
 }
 
 // fleetConfigResponse is the JSON body returned on a successful config push.

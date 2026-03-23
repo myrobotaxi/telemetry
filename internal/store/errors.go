@@ -1,13 +1,20 @@
 package store
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+
+	"github.com/tnando/my-robo-taxi-telemetry/pkg/sdk"
+)
 
 var (
 	// ErrVehicleNotFound is returned when a vehicle lookup finds no matching row.
-	ErrVehicleNotFound = errors.New("vehicle not found")
+	// Wraps sdk.ErrNotFound so callers can use errors.Is(err, sdk.ErrNotFound).
+	ErrVehicleNotFound = fmt.Errorf("vehicle %w", sdk.ErrNotFound)
 
 	// ErrDriveNotFound is returned when a drive lookup finds no matching row.
-	ErrDriveNotFound = errors.New("drive not found")
+	// Wraps sdk.ErrNotFound so callers can use errors.Is(err, sdk.ErrNotFound).
+	ErrDriveNotFound = fmt.Errorf("drive %w", sdk.ErrNotFound)
 
 	// ErrDatabaseClosed is returned when an operation is attempted on a
 	// closed database connection pool.

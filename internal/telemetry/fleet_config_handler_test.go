@@ -9,7 +9,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/tnando/my-robo-taxi-telemetry/pkg/sdk"
 )
 
 // --- Test doubles ---
@@ -139,7 +142,7 @@ func TestFleetConfigHandler_ServeHTTP(t *testing.T) {
 			vin:            validVIN,
 			authHeader:     "Bearer " + authToken,
 			tokenValidator: &stubTokenValidator{userID: userID},
-			vehicleOwner:   &stubVehicleOwner{err: fmt.Errorf("VehicleRepo.GetByVIN: %w", errors.New("vehicle not found"))},
+			vehicleOwner:   &stubVehicleOwner{err: fmt.Errorf("VehicleRepo.GetByVIN: %w", sdk.ErrNotFound)},
 			fleetStatus:    http.StatusOK,
 			fleetBody:      successBody,
 			wantStatus:     http.StatusNotFound,
@@ -206,7 +209,7 @@ func TestFleetConfigHandler_ServeHTTP(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Start a stub Fleet API server for each test case.
 			fleetSrv := stubFleetServer(t, tt.fleetStatus, tt.fleetBody)
-			defer fleetSrv.Close()
+			t.Cleanup(fleetSrv.Close)
 
 			fleetClient := newTestFleetClient(fleetSrv.URL)
 
@@ -214,9 +217,11 @@ func TestFleetConfigHandler_ServeHTTP(t *testing.T) {
 				tt.tokenValidator,
 				tt.vehicleOwner,
 				fleetClient,
-				"telemetry.example.com",
-				443,
-				"-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----",
+				EndpointConfig{
+					Hostname: "telemetry.example.com",
+					Port:     443,
+					CA:       "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----",
+				},
 				discardLogger(),
 			)
 
@@ -249,7 +254,7 @@ func TestFleetConfigHandler_ServeHTTP(t *testing.T) {
 				if errResp.Error == "" {
 					t.Error("expected error field in response, got empty")
 				}
-				if !containsSubstring(errResp.Error, tt.wantError) {
+				if !strings.Contains(errResp.Error, tt.wantError) {
 					t.Errorf("error message: got %q, want substring %q", errResp.Error, tt.wantError)
 				}
 			} else {
@@ -296,38 +301,6 @@ func TestExtractBearerToken(t *testing.T) {
 	}
 }
 
-func TestIsNotFoundError(t *testing.T) {
-	tests := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{
-			name: "direct not found",
-			err:  errors.New("vehicle not found"),
-			want: true,
-		},
-		{
-			name: "wrapped not found",
-			err:  fmt.Errorf("VehicleRepo.GetByVIN: %w", errors.New("vehicle not found")),
-			want: true,
-		},
-		{
-			name: "other error",
-			err:  errors.New("connection refused"),
-			want: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := isNotFoundError(tt.err); got != tt.want {
-				t.Errorf("isNotFoundError(%v) = %v, want %v", tt.err, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestFleetConfigHandler_FleetAPIUnreachable(t *testing.T) {
 	// Fleet API client pointed at a non-existent server.
 	fleetClient := newTestFleetClient("http://127.0.0.1:1")
@@ -336,9 +309,11 @@ func TestFleetConfigHandler_FleetAPIUnreachable(t *testing.T) {
 		&stubTokenValidator{userID: "user-123"},
 		&stubVehicleOwner{ownerID: "user-123"},
 		fleetClient,
-		"telemetry.example.com",
-		443,
-		"ca-cert",
+		EndpointConfig{
+			Hostname: "telemetry.example.com",
+			Port:     443,
+			CA:       "ca-cert",
+		},
 		discardLogger(),
 	)
 
@@ -362,18 +337,4 @@ func TestFleetConfigHandler_FleetAPIUnreachable(t *testing.T) {
 	if errResp.Error == "" {
 		t.Error("expected error field in response")
 	}
-}
-
-// containsSubstring reports whether s contains substr.
-func containsSubstring(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && contains(s, substr))
-}
-
-func contains(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

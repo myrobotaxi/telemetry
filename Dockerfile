@@ -6,7 +6,10 @@ FROM golang:1.23-alpine AS proxy-builder
 
 RUN apk add --no-cache git
 WORKDIR /build
-RUN git clone --depth 1 https://github.com/teslamotors/vehicle-command.git .
+# Pin to a specific tag for reproducible builds.
+# Update this when upgrading the proxy.
+ARG VEHICLE_COMMAND_VERSION=v0.4.1
+RUN git clone --depth 1 --branch ${VEHICLE_COMMAND_VERSION} https://github.com/teslamotors/vehicle-command.git .
 RUN CGO_ENABLED=0 GOOS=linux go build -o /tesla-http-proxy ./cmd/tesla-http-proxy
 
 # Stage 1b: Build telemetry-server
