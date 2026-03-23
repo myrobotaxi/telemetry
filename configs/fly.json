@@ -1,14 +1,14 @@
 {
-  "_comment": "Railway deployment config. Differs from default.json: empty TLS paths (Railway handles TLS) and smaller pool sizes. Keep in sync with default.json for non-TLS fields.",
+  "_comment": "Fly.io deployment config. TLS paths match start.sh decode locations (/tmp/certs/). These are also overridden at runtime by env vars TLS_CERT_FILE, TLS_KEY_FILE, TLS_CA_FILE that start.sh exports after decoding base64 secrets.",
   "server": {
     "tesla_port": 443,
     "client_port": 8080,
     "metrics_port": 9090
   },
   "tls": {
-    "cert_file": "",
-    "key_file": "",
-    "ca_file": ""
+    "cert_file": "/tmp/certs/server.crt",
+    "key_file": "/tmp/certs/server.key",
+    "ca_file": "/tmp/certs/tesla-ca.pem"
   },
   "database": {
     "max_conns": 10,
