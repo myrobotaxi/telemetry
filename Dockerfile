@@ -2,7 +2,7 @@
 # Separate stage avoids polluting the telemetry server's go.mod.
 # Clone + build because vehicle-command's go.mod has replace directives,
 # which prevents `go install ...@latest` from working.
-FROM golang:1.23-alpine AS proxy-builder
+FROM golang:1.26-alpine AS proxy-builder
 
 RUN apk add --no-cache git
 WORKDIR /build
@@ -13,7 +13,7 @@ RUN git clone --depth 1 --branch ${VEHICLE_COMMAND_VERSION} https://github.com/t
 RUN CGO_ENABLED=0 GOOS=linux go build -o /tesla-http-proxy ./cmd/tesla-http-proxy
 
 # Stage 1b: Build telemetry-server
-FROM golang:1.23-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 # Allow Go to download the toolchain version declared in go.mod.
 ENV GOTOOLCHAIN=auto
