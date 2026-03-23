@@ -73,5 +73,8 @@ USER appuser
 # 9090 — Prometheus /metrics
 EXPOSE 443 8080 4443 9090
 
-ENTRYPOINT ["telemetry-server"]
+# start.sh conditionally launches tesla-http-proxy (when TESLA_KEY_FILE is set)
+# then execs the telemetry server. Safe as default — gracefully skips the proxy
+# when the key file is absent.
+ENTRYPOINT ["start.sh"]
 CMD ["-config", "/etc/telemetry/config.json"]
