@@ -1,7 +1,7 @@
 # Fly.io deployment configuration for the telemetry server.
 #
 # Two public services:
-#   - Tesla mTLS (port 443): TCP passthrough — Fly does NOT terminate TLS,
+#   - Tesla mTLS (port 8443): TCP passthrough — Fly does NOT terminate TLS,
 #     the app handles the mTLS handshake directly so it can read client certs.
 #   - Client WebSocket (port 8080): HTTP service with TLS at the edge.
 #
