@@ -22,6 +22,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      tesla-http-proxy:
+        condition: service_healthy
     restart: on-failure
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
@@ -47,6 +49,35 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+  # Tesla HTTP proxy — signs Fleet API requests with the Tesla app private key.
+  # Used by the telemetry server to push fleet_telemetry_config to vehicles.
+  # Internal only (port 4443 is NOT exposed to the host).
+  tesla-http-proxy:
+    build: .
+    command:
+      - "tesla-http-proxy"
+      - "-key-file"
+      - "/certs/tesla-private-key.pem"
+      - "-port"
+      - "4443"
+      - "-host"
+      - "0.0.0.0"
+      - "-cert"
+      - "/certs/server.crt"
+      - "-tls-key"
+      - "/certs/server.key"
+    volumes:
+      - ./certs:/certs:ro
+    env_file:
+      - .env
+    restart: on-failure
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- https://localhost:4443/status || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
   # Prometheus scrapes /metrics on port 9090.
   prometheus:
