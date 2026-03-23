@@ -119,6 +119,7 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	// --- Store repos ---
 	vehicleRepo := store.NewVehicleRepo(db.Pool(), store.NoopMetrics{})
 	driveRepo := store.NewDriveRepo(db.Pool(), store.NoopMetrics{})
+	accountRepo := store.NewAccountRepo(db.Pool())
 
 	// --- Persistence writer ---
 	writer := store.NewWriter(
@@ -186,6 +187,7 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 		fleetHandler := telemetry.NewFleetConfigHandler(
 			authenticator,
 			&vehicleOwnerAdapter{repo: vehicleRepo},
+			&teslaTokenAdapter{repo: accountRepo},
 			fleetClient,
 			telemetry.EndpointConfig{
 				Hostname: cfg.Proxy().FleetTelemetryHostname,

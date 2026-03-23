@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/tnando/my-robo-taxi-telemetry/pkg/sdk"
 )
@@ -28,6 +29,18 @@ type VehicleOwnerLookup interface {
 	GetVehicleOwner(ctx context.Context, vin string) (userID string, err error)
 }
 
+// TeslaTokenProvider retrieves the Tesla OAuth access token for a user.
+// The token is read from the database (stored during Tesla account linking).
+type TeslaTokenProvider interface {
+	GetTeslaToken(ctx context.Context, userID string) (TeslaToken, error)
+}
+
+// TeslaToken holds a Tesla OAuth2 access token with its expiry.
+type TeslaToken struct {
+	AccessToken string
+	ExpiresAt   time.Time // zero value means no expiry info
+}
+
 // EndpointConfig describes the telemetry server that vehicles
 // should connect to after fleet config is pushed.
 type EndpointConfig struct {
@@ -42,6 +55,7 @@ type EndpointConfig struct {
 type FleetConfigHandler struct {
 	auth     tokenValidator
 	vehicles VehicleOwnerLookup
+	tokens   TeslaTokenProvider
 	fleet    *FleetAPIClient
 	endpoint EndpointConfig
 	logger   *slog.Logger
@@ -49,10 +63,12 @@ type FleetConfigHandler struct {
 
 // NewFleetConfigHandler creates a handler that pushes fleet telemetry config
 // for a single vehicle. The endpoint describes the telemetry server that the
-// vehicle should connect to after configuration.
+// vehicle should connect to after configuration. The tokens provider is used
+// to fetch the user's Tesla OAuth token for authenticating with the Fleet API.
 func NewFleetConfigHandler(
 	auth tokenValidator,
 	vehicles VehicleOwnerLookup,
+	tokens TeslaTokenProvider,
 	fleet *FleetAPIClient,
 	endpoint EndpointConfig,
 	logger *slog.Logger,
@@ -60,6 +76,7 @@ func NewFleetConfigHandler(
 	return &FleetConfigHandler{
 		auth:     auth,
 		vehicles: vehicles,
+		tokens:   tokens,
 		fleet:    fleet,
 		endpoint: endpoint,
 		logger:   logger,
@@ -97,18 +114,12 @@ func (h *FleetConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ownerID, err := h.vehicles.GetVehicleOwner(ctx, vin)
-	if err != nil {
-		h.handleVehicleLookupError(w, vin, err)
+	if !h.verifyOwnership(ctx, w, vin, userID) {
 		return
 	}
 
-	if ownerID != userID {
-		h.logger.Warn("fleet config: ownership mismatch",
-			slog.String("vin", redactVIN(vin)),
-			slog.String("user_id", userID),
-		)
-		h.writeError(w, http.StatusForbidden, "you do not own this vehicle")
+	teslaTok, ok := h.resolveTeslaToken(ctx, w, userID)
+	if !ok {
 		return
 	}
 
@@ -123,7 +134,7 @@ func (h *FleetConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	result, err := h.fleet.PushTelemetryConfig(ctx, token, req)
+	result, err := h.fleet.PushTelemetryConfig(ctx, teslaTok.AccessToken, req)
 	if err != nil {
 		h.handleFleetAPIError(w, vin, err)
 		return
@@ -144,6 +155,67 @@ func (h *FleetConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Status: "configured",
 		VIN:    redactVIN(vin),
 	})
+}
+
+// verifyOwnership checks that userID owns the vehicle identified by vin.
+// Returns true if the ownership check passes. On failure it writes an HTTP
+// error response and returns false.
+func (h *FleetConfigHandler) verifyOwnership(ctx context.Context, w http.ResponseWriter, vin, userID string) bool {
+	ownerID, err := h.vehicles.GetVehicleOwner(ctx, vin)
+	if err != nil {
+		h.handleVehicleLookupError(w, vin, err)
+		return false
+	}
+
+	if ownerID != userID {
+		h.logger.Warn("fleet config: ownership mismatch",
+			slog.String("vin", redactVIN(vin)),
+			slog.String("user_id", userID),
+		)
+		h.writeError(w, http.StatusForbidden, "you do not own this vehicle")
+		return false
+	}
+
+	return true
+}
+
+// resolveTeslaToken fetches the user's Tesla OAuth token and validates its
+// expiry. Returns the token and true on success. On failure it writes an
+// HTTP error response and returns false.
+func (h *FleetConfigHandler) resolveTeslaToken(ctx context.Context, w http.ResponseWriter, userID string) (TeslaToken, bool) {
+	tok, err := h.tokens.GetTeslaToken(ctx, userID)
+	if err != nil {
+		h.handleTeslaTokenError(w, userID, err)
+		return TeslaToken{}, false
+	}
+
+	if !tok.ExpiresAt.IsZero() && tok.ExpiresAt.Before(time.Now()) {
+		h.logger.Warn("fleet config: Tesla token expired",
+			slog.String("user_id", userID),
+			slog.Time("expired_at", tok.ExpiresAt),
+		)
+		h.writeError(w, http.StatusUnauthorized, "Tesla token expired — re-link your Tesla account")
+		return TeslaToken{}, false
+	}
+
+	return tok, true
+}
+
+// handleTeslaTokenError maps Tesla token lookup errors to HTTP responses.
+func (h *FleetConfigHandler) handleTeslaTokenError(w http.ResponseWriter, userID string, err error) {
+	if errors.Is(err, sdk.ErrNotFound) {
+		h.logger.Warn("fleet config: Tesla token not found",
+			slog.String("user_id", userID),
+		)
+		h.writeError(w, http.StatusUnauthorized, "Tesla account not linked — connect your Tesla account first")
+		return
+	}
+
+	h.logger.Error("fleet config: Tesla token lookup failed",
+		slog.String("user_id", userID),
+		slog.String("error", err.Error()),
+	)
+	h.writeError(w, http.StatusInternalServerError, "internal error")
 }
 
 // handleVehicleLookupError maps vehicle lookup errors to HTTP responses.

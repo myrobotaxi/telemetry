@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/telemetry"
 )
 
 // vinResolverAdapter adapts store.VehicleRepo (returns Vehicle) to the
@@ -39,6 +40,30 @@ func (a *vehicleOwnerAdapter) GetVehicleOwner(ctx context.Context, vin string) (
 		return "", fmt.Errorf("resolve vehicle owner: %w", err)
 	}
 	return v.UserID, nil
+}
+
+// teslaTokenAdapter adapts store.AccountRepo to the
+// telemetry.TeslaTokenProvider interface, converting the store-layer
+// TeslaOAuthToken (Unix epoch) to the telemetry-layer TeslaToken (time.Time).
+type teslaTokenAdapter struct {
+	repo *store.AccountRepo
+}
+
+func (a *teslaTokenAdapter) GetTeslaToken(ctx context.Context, userID string) (telemetry.TeslaToken, error) {
+	dbTok, err := a.repo.GetTeslaToken(ctx, userID)
+	if err != nil {
+		return telemetry.TeslaToken{}, err
+	}
+
+	var expiresAt time.Time
+	if dbTok.ExpiresAt != nil {
+		expiresAt = time.Unix(*dbTok.ExpiresAt, 0)
+	}
+
+	return telemetry.TeslaToken{
+		AccessToken: dbTok.AccessToken,
+		ExpiresAt:   expiresAt,
+	}, nil
 }
 
 // proxyTimeout matches the default Fleet API timeout for consistency.
