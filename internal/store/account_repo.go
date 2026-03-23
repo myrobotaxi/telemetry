@@ -29,9 +29,9 @@ func (r *AccountRepo) GetTeslaToken(ctx context.Context, userID string) (TeslaOA
 	row := r.pool.QueryRow(ctx, queryTeslaToken, userID)
 
 	var tok TeslaOAuthToken
-	var accessToken *string
+	var accessToken, refreshToken *string
 
-	err := row.Scan(&accessToken, &tok.RefreshToken, &tok.ExpiresAt)
+	err := row.Scan(&accessToken, &refreshToken, &tok.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return TeslaOAuthToken{}, fmt.Errorf("AccountRepo.GetTeslaToken(user=%s): %w", userID, ErrTeslaTokenNotFound)
 	}
@@ -44,5 +44,8 @@ func (r *AccountRepo) GetTeslaToken(ctx context.Context, userID string) (TeslaOA
 	}
 
 	tok.AccessToken = *accessToken
+	if refreshToken != nil {
+		tok.RefreshToken = *refreshToken
+	}
 	return tok, nil
 }
