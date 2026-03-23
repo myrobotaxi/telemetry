@@ -19,8 +19,10 @@ primary_region = 'iad'
 # Tesla mTLS — TCP passthrough (no TLS termination by Fly).
 # Vehicles connect here with client certificates. The app terminates TLS
 # and extracts the VIN from the client cert.
+# internal_port is 8443 (non-privileged) because the app runs as non-root.
+# Fly maps external port 443 → internal port 8443.
 [[services]]
-  internal_port = 443
+  internal_port = 8443
   protocol = 'tcp'
 
   [[services.ports]]
