@@ -106,3 +106,11 @@ type RoutePointRecord struct {
 	Heading   float64 `json:"heading"`
 	Timestamp string  `json:"timestamp"` // ISO 8601
 }
+
+// TeslaOAuthToken holds the Tesla OAuth2 credentials read from the
+// Prisma-owned Account table. Read-only — never modify this table.
+type TeslaOAuthToken struct {
+	AccessToken  string
+	RefreshToken string
+	ExpiresAt    *int64 // Unix epoch seconds, nullable
+}

@@ -16,6 +16,11 @@ var (
 	// Wraps sdk.ErrNotFound so callers can use errors.Is(err, sdk.ErrNotFound).
 	ErrDriveNotFound = fmt.Errorf("drive %w", sdk.ErrNotFound)
 
+	// ErrTeslaTokenNotFound is returned when no Tesla OAuth token exists
+	// for a user in the Prisma-owned Account table.
+	// Wraps sdk.ErrNotFound so callers can use errors.Is(err, sdk.ErrNotFound).
+	ErrTeslaTokenNotFound = fmt.Errorf("tesla token %w", sdk.ErrNotFound)
+
 	// ErrDatabaseClosed is returned when an operation is attempted on a
 	// closed database connection pool.
 	ErrDatabaseClosed = errors.New("database connection closed")

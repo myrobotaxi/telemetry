@@ -61,6 +61,13 @@ const queryDriveByID = `SELECT "id", "vehicleId", "date", "startTime", "endTime"
 FROM "Drive"
 WHERE "id" = $1`
 
+// Account queries. The Account table is Prisma-owned (NextAuth) — read-only.
+
+const queryTeslaToken = `SELECT "access_token", "refresh_token", "expires_at"
+FROM "Account"
+WHERE "userId" = $1 AND "provider" = 'tesla'
+LIMIT 1`
+
 // buildTelemetryUpdate constructs a dynamic UPDATE statement for
 // VehicleUpdate, including only columns whose values are non-nil.
 // Returns the query string, the argument slice, and whether any fields
