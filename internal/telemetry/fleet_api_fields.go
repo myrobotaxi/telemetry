@@ -27,7 +27,7 @@ const (
 	FleetFieldDestLocation       = "DestinationLocation"
 	FleetFieldDestinationName    = "DestinationName"
 	FleetFieldRouteLine          = "RouteLine"
-	FleetFieldRouteLastUpdated   = "RouteLastUpdated" // NOTE: Tesla docs say this field is broken
+	// RouteLastUpdated omitted — Tesla docs state this field is broken and never returns data.
 	FleetFieldMilesToArrival     = "MilesToArrival"
 	FleetFieldMinutesToArrival   = "MinutesToArrival"
 )
@@ -96,7 +96,7 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		FleetFieldDestLocation:     {IntervalSeconds: 30},
 		FleetFieldDestinationName:  {IntervalSeconds: 30},
 		FleetFieldRouteLine:        {IntervalSeconds: 30},
-		FleetFieldRouteLastUpdated: {IntervalSeconds: 30},
+		// RouteLastUpdated omitted — broken per Tesla docs, wastes buffer.
 		FleetFieldMilesToArrival:   {IntervalSeconds: 10},
 		FleetFieldMinutesToArrival: {IntervalSeconds: 10},
 

@@ -502,6 +502,23 @@ func TestDefaultFieldConfig(t *testing.T) {
 	}
 }
 
+// TestDefaultFieldConfig_CoversAllTrackedFields ensures every field in
+// fieldMap has a corresponding entry in DefaultFieldConfig. This prevents
+// the bug where a field is decoded but never requested from the vehicle.
+func TestDefaultFieldConfig_CoversAllTrackedFields(t *testing.T) {
+	t.Parallel()
+
+	config := DefaultFieldConfig()
+
+	for protoField := range fieldMap {
+		apiName := protoField.String()
+		if _, ok := config[apiName]; !ok {
+			t.Errorf("fieldMap contains %s (proto %d) but DefaultFieldConfig has no entry for %q",
+				protoField, int32(protoField), apiName)
+		}
+	}
+}
+
 func TestFleetAPIError_Error(t *testing.T) {
 	t.Parallel()
 
