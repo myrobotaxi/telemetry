@@ -177,7 +177,8 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	// --- Fleet config push endpoint (optional — requires proxy config) ---
 	if cfg.Proxy().URL != "" && cfg.Proxy().FleetTelemetryHostname != "" {
 		fleetClient := telemetry.NewFleetAPIClient(telemetry.FleetAPIConfig{
-			BaseURL: cfg.Proxy().URL,
+			BaseURL:    cfg.Proxy().URL,
+			HTTPClient: proxyHTTPClient(cfg.Proxy().URL, logger),
 		}, logger.With(slog.String("component", "fleet")))
 
 		// Map config.ProxyConfig fields → telemetry.EndpointConfig.
