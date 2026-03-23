@@ -16,6 +16,7 @@ type Config struct {
 	drives         DrivesConfig
 	websocket      WebSocketConfig
 	auth           AuthConfig
+	proxy          ProxyConfig
 	mapboxToken    string
 	teslaPublicKey string
 }
@@ -73,6 +74,16 @@ type AuthConfig struct {
 	TokenAudience string
 }
 
+// ProxyConfig holds settings for the Tesla Fleet API proxy (tesla-http-proxy).
+// All fields are optional — when URL is empty, the fleet config push endpoint
+// is disabled.
+type ProxyConfig struct {
+	URL                    string
+	FleetTelemetryHostname string
+	FleetTelemetryPort     int
+	FleetTelemetryCA       string // PEM-encoded CA cert
+}
+
 // Getters — one per section, returning a copy of the section struct.
 
 // Server returns the server port configuration.
@@ -95,6 +106,10 @@ func (c *Config) WebSocket() WebSocketConfig { return c.websocket }
 
 // Auth returns the authentication configuration.
 func (c *Config) Auth() AuthConfig { return c.auth }
+
+// Proxy returns the Tesla Fleet API proxy configuration. When URL is empty,
+// the fleet config push feature is unavailable.
+func (c *Config) Proxy() ProxyConfig { return c.proxy }
 
 // MapboxToken returns the Mapbox API token. Empty string means geocoding
 // is disabled.

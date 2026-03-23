@@ -80,3 +80,9 @@ func applyAuthDefaults(a *fileAuthConfig) {
 		a.TokenAudience = "telemetry"
 	}
 }
+
+func applyProxyDefaults(p *fileProxyConfig) {
+	if p.FleetTelemetryPort == 0 {
+		p.FleetTelemetryPort = 443
+	}
+}

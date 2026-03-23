@@ -16,12 +16,14 @@ type fileConfig struct {
 	Drives    fileDrivesConfig    `json:"drives"`
 	WebSocket fileWebSocketConfig `json:"websocket"`
 	Auth      fileAuthConfig      `json:"auth"`
+	Proxy     fileProxyConfig     `json:"proxy"`
 
 	// Populated from environment, not JSON.
-	databaseURL    string
-	authSecret     string
-	mapboxToken    string
-	teslaPublicKey string
+	databaseURL      string
+	authSecret       string
+	mapboxToken      string
+	teslaPublicKey   string
+	fleetTelemetryCA string
 }
 
 type fileServerConfig struct {
@@ -68,6 +70,12 @@ type fileAuthConfig struct {
 	TokenAudience string `json:"token_audience"`
 }
 
+type fileProxyConfig struct {
+	URL                    string `json:"url"`
+	FleetTelemetryHostname string `json:"fleet_telemetry_hostname"`
+	FleetTelemetryPort     int    `json:"fleet_telemetry_port"`
+}
+
 // loadFile reads and decodes the JSON configuration from disk.
 func loadFile(path string) (*fileConfig, error) {
 	f, err := os.Open(path) // #nosec G304 -- path is caller-controlled startup config, not user input
@@ -91,6 +99,7 @@ func applyDefaults(fc *fileConfig) {
 	applyDrivesDefaults(&fc.Drives)
 	applyWebSocketDefaults(&fc.WebSocket)
 	applyAuthDefaults(&fc.Auth)
+	applyProxyDefaults(&fc.Proxy)
 }
 
 // applyEnvOverrides reads secrets and optional overrides from environment
@@ -108,8 +117,14 @@ func applyEnvOverrides(fc *fileConfig) error {
 		missing = append(missing, "AUTH_SECRET")
 	}
 
-	fc.mapboxToken = os.Getenv("MAPBOX_TOKEN")         // optional
-	fc.teslaPublicKey = os.Getenv("TESLA_PUBLIC_KEY") // optional
+	fc.mapboxToken = os.Getenv("MAPBOX_TOKEN")           // optional
+	fc.teslaPublicKey = os.Getenv("TESLA_PUBLIC_KEY")   // optional
+	fc.fleetTelemetryCA = os.Getenv("FLEET_TELEMETRY_CA") // optional: PEM CA cert
+
+	// Proxy env var overrides.
+	if v := os.Getenv("TESLA_PROXY_URL"); v != "" {
+		fc.Proxy.URL = v
+	}
 
 	// TLS env vars override JSON values.
 	if v := os.Getenv("TLS_CERT_FILE"); v != "" {
@@ -169,6 +184,12 @@ func buildConfig(fc *fileConfig) *Config {
 			Secret:        fc.authSecret,
 			TokenIssuer:   fc.Auth.TokenIssuer,
 			TokenAudience: fc.Auth.TokenAudience,
+		},
+		proxy: ProxyConfig{
+			URL:                    fc.Proxy.URL,
+			FleetTelemetryHostname: fc.Proxy.FleetTelemetryHostname,
+			FleetTelemetryPort:     fc.Proxy.FleetTelemetryPort,
+			FleetTelemetryCA:       fc.fleetTelemetryCA,
 		},
 		mapboxToken:    fc.mapboxToken,
 		teslaPublicKey: fc.teslaPublicKey,
