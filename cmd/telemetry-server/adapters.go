@@ -78,7 +78,7 @@ func proxyHTTPClient(proxyURL string, logger *slog.Logger) *http.Client {
 		Timeout: proxyTimeout,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true, //nolint:gosec // loopback only — see guard above
+				InsecureSkipVerify: true, //#nosec G402 -- loopback only; guard above ensures non-loopback uses verified TLS
 			},
 		},
 	}
