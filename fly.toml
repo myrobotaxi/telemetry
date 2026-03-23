@@ -1,0 +1,59 @@
+# Fly.io deployment configuration for the telemetry server.
+#
+# Three services:
+#   - Tesla mTLS (port 443): TCP passthrough — Fly does NOT terminate TLS,
+#     the app handles the mTLS handshake directly so it can read client certs.
+#   - Client WebSocket (port 8080): HTTP service with TLS at the edge.
+#   - Prometheus metrics (port 9090): Internal only, not publicly routed.
+#
+# Deploy: fly deploy
+# Secrets: fly secrets set DATABASE_URL=... AUTH_SECRET=... TESLA_KEY_FILE_B64=...
+
+app = 'my-robo-taxi-telemetry'
+primary_region = 'iad'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+# Tesla mTLS — TCP passthrough (no TLS termination by Fly).
+# Vehicles connect here with client certificates. The app terminates TLS
+# and extracts the VIN from the client cert.
+[[services]]
+  internal_port = 443
+  protocol = 'tcp'
+
+  [[services.ports]]
+    port = 443
+
+# Client WebSocket — standard HTTPS with Fly's automatic TLS.
+# Browser clients connect here for real-time telemetry.
+# Also serves /healthz, /api/fleet-config/{vin}, and .well-known endpoint.
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = 'connections'
+    hard_limit = 250
+    soft_limit = 200
+
+  [[http_service.checks]]
+    interval = '10s'
+    timeout = '5s'
+    grace_period = '10s'
+    method = 'GET'
+    path = '/healthz'
+
+# Prometheus metrics — internal only, accessible via `fly proxy 9090`.
+[[services]]
+  internal_port = 9090
+  protocol = 'tcp'
+  auto_stop_machines = false
+
+# VM sizing — smallest machine, single instance for now.
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '256mb'

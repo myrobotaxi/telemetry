@@ -60,9 +60,9 @@ COPY --from=proxy-builder /tesla-http-proxy /usr/local/bin/tesla-http-proxy
 COPY deployments/start.sh /usr/local/bin/start.sh
 
 # Operational config (no secrets — secrets arrive via env vars at runtime).
-# Default: railway.json (empty TLS paths, Railway handles TLS at the edge).
+# Default: fly.json (TLS paths set — app handles mTLS on Fly.io).
 # Override for other targets: docker build --build-arg CONFIG_FILE=default.json
-ARG CONFIG_FILE=railway.json
+ARG CONFIG_FILE=fly.json
 COPY configs/${CONFIG_FILE} /etc/telemetry/config.json
 
 USER appuser
