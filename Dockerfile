@@ -1,4 +1,11 @@
-# Stage 1: Build
+# Stage 1a: Build tesla-http-proxy in an isolated builder.
+# Separate stage avoids polluting the telemetry server's go.mod.
+FROM golang:1.23-alpine AS proxy-builder
+
+RUN CGO_ENABLED=0 GOOS=linux \
+    go install github.com/teslamotors/vehicle-command/cmd/tesla-http-proxy@latest
+
+# Stage 1b: Build telemetry-server
 FROM golang:1.23-alpine AS builder
 
 # Allow Go to download the toolchain version declared in go.mod.
@@ -40,6 +47,10 @@ RUN apk add --no-cache ca-certificates
 RUN adduser -D -u 1000 appuser
 
 COPY --from=builder /telemetry-server /usr/local/bin/telemetry-server
+COPY --from=proxy-builder /go/bin/tesla-http-proxy /usr/local/bin/tesla-http-proxy
+
+# Entrypoint wrapper that starts the proxy sidecar alongside the telemetry server.
+COPY deployments/start.sh /usr/local/bin/start.sh
 
 # Operational config (no secrets — secrets arrive via env vars at runtime).
 # Default: railway.json (empty TLS paths, Railway handles TLS at the edge).
@@ -51,8 +62,9 @@ USER appuser
 
 # 443  — Tesla vehicle mTLS WebSocket
 # 8080 — Browser client WebSocket
+# 4443 — Tesla HTTP proxy (internal only — never expose publicly)
 # 9090 — Prometheus /metrics
-EXPOSE 443 8080 9090
+EXPOSE 443 8080 4443 9090
 
 ENTRYPOINT ["telemetry-server"]
 CMD ["-config", "/etc/telemetry/config.json"]
