@@ -3,13 +3,17 @@ builder = "dockerfile"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-# This overrides the Dockerfile ENTRYPOINT+CMD. Keep in sync with Dockerfile.
-startCommand = "telemetry-server -config /etc/telemetry/config.json"
+# Uses start.sh wrapper to run tesla-http-proxy sidecar + telemetry-server
+# in the same container (Railway doesn't support multi-service deploys).
+# The proxy listens on 127.0.0.1:4443 (internal only) and is only started
+# when TESLA_KEY_FILE is set. See deployments/start.sh for details.
+startCommand = "start.sh -config /etc/telemetry/config.json"
 healthcheckPath = "/healthz"
 healthcheckTimeout = 30
 restartPolicyType = "on_failure"
 
 # Railway routes external traffic to this port (client WebSocket + healthcheck).
 # Tesla mTLS (port 443) and Prometheus metrics (port 9090) are internal.
+# Tesla HTTP proxy (port 4443) is internal — never expose publicly.
 [deploy.env]
 PORT = "8080"
