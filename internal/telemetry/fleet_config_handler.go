@@ -132,8 +132,8 @@ func (h *FleetConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeJSON(w, http.StatusOK, fleetConfigResponse{
-		Status: "ok",
-		VIN:    vin,
+		Status: "configured",
+		VIN:    redactVIN(vin),
 	})
 }
 

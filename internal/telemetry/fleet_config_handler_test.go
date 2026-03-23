@@ -257,11 +257,12 @@ func TestFleetConfigHandler_ServeHTTP(t *testing.T) {
 				if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 					t.Fatalf("decode success response: %v", err)
 				}
-				if resp.Status != "ok" {
-					t.Errorf("status: got %q, want %q", resp.Status, "ok")
+				if resp.Status != "configured" {
+					t.Errorf("status: got %q, want %q", resp.Status, "configured")
 				}
-				if resp.VIN != tt.vin {
-					t.Errorf("vin: got %q, want %q", resp.VIN, tt.vin)
+				wantVIN := redactVIN(tt.vin)
+				if resp.VIN != wantVIN {
+					t.Errorf("vin: got %q, want %q (redacted)", resp.VIN, wantVIN)
 				}
 			}
 		})
