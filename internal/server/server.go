@@ -33,6 +33,7 @@ type Server struct {
 	tesla          *http.Server
 	client         *http.Server
 	metrics        *http.Server
+	clientMux      *http.ServeMux // stored to allow API route registration
 	logger         *slog.Logger
 	logMiddleware  func(http.Handler) http.Handler
 	teslaPublicKey string // PEM-encoded public key for Tesla .well-known endpoint
@@ -89,6 +90,7 @@ func New(cfg config.ServerConfig, logger *slog.Logger, checker ReadinessChecker,
 			Handler:           logMiddleware(metricsMux),
 			ReadHeaderTimeout: readHeaderTimeout,
 		},
+		clientMux:      clientMux,
 		logger:         logger,
 		logMiddleware:  logMiddleware,
 		teslaPublicKey: teslaPublicKey,
@@ -108,17 +110,20 @@ func (s *Server) SetTeslaTLS(tlsConfig *tls.Config) {
 	s.tesla.TLSConfig = tlsConfig
 }
 
-// SetClientHandler adds routes from the given handler to the client server.
-// The client server always retains /healthz and the Tesla .well-known endpoint.
+// SetClientHandler adds the given handler as the catch-all route on the
+// client server. The client server always retains /healthz, the Tesla
+// .well-known endpoint, and any routes registered via HandleFunc.
 // Must be called before Start.
 func (s *Server) SetClientHandler(h http.Handler) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", handleHealthz)
-	if s.teslaPublicKey != "" {
-		registerWellKnown(mux, s.teslaPublicKey)
-	}
-	mux.Handle("/", h)
-	s.client.Handler = s.logMiddleware(mux)
+	s.clientMux.Handle("/", h)
+	s.client.Handler = s.logMiddleware(s.clientMux)
+}
+
+// HandleFunc registers an HTTP handler function on the client server at the
+// given pattern (e.g. "POST /api/fleet-config/{vin}"). Must be called
+// before Start.
+func (s *Server) HandleFunc(pattern string, handler http.HandlerFunc) {
+	s.clientMux.HandleFunc(pattern, handler)
 }
 
 // Start begins serving on all three ports. It blocks until ctx is
