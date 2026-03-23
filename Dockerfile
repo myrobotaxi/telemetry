@@ -44,7 +44,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 
 # Stage 2: Runtime
 # Minimal Alpine image — only ca-certificates and the static binary.
-FROM alpine:3.20
+FROM alpine:3.23
 
 # ca-certificates is required at runtime so the server can open TLS
 # connections to Supabase (PostgreSQL) and other external services.
