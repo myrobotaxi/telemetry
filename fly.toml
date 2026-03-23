@@ -55,12 +55,8 @@ primary_region = 'iad'
     method = 'GET'
     path = '/healthz'
 
-  [[http_service.checks]]
-    interval = '10s'
-    timeout = '5s'
-    grace_period = '15s'
-    method = 'GET'
-    path = '/readyz'
+  # /readyz is served on the metrics port (9090), not the client port (8080).
+  # Fly health checks only reach internal_port, so /healthz is sufficient here.
 
 # VM sizing — 512MB to handle mTLS + WebSocket + PostgreSQL connections.
 [[vm]]
