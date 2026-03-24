@@ -12,7 +12,8 @@
   },
   "database": {
     "max_conns": 10,
-    "min_conns": 2
+    "min_conns": 2,
+    "disable_prepared_statements": true
   },
   "telemetry": {
     "max_vehicles": 100,

@@ -39,8 +39,9 @@ type fileTLSConfig struct {
 }
 
 type fileDatabaseConfig struct {
-	MaxConns int `json:"max_conns"`
-	MinConns int `json:"min_conns"`
+	MaxConns                  int  `json:"max_conns"`
+	MinConns                  int  `json:"min_conns"`
+	DisablePreparedStatements bool `json:"disable_prepared_statements"`
 }
 
 type fileTelemetryConfig struct {
@@ -121,6 +122,11 @@ func applyEnvOverrides(fc *fileConfig) error {
 	fc.teslaPublicKey = os.Getenv("TESLA_PUBLIC_KEY")   // optional
 	fc.fleetTelemetryCA = os.Getenv("FLEET_TELEMETRY_CA") // optional: PEM CA cert
 
+	// Database env var overrides.
+	if v := os.Getenv("DATABASE_DISABLE_PREPARED_STATEMENTS"); v == "true" || v == "1" {
+		fc.Database.DisablePreparedStatements = true
+	}
+
 	// Proxy env var overrides.
 	if v := os.Getenv("TESLA_PROXY_URL"); v != "" {
 		fc.Proxy.URL = v
@@ -157,9 +163,10 @@ func buildConfig(fc *fileConfig) *Config {
 			CAFile:   fc.TLS.CAFile,
 		},
 		database: DatabaseConfig{
-			URL:      fc.databaseURL,
-			MaxConns: fc.Database.MaxConns,
-			MinConns: fc.Database.MinConns,
+			URL:                       fc.databaseURL,
+			MaxConns:                  fc.Database.MaxConns,
+			MinConns:                  fc.Database.MinConns,
+			DisablePreparedStatements: fc.Database.DisablePreparedStatements,
 		},
 		telemetry: TelemetryConfig{
 			MaxVehicles:        fc.Telemetry.MaxVehicles,

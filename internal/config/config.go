@@ -37,9 +37,10 @@ type TLSConfig struct {
 
 // DatabaseConfig holds connection pool parameters and the connection URL.
 type DatabaseConfig struct {
-	URL      string
-	MaxConns int
-	MinConns int
+	URL                       string
+	MaxConns                  int
+	MinConns                  int
+	DisablePreparedStatements bool // Set true for PgBouncer transaction pooling (Supabase port 6543)
 }
 
 // TelemetryConfig holds tuning parameters for the telemetry receiver.
