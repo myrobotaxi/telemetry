@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"google.golang.org/protobuf/proto"
@@ -53,13 +54,14 @@ func TestUnwrapEnvelope_ErrorCases(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name  string
-		input []byte
+		name      string
+		input     []byte
+		wantSubstr string
 	}{
-		{name: "nil input", input: nil},
-		{name: "empty input", input: []byte{}},
-		{name: "garbage bytes", input: []byte("not a flatbuffers envelope")},
-		{name: "truncated bytes", input: []byte{0x04, 0x00, 0x00, 0x00}},
+		{name: "nil input", input: nil, wantSubstr: "unwrap envelope"},
+		{name: "empty input", input: []byte{}, wantSubstr: "unwrap envelope"},
+		{name: "garbage bytes", input: []byte("not a flatbuffers envelope"), wantSubstr: "malformed FlatBuffers"},
+		{name: "truncated bytes", input: []byte{0x04, 0x00, 0x00, 0x00}, wantSubstr: "malformed FlatBuffers"},
 	}
 
 	for _, tt := range tests {
@@ -67,7 +69,10 @@ func TestUnwrapEnvelope_ErrorCases(t *testing.T) {
 			t.Parallel()
 			_, err := unwrapEnvelope(tt.input)
 			if err == nil {
-				t.Error("expected error, got nil")
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.wantSubstr) {
+				t.Errorf("error = %q, want substring %q", err.Error(), tt.wantSubstr)
 			}
 		})
 	}
