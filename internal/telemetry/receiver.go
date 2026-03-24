@@ -179,7 +179,7 @@ func (r *Receiver) handleConnection(ctx context.Context, vc *vehicleConn) {
 			continue
 		}
 
-		evt, fieldErrs, err := r.decoder.Decode(data)
+		result, err := r.decoder.Decode(data)
 		if err != nil {
 			r.metrics.IncDecodeErrors(redacted)
 			r.logger.Warn("decode failed",
@@ -189,10 +189,20 @@ func (r *Receiver) handleConnection(ctx context.Context, vc *vehicleConn) {
 			continue
 		}
 
-		if len(fieldErrs) > 0 {
+		if len(result.FieldErrors) > 0 {
 			r.logger.Debug("field decode warnings",
 				slog.String("vin", redacted),
-				slog.Int("count", len(fieldErrs)),
+				slog.Int("count", len(result.FieldErrors)),
+			)
+		}
+
+		evt := result.Event
+
+		// Cross-check the envelope VIN (deviceId) against the cert VIN.
+		if result.DeviceID != "" && result.DeviceID != vc.vin {
+			r.logger.Warn("envelope deviceId mismatch, using cert VIN",
+				slog.String("cert_vin", redacted),
+				slog.String("envelope_vin", redactVIN(result.DeviceID)),
 			)
 		}
 
@@ -217,6 +227,7 @@ func (r *Receiver) handleConnection(ctx context.Context, vc *vehicleConn) {
 		r.metrics.ObserveMessageLatency(latency.Seconds())
 		r.logger.Debug("telemetry received",
 			slog.String("vin", redacted),
+			slog.String("topic", result.Topic),
 			slog.Int("fields", len(evt.Fields)),
 			slog.Duration("latency", latency),
 		)
