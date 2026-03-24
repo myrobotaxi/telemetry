@@ -172,6 +172,56 @@ func TestDecoder_Decode_FlatBuffersEnvelope(t *testing.T) {
 	}
 }
 
+func TestDecoder_Decode_VINFallbackFromEnvelope(t *testing.T) {
+	t.Parallel()
+	dec := NewDecoder()
+
+	// Payload with empty VIN — vehicle doesn't populate it in typed format.
+	payload := &tpb.Payload{
+		Vin:       "",
+		CreatedAt: timestamppb.Now(),
+		Data:      []*tpb.Datum{makeDatum(tpb.Field_VehicleSpeed, stringVal("55"))},
+	}
+	raw, err := proto.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	envelope := BuildTestEnvelope(testVIN, raw)
+	result, err := dec.Decode(envelope)
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if result.Event.VIN != testVIN {
+		t.Errorf("VIN = %q, want %q (from envelope fallback)", result.Event.VIN, testVIN)
+	}
+}
+
+func TestDecoder_Decode_BothVINsEmpty(t *testing.T) {
+	t.Parallel()
+	dec := NewDecoder()
+
+	payload := &tpb.Payload{
+		Vin:       "",
+		CreatedAt: timestamppb.Now(),
+		Data:      []*tpb.Datum{makeDatum(tpb.Field_VehicleSpeed, stringVal("55"))},
+	}
+	raw, err := proto.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	// Envelope with empty deviceId AND empty payload VIN.
+	envelope := BuildTestEnvelope("", raw)
+	_, err = dec.Decode(envelope)
+	if err == nil {
+		t.Fatal("expected error when both VINs are empty, got nil")
+	}
+	if !errors.Is(err, ErrMissingVIN) {
+		t.Errorf("error = %v, want ErrMissingVIN", err)
+	}
+}
+
 func TestDecoder_Decode_InvalidEnvelope(t *testing.T) {
 	t.Parallel()
 	dec := NewDecoder()

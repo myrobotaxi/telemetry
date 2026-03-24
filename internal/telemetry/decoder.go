@@ -66,6 +66,13 @@ func (d *Decoder) Decode(raw []byte) (DecodeResult, error) {
 		return DecodeResult{}, fmt.Errorf("decoder.Decode: decode protobuf: %w", err)
 	}
 
+	// Tesla's typed protobuf format often omits the VIN from the protobuf
+	// Payload — it's in the FlatBuffers envelope's deviceId instead.
+	// Fill it in before validation so DecodePayload doesn't reject it.
+	if payload.GetVin() == "" && env.DeviceID != "" {
+		payload.Vin = env.DeviceID
+	}
+
 	evt, fieldErrs, err := d.DecodePayload(&payload)
 	if err != nil {
 		return DecodeResult{}, fmt.Errorf("decoder.Decode: %w", err)
