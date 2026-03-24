@@ -132,7 +132,7 @@ func TestDecoder_DecodePayload_Validation(t *testing.T) {
 	}
 }
 
-func TestDecoder_Decode_RawBytes(t *testing.T) {
+func TestDecoder_Decode_FlatBuffersEnvelope(t *testing.T) {
 	t.Parallel()
 	dec := NewDecoder()
 
@@ -144,18 +144,26 @@ func TestDecoder_Decode_RawBytes(t *testing.T) {
 		t.Fatalf("Marshal payload: %v", err)
 	}
 
-	evt, fieldErrs, err := dec.Decode(raw)
+	envelope := BuildTestEnvelope(testVIN, raw)
+
+	result, err := dec.Decode(envelope)
 	if err != nil {
 		t.Fatalf("Decode() error = %v", err)
 	}
-	if len(fieldErrs) != 0 {
-		t.Errorf("unexpected field errors: %v", fieldErrs)
+	if len(result.FieldErrors) != 0 {
+		t.Errorf("unexpected field errors: %v", result.FieldErrors)
 	}
-	if evt.VIN != testVIN {
-		t.Errorf("VIN = %q, want %q", evt.VIN, testVIN)
+	if result.Event.VIN != testVIN {
+		t.Errorf("VIN = %q, want %q", result.Event.VIN, testVIN)
+	}
+	if result.Topic != "V" {
+		t.Errorf("Topic = %q, want %q", result.Topic, "V")
+	}
+	if result.DeviceID != testVIN {
+		t.Errorf("DeviceID = %q, want %q", result.DeviceID, testVIN)
 	}
 
-	speed, ok := evt.Fields["speed"]
+	speed, ok := result.Event.Fields["speed"]
 	if !ok {
 		t.Fatal("missing speed field")
 	}
@@ -164,13 +172,28 @@ func TestDecoder_Decode_RawBytes(t *testing.T) {
 	}
 }
 
-func TestDecoder_Decode_InvalidProtobuf(t *testing.T) {
+func TestDecoder_Decode_InvalidEnvelope(t *testing.T) {
 	t.Parallel()
 	dec := NewDecoder()
 
-	_, _, err := dec.Decode([]byte("not valid protobuf"))
+	_, err := dec.Decode([]byte("not a valid flatbuffers envelope"))
 	if err == nil {
-		t.Error("expected error for invalid protobuf, got nil")
+		t.Error("expected error for invalid envelope, got nil")
+	}
+}
+
+func TestDecoder_Decode_EmptyEnvelope(t *testing.T) {
+	t.Parallel()
+	dec := NewDecoder()
+
+	_, err := dec.Decode(nil)
+	if err == nil {
+		t.Error("expected error for nil input, got nil")
+	}
+
+	_, err = dec.Decode([]byte{})
+	if err == nil {
+		t.Error("expected error for empty input, got nil")
 	}
 }
 

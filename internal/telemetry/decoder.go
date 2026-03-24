@@ -10,10 +10,11 @@ import (
 	tpb "github.com/tnando/my-robo-taxi-telemetry/internal/telemetry/proto/tesla"
 )
 
-// Decoder converts raw Tesla protobuf payloads into domain-level
-// VehicleTelemetryEvent values. It handles the many quirks of Tesla's
-// value encoding: numeric fields sent as strings, location values with
-// nested lat/lng, typed enums for gear/charge state, and fields whose
+// Decoder converts raw Tesla FlatBuffers-wrapped protobuf payloads into
+// domain-level VehicleTelemetryEvent values. It handles the FlatBuffers
+// envelope unwrapping, protobuf deserialization, and the many quirks of
+// Tesla's value encoding: numeric fields sent as strings, location values
+// with nested lat/lng, typed enums for gear/charge state, and fields whose
 // types change across firmware versions.
 type Decoder struct{}
 
@@ -22,20 +23,60 @@ func NewDecoder() *Decoder {
 	return &Decoder{}
 }
 
-// Decode unmarshals raw bytes into a Tesla Payload protobuf, validates
-// required fields, and converts each datum into a TelemetryValue keyed by
-// our internal field names. Fields not in fieldMap are silently skipped.
+// DecodeResult carries a decoded telemetry event along with metadata from
+// the FlatBuffers envelope. The Topic and DeviceID fields come from the
+// envelope; the Event is the decoded protobuf payload.
+type DecodeResult struct {
+	// Event is the decoded telemetry event.
+	Event events.VehicleTelemetryEvent
+
+	// FieldErrors contains per-field decode problems that did not prevent
+	// the overall payload from being decoded.
+	FieldErrors []FieldError
+
+	// Topic is the envelope routing topic (e.g. "V" for vehicle data).
+	Topic string
+
+	// DeviceID is the VIN from the FlatBuffers envelope's deviceId field.
+	DeviceID string
+}
+
+// Decode unwraps a FlatBuffers envelope, extracts the protobuf payload,
+// unmarshals it, and converts it into a VehicleTelemetryEvent.
 //
-// The returned FieldError slice contains per-field decode errors that did
-// not prevent the overall payload from being decoded. Callers can log
-// these but should still use the event.
-func (d *Decoder) Decode(raw []byte) (events.VehicleTelemetryEvent, []FieldError, error) {
-	var payload tpb.Payload
-	if err := proto.Unmarshal(raw, &payload); err != nil {
-		return events.VehicleTelemetryEvent{}, nil, fmt.Errorf("decode protobuf: %w", err)
+// The raw bytes must be a complete FlatBuffers envelope as sent by Tesla
+// vehicles over WebSocket. Only topic "V" (vehicle data) is supported;
+// other topics return ErrUnsupportedTopic.
+//
+// The returned FieldError slice (via DecodeResult) contains per-field
+// decode errors that did not prevent the overall payload from being
+// decoded. Callers can log these but should still use the event.
+func (d *Decoder) Decode(raw []byte) (DecodeResult, error) {
+	env, err := unwrapEnvelope(raw)
+	if err != nil {
+		return DecodeResult{}, fmt.Errorf("decoder.Decode: %w", err)
 	}
 
-	return d.DecodePayload(&payload)
+	if env.Topic != topicVehicleData {
+		return DecodeResult{}, fmt.Errorf("decoder.Decode(topic=%s): %w", env.Topic, ErrUnsupportedTopic)
+	}
+
+	var payload tpb.Payload
+	if err := proto.Unmarshal(env.PayloadBytes, &payload); err != nil {
+		return DecodeResult{}, fmt.Errorf("decoder.Decode: decode protobuf: %w", err)
+	}
+
+	evt, fieldErrs, err := d.DecodePayload(&payload)
+	if err != nil {
+		return DecodeResult{}, fmt.Errorf("decoder.Decode: %w", err)
+	}
+
+	return DecodeResult{
+		Event:       evt,
+		FieldErrors: fieldErrs,
+		Topic:       env.Topic,
+		DeviceID:    env.DeviceID,
+	}, nil
 }
 
 // DecodePayload converts an already-unmarshalled Tesla Payload into a
