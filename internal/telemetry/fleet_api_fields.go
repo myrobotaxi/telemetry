@@ -81,6 +81,7 @@ const (
 // interval has elapsed AND the value has changed since the last emission.
 func DefaultFieldConfig() map[string]FieldConfig {
 	locationDelta := float64(10) // meters; filters out GPS jitter while parked
+	oneMile := float64(1)        // Tesla requires minimum_delta >= 1 for mileage fields
 
 	return map[string]FieldConfig{
 		// Driving — high frequency
@@ -124,7 +125,7 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		FleetFieldSentryMode:  {IntervalSeconds: 30},
 
 		// Safety / ADAS — low frequency
-		FleetFieldMilesSinceReset:    {IntervalSeconds: 60},
-		FleetFieldFSDMilesSinceReset: {IntervalSeconds: 60},
+		FleetFieldMilesSinceReset:    {IntervalSeconds: 60, MinimumDelta: &oneMile},
+		FleetFieldFSDMilesSinceReset: {IntervalSeconds: 60, MinimumDelta: &oneMile},
 	}
 }

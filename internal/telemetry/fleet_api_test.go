@@ -468,7 +468,7 @@ func TestDefaultFieldConfig(t *testing.T) {
 		{FleetFieldDetailedChargeState, 30, false, 0},
 		{FleetFieldOdometer, 60, false, 0},
 		{FleetFieldDestinationName, 30, false, 0},
-		{FleetFieldFSDMilesSinceReset, 60, false, 0},
+		{FleetFieldFSDMilesSinceReset, 60, true, 1},
 	}
 
 	for _, tt := range spotChecks {
