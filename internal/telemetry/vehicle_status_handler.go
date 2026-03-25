@@ -11,6 +11,20 @@ import (
 	"github.com/tnando/my-robo-taxi-telemetry/pkg/sdk"
 )
 
+// VehiclePresence provides information about which vehicles are currently
+// connected to the telemetry receiver.
+type VehiclePresence interface {
+	IsConnected(vin string) bool
+	ConnectionInfo(vin string) (ConnInfo, bool)
+}
+
+// ConnInfo describes an active vehicle connection.
+type ConnInfo struct {
+	ConnectedSince time.Time
+	LastMessageAt  time.Time
+	MessageCount   int64
+}
+
 // VehicleStatusHandler handles GET /api/vehicle-status/{vin} requests. It
 // validates the caller's JWT, verifies vehicle ownership, and returns the
 // vehicle's current connection status. The frontend polls this endpoint

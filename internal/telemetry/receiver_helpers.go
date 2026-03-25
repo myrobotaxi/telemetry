@@ -22,20 +22,6 @@ type vehicleConn struct {
 	messageCount atomic.Int64
 }
 
-// VehiclePresence provides information about which vehicles are currently
-// connected to the telemetry receiver.
-type VehiclePresence interface {
-	IsConnected(vin string) bool
-	ConnectionInfo(vin string) (ConnInfo, bool)
-}
-
-// ConnInfo describes an active vehicle connection.
-type ConnInfo struct {
-	ConnectedSince time.Time
-	LastMessageAt  time.Time
-	MessageCount   int64
-}
-
 // isNormalClose reports whether the error represents a normal WebSocket
 // closure (client disconnecting cleanly or context cancelled).
 func isNormalClose(err error) bool {
