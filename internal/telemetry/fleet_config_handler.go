@@ -128,6 +128,8 @@ func (h *FleetConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ca = &h.endpoint.CA
 	}
 
+	expTime := time.Now().Add(365 * 24 * time.Hour).Unix()
+
 	req := FleetConfigRequest{
 		VINs: []string{vin},
 		Config: FleetConfig{
@@ -136,6 +138,7 @@ func (h *FleetConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			CA:         ca,
 			Fields:     DefaultFieldConfig(),
 			AlertTypes: []string{"service"},
+			Exp:        &expTime,
 		},
 	}
 

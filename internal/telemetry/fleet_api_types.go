@@ -20,6 +20,7 @@ type FleetConfig struct {
 	CA         *string                `json:"ca"`
 	Fields     map[string]FieldConfig `json:"fields"`
 	AlertTypes []string               `json:"alert_types,omitempty"`
+	Exp        *int64                 `json:"exp,omitempty"`
 }
 
 // FieldConfig controls how often a field is emitted and, for spatial

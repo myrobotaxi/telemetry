@@ -18,7 +18,7 @@ set -euo pipefail
 #   --ca-file PATH     CA certificate PEM file for vehicle TLS trust anchor.
 #                      If omitted, "ca" is null (for publicly trusted certs like Let's Encrypt).
 #   --hostname HOST    Telemetry server hostname (default: telemetry.myrobotaxi.app)
-#   --port PORT        Telemetry server port (default: 8443)
+#   --port PORT        Telemetry server port (default: 443)
 #   --interval SECS    Telemetry push interval in seconds (default: 5)
 #   --api-base URL     Fleet API base URL (default: https://fleet-api.prd.na.vn.cloud.tesla.com)
 #   --dry-run          Print the request without sending it
@@ -41,7 +41,7 @@ readonly SCRIPT_NAME="$(basename "$0")"
 VIN=""
 AUTH_TOKEN="${TESLA_AUTH_TOKEN:-}"
 HOSTNAME="telemetry.myrobotaxi.app"
-PORT=8443
+PORT=443
 INTERVAL=5
 API_BASE="${TESLA_API_BASE:-https://fleet-api.prd.na.vn.cloud.tesla.com}"
 CA_FILE="${FLEET_TELEMETRY_CA_FILE:-}"

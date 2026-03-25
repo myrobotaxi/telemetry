@@ -1,7 +1,7 @@
 {
   "_comment": "Fly.io deployment config. TLS paths match start.sh decode locations (/tmp/certs/). These are also overridden at runtime by env vars TLS_CERT_FILE, TLS_KEY_FILE, TLS_CA_FILE that start.sh exports after decoding base64 secrets.",
   "server": {
-    "tesla_port": 8443,
+    "tesla_port": 443,
     "client_port": 8080,
     "metrics_port": 9090
   },
@@ -40,6 +40,6 @@
   "proxy": {
     "url": "https://127.0.0.1:4443",
     "fleet_telemetry_hostname": "telemetry.myrobotaxi.app",
-    "fleet_telemetry_port": 8443
+    "fleet_telemetry_port": 443
   }
 }

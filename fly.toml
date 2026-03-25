@@ -1,9 +1,9 @@
 # Fly.io deployment configuration for the telemetry server.
 #
 # Two public services:
-#   - Tesla mTLS (port 8443): TCP passthrough — Fly does NOT terminate TLS,
+#   - Tesla mTLS (port 443): TCP passthrough — Fly does NOT terminate TLS,
 #     the app handles the mTLS handshake directly so it can read client certs.
-#   - Client WebSocket (port 8080): HTTP service with TLS at the edge.
+#   - Client WebSocket (port 4443): Fly terminates TLS, proxies HTTP to app.
 #
 # Prometheus metrics (port 9090) is internal only — access via `fly proxy 9090`.
 #
@@ -16,46 +16,36 @@ primary_region = 'iad'
 [build]
   dockerfile = 'Dockerfile'
 
-# Tesla mTLS — TCP passthrough (no TLS termination by Fly).
-# Vehicles connect here with client certificates. The app terminates TLS
-# and extracts the VIN from the client cert.
-# External port 8443 avoids conflicting with Fly's HTTPS on port 443.
-# fleet_telemetry_config uses hostname:8443 as the vehicle connection target.
+# Tesla mTLS — pure TCP passthrough (no TLS termination by Fly).
+# Vehicles connect on port 443 (hardcoded in Tesla firmware).
+# The app terminates TLS and extracts the VIN from the client cert.
+# NO handlers — Fly passes raw TCP bytes so mTLS works end-to-end.
+# NO health checks — TCP probes cause TLS EOF errors on the mTLS listener.
 [[services]]
-  internal_port = 8443
+  internal_port = 443
   protocol = 'tcp'
 
   [[services.ports]]
-    port = 8443
+    port = 443
 
-  # No health checks on the mTLS port. Fly's TCP health check opens a raw
-  # socket (no TLS ClientHello), which the TLS listener rejects as EOF.
-  # Machine health is determined by the HTTP /healthz check on the client port.
-
-# Client WebSocket — standard HTTPS with Fly's automatic TLS.
-# Browser clients connect here for real-time telemetry.
+# Client WebSocket — Fly terminates TLS, proxies HTTP to internal port 8080.
+# Browser clients connect on port 4443 for real-time telemetry.
 # Also serves /healthz, /api/fleet-config/{vin}, and .well-known endpoint.
-[http_service]
+[[services]]
   internal_port = 8080
-  force_https = true
-  auto_stop_machines = 'stop'
-  auto_start_machines = true
-  min_machines_running = 1
+  protocol = 'tcp'
 
-  [http_service.concurrency]
-    type = 'connections'
-    hard_limit = 250
-    soft_limit = 200
+  [[services.ports]]
+    port = 4443
+    handlers = ['tls', 'http']
 
-  [[http_service.checks]]
+  [[services.http_checks]]
     interval = '10s'
     timeout = '5s'
     grace_period = '10s'
     method = 'GET'
     path = '/healthz'
-
-  # /readyz is served on the metrics port (9090), not the client port (8080).
-  # Fly health checks only reach internal_port, so /healthz is sufficient here.
+    port = 8080
 
 # VM sizing — 512MB to handle mTLS + WebSocket + PostgreSQL connections.
 [[vm]]
