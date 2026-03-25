@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -13,10 +14,26 @@ import (
 
 // vehicleConn tracks the state of a single vehicle WebSocket connection.
 type vehicleConn struct {
-	vin       string
-	conn      *websocket.Conn
-	connected time.Time
-	cancel    context.CancelFunc
+	vin          string
+	conn         *websocket.Conn
+	connected    time.Time
+	cancel       context.CancelFunc
+	lastMessage  atomic.Value // stores time.Time
+	messageCount atomic.Int64
+}
+
+// VehiclePresence provides information about which vehicles are currently
+// connected to the telemetry receiver.
+type VehiclePresence interface {
+	IsConnected(vin string) bool
+	ConnectionInfo(vin string) (ConnInfo, bool)
+}
+
+// ConnInfo describes an active vehicle connection.
+type ConnInfo struct {
+	ConnectedSince time.Time
+	LastMessageAt  time.Time
+	MessageCount   int64
 }
 
 // isNormalClose reports whether the error represents a normal WebSocket
@@ -119,4 +136,30 @@ func (r *Receiver) Shutdown(ctx context.Context) {
 // ConnectedVehicles returns the number of currently connected vehicles.
 func (r *Receiver) ConnectedVehicles() int {
 	return int(r.connCount.Load())
+}
+
+// IsConnected reports whether a vehicle with the given VIN has an active
+// WebSocket connection.
+func (r *Receiver) IsConnected(vin string) bool {
+	_, ok := r.connections.Load(vin)
+	return ok
+}
+
+// ConnectionInfo returns connection details for the given VIN. The second
+// return value is false if the vehicle is not connected.
+func (r *Receiver) ConnectionInfo(vin string) (ConnInfo, bool) {
+	val, ok := r.connections.Load(vin)
+	if !ok {
+		return ConnInfo{}, false
+	}
+	vc := val.(*vehicleConn)
+	var lastMsg time.Time
+	if v := vc.lastMessage.Load(); v != nil {
+		lastMsg = v.(time.Time)
+	}
+	return ConnInfo{
+		ConnectedSince: vc.connected,
+		LastMessageAt:  lastMsg,
+		MessageCount:   vc.messageCount.Load(),
+	}, true
 }

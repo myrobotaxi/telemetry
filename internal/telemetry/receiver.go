@@ -197,23 +197,7 @@ func (r *Receiver) handleConnection(ctx context.Context, vc *vehicleConn) {
 		}
 
 		evt := result.Event
-
-		// Cross-check the envelope VIN (deviceId) against the cert VIN.
-		if result.DeviceID != "" && result.DeviceID != vc.vin {
-			r.logger.Warn("envelope deviceId mismatch, using cert VIN",
-				slog.String("cert_vin", redacted),
-				slog.String("envelope_vin", redactVIN(result.DeviceID)),
-			)
-		}
-
-		// Override the protobuf VIN with the cert VIN for security.
-		if evt.VIN != vc.vin {
-			r.logger.Warn("payload VIN mismatch, using cert VIN",
-				slog.String("cert_vin", redacted),
-				slog.String("payload_vin", redactVIN(evt.VIN)),
-			)
-			evt.VIN = vc.vin
-		}
+		r.reconcileVIN(&evt, result.DeviceID, vc.vin, redacted)
 
 		if err := r.bus.Publish(ctx, events.NewEvent(evt)); err != nil {
 			r.logger.Error("publish telemetry event failed",
@@ -223,6 +207,9 @@ func (r *Receiver) handleConnection(ctx context.Context, vc *vehicleConn) {
 			return
 		}
 
+		vc.lastMessage.Store(time.Now())
+		vc.messageCount.Add(1)
+
 		latency := time.Since(start)
 		r.metrics.ObserveMessageLatency(latency.Seconds())
 		r.logger.Debug("telemetry received",
@@ -231,6 +218,26 @@ func (r *Receiver) handleConnection(ctx context.Context, vc *vehicleConn) {
 			slog.Int("fields", len(evt.Fields)),
 			slog.Duration("latency", latency),
 		)
+	}
+}
+
+// reconcileVIN cross-checks the envelope and payload VINs against the cert
+// VIN and overwrites any mismatch. The cert VIN is authoritative because
+// it was validated during the mTLS handshake.
+func (r *Receiver) reconcileVIN(evt *events.VehicleTelemetryEvent, envelopeVIN, certVIN, redacted string) {
+	if envelopeVIN != "" && envelopeVIN != certVIN {
+		r.logger.Warn("envelope deviceId mismatch, using cert VIN",
+			slog.String("cert_vin", redacted),
+			slog.String("envelope_vin", redactVIN(envelopeVIN)),
+		)
+	}
+
+	if evt.VIN != certVIN {
+		r.logger.Warn("payload VIN mismatch, using cert VIN",
+			slog.String("cert_vin", redacted),
+			slog.String("payload_vin", redactVIN(evt.VIN)),
+		)
+		evt.VIN = certVIN
 	}
 }
 
