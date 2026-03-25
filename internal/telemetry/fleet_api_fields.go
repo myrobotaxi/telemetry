@@ -49,8 +49,16 @@ const (
 // --- Climate ---
 
 const (
-	FleetFieldInsideTemp  = "InsideTemp"
-	FleetFieldOutsideTemp = "OutsideTemp"
+	FleetFieldInsideTemp           = "InsideTemp"
+	FleetFieldOutsideTemp          = "OutsideTemp"
+	FleetFieldHvacPower            = "HvacPower"
+	FleetFieldHvacFanSpeed         = "HvacFanSpeed"
+	FleetFieldDriverTempSetting    = "HvacLeftTemperatureRequest"
+	FleetFieldPassengerTempSetting = "HvacRightTemperatureRequest"
+	FleetFieldDefrostMode          = "DefrostMode"
+	FleetFieldSeatHeaterLeft       = "SeatHeaterLeft"
+	FleetFieldSeatHeaterRight      = "SeatHeaterRight"
+	FleetFieldClimateKeeperMode    = "ClimateKeeperMode"
 )
 
 // --- Vehicle State ---
@@ -112,9 +120,17 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		FleetFieldPackCurrent:         {IntervalSeconds: 30},
 		FleetFieldDetailedChargeState: {IntervalSeconds: 30},
 
-		// Climate — low frequency
-		FleetFieldInsideTemp:  {IntervalSeconds: 60},
-		FleetFieldOutsideTemp: {IntervalSeconds: 60},
+		// Climate — medium/low frequency
+		FleetFieldInsideTemp:           {IntervalSeconds: 60},
+		FleetFieldOutsideTemp:          {IntervalSeconds: 60},
+		FleetFieldHvacPower:            {IntervalSeconds: 10},
+		FleetFieldHvacFanSpeed:         {IntervalSeconds: 30},
+		FleetFieldDriverTempSetting:    {IntervalSeconds: 30},
+		FleetFieldPassengerTempSetting: {IntervalSeconds: 30},
+		FleetFieldDefrostMode:          {IntervalSeconds: 30},
+		FleetFieldSeatHeaterLeft:       {IntervalSeconds: 30},
+		FleetFieldSeatHeaterRight:      {IntervalSeconds: 30},
+		FleetFieldClimateKeeperMode:    {IntervalSeconds: 60},
 
 		// Vehicle state — low frequency
 		FleetFieldOdometer:    {IntervalSeconds: 60},

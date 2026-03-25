@@ -104,3 +104,52 @@ func sentryModeString(sm tpb.SentryModeState) string {
 		return "Unknown"
 	}
 }
+
+// defrostModeString converts a DefrostModeState enum to a human-readable string.
+func defrostModeString(dm tpb.DefrostModeState) string {
+	switch dm {
+	case tpb.DefrostModeState_DefrostModeStateOff:
+		return "Off"
+	case tpb.DefrostModeState_DefrostModeStateNormal:
+		return "Normal"
+	case tpb.DefrostModeState_DefrostModeStateMax:
+		return "Max"
+	case tpb.DefrostModeState_DefrostModeStateAutoDefog:
+		return "AutoDefog"
+	default:
+		return "Unknown"
+	}
+}
+
+// climateKeeperModeString converts a ClimateKeeperModeState enum to a
+// human-readable string.
+func climateKeeperModeString(ck tpb.ClimateKeeperModeState) string {
+	switch ck {
+	case tpb.ClimateKeeperModeState_ClimateKeeperModeStateOff:
+		return "Off"
+	case tpb.ClimateKeeperModeState_ClimateKeeperModeStateOn:
+		return "On"
+	case tpb.ClimateKeeperModeState_ClimateKeeperModeStateDog:
+		return "Dog"
+	case tpb.ClimateKeeperModeState_ClimateKeeperModeStateParty:
+		return "Party"
+	default:
+		return "Unknown"
+	}
+}
+
+// hvacPowerString converts an HvacPowerState enum to a human-readable string.
+func hvacPowerString(hp tpb.HvacPowerState) string {
+	switch hp {
+	case tpb.HvacPowerState_HvacPowerStateOff:
+		return "Off"
+	case tpb.HvacPowerState_HvacPowerStateOn:
+		return "On"
+	case tpb.HvacPowerState_HvacPowerStatePrecondition:
+		return "Precondition"
+	case tpb.HvacPowerState_HvacPowerStateOverheatProtect:
+		return "OverheatProtect"
+	default:
+		return "Unknown"
+	}
+}

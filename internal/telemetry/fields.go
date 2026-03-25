@@ -21,9 +21,17 @@ const (
 	FieldEstBatteryRange    FieldName = "estimatedRange"
 	FieldChargeState        FieldName = "chargeState"
 	FieldOdometer           FieldName = "odometer"
-	FieldInsideTemp         FieldName = "insideTemp"
-	FieldOutsideTemp        FieldName = "outsideTemp"
-	FieldDestinationName    FieldName = "destinationName"
+	FieldInsideTemp           FieldName = "insideTemp"
+	FieldOutsideTemp          FieldName = "outsideTemp"
+	FieldHvacPower            FieldName = "hvacPower"
+	FieldHvacFanSpeed         FieldName = "hvacFanSpeed"
+	FieldDriverTempSetting    FieldName = "driverTempSetting"
+	FieldPassengerTempSetting FieldName = "passengerTempSetting"
+	FieldDefrostMode          FieldName = "defrostMode"
+	FieldSeatHeaterLeft       FieldName = "seatHeaterLeft"
+	FieldSeatHeaterRight      FieldName = "seatHeaterRight"
+	FieldClimateKeeperMode    FieldName = "climateKeeperMode"
+	FieldDestinationName      FieldName = "destinationName"
 	FieldRouteLine          FieldName = "routeLine"
 	FieldFSDMiles           FieldName = "fsdMilesSinceReset"
 	FieldBatteryLevel       FieldName = "batteryLevel"
@@ -58,9 +66,17 @@ var fieldMap = map[tpb.Field]FieldName{
 	tpb.Field_EstBatteryRange:          FieldEstBatteryRange,
 	tpb.Field_DetailedChargeState:      FieldChargeState,
 	tpb.Field_Odometer:                 FieldOdometer,
-	tpb.Field_InsideTemp:               FieldInsideTemp,
-	tpb.Field_OutsideTemp:              FieldOutsideTemp,
-	tpb.Field_DestinationName:          FieldDestinationName,
+	tpb.Field_InsideTemp:                  FieldInsideTemp,
+	tpb.Field_OutsideTemp:                 FieldOutsideTemp,
+	tpb.Field_HvacPower:                   FieldHvacPower,
+	tpb.Field_HvacFanSpeed:                FieldHvacFanSpeed,
+	tpb.Field_HvacLeftTemperatureRequest:  FieldDriverTempSetting,
+	tpb.Field_HvacRightTemperatureRequest: FieldPassengerTempSetting,
+	tpb.Field_DefrostMode:                 FieldDefrostMode,
+	tpb.Field_SeatHeaterLeft:              FieldSeatHeaterLeft,
+	tpb.Field_SeatHeaterRight:             FieldSeatHeaterRight,
+	tpb.Field_ClimateKeeperMode:           FieldClimateKeeperMode,
+	tpb.Field_DestinationName:             FieldDestinationName,
 	tpb.Field_RouteLine:                FieldRouteLine,
 	tpb.Field_SelfDrivingMilesSinceReset: FieldFSDMiles,
 	tpb.Field_BatteryLevel:             FieldBatteryLevel,

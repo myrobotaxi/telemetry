@@ -26,6 +26,15 @@ func convertValue(field tpb.Field, v *tpb.Value) (events.TelemetryValue, error) 
 		return convertSentryMode(v)
 	case tpb.Field_Locked:
 		return convertBool(v)
+	case tpb.Field_DefrostMode:
+		return convertDefrostMode(v)
+	case tpb.Field_ClimateKeeperMode:
+		return convertClimateKeeperMode(v)
+	case tpb.Field_HvacPower:
+		return convertHvacPower(v)
+	case tpb.Field_InsideTemp, tpb.Field_OutsideTemp,
+		tpb.Field_HvacLeftTemperatureRequest, tpb.Field_HvacRightTemperatureRequest:
+		return convertTemperature(v)
 	default:
 		return convertNumericOrString(v)
 	}
@@ -170,6 +179,78 @@ func convertNumericOrString(v *tpb.Value) (events.TelemetryValue, error) {
 			"%w: expected numeric or string, got %T", ErrUnexpectedValueType, v.Value,
 		)
 	}
+}
+
+// convertDefrostMode extracts a DefrostModeState enum and returns it as a string.
+func convertDefrostMode(v *tpb.Value) (events.TelemetryValue, error) {
+	switch val := v.Value.(type) {
+	case *tpb.Value_DefrostModeValue:
+		s := defrostModeString(val.DefrostModeValue)
+		return events.TelemetryValue{StringVal: &s}, nil
+	case *tpb.Value_StringValue:
+		s := val.StringValue
+		return events.TelemetryValue{StringVal: &s}, nil
+	default:
+		return events.TelemetryValue{}, fmt.Errorf(
+			"%w: expected defrostMode or string, got %T", ErrUnexpectedValueType, v.Value,
+		)
+	}
+}
+
+// convertClimateKeeperMode extracts a ClimateKeeperModeState enum and returns
+// it as a string.
+func convertClimateKeeperMode(v *tpb.Value) (events.TelemetryValue, error) {
+	switch val := v.Value.(type) {
+	case *tpb.Value_ClimateKeeperModeValue:
+		s := climateKeeperModeString(val.ClimateKeeperModeValue)
+		return events.TelemetryValue{StringVal: &s}, nil
+	case *tpb.Value_StringValue:
+		s := val.StringValue
+		return events.TelemetryValue{StringVal: &s}, nil
+	default:
+		return events.TelemetryValue{}, fmt.Errorf(
+			"%w: expected climateKeeperMode or string, got %T", ErrUnexpectedValueType, v.Value,
+		)
+	}
+}
+
+// convertHvacPower extracts an HvacPowerState enum and returns it as a string.
+func convertHvacPower(v *tpb.Value) (events.TelemetryValue, error) {
+	switch val := v.Value.(type) {
+	case *tpb.Value_HvacPowerValue:
+		s := hvacPowerString(val.HvacPowerValue)
+		return events.TelemetryValue{StringVal: &s}, nil
+	case *tpb.Value_StringValue:
+		s := val.StringValue
+		return events.TelemetryValue{StringVal: &s}, nil
+	default:
+		return events.TelemetryValue{}, fmt.Errorf(
+			"%w: expected hvacPower or string, got %T", ErrUnexpectedValueType, v.Value,
+		)
+	}
+}
+
+// convertTemperature extracts a numeric Celsius value and converts it to
+// Fahrenheit. Tesla sends temperatures in Celsius; the frontend expects
+// Fahrenheit for US users, so we convert at the telemetry pipeline boundary
+// so all downstream consumers (WebSocket, database) receive Fahrenheit.
+func convertTemperature(v *tpb.Value) (events.TelemetryValue, error) {
+	tv, err := convertNumericOrString(v)
+	if err != nil {
+		return tv, err
+	}
+
+	if tv.FloatVal != nil {
+		f := celsiusToFahrenheit(*tv.FloatVal)
+		return events.TelemetryValue{FloatVal: &f}, nil
+	}
+
+	return tv, nil
+}
+
+// celsiusToFahrenheit converts a Celsius temperature to Fahrenheit.
+func celsiusToFahrenheit(c float64) float64 {
+	return c*9.0/5.0 + 32.0
 }
 
 // parseStringValue attempts to parse a string into a numeric TelemetryValue.
