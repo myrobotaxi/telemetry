@@ -14,7 +14,6 @@ import (
 // VehiclePresence provides information about which vehicles are currently
 // connected to the telemetry receiver.
 type VehiclePresence interface {
-	IsConnected(vin string) bool
 	ConnectionInfo(vin string) (ConnInfo, bool)
 }
 

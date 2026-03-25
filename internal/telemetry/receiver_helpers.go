@@ -124,13 +124,6 @@ func (r *Receiver) ConnectedVehicles() int {
 	return int(r.connCount.Load())
 }
 
-// IsConnected reports whether a vehicle with the given VIN has an active
-// WebSocket connection.
-func (r *Receiver) IsConnected(vin string) bool {
-	_, ok := r.connections.Load(vin)
-	return ok
-}
-
 // ConnectionInfo returns connection details for the given VIN. The second
 // return value is false if the vehicle is not connected.
 func (r *Receiver) ConnectionInfo(vin string) (ConnInfo, bool) {

@@ -21,10 +21,6 @@ type stubVehiclePresence struct {
 	connected bool
 }
 
-func (s *stubVehiclePresence) IsConnected(_ string) bool {
-	return s.connected
-}
-
 func (s *stubVehiclePresence) ConnectionInfo(_ string) (ConnInfo, bool) {
 	return s.info, s.connected
 }
