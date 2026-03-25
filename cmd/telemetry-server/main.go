@@ -175,6 +175,15 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 		OriginPatterns: originPatterns,
 	}))
 
+	// --- Vehicle status endpoint (always available) ---
+	statusHandler := telemetry.NewVehicleStatusHandler(
+		authenticator,
+		&vehicleOwnerAdapter{repo: vehicleRepo},
+		recv,
+		logger.With(slog.String("component", "vehicle-status")),
+	)
+	srv.HandleFunc("GET /api/vehicle-status/{vin}", statusHandler.ServeHTTP)
+
 	// --- Fleet config push endpoint (optional — requires proxy config) ---
 	if cfg.Proxy().URL != "" && cfg.Proxy().FleetTelemetryHostname != "" {
 		fleetClient := telemetry.NewFleetAPIClient(telemetry.FleetAPIConfig{
