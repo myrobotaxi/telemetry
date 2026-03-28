@@ -89,9 +89,13 @@ func applyLocation(u *VehicleUpdate, val events.TelemetryValue) bool {
 }
 
 // applyDestLocation applies a LocationVal to DestinationLatitude and
-// DestinationLongitude fields.
+// DestinationLongitude fields. Zero-zero coordinates (protobuf default
+// for "not set") are ignored to prevent overwriting real values.
 func applyDestLocation(u *VehicleUpdate, val events.TelemetryValue) bool {
 	if val.LocationVal == nil {
+		return false
+	}
+	if val.LocationVal.Latitude == 0 && val.LocationVal.Longitude == 0 {
 		return false
 	}
 	u.DestinationLatitude = &val.LocationVal.Latitude
@@ -100,9 +104,12 @@ func applyDestLocation(u *VehicleUpdate, val events.TelemetryValue) bool {
 }
 
 // applyOriginLocation applies a LocationVal to OriginLatitude and
-// OriginLongitude fields.
+// OriginLongitude fields. Zero-zero coordinates are ignored.
 func applyOriginLocation(u *VehicleUpdate, val events.TelemetryValue) bool {
 	if val.LocationVal == nil {
+		return false
+	}
+	if val.LocationVal.Latitude == 0 && val.LocationVal.Longitude == 0 {
 		return false
 	}
 	u.OriginLatitude = &val.LocationVal.Latitude

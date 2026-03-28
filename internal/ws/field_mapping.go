@@ -84,8 +84,17 @@ func mapFieldsForClient(fields map[string]events.TelemetryValue) map[string]any 
 
 // splitLocationField adds a LocationVal as separate latitude/longitude keys
 // to the output map. If the LocationVal is nil, no keys are added.
+// For origin and destination locations, zero-zero coordinates (protobuf
+// default for "not set") are skipped to prevent overwriting real values.
 func splitLocationField(out map[string]any, name string, val events.TelemetryValue) {
 	if val.LocationVal == nil {
+		return
+	}
+	// Skip zero-zero for origin/destination — protobuf default means "not set".
+	// Vehicle Location is not skipped because it updates frequently and 0,0 is
+	// filtered upstream by the minimum_delta config.
+	if name != "location" &&
+		val.LocationVal.Latitude == 0 && val.LocationVal.Longitude == 0 {
 		return
 	}
 	latLng := locationFieldSplit[name]
