@@ -23,6 +23,9 @@ var fieldAppliers = map[telemetry.FieldName]fieldApplier{
 	telemetry.FieldOdometer:        applyFloatAsInt(func(u *VehicleUpdate) **int { return &u.OdometerMiles }),
 	telemetry.FieldGear:            applyString(func(u *VehicleUpdate) **string { return &u.GearPosition }),
 	telemetry.FieldLocation:        applyLocation,
+	telemetry.FieldDestinationName: applyString(func(u *VehicleUpdate) **string { return &u.DestinationName }),
+	telemetry.FieldDestLocation:    applyDestLocation,
+	telemetry.FieldOriginLocation:  applyOriginLocation,
 }
 
 // mapTelemetryToUpdate converts a map of telemetry field values into a
@@ -82,6 +85,28 @@ func applyLocation(u *VehicleUpdate, val events.TelemetryValue) bool {
 	}
 	u.Latitude = &val.LocationVal.Latitude
 	u.Longitude = &val.LocationVal.Longitude
+	return true
+}
+
+// applyDestLocation applies a LocationVal to DestinationLatitude and
+// DestinationLongitude fields.
+func applyDestLocation(u *VehicleUpdate, val events.TelemetryValue) bool {
+	if val.LocationVal == nil {
+		return false
+	}
+	u.DestinationLatitude = &val.LocationVal.Latitude
+	u.DestinationLongitude = &val.LocationVal.Longitude
+	return true
+}
+
+// applyOriginLocation applies a LocationVal to OriginLatitude and
+// OriginLongitude fields.
+func applyOriginLocation(u *VehicleUpdate, val events.TelemetryValue) bool {
+	if val.LocationVal == nil {
+		return false
+	}
+	u.OriginLatitude = &val.LocationVal.Latitude
+	u.OriginLongitude = &val.LocationVal.Longitude
 	return true
 }
 
