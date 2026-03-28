@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -22,6 +23,7 @@ import (
 	"github.com/tnando/my-robo-taxi-telemetry/internal/config"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/drives"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/geocode"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/server"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/telemetry"
@@ -121,9 +123,12 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	driveRepo := store.NewDriveRepo(db.Pool(), store.NoopMetrics{})
 	accountRepo := store.NewAccountRepo(db.Pool())
 
+	// --- Geocoder (optional — requires MAPBOX_TOKEN) ---
+	geo := newGeocoder(cfg.MapboxToken(), cfg.Drives().GeocodeTimeout, logger)
+
 	// --- Persistence writer ---
 	writer := store.NewWriter(
-		vehicleRepo, driveRepo, vehicleRepo, bus,
+		vehicleRepo, driveRepo, vehicleRepo, bus, geo,
 		logger.With(slog.String("component", "writer")),
 		store.WriterConfig{
 			FlushInterval: cfg.Telemetry().BatchWriteInterval,
@@ -292,3 +297,13 @@ func buildTeslaTLS(cfg config.TLSConfig) (*tls.Config, error) {
 	return tlsCfg, nil
 }
 
+// newGeocoder creates a Geocoder based on whether a Mapbox token is
+// available. Returns NoopGeocoder when the token is empty.
+func newGeocoder(token string, timeout time.Duration, logger *slog.Logger) geocode.Geocoder {
+	if g := geocode.NewMapboxGeocoder(token, timeout); g != nil {
+		logger.Info("Mapbox reverse geocoding enabled for drive addresses")
+		return g
+	}
+	logger.Warn("Mapbox token not set — drive addresses will show raw coordinates")
+	return geocode.NoopGeocoder{}
+}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/geocode"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/telemetry"
 )
 
@@ -141,7 +142,7 @@ func newTestBus(t *testing.T) *events.ChannelBus {
 
 func newTestWriter(t *testing.T, bus events.Bus, vehicles vehicleUpdater, drives drivePersister, lookup vinLookup) *Writer {
 	t.Helper()
-	w := NewWriter(vehicles, drives, lookup, bus, slog.Default(), WriterConfig{
+	w := NewWriter(vehicles, drives, lookup, bus, geocode.NoopGeocoder{}, slog.Default(), WriterConfig{
 		FlushInterval: 50 * time.Millisecond,
 		BatchSize:     1000,
 	})
@@ -411,7 +412,7 @@ func TestWriter_BatchSizeTriggersFlush(t *testing.T) {
 	lookup := &stubVINLookup{vehicles: map[string]Vehicle{}}
 
 	// Set batch size very low so it triggers before the timer.
-	w := NewWriter(vehicles, drives, lookup, bus, slog.Default(), WriterConfig{
+	w := NewWriter(vehicles, drives, lookup, bus, geocode.NoopGeocoder{}, slog.Default(), WriterConfig{
 		FlushInterval: 10 * time.Second, // very long — should not trigger
 		BatchSize:     3,
 	})

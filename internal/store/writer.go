@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/geocode"
 )
 
 // vehicleUpdater is the consumer-site interface for writing vehicle
@@ -47,6 +48,7 @@ type Writer struct {
 	drives   drivePersister
 	bus      events.Bus
 	vinCache *vinCache
+	geocoder geocode.Geocoder
 	logger   *slog.Logger
 	cfg      WriterConfig
 
@@ -62,12 +64,15 @@ type Writer struct {
 }
 
 // NewWriter creates a Writer that will subscribe to telemetry and drive
-// events, coalesce vehicle updates, and flush them periodically.
+// events, coalesce vehicle updates, and flush them periodically. The
+// geocoder is used to reverse geocode drive start/end locations. Pass
+// geocode.NoopGeocoder{} to disable geocoding.
 func NewWriter(
 	vehicles vehicleUpdater,
 	drives drivePersister,
 	vinLookup vinLookup,
 	bus events.Bus,
+	geocoder geocode.Geocoder,
 	logger *slog.Logger,
 	cfg WriterConfig,
 ) *Writer {
@@ -78,13 +83,14 @@ func NewWriter(
 		cfg.BatchSize = DefaultWriterConfig().BatchSize
 	}
 	return &Writer{
-		vehicles: vehicles,
-		drives:   drives,
-		bus:      bus,
-		vinCache: newVINCache(vinLookup, logger),
-		logger:   logger,
-		cfg:      cfg,
-		pending:  make(map[string]*VehicleUpdate),
+		vehicles:  vehicles,
+		drives:    drives,
+		bus:       bus,
+		vinCache:  newVINCache(vinLookup, logger),
+		geocoder:  geocoder,
+		logger:    logger,
+		cfg:       cfg,
+		pending:   make(map[string]*VehicleUpdate),
 		done:      make(chan struct{}),
 		flushDone: make(chan struct{}),
 	}
