@@ -6,8 +6,10 @@ import "fmt"
 // [lat, lng] coordinate pairs. The algorithm is documented at:
 // https://developers.google.com/maps/documentation/utilities/polylinealgorithm
 //
-// Returns an error if the encoded string is malformed (e.g., truncated
-// mid-character).
+// Tesla vehicles may truncate long route polylines, producing strings that
+// end mid-value. This decoder is tolerant of truncation: it returns all
+// complete coordinate pairs decoded before the truncation point. An error
+// is only returned if zero coordinates could be decoded.
 func DecodePolyline(encoded string) ([][]float64, error) {
 	var coords [][]float64
 	lat, lng := 0, 0
@@ -16,14 +18,16 @@ func DecodePolyline(encoded string) ([][]float64, error) {
 	for i < len(encoded) {
 		dlat, n, err := decodeNextValue(encoded, i)
 		if err != nil {
-			return nil, fmt.Errorf("DecodePolyline: latitude at byte %d: %w", i, err)
+			// Truncated mid-latitude — return what we have.
+			break
 		}
 		i += n
 		lat += dlat
 
 		dlng, n, err := decodeNextValue(encoded, i)
 		if err != nil {
-			return nil, fmt.Errorf("DecodePolyline: longitude at byte %d: %w", i, err)
+			// Truncated mid-longitude — return what we have.
+			break
 		}
 		i += n
 		lng += dlng
@@ -32,6 +36,10 @@ func DecodePolyline(encoded string) ([][]float64, error) {
 			float64(lat) / 1e5,
 			float64(lng) / 1e5,
 		})
+	}
+
+	if len(coords) == 0 {
+		return nil, fmt.Errorf("DecodePolyline: no valid coordinates in polyline (len=%d)", len(encoded))
 	}
 	return coords, nil
 }

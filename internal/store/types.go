@@ -19,41 +19,51 @@ const (
 // Vehicle is a read model of the Prisma "Vehicle" table. Only the fields
 // the telemetry server needs are included.
 type Vehicle struct {
-	ID             string
-	UserID         string
-	VIN            string
-	Name           string
-	Status         VehicleStatus
-	ChargeLevel    int
-	EstimatedRange int
-	Speed          int
-	GearPosition   *string // nullable
-	Heading        int
-	Latitude       float64
-	Longitude      float64
-	InteriorTemp   int
-	ExteriorTemp   int
-	OdometerMiles  int
-	LastUpdated    time.Time
+	ID                   string
+	UserID               string
+	VIN                  string
+	Name                 string
+	Status               VehicleStatus
+	ChargeLevel          int
+	EstimatedRange       int
+	Speed                int
+	GearPosition         *string // nullable
+	Heading              int
+	Latitude             float64
+	Longitude            float64
+	InteriorTemp         int
+	ExteriorTemp         int
+	OdometerMiles        int
+	DestinationName      *string  // nullable
+	DestinationLatitude  *float64 // nullable
+	DestinationLongitude *float64 // nullable
+	OriginLatitude       *float64 // nullable
+	OriginLongitude      *float64 // nullable
+	LastUpdated          time.Time
 }
 
 // VehicleUpdate holds the subset of vehicle fields that can change from
 // a single telemetry event. Nil pointer fields are not written to the
 // database, allowing partial updates.
 type VehicleUpdate struct {
-	Speed          *int
-	ChargeLevel    *int
-	EstimatedRange *int
-	GearPosition   *string
-	Heading        *int
-	Latitude       *float64
-	Longitude      *float64
-	InteriorTemp   *int
-	ExteriorTemp   *int
-	OdometerMiles  *int
-	LocationName   *string
-	LocationAddr   *string
-	LastUpdated    time.Time // always set
+	Speed                *int
+	ChargeLevel          *int
+	EstimatedRange       *int
+	GearPosition         *string
+	Heading              *int
+	Latitude             *float64
+	Longitude            *float64
+	InteriorTemp         *int
+	ExteriorTemp         *int
+	OdometerMiles        *int
+	LocationName         *string
+	LocationAddr         *string
+	DestinationName      *string
+	DestinationLatitude  *float64
+	DestinationLongitude *float64
+	OriginLatitude       *float64
+	OriginLongitude      *float64
+	LastUpdated          time.Time // always set
 }
 
 // DriveRecord maps to the Prisma "Drive" table.

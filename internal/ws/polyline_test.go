@@ -31,12 +31,14 @@ func TestDecodePolyline(t *testing.T) {
 		{
 			name:    "empty string",
 			encoded: "",
-			want:    nil,
+			wantErr: true,
 		},
 		{
-			name:    "truncated mid-latitude",
+			name:    "truncated mid-latitude returns complete pairs before truncation",
 			encoded: "_p~iF~ps|U_u",
-			wantErr: true,
+			want: [][]float64{
+				{38.5, -120.2},
+			},
 		},
 	}
 
