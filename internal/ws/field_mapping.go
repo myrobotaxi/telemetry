@@ -106,9 +106,16 @@ func splitLocationField(out map[string]any, name string, val events.TelemetryVal
 // the resulting coordinates as "navRouteCoordinates" in [lng, lat] (Mapbox)
 // format. Empty or nil strings are silently skipped.
 func decodeRouteLineField(out map[string]any, val events.TelemetryValue) {
-	if val.StringVal == nil || *val.StringVal == "" {
+	if val.StringVal == nil {
+		slog.Warn("decodeRouteLineField: routeLine arrived but StringVal is nil, unexpected type")
 		return
 	}
+	if *val.StringVal == "" {
+		return
+	}
+	slog.Info("decodeRouteLineField: routeLine received",
+		slog.Int("encoded_len", len(*val.StringVal)),
+	)
 	coords, err := DecodePolyline(*val.StringVal)
 	if err != nil {
 		slog.Warn("mapFieldsForClient: failed to decode routeLine",
