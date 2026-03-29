@@ -288,8 +288,8 @@ func TestBroadcaster_Stop_Unsubscribes(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	if len(b.subs) != 4 {
-		t.Fatalf("expected 4 subscriptions, got %d", len(b.subs))
+	if len(b.subs) != 5 {
+		t.Fatalf("expected 5 subscriptions, got %d", len(b.subs))
 	}
 
 	if err := b.Stop(); err != nil {
@@ -924,6 +924,153 @@ func TestUnwrapValue(t *testing.T) {
 				t.Fatalf("unwrapValue() = %v (%T), want %v (%T)", got, got, tt.want, tt.want)
 			}
 		})
+	}
+}
+
+
+func TestBroadcaster_HandleDriveUpdated(t *testing.T) {
+	bus := events.NewChannelBus(events.DefaultBusConfig(), events.NoopBusMetrics{}, slog.Default())
+	t.Cleanup(func() { _ = bus.Close(context.Background()) })
+
+	resolver := newStubVINResolver(map[string]string{
+		"5YJ3E1EA1NF000001": "vehicle-id-1",
+	})
+
+	hub := NewHub(slog.Default(), NoopHubMetrics{})
+	t.Cleanup(hub.Stop)
+
+	b := NewBroadcaster(hub, bus, resolver, slog.Default())
+	// Override accumulator with batch size 2 for faster test feedback.
+	b.routes = newRouteAccumulator(2, 0)
+
+	ctx := context.Background()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+
+	now := time.Date(2026, 3, 28, 12, 0, 0, 0, time.UTC)
+
+	// Publish first route point — should not trigger a broadcast.
+	event1 := events.NewEvent(events.DriveUpdatedEvent{
+		VIN:     "5YJ3E1EA1NF000001",
+		DriveID: "drive-abc",
+		RoutePoint: events.RoutePoint{
+			Latitude:  37.7749,
+			Longitude: -122.4194,
+			Speed:     35.0,
+			Heading:   180.0,
+			Timestamp: now,
+		},
+	})
+
+	if err := bus.Publish(ctx, event1); err != nil {
+		t.Fatalf("Publish event1: %v", err)
+	}
+
+	// Brief pause to let async handler run.
+	time.Sleep(50 * time.Millisecond)
+
+	// Resolver should not have been called yet (batch not full).
+	resolver.mu.RLock()
+	callsBefore := len(resolver.callLog)
+	resolver.mu.RUnlock()
+
+	// Publish second route point — batch size 2 triggers flush + VIN resolution.
+	event2 := events.NewEvent(events.DriveUpdatedEvent{
+		VIN:     "5YJ3E1EA1NF000001",
+		DriveID: "drive-abc",
+		RoutePoint: events.RoutePoint{
+			Latitude:  37.7750,
+			Longitude: -122.4195,
+			Speed:     40.0,
+			Heading:   185.0,
+			Timestamp: now.Add(time.Second),
+		},
+	})
+
+	if err := bus.Publish(ctx, event2); err != nil {
+		t.Fatalf("Publish event2: %v", err)
+	}
+
+	waitForCondition(t, func() bool {
+		resolver.mu.RLock()
+		defer resolver.mu.RUnlock()
+		return len(resolver.callLog) > callsBefore
+	})
+}
+
+func TestBroadcaster_DriveEndedClearsAccumulator(t *testing.T) {
+	bus := events.NewChannelBus(events.DefaultBusConfig(), events.NoopBusMetrics{}, slog.Default())
+	t.Cleanup(func() { _ = bus.Close(context.Background()) })
+
+	resolver := newStubVINResolver(map[string]string{
+		"5YJ3E1EA1NF000001": "vehicle-id-1",
+	})
+
+	hub := NewHub(slog.Default(), NoopHubMetrics{})
+	t.Cleanup(hub.Stop)
+
+	b := NewBroadcaster(hub, bus, resolver, slog.Default())
+	// Large batch so points accumulate without flushing.
+	b.routes = newRouteAccumulator(100, 0)
+
+	ctx := context.Background()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+
+	now := time.Date(2026, 3, 28, 12, 0, 0, 0, time.UTC)
+
+	// Accumulate some route points.
+	for i := 0; i < 3; i++ {
+		event := events.NewEvent(events.DriveUpdatedEvent{
+			VIN:     "5YJ3E1EA1NF000001",
+			DriveID: "drive-abc",
+			RoutePoint: events.RoutePoint{
+				Latitude:  37.7749 + float64(i)*0.001,
+				Longitude: -122.4194 + float64(i)*0.001,
+				Speed:     35.0,
+				Heading:   180.0,
+				Timestamp: now.Add(time.Duration(i) * time.Second),
+			},
+		})
+		if err := bus.Publish(ctx, event); err != nil {
+			t.Fatalf("Publish route point %d: %v", i, err)
+		}
+	}
+
+	// Wait for route points to be processed.
+	time.Sleep(100 * time.Millisecond)
+
+	// End the drive — flushes remaining points and clears accumulator.
+	endEvent := events.NewEvent(events.DriveEndedEvent{
+		VIN:     "5YJ3E1EA1NF000001",
+		DriveID: "drive-abc",
+		Stats: events.DriveStats{
+			Distance: 5.0,
+			Duration: 10 * time.Minute,
+			AvgSpeed: 30.0,
+			MaxSpeed: 45.0,
+		},
+		EndedAt: now.Add(10 * time.Minute),
+	})
+
+	if err := bus.Publish(ctx, endEvent); err != nil {
+		t.Fatalf("Publish drive ended: %v", err)
+	}
+
+	waitForCondition(t, func() bool {
+		resolver.mu.RLock()
+		defer resolver.mu.RUnlock()
+		return len(resolver.callLog) > 0
+	})
+
+	// Accumulator should be cleared for this VIN.
+	remaining := b.routes.Flush("5YJ3E1EA1NF000001")
+	if remaining != nil {
+		t.Fatalf("expected nil after drive ended, got %d points", len(remaining))
 	}
 }
 
