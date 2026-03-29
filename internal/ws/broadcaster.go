@@ -19,6 +19,7 @@ type Broadcaster struct {
 	resolver VINResolver
 	logger   *slog.Logger
 	subs     []events.Subscription
+	routes   *routeAccumulator
 }
 
 // NewBroadcaster creates a Broadcaster ready to start. Call Start to begin
@@ -29,6 +30,7 @@ func NewBroadcaster(hub *Hub, bus events.Bus, resolver VINResolver, logger *slog
 		bus:      bus,
 		resolver: resolver,
 		logger:   logger,
+		routes:   newRouteAccumulator(defaultRouteBatchSize, defaultRouteFlushInterval),
 	}
 }
 
@@ -43,6 +45,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	subscriptions := []topicHandler{
 		{events.TopicVehicleTelemetry, b.makeHandler(b.handleTelemetry)},
 		{events.TopicDriveStarted, b.makeHandler(b.handleDriveStarted)},
+		{events.TopicDriveUpdated, b.makeHandler(b.handleDriveUpdated)},
 		{events.TopicDriveEnded, b.makeHandler(b.handleDriveEnded)},
 		{events.TopicConnectivity, b.makeHandler(b.handleConnectivity)},
 	}
@@ -184,7 +187,8 @@ func (b *Broadcaster) handleDriveStarted(ctx context.Context, event events.Event
 }
 
 // handleDriveEnded transforms a DriveEndedEvent into a drive_ended
-// message and broadcasts it.
+// message and broadcasts it. It also flushes any remaining accumulated
+// route points and clears the accumulator for the vehicle.
 func (b *Broadcaster) handleDriveEnded(ctx context.Context, event events.Event) {
 	payload, ok := event.Payload.(events.DriveEndedEvent)
 	if !ok {
@@ -202,6 +206,12 @@ func (b *Broadcaster) handleDriveEnded(ctx context.Context, event events.Event) 
 		)
 		return
 	}
+
+	// Flush any remaining route points before sending drive_ended.
+	if remaining := b.routes.Flush(payload.VIN); len(remaining) > 0 {
+		b.broadcastRoutePoints(ctx, event.ID, payload.VIN, remaining)
+	}
+	b.routes.Clear(payload.VIN)
 
 	msg, err := marshalWSMessage(msgTypeDriveEnded, driveEndedPayload{
 		VehicleID: vehicleID,
