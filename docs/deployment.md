@@ -1,7 +1,7 @@
 # Deployment Guide
 
 This document covers building the Docker image, running the stack locally with
-docker compose, deploying to Railway, and setting up TLS certificates.
+docker compose, deploying to Fly.io, and setting up TLS certificates.
 
 ---
 
@@ -108,48 +108,39 @@ CI can use the exit code directly.
 
 ---
 
-## Deploying to Railway (Phase 1)
+## Deploying to Fly.io
 
-Railway reads `railway.toml` and builds from the `Dockerfile` automatically.
+Deployment to Fly.io is handled automatically by the CI pipeline (`ci.yml`).
+On every push to `main` (after all CI jobs pass), the `deploy` job runs
+`flyctl deploy --remote-only` using a `FLY_API_TOKEN` secret.
 
-### Steps
+### Manual deploy (if needed)
 
-1. Install the Railway CLI:
-
-   ```bash
-   npm install -g @railway/cli
-   railway login
-   ```
-
-2. Link the project:
+1. Install the Fly CLI:
 
    ```bash
-   railway link
+   curl -L https://fly.io/install.sh | sh
+   fly auth login
    ```
 
-3. Set secrets via the Railway dashboard or CLI:
+2. Deploy:
 
    ```bash
-   railway variables set DATABASE_URL="postgres://..."
-   railway variables set AUTH_SECRET="$(openssl rand -hex 32)"
-   railway variables set LOG_FORMAT=json
+   fly deploy --remote-only
    ```
 
-4. Deploy:
+   Fly.io reads `fly.toml`, builds the Dockerfile, and runs health checks
+   before routing traffic to the new release.
 
-   ```bash
-   railway up
-   ```
+### Secrets
 
-   Railway detects `railway.toml`, builds the Dockerfile, and exposes the
-   service. The healthcheck polls `/healthz` every 10 seconds.
+Set secrets via the Fly CLI:
 
-### Port mapping on Railway
-
-Railway automatically routes external HTTPS traffic to the process. Set the
-`PORT` environment variable in the Railway dashboard to `8080` so the client
-WebSocket is the public-facing port. The Tesla mTLS port (443) requires a
-Railway TCP proxy — configure it under **Service → Networking → Add TCP Port**.
+```bash
+fly secrets set DATABASE_URL="postgres://..."
+fly secrets set AUTH_SECRET="$(openssl rand -hex 32)"
+fly secrets set LOG_FORMAT=json
+```
 
 ---
 
@@ -196,8 +187,8 @@ certbot certonly --standalone -d your-domain.example.com
 
 After obtaining certs:
 
-1. Mount them into the container or copy them to the Railway volume.
-2. Update `DATABASE_URL` and `AUTH_SECRET` in Railway variables.
+1. Mount them into the container or set them as Fly.io secrets.
+2. Update `DATABASE_URL` and `AUTH_SECRET` via `fly secrets set`.
 3. Re-push the Fleet Telemetry config to Tesla:
 
    ```bash
@@ -207,7 +198,7 @@ After obtaining certs:
 ### Certificate renewal
 
 Let's Encrypt certificates expire every 90 days. Automate renewal with a cron
-job or Railway CronJob:
+job:
 
 ```bash
 # renew and re-push fleet config
@@ -227,7 +218,7 @@ server. Alert when it drops below 30 days.
 | `/readyz` | 8080 | Readiness | DB connected and event bus active |
 | `/metrics` | 9090 | Metrics | Always (Prometheus scrape target) |
 
-Railway's healthcheck polls `/healthz`. Kubernetes readiness probes should use
+Fly.io's healthcheck polls `/healthz`. Kubernetes readiness probes should use
 `/readyz` to gate traffic until the service is fully initialised.
 
 ---
