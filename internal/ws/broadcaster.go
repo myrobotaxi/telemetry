@@ -143,6 +143,13 @@ func (b *Broadcaster) handleTelemetry(ctx context.Context, event events.Event) {
 		return
 	}
 
+	// Diagnostic: confirm navRouteCoordinates makes it to broadcast
+	if _, hasNav := fields["navRouteCoordinates"]; hasNav {
+		b.logger.Info("broadcaster.handleTelemetry: broadcasting navRouteCoordinates",
+			slog.String("vehicle_id", vehicleID),
+		)
+	}
+
 	b.hub.Broadcast(vehicleID, msg)
 }
 

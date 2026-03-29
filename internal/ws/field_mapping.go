@@ -129,6 +129,19 @@ func decodeRouteLineField(out map[string]any, val events.TelemetryValue) {
 		mapboxCoords[i] = []float64{c[1], c[0]}
 	}
 	out["navRouteCoordinates"] = mapboxCoords
+
+	// Diagnostic: log first/last coords and count so we can verify the route
+	if len(mapboxCoords) > 0 {
+		first := mapboxCoords[0]
+		last := mapboxCoords[len(mapboxCoords)-1]
+		slog.Info("decodeRouteLineField: navRouteCoordinates set",
+			slog.Int("points", len(mapboxCoords)),
+			slog.Float64("first_lng", first[0]),
+			slog.Float64("first_lat", first[1]),
+			slog.Float64("last_lng", last[0]),
+			slog.Float64("last_lat", last[1]),
+		)
+	}
 }
 
 // roundIfInteger rounds float64 values to integers for fields the frontend
