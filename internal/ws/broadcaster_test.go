@@ -494,16 +494,16 @@ func TestFieldMapping(t *testing.T) {
 			},
 		},
 		{
-			name: "routeLine decodes to routeCoordinates in lng/lat order",
+			name: "routeLine decodes to navRouteCoordinates in lng/lat order",
 			fields: map[string]events.TelemetryValue{
 				"routeLine": {StringVal: ptrString("_p~iF~ps|U_ulLnnqC_mqNvxq`@")},
 			},
-			wantKeys: []string{"routeCoordinates"},
+			wantKeys: []string{"navRouteCoordinates"},
 			check: func(t *testing.T, result map[string]any) {
 				t.Helper()
-				coords, ok := result["routeCoordinates"].([][]float64)
+				coords, ok := result["navRouteCoordinates"].([][]float64)
 				if !ok {
-					t.Fatalf("expected routeCoordinates to be [][]float64, got %T", result["routeCoordinates"])
+					t.Fatalf("expected navRouteCoordinates to be [][]float64, got %T", result["navRouteCoordinates"])
 				}
 				if len(coords) != 3 {
 					t.Fatalf("expected 3 coordinates, got %d", len(coords))
@@ -528,8 +528,8 @@ func TestFieldMapping(t *testing.T) {
 			wantKeys: nil,
 			check: func(t *testing.T, result map[string]any) {
 				t.Helper()
-				if _, ok := result["routeCoordinates"]; ok {
-					t.Fatal("expected no routeCoordinates for empty routeLine")
+				if _, ok := result["navRouteCoordinates"]; ok {
+					t.Fatal("expected no navRouteCoordinates for empty routeLine")
 				}
 			},
 		},

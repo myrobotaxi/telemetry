@@ -103,7 +103,7 @@ func splitLocationField(out map[string]any, name string, val events.TelemetryVal
 }
 
 // decodeRouteLineField decodes a Google Encoded Polyline string and adds
-// the resulting coordinates as "routeCoordinates" in [lng, lat] (Mapbox)
+// the resulting coordinates as "navRouteCoordinates" in [lng, lat] (Mapbox)
 // format. Empty or nil strings are silently skipped.
 func decodeRouteLineField(out map[string]any, val events.TelemetryValue) {
 	if val.StringVal == nil || *val.StringVal == "" {
@@ -121,7 +121,7 @@ func decodeRouteLineField(out map[string]any, val events.TelemetryValue) {
 	for i, c := range coords {
 		mapboxCoords[i] = []float64{c[1], c[0]}
 	}
-	out["routeCoordinates"] = mapboxCoords
+	out["navRouteCoordinates"] = mapboxCoords
 }
 
 // roundIfInteger rounds float64 values to integers for fields the frontend
