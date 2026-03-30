@@ -1,7 +1,6 @@
 package ws
 
 import (
-	"fmt"
 	"log/slog"
 	"math"
 
@@ -103,7 +102,8 @@ func splitLocationField(out map[string]any, name string, val events.TelemetryVal
 	out[latLng[1]] = val.LocationVal.Longitude
 }
 
-// decodeRouteLineField decodes a Google Encoded Polyline string and adds
+// decodeRouteLineField decodes Tesla's RouteLine field (Base64-encoded
+// protobuf wrapping a Google Encoded Polyline at 1e6 precision) and adds
 // the resulting coordinates as "navRouteCoordinates" in [lng, lat] (Mapbox)
 // format. Empty or nil strings are silently skipped.
 func decodeRouteLineField(out map[string]any, val events.TelemetryValue) {
@@ -114,19 +114,10 @@ func decodeRouteLineField(out map[string]any, val events.TelemetryValue) {
 	if *val.StringVal == "" {
 		return
 	}
-	raw := *val.StringVal
-	// Log raw string (first 100 chars + hex of first 20 bytes) to determine encoding format
-	preview := raw
-	if len(preview) > 100 {
-		preview = preview[:100]
-	}
-	hexPreview := fmt.Sprintf("%x", []byte(raw[:min(len(raw), 20)]))
 	slog.Info("decodeRouteLineField: routeLine received",
-		slog.Int("encoded_len", len(raw)),
-		slog.String("raw_preview", preview),
-		slog.String("hex_preview", hexPreview),
+		slog.Int("encoded_len", len(*val.StringVal)),
 	)
-	coords, err := DecodePolyline(*val.StringVal)
+	coords, err := DecodeRouteLine(*val.StringVal)
 	if err != nil {
 		slog.Warn("mapFieldsForClient: failed to decode routeLine",
 			slog.Any("error", err),

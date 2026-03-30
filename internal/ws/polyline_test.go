@@ -88,3 +88,45 @@ func TestDecodePolyline_MultiPoint(t *testing.T) {
 func coordsClose(a, b []float64) bool {
 	return math.Abs(a[0]-b[0]) < 1e-4 && math.Abs(a[1]-b[1]) < 1e-4
 }
+
+func TestDecodeRouteLine_RealTeslaData(t *testing.T) {
+	// Real Base64-encoded protobuf from Tesla RouteLine field (truncated for
+	// test brevity). Field 1 contains a Google Encoded Polyline at 1e6
+	// precision. First coordinate should be in the Dallas/Plano TX area
+	// (~32.87°N, ~-96.77°W).
+	//
+	// Protobuf structure: tag=0x0a (field 1, wire type 2), varint length,
+	// then the polyline string.
+	encoded := "CjRnfWZ1fUBwYXJxd0R9eEBsQGdKTH1JTWtHTG1JP3tGP29OTWFTP19jQD95YEBPc0w/Z0Q/"
+
+	coords, err := DecodeRouteLine(encoded)
+	if err != nil {
+		t.Fatalf("DecodeRouteLine() error: %v", err)
+	}
+	if len(coords) == 0 {
+		t.Fatal("expected coordinates, got none")
+	}
+
+	// First point should be near Dallas/Plano TX (lat ~32.87, lng ~-96.77).
+	first := coords[0]
+	if first[0] < 32.0 || first[0] > 34.0 {
+		t.Errorf("first lat %f not in Dallas area [32, 34]", first[0])
+	}
+	if first[1] < -98.0 || first[1] > -96.0 {
+		t.Errorf("first lng %f not in Dallas area [-98, -96]", first[1])
+	}
+}
+
+func TestDecodeRouteLine_InvalidBase64(t *testing.T) {
+	_, err := DecodeRouteLine("not-valid-base64!!!")
+	if err == nil {
+		t.Fatal("expected error for invalid base64")
+	}
+}
+
+func TestDecodeRouteLine_EmptyProto(t *testing.T) {
+	_, err := DecodeRouteLine("AA==") // single zero byte
+	if err == nil {
+		t.Fatal("expected error for empty/invalid proto")
+	}
+}

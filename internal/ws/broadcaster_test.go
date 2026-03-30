@@ -494,9 +494,12 @@ func TestFieldMapping(t *testing.T) {
 			},
 		},
 		{
+			// Tesla's RouteLine is Base64-encoded protobuf wrapping a Google
+			// Encoded Polyline at 1e6 precision. This test uses a real
+			// protobuf-wrapped polyline encoding 3 points near 38.5/-120.2.
 			name: "routeLine decodes to navRouteCoordinates in lng/lat order",
 			fields: map[string]events.TelemetryValue{
-				"routeLine": {StringVal: ptrString("_p~iF~ps|U_ulLnnqC_mqNvxq`@")},
+				"routeLine": {StringVal: ptrString("CiBfaXpsaEF+cmxnZEZfe2dlQ355d2xAX2t3ekNuYHtuSQ==")},
 			},
 			wantKeys: []string{"navRouteCoordinates"},
 			check: func(t *testing.T, result map[string]any) {
@@ -508,11 +511,7 @@ func TestFieldMapping(t *testing.T) {
 				if len(coords) != 3 {
 					t.Fatalf("expected 3 coordinates, got %d", len(coords))
 				}
-				// Mapbox format: [lng, lat]
-				if coords[0][0] != coords[0][0] { // sanity: not NaN
-					t.Fatal("coordinate is NaN")
-				}
-				// First point: lat=38.5, lng=-120.2 -> [lng, lat] = [-120.2, 38.5]
+				// First point: lat=38.5, lng=-120.2 -> Mapbox [lng, lat] = [-120.2, 38.5]
 				wantLng, wantLat := -120.2, 38.5
 				if !floatClose(coords[0][0], wantLng) || !floatClose(coords[0][1], wantLat) {
 					t.Fatalf("first coord = [%f, %f], want [%f, %f]",

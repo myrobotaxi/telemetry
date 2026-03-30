@@ -17,9 +17,10 @@ import (
 func TestRouteLine_EndToEnd(t *testing.T) {
 	t.Parallel()
 
-	// Google's example polyline: three points
+	// Tesla RouteLine: Base64-encoded protobuf wrapping a Google Encoded
+	// Polyline at 1e6 precision. Three points:
 	// (38.5, -120.2), (40.7, -120.95), (43.252, -126.453)
-	const encodedPolyline = "_p~iF~ps|U_ulLnnqC_mqNvxq`@"
+	const encodedPolyline = "CiBfaXpsaEF+cmxnZEZfe2dlQ355d2xAX2t3ekNuYHtuSQ=="
 
 	tests := []struct {
 		name           string
