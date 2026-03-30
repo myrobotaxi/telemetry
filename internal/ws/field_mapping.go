@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"fmt"
 	"log/slog"
 	"math"
 
@@ -113,8 +114,17 @@ func decodeRouteLineField(out map[string]any, val events.TelemetryValue) {
 	if *val.StringVal == "" {
 		return
 	}
+	raw := *val.StringVal
+	// Log raw string (first 100 chars + hex of first 20 bytes) to determine encoding format
+	preview := raw
+	if len(preview) > 100 {
+		preview = preview[:100]
+	}
+	hexPreview := fmt.Sprintf("%x", []byte(raw[:min(len(raw), 20)]))
 	slog.Info("decodeRouteLineField: routeLine received",
-		slog.Int("encoded_len", len(*val.StringVal)),
+		slog.Int("encoded_len", len(raw)),
+		slog.String("raw_preview", preview),
+		slog.String("hex_preview", hexPreview),
 	)
 	coords, err := DecodePolyline(*val.StringVal)
 	if err != nil {
