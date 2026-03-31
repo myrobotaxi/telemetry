@@ -852,6 +852,139 @@ func TestDetector_ConcurrentDriveEvents(t *testing.T) {
 	}
 }
 
+func TestExtractLocation_IgnoresOriginLocation(t *testing.T) {
+	gpsLoc := &events.Location{Latitude: 32.95, Longitude: -96.73}
+	navOrigin := &events.Location{Latitude: 33.09, Longitude: -96.82}
+
+	tests := []struct {
+		name   string
+		fields map[string]events.TelemetryValue
+		want   *events.Location
+	}{
+		{
+			name: "both location and originLocation present, returns GPS location",
+			fields: map[string]events.TelemetryValue{
+				string(telemetry.FieldLocation):       {LocationVal: gpsLoc},
+				string(telemetry.FieldOriginLocation):  {LocationVal: navOrigin},
+			},
+			want: gpsLoc,
+		},
+		{
+			name: "only originLocation present, returns nil",
+			fields: map[string]events.TelemetryValue{
+				string(telemetry.FieldOriginLocation): {LocationVal: navOrigin},
+			},
+			want: nil,
+		},
+		{
+			name: "only GPS location present, returns GPS location",
+			fields: map[string]events.TelemetryValue{
+				string(telemetry.FieldLocation): {LocationVal: gpsLoc},
+			},
+			want: gpsLoc,
+		},
+		{
+			name:   "neither location present, returns nil",
+			fields: map[string]events.TelemetryValue{},
+			want:   nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractLocation(tt.fields)
+			if tt.want == nil {
+				if got != nil {
+					t.Errorf("extractLocation: got %+v, want nil", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatal("extractLocation: got nil, want non-nil")
+			}
+			if got.Latitude != tt.want.Latitude || got.Longitude != tt.want.Longitude {
+				t.Errorf("extractLocation: got (%f, %f), want (%f, %f)",
+					got.Latitude, got.Longitude, tt.want.Latitude, tt.want.Longitude)
+			}
+		})
+	}
+}
+
+func TestDetector_DriveStartUsesGPSNotNavOrigin(t *testing.T) {
+	bus := testBus()
+	defer bus.Close(context.Background())
+
+	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{})
+	if err := d.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = d.Stop() }()
+
+	startedCh := subscribeTopic(t, bus, events.TopicDriveStarted)
+
+	now := time.Now()
+
+	// Send telemetry with both GPS location and nav origin — GPS should win.
+	fields := map[string]events.TelemetryValue{
+		string(telemetry.FieldGear):            {StringVal: ptr("D")},
+		string(telemetry.FieldSpeed):           {FloatVal: ptr(10.0)},
+		string(telemetry.FieldLocation):        {LocationVal: &events.Location{Latitude: 32.95, Longitude: -96.73}},
+		string(telemetry.FieldOriginLocation):  {LocationVal: &events.Location{Latitude: 33.09, Longitude: -96.82}},
+	}
+	publishTelemetry(t, bus, telemetryEvent("VIN_NAV", now, fields))
+
+	evt, ok := waitForEvent(startedCh)
+	if !ok {
+		t.Fatal("timed out waiting for DriveStartedEvent")
+	}
+
+	payload := evt.Payload.(events.DriveStartedEvent)
+	if payload.Location.Latitude != 32.95 {
+		t.Errorf("DriveStartedEvent.Location.Latitude: got %f, want 32.95 (GPS, not nav origin 33.09)",
+			payload.Location.Latitude)
+	}
+	if payload.Location.Longitude != -96.73 {
+		t.Errorf("DriveStartedEvent.Location.Longitude: got %f, want -96.73 (GPS, not nav origin -96.82)",
+			payload.Location.Longitude)
+	}
+}
+
+func TestDetector_OriginLocationOnlyDoesNotCacheLocation(t *testing.T) {
+	bus := testBus()
+	defer bus.Close(context.Background())
+
+	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{})
+	if err := d.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = d.Stop() }()
+
+	startedCh := subscribeTopic(t, bus, events.TopicDriveStarted)
+
+	now := time.Now()
+
+	// Send telemetry with ONLY originLocation (no GPS) — should NOT cache.
+	navFields := map[string]events.TelemetryValue{
+		string(telemetry.FieldOriginLocation): {LocationVal: &events.Location{Latitude: 33.09, Longitude: -96.82}},
+	}
+	publishTelemetry(t, bus, telemetryEvent("VIN_NAV2", now, navFields))
+
+	// Now start a drive without any location — should have zero-value location
+	// because originLocation should not have been cached.
+	publishTelemetry(t, bus, telemetryEvent("VIN_NAV2", now.Add(time.Second), gearField("D")))
+
+	evt, ok := waitForEvent(startedCh)
+	if !ok {
+		t.Fatal("timed out waiting for DriveStartedEvent")
+	}
+
+	payload := evt.Payload.(events.DriveStartedEvent)
+	if payload.Location.Latitude != 0 || payload.Location.Longitude != 0 {
+		t.Errorf("DriveStartedEvent.Location: got (%f, %f), want (0, 0) — originLocation should not be used as fallback",
+			payload.Location.Latitude, payload.Location.Longitude)
+	}
+}
+
 func TestHaversine(t *testing.T) {
 	tests := []struct {
 		name     string
