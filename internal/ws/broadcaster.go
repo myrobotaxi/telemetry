@@ -119,14 +119,9 @@ func (b *Broadcaster) handleTelemetry(ctx context.Context, event events.Event) {
 	// ordering) — lastUpdated is what the UI displays.
 	fields["lastUpdated"] = payload.CreatedAt.Format(time.RFC3339)
 
-	// Derive vehicle status from gear and speed only when one of those
-	// fields is present in this update. Tesla sends fields only on change,
-	// so most updates won't contain gear or speed. Injecting "parked"
-	// into those updates would override the frontend's current status and
-	// cause the driving/parked UI to flicker.
+	// Only derive status when gear changes — speed-only updates should not
+	// override the status because we don't know the current gear.
 	if _, hasGear := fields["gearPosition"]; hasGear {
-		fields["status"] = deriveVehicleStatus(fields)
-	} else if _, hasSpeed := fields["speed"]; hasSpeed {
 		fields["status"] = deriveVehicleStatus(fields)
 	}
 

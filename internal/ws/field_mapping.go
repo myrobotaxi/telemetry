@@ -53,15 +53,40 @@ var locationFieldSplit = map[string][2]string{
 	"originLocation":      {"originLatitude", "originLongitude"},
 }
 
+// navClearFields maps internal nav field names to their client-facing keys.
+// When a nav field is marked invalid by the vehicle, these client keys are
+// set to nil so the frontend clears stale destination/route data.
+var navClearFields = map[string][]string{
+	"destinationName":     {"destinationName"},
+	"milesToArrival":      {"tripDistanceRemaining"},
+	"minutesToArrival":    {"etaMinutes"},
+	"routeLine":           {"navRouteCoordinates"},
+	"originLocation":      {"originLatitude", "originLongitude"},
+	"destinationLocation": {"destinationLatitude", "destinationLongitude"},
+}
+
 // mapFieldsForClient converts a map of internal TelemetryValue fields into
 // plain key-value pairs suitable for JSON serialization to browser clients.
 // Pointer-wrapped values are unwrapped, LocationVal fields are split into
 // separate latitude/longitude pairs, routeLine is decoded into coordinates,
 // field names are translated to match the frontend Vehicle model, and
 // isClimateOn is derived from hvacPower when that field is present.
+// Fields marked Invalid by the vehicle produce nil values for nav fields
+// so the frontend clears stale destination/route state.
 func mapFieldsForClient(fields map[string]events.TelemetryValue) map[string]any {
 	out := make(map[string]any, len(fields))
 	for name, val := range fields {
+		// Nav fields marked invalid by the vehicle → send nil to clear
+		// frontend state (e.g. cancelled navigation).
+		if val.Invalid {
+			if clientKeys, isNav := navClearFields[name]; isNav {
+				for _, k := range clientKeys {
+					out[k] = nil
+				}
+			}
+			continue
+		}
+
 		switch {
 		case locationFieldSplit[name] != [2]string{}:
 			splitLocationField(out, name, val)

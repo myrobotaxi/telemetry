@@ -178,9 +178,11 @@ func extractValue(datum *tpb.Datum) (events.TelemetryValue, error) {
 		return events.TelemetryValue{}, ErrNilValue
 	}
 
-	// Check the invalid flag first.
+	// When the vehicle marks a datum as invalid, return a TelemetryValue
+	// with Invalid=true instead of an error so downstream consumers can
+	// clear stale frontend state (e.g. cancelled nav destinations).
 	if _, ok := v.Value.(*tpb.Value_Invalid); ok {
-		return events.TelemetryValue{}, ErrInvalidValue
+		return events.TelemetryValue{Invalid: true}, nil
 	}
 
 	return convertValue(datum.GetKey(), v)

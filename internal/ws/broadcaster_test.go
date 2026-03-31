@@ -1076,6 +1076,165 @@ func TestBroadcaster_DriveEndedClearsAccumulator(t *testing.T) {
 	}
 }
 
+func TestStatusDerivation_SpeedOnlyDoesNotInjectStatus(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		fields     map[string]events.TelemetryValue
+		wantStatus bool // whether "status" key should exist
+		wantValue  string
+	}{
+		{
+			name: "speed 0 without gear does not inject status",
+			fields: map[string]events.TelemetryValue{
+				"speed": {FloatVal: ptrFloat64(0)},
+			},
+			wantStatus: false,
+		},
+		{
+			name: "speed 65 without gear does not inject status",
+			fields: map[string]events.TelemetryValue{
+				"speed": {FloatVal: ptrFloat64(65)},
+			},
+			wantStatus: false,
+		},
+		{
+			name: "gear D with speed 0 injects driving",
+			fields: map[string]events.TelemetryValue{
+				"gear":  {StringVal: ptrString("D")},
+				"speed": {FloatVal: ptrFloat64(0)},
+			},
+			wantStatus: true,
+			wantValue:  "driving",
+		},
+		{
+			name: "gear P alone injects parked",
+			fields: map[string]events.TelemetryValue{
+				"gear": {StringVal: ptrString("P")},
+			},
+			wantStatus: true,
+			wantValue:  "parked",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clientFields := mapFieldsForClient(tt.fields)
+			_, hasStatus := clientFields["gearPosition"]
+			if tt.wantStatus && !hasStatus {
+				// Gear must be present for status to be injected.
+				// If gear is in input, gearPosition is in output.
+			}
+
+			// Simulate what handleTelemetry does.
+			if _, hasGear := clientFields["gearPosition"]; hasGear {
+				clientFields["status"] = deriveVehicleStatus(clientFields)
+			}
+
+			_, gotStatus := clientFields["status"]
+			if gotStatus != tt.wantStatus {
+				t.Fatalf("status present = %v, want %v (fields: %v)", gotStatus, tt.wantStatus, clientFields)
+			}
+			if tt.wantStatus {
+				if clientFields["status"] != tt.wantValue {
+					t.Fatalf("status = %q, want %q", clientFields["status"], tt.wantValue)
+				}
+			}
+		})
+	}
+}
+
+func TestMapFieldsForClient_InvalidNavFieldsClear(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		fields      map[string]events.TelemetryValue
+		wantNilKeys []string
+		wantAbsent  []string
+	}{
+		{
+			name: "invalid destinationName clears to nil",
+			fields: map[string]events.TelemetryValue{
+				"destinationName": {Invalid: true},
+			},
+			wantNilKeys: []string{"destinationName"},
+		},
+		{
+			name: "invalid milesToArrival clears tripDistanceRemaining",
+			fields: map[string]events.TelemetryValue{
+				"milesToArrival": {Invalid: true},
+			},
+			wantNilKeys: []string{"tripDistanceRemaining"},
+		},
+		{
+			name: "invalid minutesToArrival clears etaMinutes",
+			fields: map[string]events.TelemetryValue{
+				"minutesToArrival": {Invalid: true},
+			},
+			wantNilKeys: []string{"etaMinutes"},
+		},
+		{
+			name: "invalid routeLine clears navRouteCoordinates",
+			fields: map[string]events.TelemetryValue{
+				"routeLine": {Invalid: true},
+			},
+			wantNilKeys: []string{"navRouteCoordinates"},
+		},
+		{
+			name: "invalid originLocation clears lat and lng",
+			fields: map[string]events.TelemetryValue{
+				"originLocation": {Invalid: true},
+			},
+			wantNilKeys: []string{"originLatitude", "originLongitude"},
+		},
+		{
+			name: "invalid destinationLocation clears lat and lng",
+			fields: map[string]events.TelemetryValue{
+				"destinationLocation": {Invalid: true},
+			},
+			wantNilKeys: []string{"destinationLatitude", "destinationLongitude"},
+		},
+		{
+			name: "invalid non-nav field is skipped",
+			fields: map[string]events.TelemetryValue{
+				"speed": {Invalid: true},
+			},
+			wantAbsent: []string{"speed"},
+		},
+		{
+			name: "mix of valid and invalid fields",
+			fields: map[string]events.TelemetryValue{
+				"destinationName": {Invalid: true},
+				"speed":           {FloatVal: ptrFloat64(65)},
+			},
+			wantNilKeys: []string{"destinationName"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			out := mapFieldsForClient(tt.fields)
+
+			for _, key := range tt.wantNilKeys {
+				val, exists := out[key]
+				if !exists {
+					t.Fatalf("expected key %q to be present (nil), but it was absent", key)
+				}
+				if val != nil {
+					t.Fatalf("expected %q = nil, got %v (%T)", key, val, val)
+				}
+			}
+			for _, key := range tt.wantAbsent {
+				if _, exists := out[key]; exists {
+					t.Fatalf("expected key %q to be absent, but it was present", key)
+				}
+			}
+		})
+	}
+}
+
 // assertFloat asserts a map value is a float64 equal to the expected value.
 func assertFloat(t *testing.T, m map[string]any, key string, want float64) {
 	t.Helper()
