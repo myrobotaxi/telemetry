@@ -520,15 +520,19 @@ func TestFieldMapping(t *testing.T) {
 			},
 		},
 		{
-			name: "empty routeLine is skipped",
+			name: "empty routeLine clears navRouteCoordinates",
 			fields: map[string]events.TelemetryValue{
 				"routeLine": {StringVal: ptrString("")},
 			},
-			wantKeys: nil,
+			wantKeys: []string{"navRouteCoordinates"},
 			check: func(t *testing.T, result map[string]any) {
 				t.Helper()
-				if _, ok := result["navRouteCoordinates"]; ok {
-					t.Fatal("expected no navRouteCoordinates for empty routeLine")
+				val, ok := result["navRouteCoordinates"]
+				if !ok {
+					t.Fatal("expected navRouteCoordinates key to be present (as nil)")
+				}
+				if val != nil {
+					t.Fatalf("expected navRouteCoordinates to be nil, got %v", val)
 				}
 			},
 		},
