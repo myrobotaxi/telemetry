@@ -1121,11 +1121,6 @@ func TestStatusDerivation_SpeedOnlyDoesNotInjectStatus(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			clientFields := mapFieldsForClient(tt.fields)
-			_, hasStatus := clientFields["gearPosition"]
-			if tt.wantStatus && !hasStatus {
-				// Gear must be present for status to be injected.
-				// If gear is in input, gearPosition is in output.
-			}
 
 			// Simulate what handleTelemetry does.
 			if _, hasGear := clientFields["gearPosition"]; hasGear {
