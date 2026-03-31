@@ -137,6 +137,8 @@ func decodeRouteLineField(out map[string]any, val events.TelemetryValue) {
 		return
 	}
 	if *val.StringVal == "" {
+		// Empty RouteLine = navigation cleared.
+		out["navRouteCoordinates"] = nil
 		return
 	}
 	slog.Info("decodeRouteLineField: routeLine received",
@@ -144,9 +146,12 @@ func decodeRouteLineField(out map[string]any, val events.TelemetryValue) {
 	)
 	coords, err := DecodeRouteLine(*val.StringVal)
 	if err != nil {
-		slog.Warn("mapFieldsForClient: failed to decode routeLine",
+		slog.Warn("decodeRouteLineField: decode failed, clearing navRouteCoordinates",
 			slog.Any("error", err),
 		)
+		// Clear stale route data — Tesla sends undecodable RouteLine (e.g.,
+		// protobuf tag 0x12) when navigation is cancelled or route changes.
+		out["navRouteCoordinates"] = nil
 		return
 	}
 	// Convert from [lat, lng] (Google) to [lng, lat] (Mapbox/GeoJSON).
