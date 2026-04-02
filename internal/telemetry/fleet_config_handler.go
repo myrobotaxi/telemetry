@@ -213,9 +213,12 @@ func (h *FleetConfigHandler) tryRefreshToken(ctx context.Context, w http.Respons
 		return TeslaToken{}, false
 	}
 
+	// Compute expiry once — ExpiresAt() calls time.Now() internally,
+	// so reuse the same value for DB and in-memory consistency.
+	expiresAt := refreshed.ExpiresAt()
+
 	// Persist the refreshed token if an updater is available.
 	if h.updater != nil {
-		expiresAt := refreshed.ExpiresAt()
 		if err := h.updater.UpdateTeslaToken(ctx, userID,
 			refreshed.AccessToken, refreshed.RefreshToken, expiresAt.Unix()); err != nil {
 			h.logger.Error("fleet config: failed to persist refreshed token",
@@ -229,7 +232,7 @@ func (h *FleetConfigHandler) tryRefreshToken(ctx context.Context, w http.Respons
 	return TeslaToken{
 		AccessToken:  refreshed.AccessToken,
 		RefreshToken: refreshed.RefreshToken,
-		ExpiresAt:    refreshed.ExpiresAt(),
+		ExpiresAt:    expiresAt,
 	}, true
 }
 

@@ -200,6 +200,9 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 		// If new proxy fields are added to config, update this mapping.
 		var fleetOpts []telemetry.FleetConfigOption
 		if cfg.TeslaOAuth().ClientID != "" {
+			// Intentional mapping: config.TeslaOAuthConfig and telemetry.TeslaOAuthConfig
+			// have identical fields but live in separate dependency layers. Don't "DRY"
+			// them — config is infra, telemetry is domain. The copy keeps them decoupled.
 			refresher := telemetry.NewTokenRefresher(telemetry.TeslaOAuthConfig{
 				ClientID:     cfg.TeslaOAuth().ClientID,
 				ClientSecret: cfg.TeslaOAuth().ClientSecret,

@@ -38,6 +38,9 @@ type TokenRefresher struct {
 	config     TeslaOAuthConfig
 	httpClient *http.Client
 	logger     *slog.Logger
+	// endpoint is the Tesla OAuth2 token URL. Defaults to the production
+	// endpoint; injectable for testing.
+	endpoint string
 }
 
 // teslaTokenEndpoint is the Tesla OAuth2 token endpoint.
@@ -51,6 +54,7 @@ func NewTokenRefresher(cfg TeslaOAuthConfig, logger *slog.Logger) *TokenRefreshe
 		config:     cfg,
 		httpClient: &http.Client{Timeout: 15 * time.Second},
 		logger:     logger,
+		endpoint:   teslaTokenEndpoint,
 	}
 }
 
@@ -69,7 +73,7 @@ func (r *TokenRefresher) Refresh(ctx context.Context, refreshToken string) (Tesl
 		"refresh_token": {refreshToken},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, teslaTokenEndpoint,
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.endpoint,
 		strings.NewReader(form.Encode()))
 	if err != nil {
 		return TeslaRefreshedToken{}, fmt.Errorf("TokenRefresher.Refresh: create request: %w", err)

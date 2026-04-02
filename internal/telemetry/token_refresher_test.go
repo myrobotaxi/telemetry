@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 )
@@ -110,29 +109,14 @@ func TestTokenRefresher_Refresh(t *testing.T) {
 			}))
 			t.Cleanup(srv.Close)
 
-			// Create refresher that points at our test server instead of
-			// the real Tesla endpoint.
+			// Create refresher pointing at our test server.
 			refresher := NewTokenRefresher(TeslaOAuthConfig{
 				ClientID:     "test-client-id",
 				ClientSecret: "test-client-secret",
 			}, discardLogger())
+			refresher.endpoint = srv.URL // inject test server URL
 
-			// Override the endpoint URL by making a request through the test
-			// server. We cannot easily override the const, so we test the
-			// empty-token path directly and use the httptest approach for
-			// the full flow.
-			if tt.refreshToken == "" {
-				// Test the empty token guard directly.
-				_, err := refresher.Refresh(context.Background(), "")
-				if err == nil {
-					t.Fatal("expected error for empty refresh token, got nil")
-				}
-				return
-			}
-
-			// For non-empty tokens, we need to test the HTTP call.
-			// Patch the refresher to use our test server URL.
-			result, err := refreshWithURL(refresher, context.Background(), srv.URL, tt.refreshToken)
+			result, err := refresher.Refresh(context.Background(), tt.refreshToken)
 
 			if tt.wantErr {
 				if err == nil {
@@ -167,45 +151,6 @@ func TestTokenRefresher_Refresh(t *testing.T) {
 			}
 		})
 	}
-}
-
-// refreshWithURL calls Refresh but targets a custom URL instead of the
-// real Tesla endpoint. This allows testing against httptest.Server.
-func refreshWithURL(r *TokenRefresher, ctx context.Context, targetURL, refreshToken string) (TeslaRefreshedToken, error) { //nolint:revive // test helper, context position is fine
-	form := fmt.Sprintf("grant_type=refresh_token&client_id=%s&client_secret=%s&refresh_token=%s",
-		r.config.ClientID, r.config.ClientSecret, refreshToken)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL,
-		strings.NewReader(form))
-	if err != nil {
-		return TeslaRefreshedToken{}, fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := r.httpClient.Do(req)
-	if err != nil {
-		return TeslaRefreshedToken{}, fmt.Errorf("http request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return TeslaRefreshedToken{}, fmt.Errorf("Tesla returned %d", resp.StatusCode)
-	}
-
-	var tokenResp teslaTokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return TeslaRefreshedToken{}, fmt.Errorf("decode response: %w", err)
-	}
-
-	if tokenResp.AccessToken == "" {
-		return TeslaRefreshedToken{}, fmt.Errorf("empty access_token")
-	}
-
-	return TeslaRefreshedToken{
-		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: tokenResp.RefreshToken,
-		ExpiresIn:    tokenResp.ExpiresIn,
-	}, nil
 }
 
 func TestTeslaRefreshedToken_ExpiresAt(t *testing.T) {
