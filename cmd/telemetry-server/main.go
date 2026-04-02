@@ -198,6 +198,19 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 
 		// Map config.ProxyConfig fields → telemetry.EndpointConfig.
 		// If new proxy fields are added to config, update this mapping.
+		var fleetOpts []telemetry.FleetConfigOption
+		if cfg.TeslaOAuth().ClientID != "" {
+			refresher := telemetry.NewTokenRefresher(telemetry.TeslaOAuthConfig{
+				ClientID:     cfg.TeslaOAuth().ClientID,
+				ClientSecret: cfg.TeslaOAuth().ClientSecret,
+			}, logger.With(slog.String("component", "token-refresh")))
+			updater := &teslaTokenUpdaterAdapter{repo: accountRepo}
+			fleetOpts = append(fleetOpts, telemetry.WithTokenRefresher(refresher, updater))
+			logger.Info("Tesla token auto-refresh enabled")
+		} else {
+			logger.Warn("Tesla token auto-refresh disabled: AUTH_TESLA_ID not set")
+		}
+
 		fleetHandler := telemetry.NewFleetConfigHandler(
 			authenticator,
 			&vehicleOwnerAdapter{repo: vehicleRepo},
@@ -209,6 +222,7 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 				CA:       cfg.Proxy().FleetTelemetryCA,
 			},
 			logger.With(slog.String("component", "fleet-config")),
+			fleetOpts...,
 		)
 
 		srv.HandleFunc("POST /api/fleet-config/{vin}", fleetHandler.ServeHTTP)

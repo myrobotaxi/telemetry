@@ -61,9 +61,20 @@ func (a *teslaTokenAdapter) GetTeslaToken(ctx context.Context, userID string) (t
 	}
 
 	return telemetry.TeslaToken{
-		AccessToken: dbTok.AccessToken,
-		ExpiresAt:   expiresAt,
+		AccessToken:  dbTok.AccessToken,
+		RefreshToken: dbTok.RefreshToken,
+		ExpiresAt:    expiresAt,
 	}, nil
+}
+
+// teslaTokenUpdaterAdapter adapts store.AccountRepo to the
+// telemetry.TeslaTokenUpdater interface for persisting refreshed tokens.
+type teslaTokenUpdaterAdapter struct {
+	repo *store.AccountRepo
+}
+
+func (a *teslaTokenUpdaterAdapter) UpdateTeslaToken(ctx context.Context, userID, accessToken, refreshToken string, expiresAt int64) error {
+	return a.repo.UpdateTeslaToken(ctx, userID, accessToken, refreshToken, expiresAt)
 }
 
 // proxyTimeout matches the default Fleet API timeout for consistency.
