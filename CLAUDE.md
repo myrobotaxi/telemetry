@@ -151,6 +151,7 @@ Issues carry one or more `agent:<name>` labels that map directly to `.claude/age
 | `agent:testing` | `testing.md` | Test writing, test infrastructure, coverage |
 | `agent:infra` | `infra.md` | Docker, CI/CD, deployment, monitoring |
 | `agent:frontend-integration` | `frontend-integration.md` | MyRoboTaxi frontend compatibility |
+| `agent:ux-audit` | `ux-audit.md` | Cross-project UX audit — end-user experience quality |
 
 ### Workflow (MUST FOLLOW)
 
@@ -187,20 +188,26 @@ Spin up the `security` agent LAST to review the completed code for vulnerabiliti
 **Phase 5 — Frontend compatibility (if `agent:frontend-integration` is tagged):**
 Spin up the `frontend-integration` agent to verify protocol compatibility with the MyRoboTaxi Next.js app.
 
+**Phase 6 — UX audit (ALWAYS runs, no label required):**
+Spin up the `ux-audit` agent as the final step on every issue, regardless of labels. This agent audits the completed changes across both the backend and frontend to catch UX regressions — wrong data on screen, missing loading states, broken real-time flows, or contract mismatches that would degrade the end user's experience.
+
 ### Examples
 
 **Issue with labels `agent:go-engineer, agent:testing`:**
 1. Spin up `go-engineer` → writes implementation + inline tests
 2. Spin up `testing` → reviews test coverage, adds missing tests
+3. Spin up `ux-audit` → audit end-user experience impact
 
 **Issue with labels `agent:architect, agent:event-system, agent:go-engineer, agent:testing`:**
 1. Spin up `architect` → defines interfaces and design (WAIT for output)
 2. Spin up `event-system` + `go-engineer` in parallel → implement
 3. Spin up `testing` → verify tests and coverage
+4. Spin up `ux-audit` → audit end-user experience impact
 
 **Issue with labels `agent:tesla-telemetry, agent:go-engineer, agent:security`:**
 1. Spin up `tesla-telemetry` + `go-engineer` in parallel → implement
 2. Spin up `security` → audit the completed code
+3. Spin up `ux-audit` → audit end-user experience impact
 
 ### Milestones
 
@@ -303,6 +310,16 @@ Run before every commit:
 ### Pre-PR Lint Gate (ENFORCED)
 
 Every agent MUST run `golangci-lint run ./...` and fix all warnings before opening a PR. CI will reject PRs that fail lint. This applies to ALL agents — implementation, testing, infra, etc. No exceptions. If a lint rule seems wrong, suppress it with a targeted `//nolint:rulename // reason` comment, never globally disable the rule.
+
+### Merge Policy (NON-NEGOTIABLE)
+
+A PR MUST NOT be merged until ALL of the following are true:
+
+1. **All CI checks pass** — lint, test, build, security, gosec. No exceptions.
+2. **All review comments are addressed** — every "changes requested" review must be resolved and re-approved before merge. Do not dismiss or skip reviews.
+3. **No pending change requests** — if a reviewer (human or bot) requested changes, fix them and get the review approved. Never use `--admin` or `--force` to bypass.
+
+**NEVER use `gh pr merge --admin`** to bypass branch protection. If merge is blocked, fix the root cause — don't circumvent the safeguard.
 
 ## What NOT to Do
 
