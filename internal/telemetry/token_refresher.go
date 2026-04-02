@@ -51,7 +51,7 @@ func NewTokenRefresher(cfg TeslaOAuthConfig, logger *slog.Logger) *TokenRefreshe
 		config:     cfg,
 		httpClient: &http.Client{Timeout: 15 * time.Second},
 		logger:     logger,
-		tokenURL:   "https://auth.tesla.com/oauth2/v3/token", //nolint:gosec // URL, not a credential
+		tokenURL:   "https://auth.tesla.com/oauth2/v3/token", //nolint:gosec,G101 // URL, not a credential
 	}
 }
 
@@ -70,14 +70,15 @@ func (r *TokenRefresher) Refresh(ctx context.Context, refreshToken string) (Tesl
 		"refresh_token": {refreshToken},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.tokenURL, /* #nosec G107 -- URL is hardcoded in constructor; only tests override */
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		r.tokenURL, //nolint:gosec,G107,G704 // URL hardcoded in constructor; tests override
 		strings.NewReader(form.Encode()))
 	if err != nil {
 		return TeslaRefreshedToken{}, fmt.Errorf("TokenRefresher.Refresh: create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := r.httpClient.Do(req)
+	resp, err := r.httpClient.Do(req) //nolint:gosec,G107,G704 // URL from constructor, not user input
 	if err != nil {
 		return TeslaRefreshedToken{}, fmt.Errorf("TokenRefresher.Refresh: http request: %w", err)
 	}
