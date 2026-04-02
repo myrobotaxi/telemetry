@@ -469,7 +469,7 @@ func TestDefaultFieldConfig(t *testing.T) {
 		{FleetFieldGear, 1, false, 0},
 		{FleetFieldDetailedChargeState, 30, false, 0},
 		{FleetFieldOdometer, 60, false, 0},
-		{FleetFieldDestinationName, 30, false, 0},
+		{FleetFieldDestinationName, 10, false, 0},
 		{FleetFieldMilesSinceReset, 60, true, 1},
 		{FleetFieldFSDMilesSinceReset, 60, true, 1},
 	}
