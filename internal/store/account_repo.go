@@ -49,3 +49,17 @@ func (r *AccountRepo) GetTeslaToken(ctx context.Context, userID string) (TeslaOA
 	}
 	return tok, nil
 }
+
+// UpdateTeslaToken writes a refreshed token set back to the Account table.
+// The expiresAt is a Unix epoch timestamp. Returns an error if the update
+// affects zero rows (user has no Tesla account linked).
+func (r *AccountRepo) UpdateTeslaToken(ctx context.Context, userID, accessToken, refreshToken string, expiresAt int64) error {
+	tag, err := r.pool.Exec(ctx, queryUpdateTeslaToken, accessToken, refreshToken, expiresAt, userID)
+	if err != nil {
+		return fmt.Errorf("AccountRepo.UpdateTeslaToken(user=%s): %w", userID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("AccountRepo.UpdateTeslaToken(user=%s): %w", userID, ErrTeslaTokenNotFound)
+	}
+	return nil
+}

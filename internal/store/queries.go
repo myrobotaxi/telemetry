@@ -43,6 +43,10 @@ const queryDriveInsert = `INSERT INTO "Drive" (
 	$17, $18, $19, $20::jsonb
 )`
 
+const queryDriveUpdateStartLocation = `UPDATE "Drive"
+SET "startLocation" = $2, "startAddress" = $3
+WHERE "id" = $1 AND "startLocation" IN ('', '0.0000, 0.0000', '0.000000, 0.000000')`
+
 const queryDriveAppendRoutePoints = `UPDATE "Drive"
 SET "routePoints" = "routePoints" || $2::jsonb
 WHERE "id" = $1`
@@ -63,12 +67,17 @@ const queryDriveByID = `SELECT "id", "vehicleId", "date", "startTime", "endTime"
 FROM "Drive"
 WHERE "id" = $1`
 
-// Account queries. The Account table is Prisma-owned (NextAuth) — read-only.
+// Account queries. The Account table is Prisma-owned (NextAuth). We read
+// tokens and update them in-place when refreshing expired OAuth tokens.
 
 const queryTeslaToken = `SELECT "access_token", "refresh_token", "expires_at"
 FROM "Account"
 WHERE "userId" = $1 AND "provider" = 'tesla'
 LIMIT 1`
+
+const queryUpdateTeslaToken = `UPDATE "Account"
+SET "access_token" = $1, "refresh_token" = $2, "expires_at" = $3
+WHERE "userId" = $4 AND "provider" = 'tesla'`
 
 // updateColumn pairs a PostgreSQL column name with the value to set. A nil
 // value signals that the field was not present in this telemetry event.
