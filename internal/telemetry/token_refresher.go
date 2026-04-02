@@ -38,9 +38,9 @@ type TokenRefresher struct {
 	config     TeslaOAuthConfig
 	httpClient *http.Client
 	logger     *slog.Logger
-	// tokenURL is the Tesla OAuth2 token URL. Always set to the production
-	// endpoint in NewTokenRefresher; tests override via the exported field.
-	tokenURL string
+	// oauthEndpoint is the Tesla OAuth2 endpoint URL. Always set to the
+	// production endpoint in NewTokenRefresher; tests override for httptest.
+	oauthEndpoint string
 }
 
 // NewTokenRefresher creates a TokenRefresher that calls Tesla's OAuth2 endpoint
@@ -51,8 +51,7 @@ func NewTokenRefresher(cfg TeslaOAuthConfig, logger *slog.Logger) *TokenRefreshe
 		config:     cfg,
 		httpClient: &http.Client{Timeout: 15 * time.Second},
 		logger:     logger,
-		tokenURL:   "https://auth.tesla.com/oauth2/v3/token", //nolint:gosec,G101 // URL, not a credential
-	}
+		oauthEndpoint:   "https://auth.tesla.com/oauth2/v3/token",	}
 }
 
 // Refresh exchanges the given refresh token for a new token set by calling
@@ -71,15 +70,13 @@ func (r *TokenRefresher) Refresh(ctx context.Context, refreshToken string) (Tesl
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		r.tokenURL, //nolint:gosec,G107,G704 // URL hardcoded in constructor; tests override
-		strings.NewReader(form.Encode()))
+		r.oauthEndpoint,		strings.NewReader(form.Encode()))
 	if err != nil {
 		return TeslaRefreshedToken{}, fmt.Errorf("TokenRefresher.Refresh: create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := r.httpClient.Do(req) //nolint:gosec,G107,G704 // URL from constructor, not user input
-	if err != nil {
+	resp, err := r.httpClient.Do(req)	if err != nil {
 		return TeslaRefreshedToken{}, fmt.Errorf("TokenRefresher.Refresh: http request: %w", err)
 	}
 	defer resp.Body.Close()
