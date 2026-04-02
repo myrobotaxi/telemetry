@@ -318,7 +318,6 @@ A PR MUST NOT be merged until ALL of the following are true:
 1. **All CI checks pass** — lint, test, build, security, gosec. No exceptions.
 2. **All review comments are addressed** — every "changes requested" review must be resolved and re-approved before merge. Do not dismiss or skip reviews.
 3. **No pending change requests** — if a reviewer (human or bot) requested changes, fix them and get the review approved. Never use `--admin` or `--force` to bypass.
-<<<<<<< HEAD
 4. **All critical and warning-level Claude Review comments are resolved** — Claude Review comments marked as critical, high, or medium severity must be fixed before merge. Low-severity suggestions are optional but encouraged.
 
 **NEVER use `gh pr merge --admin`** to bypass branch protection. If merge is blocked, fix the root cause — don't circumvent the safeguard.
@@ -335,12 +334,6 @@ When Claude Review (tnando-gh-bot) leaves review comments, they carry severity l
 | **Low / Suggestion** | Optional — fix if reasonable |
 
 If you disagree with a review comment, respond with a justification on the PR — do not silently ignore it.
-
-=======
-
-**NEVER use `gh pr merge --admin`** to bypass branch protection. If merge is blocked, fix the root cause — don't circumvent the safeguard.
-
->>>>>>> 5f3e323 (Add merge policy: never bypass reviews, failing CI, or change requests)
 ## What NOT to Do
 
 - Do NOT import from `my-robo-taxi` — communicate only via shared database and documented contracts
