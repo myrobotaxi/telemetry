@@ -93,6 +93,7 @@ func TestTokenRefresher_Refresh(t *testing.T) {
 					t.Errorf("Content-Type: got %q, want application/x-www-form-urlencoded", ct)
 				}
 
+				r.Body = http.MaxBytesReader(w, r.Body, 1<<20) //nolint:gosec // test only
 				if err := r.ParseForm(); err != nil {
 					t.Fatalf("ParseForm: %v", err)
 				}
@@ -170,7 +171,7 @@ func TestTokenRefresher_Refresh(t *testing.T) {
 
 // refreshWithURL calls Refresh but targets a custom URL instead of the
 // real Tesla endpoint. This allows testing against httptest.Server.
-func refreshWithURL(r *TokenRefresher, ctx context.Context, targetURL, refreshToken string) (TeslaRefreshedToken, error) {
+func refreshWithURL(r *TokenRefresher, ctx context.Context, targetURL, refreshToken string) (TeslaRefreshedToken, error) { //nolint:revive // test helper, context position is fine
 	form := fmt.Sprintf("grant_type=refresh_token&client_id=%s&client_secret=%s&refresh_token=%s",
 		r.config.ClientID, r.config.ClientSecret, refreshToken)
 

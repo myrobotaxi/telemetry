@@ -43,10 +43,6 @@ const queryDriveInsert = `INSERT INTO "Drive" (
 	$17, $18, $19, $20::jsonb
 )`
 
-const queryDriveUpdateStartLocation = `UPDATE "Drive"
-SET "startLocation" = $2, "startAddress" = $3
-WHERE "id" = $1 AND "startLocation" IN ('', '0.0000, 0.0000', '0.000000, 0.000000')`
-
 const queryDriveAppendRoutePoints = `UPDATE "Drive"
 SET "routePoints" = "routePoints" || $2::jsonb
 WHERE "id" = $1`

@@ -41,7 +41,7 @@ type TokenRefresher struct {
 }
 
 // teslaTokenEndpoint is the Tesla OAuth2 token endpoint.
-const teslaTokenEndpoint = "https://auth.tesla.com/oauth2/v3/token"
+const teslaTokenEndpoint = "https://auth.tesla.com/oauth2/v3/token" //nolint:gosec // Not a credential, just a URL constant
 
 // NewTokenRefresher creates a TokenRefresher that calls Tesla's OAuth2 endpoint
 // to exchange a refresh_token for a new access_token. The config must contain
