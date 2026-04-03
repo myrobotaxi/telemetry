@@ -1080,6 +1080,225 @@ func TestBroadcaster_DriveEndedClearsAccumulator(t *testing.T) {
 	}
 }
 
+func TestBroadcaster_NavOnlyEvent_NotBroadcastImmediately(t *testing.T) {
+	bus := events.NewChannelBus(events.DefaultBusConfig(), events.NoopBusMetrics{}, slog.Default())
+	t.Cleanup(func() { _ = bus.Close(context.Background()) })
+
+	resolver := newStubVINResolver(map[string]string{
+		"5YJ3E1EA1NF000001": "vehicle-id-1",
+	})
+
+	hub := NewHub(slog.Default(), NoopHubMetrics{})
+	t.Cleanup(hub.Stop)
+
+	b := NewBroadcaster(hub, bus, resolver, slog.Default())
+	ctx := context.Background()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+
+	now := time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)
+	event := events.NewEvent(events.VehicleTelemetryEvent{
+		VIN:       "5YJ3E1EA1NF000001",
+		CreatedAt: now,
+		Fields: map[string]events.TelemetryValue{
+			"destinationName":  {StringVal: ptrString("Home")},
+			"minutesToArrival": {FloatVal: ptrFloat64(15)},
+		},
+	})
+
+	if err := bus.Publish(ctx, event); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	// Give subscriber time to process event.
+	time.Sleep(50 * time.Millisecond)
+
+	// Nav-only event should NOT trigger immediate VIN resolution
+	// (nav fields are accumulated, not broadcast immediately).
+	resolver.mu.RLock()
+	calls := len(resolver.callLog)
+	resolver.mu.RUnlock()
+	if calls != 0 {
+		t.Fatalf("expected 0 resolver calls for nav-only event, got %d", calls)
+	}
+
+	// After the nav flush interval, the accumulator should flush.
+	waitForCondition(t, func() bool {
+		resolver.mu.RLock()
+		defer resolver.mu.RUnlock()
+		return len(resolver.callLog) > 0
+	})
+}
+
+func TestBroadcaster_NonNavEvent_BroadcastImmediately(t *testing.T) {
+	bus := events.NewChannelBus(events.DefaultBusConfig(), events.NoopBusMetrics{}, slog.Default())
+	t.Cleanup(func() { _ = bus.Close(context.Background()) })
+
+	resolver := newStubVINResolver(map[string]string{
+		"5YJ3E1EA1NF000001": "vehicle-id-1",
+	})
+
+	hub := NewHub(slog.Default(), NoopHubMetrics{})
+	t.Cleanup(hub.Stop)
+
+	b := NewBroadcaster(hub, bus, resolver, slog.Default())
+	ctx := context.Background()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+
+	now := time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)
+	event := events.NewEvent(events.VehicleTelemetryEvent{
+		VIN:       "5YJ3E1EA1NF000001",
+		CreatedAt: now,
+		Fields: map[string]events.TelemetryValue{
+			"speed": {FloatVal: ptrFloat64(65)},
+			"gear":  {StringVal: ptrString("D")},
+		},
+	})
+
+	if err := bus.Publish(ctx, event); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	// Non-nav fields should trigger immediate VIN resolution.
+	waitForCondition(t, func() bool {
+		resolver.mu.RLock()
+		defer resolver.mu.RUnlock()
+		return len(resolver.callLog) > 0
+	})
+
+	resolver.mu.RLock()
+	defer resolver.mu.RUnlock()
+	if resolver.callLog[0] != "5YJ3E1EA1NF000001" {
+		t.Fatalf("expected VIN 5YJ3E1EA1NF000001, got %q", resolver.callLog[0])
+	}
+}
+
+func TestBroadcaster_MixedEvent_NonNavImmediateNavAccumulated(t *testing.T) {
+	bus := events.NewChannelBus(events.DefaultBusConfig(), events.NoopBusMetrics{}, slog.Default())
+	t.Cleanup(func() { _ = bus.Close(context.Background()) })
+
+	resolver := newStubVINResolver(map[string]string{
+		"5YJ3E1EA1NF000001": "vehicle-id-1",
+	})
+
+	hub := NewHub(slog.Default(), NoopHubMetrics{})
+	t.Cleanup(hub.Stop)
+
+	b := NewBroadcaster(hub, bus, resolver, slog.Default())
+	ctx := context.Background()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+
+	now := time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)
+	event := events.NewEvent(events.VehicleTelemetryEvent{
+		VIN:       "5YJ3E1EA1NF000001",
+		CreatedAt: now,
+		Fields: map[string]events.TelemetryValue{
+			"speed":           {FloatVal: ptrFloat64(65)},
+			"destinationName": {StringVal: ptrString("Work")},
+		},
+	})
+
+	if err := bus.Publish(ctx, event); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	// Non-nav field (speed) triggers immediate VIN resolution.
+	waitForCondition(t, func() bool {
+		resolver.mu.RLock()
+		defer resolver.mu.RUnlock()
+		return len(resolver.callLog) > 0
+	})
+
+	// First resolver call is for the immediate non-nav broadcast.
+	resolver.mu.RLock()
+	firstCalls := len(resolver.callLog)
+	resolver.mu.RUnlock()
+	if firstCalls != 1 {
+		t.Fatalf("expected 1 resolver call for non-nav, got %d", firstCalls)
+	}
+
+	// Nav fields are accumulated — a second resolver call happens
+	// after the nav flush interval.
+	waitForCondition(t, func() bool {
+		resolver.mu.RLock()
+		defer resolver.mu.RUnlock()
+		return len(resolver.callLog) > 1
+	})
+}
+
+func TestBroadcaster_DriveEndedClearsNavAccumulator(t *testing.T) {
+	bus := events.NewChannelBus(events.DefaultBusConfig(), events.NoopBusMetrics{}, slog.Default())
+	t.Cleanup(func() { _ = bus.Close(context.Background()) })
+
+	resolver := newStubVINResolver(map[string]string{
+		"5YJ3E1EA1NF000001": "vehicle-id-1",
+	})
+
+	hub := NewHub(slog.Default(), NoopHubMetrics{})
+	t.Cleanup(hub.Stop)
+
+	b := NewBroadcaster(hub, bus, resolver, slog.Default())
+	// Use a long flush interval so nav fields stay pending.
+	b.nav = newNavAccumulator(10*time.Second, b.flushNav)
+
+	ctx := context.Background()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+
+	now := time.Date(2026, 3, 28, 12, 0, 0, 0, time.UTC)
+
+	// Accumulate nav fields via telemetry event.
+	telEvent := events.NewEvent(events.VehicleTelemetryEvent{
+		VIN:       "5YJ3E1EA1NF000001",
+		CreatedAt: now,
+		Fields: map[string]events.TelemetryValue{
+			"destinationName": {StringVal: ptrString("Airport")},
+		},
+	})
+	if err := bus.Publish(ctx, telEvent); err != nil {
+		t.Fatalf("Publish telemetry: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// End drive — should flush and clear nav accumulator.
+	endEvent := events.NewEvent(events.DriveEndedEvent{
+		VIN:     "5YJ3E1EA1NF000001",
+		DriveID: "drive-abc",
+		Stats: events.DriveStats{
+			Distance: 5.0,
+			Duration: 10 * time.Minute,
+			AvgSpeed: 30.0,
+			MaxSpeed: 45.0,
+		},
+		EndedAt: now.Add(10 * time.Minute),
+	})
+	if err := bus.Publish(ctx, endEvent); err != nil {
+		t.Fatalf("Publish drive ended: %v", err)
+	}
+
+	waitForCondition(t, func() bool {
+		resolver.mu.RLock()
+		defer resolver.mu.RUnlock()
+		return len(resolver.callLog) > 0
+	})
+
+	// Nav accumulator should be cleared.
+	remaining := b.nav.Flush("5YJ3E1EA1NF000001")
+	if remaining != nil {
+		t.Fatalf("expected nil nav fields after drive ended, got %v", remaining)
+	}
+}
+
 func TestStatusDerivation_SpeedOnlyDoesNotInjectStatus(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
