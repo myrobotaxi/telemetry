@@ -26,16 +26,40 @@ var fieldAppliers = map[telemetry.FieldName]fieldApplier{
 	telemetry.FieldDestinationName: applyString(func(u *VehicleUpdate) **string { return &u.DestinationName }),
 	telemetry.FieldDestLocation:    applyDestLocation,
 	telemetry.FieldOriginLocation:  applyOriginLocation,
+	telemetry.FieldMinutesToArrival: applyFloatAsInt(func(u *VehicleUpdate) **int { return &u.EtaMinutes }),
+	telemetry.FieldMilesToArrival:   applyFloat(func(u *VehicleUpdate) **float64 { return &u.TripDistRemaining }),
+}
+
+// navFieldColumns maps internal telemetry field names to the DB column
+// names that should be SET NULL when the vehicle marks the field invalid
+// (e.g. navigation cancelled).
+var navFieldColumns = map[string][]string{
+	string(telemetry.FieldDestinationName): {"destinationName"},
+	string(telemetry.FieldMinutesToArrival): {"etaMinutes"},
+	string(telemetry.FieldMilesToArrival):   {"tripDistanceRemaining"},
+	string(telemetry.FieldOriginLocation):   {"originLatitude", "originLongitude"},
+	string(telemetry.FieldDestLocation):     {"destinationLatitude", "destinationLongitude"},
 }
 
 // mapTelemetryToUpdate converts a map of telemetry field values into a
 // VehicleUpdate with only the present fields set. Fields not recognized
 // or missing from the map are left nil (no-op on the database update).
+// Fields marked Invalid by the vehicle (e.g. cancelled navigation) are
+// added to ClearFields so the database writer sets them to NULL.
 func mapTelemetryToUpdate(fields map[string]events.TelemetryValue) *VehicleUpdate {
 	u := &VehicleUpdate{}
 	hasFields := false
 
 	for name, val := range fields {
+		// Nav fields marked invalid → schedule DB columns for NULL.
+		if val.Invalid {
+			if cols, isNav := navFieldColumns[name]; isNav {
+				u.ClearFields = append(u.ClearFields, cols...)
+				hasFields = true
+			}
+			continue
+		}
+
 		apply, ok := fieldAppliers[telemetry.FieldName(name)]
 		if !ok {
 			continue
@@ -60,6 +84,18 @@ func applyFloatAsInt(target func(u *VehicleUpdate) **int) fieldApplier {
 			return false
 		}
 		*target(u) = v
+		return true
+	}
+}
+
+// applyFloat returns an applier that assigns a float64 value to the field
+// returned by the target function.
+func applyFloat(target func(u *VehicleUpdate) **float64) fieldApplier {
+	return func(u *VehicleUpdate, val events.TelemetryValue) bool {
+		if val.FloatVal == nil {
+			return false
+		}
+		*target(u) = val.FloatVal
 		return true
 	}
 }

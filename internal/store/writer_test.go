@@ -728,6 +728,125 @@ func TestMergeUpdate(t *testing.T) {
 	}
 }
 
+func TestMergeUpdate_ClearFields(t *testing.T) {
+	t1 := time.Date(2026, 3, 17, 14, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 3, 17, 14, 0, 5, 0, time.UTC)
+
+	tests := []struct {
+		name      string
+		dst       *VehicleUpdate
+		src       *VehicleUpdate
+		wantClear []string
+	}{
+		{
+			name: "ClearFields appended from src",
+			dst: &VehicleUpdate{
+				Speed:       intPtr(45),
+				LastUpdated: t1,
+			},
+			src: &VehicleUpdate{
+				ClearFields: []string{"destinationName", "etaMinutes"},
+				LastUpdated: t2,
+			},
+			wantClear: []string{"destinationName", "etaMinutes"},
+		},
+		{
+			name: "ClearFields from both dst and src merged",
+			dst: &VehicleUpdate{
+				ClearFields: []string{"originLatitude"},
+				LastUpdated: t1,
+			},
+			src: &VehicleUpdate{
+				ClearFields: []string{"destinationLatitude"},
+				LastUpdated: t2,
+			},
+			wantClear: []string{"originLatitude", "destinationLatitude"},
+		},
+		{
+			name: "empty src ClearFields preserves dst ClearFields",
+			dst: &VehicleUpdate{
+				ClearFields: []string{"etaMinutes"},
+				LastUpdated: t1,
+			},
+			src: &VehicleUpdate{
+				Speed:       intPtr(72),
+				LastUpdated: t2,
+			},
+			wantClear: []string{"etaMinutes"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mergeUpdate(tt.dst, tt.src)
+
+			if len(tt.dst.ClearFields) != len(tt.wantClear) {
+				t.Fatalf("ClearFields = %v, want %v", tt.dst.ClearFields, tt.wantClear)
+			}
+			for i := range tt.dst.ClearFields {
+				if tt.dst.ClearFields[i] != tt.wantClear[i] {
+					t.Errorf("ClearFields[%d] = %q, want %q", i, tt.dst.ClearFields[i], tt.wantClear[i])
+				}
+			}
+		})
+	}
+}
+
+func TestMergeUpdate_NavFields(t *testing.T) {
+	t1 := time.Date(2026, 3, 17, 14, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 3, 17, 14, 0, 5, 0, time.UTC)
+
+	destName := "Home"
+	destLat := 33.0975
+	destLng := -96.8214
+	origLat := 33.05
+	origLng := -96.80
+	eta := 15
+	dist := 8.3
+
+	dst := &VehicleUpdate{
+		Speed:       intPtr(45),
+		LastUpdated: t1,
+	}
+	src := &VehicleUpdate{
+		DestinationName:      &destName,
+		DestinationLatitude:  &destLat,
+		DestinationLongitude: &destLng,
+		OriginLatitude:       &origLat,
+		OriginLongitude:      &origLng,
+		EtaMinutes:           &eta,
+		TripDistRemaining:    &dist,
+		LastUpdated:          t2,
+	}
+
+	mergeUpdate(dst, src)
+
+	if dst.DestinationName == nil || *dst.DestinationName != "Home" {
+		t.Errorf("DestinationName = %v, want Home", ptrVal(dst.DestinationName))
+	}
+	if dst.DestinationLatitude == nil || *dst.DestinationLatitude != 33.0975 {
+		t.Errorf("DestinationLatitude = %v, want 33.0975", ptrVal(dst.DestinationLatitude))
+	}
+	if dst.DestinationLongitude == nil || *dst.DestinationLongitude != -96.8214 {
+		t.Errorf("DestinationLongitude = %v, want -96.8214", ptrVal(dst.DestinationLongitude))
+	}
+	if dst.OriginLatitude == nil || *dst.OriginLatitude != 33.05 {
+		t.Errorf("OriginLatitude = %v, want 33.05", ptrVal(dst.OriginLatitude))
+	}
+	if dst.OriginLongitude == nil || *dst.OriginLongitude != -96.80 {
+		t.Errorf("OriginLongitude = %v, want -96.80", ptrVal(dst.OriginLongitude))
+	}
+	if dst.EtaMinutes == nil || *dst.EtaMinutes != 15 {
+		t.Errorf("EtaMinutes = %v, want 15", ptrVal(dst.EtaMinutes))
+	}
+	if dst.TripDistRemaining == nil || *dst.TripDistRemaining != 8.3 {
+		t.Errorf("TripDistRemaining = %v, want 8.3", ptrVal(dst.TripDistRemaining))
+	}
+	if dst.Speed == nil || *dst.Speed != 45 {
+		t.Errorf("Speed = %v, want 45 (preserved from dst)", ptrVal(dst.Speed))
+	}
+}
+
 func TestMergeUpdate_OlderTimestampPreserved(t *testing.T) {
 	t1 := time.Date(2026, 3, 17, 14, 0, 5, 0, time.UTC) // later
 	t2 := time.Date(2026, 3, 17, 14, 0, 0, 0, time.UTC) // earlier

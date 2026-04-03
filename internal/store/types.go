@@ -63,6 +63,9 @@ type VehicleUpdate struct {
 	DestinationLongitude *float64
 	OriginLatitude       *float64
 	OriginLongitude      *float64
+	EtaMinutes           *int
+	TripDistRemaining    *float64
+	ClearFields          []string  // DB column names to explicitly SET NULL
 	LastUpdated          time.Time // always set
 }
 

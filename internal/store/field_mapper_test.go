@@ -152,6 +152,34 @@ func TestMapTelemetryToUpdate(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "minutesToArrival mapped from float",
+			fields: map[string]events.TelemetryValue{
+				string(telemetry.FieldMinutesToArrival): {FloatVal: floatPtr(12.7)},
+			},
+			check: func(t *testing.T, u *VehicleUpdate) {
+				if u == nil {
+					t.Fatal("expected non-nil update")
+				}
+				if u.EtaMinutes == nil || *u.EtaMinutes != 13 {
+					t.Errorf("EtaMinutes = %v, want 13", ptrVal(u.EtaMinutes))
+				}
+			},
+		},
+		{
+			name: "milesToArrival mapped from float",
+			fields: map[string]events.TelemetryValue{
+				string(telemetry.FieldMilesToArrival): {FloatVal: floatPtr(8.3)},
+			},
+			check: func(t *testing.T, u *VehicleUpdate) {
+				if u == nil {
+					t.Fatal("expected non-nil update")
+				}
+				if u.TripDistRemaining == nil || *u.TripDistRemaining != 8.3 {
+					t.Errorf("TripDistRemaining = %v, want 8.3", ptrVal(u.TripDistRemaining))
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -196,6 +224,116 @@ func TestFloatToIntPtr(t *testing.T) {
 	}
 }
 
+func TestMapTelemetryToUpdate_InvalidNavFields(t *testing.T) {
+	tests := []struct {
+		name       string
+		fields     map[string]events.TelemetryValue
+		wantClear  []string
+		wantNilUpd bool // true if entire update should be nil
+	}{
+		{
+			name: "invalid destinationName clears DB column",
+			fields: map[string]events.TelemetryValue{
+				"destinationName": {Invalid: true},
+			},
+			wantClear: []string{"destinationName"},
+		},
+		{
+			name: "invalid minutesToArrival clears etaMinutes",
+			fields: map[string]events.TelemetryValue{
+				"minutesToArrival": {Invalid: true},
+			},
+			wantClear: []string{"etaMinutes"},
+		},
+		{
+			name: "invalid milesToArrival clears tripDistanceRemaining",
+			fields: map[string]events.TelemetryValue{
+				"milesToArrival": {Invalid: true},
+			},
+			wantClear: []string{"tripDistanceRemaining"},
+		},
+		{
+			name: "invalid originLocation clears both lat/lng columns",
+			fields: map[string]events.TelemetryValue{
+				"originLocation": {Invalid: true},
+			},
+			wantClear: []string{"originLatitude", "originLongitude"},
+		},
+		{
+			name: "invalid destinationLocation clears both lat/lng columns",
+			fields: map[string]events.TelemetryValue{
+				"destinationLocation": {Invalid: true},
+			},
+			wantClear: []string{"destinationLatitude", "destinationLongitude"},
+		},
+		{
+			name: "invalid non-nav field is ignored",
+			fields: map[string]events.TelemetryValue{
+				"speed": {Invalid: true},
+			},
+			wantNilUpd: true,
+		},
+		{
+			name: "invalid nav field skips applier even if value present",
+			fields: map[string]events.TelemetryValue{
+				"destinationName": {Invalid: true, StringVal: strPtr("Stale Dest")},
+			},
+			wantClear: []string{"destinationName"},
+		},
+		{
+			name: "mix of invalid and valid fields",
+			fields: map[string]events.TelemetryValue{
+				"destinationName": {Invalid: true},
+				"speed":           {FloatVal: floatPtr(65.0)},
+			},
+			wantClear: []string{"destinationName"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u := mapTelemetryToUpdate(tt.fields)
+			if tt.wantNilUpd {
+				if u != nil {
+					t.Fatalf("expected nil update, got %+v", u)
+				}
+				return
+			}
+			if u == nil {
+				t.Fatal("expected non-nil update")
+			}
+
+			// Sort both slices for deterministic comparison since map
+			// iteration order is random.
+			gotClear := make([]string, len(u.ClearFields))
+			copy(gotClear, u.ClearFields)
+			wantClear := make([]string, len(tt.wantClear))
+			copy(wantClear, tt.wantClear)
+			sortStrings(gotClear)
+			sortStrings(wantClear)
+
+			if len(gotClear) != len(wantClear) {
+				t.Fatalf("ClearFields = %v, want %v", gotClear, wantClear)
+			}
+			for i := range gotClear {
+				if gotClear[i] != wantClear[i] {
+					t.Errorf("ClearFields[%d] = %q, want %q", i, gotClear[i], wantClear[i])
+				}
+			}
+
+			// For the mixed case, verify that the valid field was still applied.
+			if tt.name == "mix of invalid and valid fields" {
+				if u.Speed == nil || *u.Speed != 65 {
+					t.Errorf("Speed = %v, want 65 (valid field should still apply)", ptrVal(u.Speed))
+				}
+				if u.DestinationName != nil {
+					t.Errorf("DestinationName = %v, want nil (invalid field should not apply)", ptrVal(u.DestinationName))
+				}
+			}
+		})
+	}
+}
+
 // test helpers
 
 func strPtr(s string) *string    { return &s }
@@ -207,4 +345,14 @@ func ptrVal[T any](p *T) any {
 		return nil
 	}
 	return *p
+}
+
+func sortStrings(s []string) {
+	for i := range s {
+		for j := i + 1; j < len(s); j++ {
+			if s[i] > s[j] {
+				s[i], s[j] = s[j], s[i]
+			}
+		}
+	}
 }

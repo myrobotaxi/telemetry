@@ -54,6 +54,31 @@ func mergeUpdate(dst, src *VehicleUpdate) {
 	if src.LocationAddr != nil {
 		dst.LocationAddr = src.LocationAddr
 	}
+	if src.DestinationName != nil {
+		dst.DestinationName = src.DestinationName
+	}
+	if src.DestinationLatitude != nil {
+		dst.DestinationLatitude = src.DestinationLatitude
+	}
+	if src.DestinationLongitude != nil {
+		dst.DestinationLongitude = src.DestinationLongitude
+	}
+	if src.OriginLatitude != nil {
+		dst.OriginLatitude = src.OriginLatitude
+	}
+	if src.OriginLongitude != nil {
+		dst.OriginLongitude = src.OriginLongitude
+	}
+	if src.EtaMinutes != nil {
+		dst.EtaMinutes = src.EtaMinutes
+	}
+	if src.TripDistRemaining != nil {
+		dst.TripDistRemaining = src.TripDistRemaining
+	}
+	// Append ClearFields from source so NULL writes survive coalescing.
+	if len(src.ClearFields) > 0 {
+		dst.ClearFields = append(dst.ClearFields, src.ClearFields...)
+	}
 	// Always take the later timestamp.
 	if src.LastUpdated.After(dst.LastUpdated) {
 		dst.LastUpdated = src.LastUpdated
