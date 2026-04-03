@@ -45,6 +45,25 @@ var integerFields = map[string]struct{}{
 	"passengerTempSetting": {},
 }
 
+// navFieldSet contains internal telemetry field names that are considered
+// navigation-related. These fields are accumulated and broadcast together
+// after a time window to avoid race conditions in the frontend.
+var navFieldSet = map[string]struct{}{
+	"routeLine":           {},
+	"destinationName":     {},
+	"minutesToArrival":    {},
+	"milesToArrival":      {},
+	"destinationLocation": {},
+	"originLocation":      {},
+}
+
+// isNavField reports whether the given internal field name is a navigation
+// field that should be routed through the navAccumulator.
+func isNavField(name string) bool {
+	_, ok := navFieldSet[name]
+	return ok
+}
+
 // locationFieldSplit maps internal location field names to the pair of
 // client field names they should be split into (latitude, longitude).
 var locationFieldSplit = map[string][2]string{

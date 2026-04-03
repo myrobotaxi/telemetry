@@ -20,18 +20,21 @@ type Broadcaster struct {
 	logger   *slog.Logger
 	subs     []events.Subscription
 	routes   *routeAccumulator
+	nav      *navAccumulator
 }
 
 // NewBroadcaster creates a Broadcaster ready to start. Call Start to begin
 // subscribing to event bus topics.
 func NewBroadcaster(hub *Hub, bus events.Bus, resolver VINResolver, logger *slog.Logger) *Broadcaster {
-	return &Broadcaster{
+	b := &Broadcaster{
 		hub:      hub,
 		bus:      bus,
 		resolver: resolver,
 		logger:   logger,
 		routes:   newRouteAccumulator(defaultRouteBatchSize, defaultRouteFlushInterval),
 	}
+	b.nav = newNavAccumulator(defaultNavFlushInterval, b.flushNav)
+	return b
 }
 
 // Start subscribes to all relevant event bus topics. The provided context
@@ -87,65 +90,6 @@ func (b *Broadcaster) makeHandler(fn eventHandler) events.Handler {
 		defer cancel()
 		fn(ctx, event)
 	}
-}
-
-// handleTelemetry transforms a VehicleTelemetryEvent into a vehicle_update
-// message and broadcasts it to authorized clients.
-func (b *Broadcaster) handleTelemetry(ctx context.Context, event events.Event) {
-	payload, ok := event.Payload.(events.VehicleTelemetryEvent)
-	if !ok {
-		b.logger.Error("broadcaster.handleTelemetry: unexpected payload type",
-			slog.String("event_id", event.ID),
-		)
-		return
-	}
-
-	vehicleID, err := b.resolver.GetByVIN(ctx, payload.VIN)
-	if err != nil {
-		b.logger.Warn("broadcaster.handleTelemetry: VIN resolution failed, skipping event",
-			slog.String("event_id", event.ID),
-			slog.Any("error", err),
-		)
-		return
-	}
-
-	fields := mapFieldsForClient(payload.Fields)
-	if len(fields) == 0 {
-		return
-	}
-
-	// Inject lastUpdated into fields so it merges into the frontend Vehicle
-	// object. The envelope's Timestamp serves a different purpose (message
-	// ordering) — lastUpdated is what the UI displays.
-	fields["lastUpdated"] = payload.CreatedAt.Format(time.RFC3339)
-
-	// Only derive status when gear changes — speed-only updates should not
-	// override the status because we don't know the current gear.
-	if _, hasGear := fields["gearPosition"]; hasGear {
-		fields["status"] = deriveVehicleStatus(fields)
-	}
-
-	msg, err := marshalWSMessage(msgTypeVehicleUpdate, vehicleUpdatePayload{
-		VehicleID: vehicleID,
-		Fields:    fields,
-		Timestamp: payload.CreatedAt.Format(time.RFC3339),
-	})
-	if err != nil {
-		b.logger.Error("broadcaster.handleTelemetry: marshal failed",
-			slog.String("event_id", event.ID),
-			slog.Any("error", err),
-		)
-		return
-	}
-
-	// Diagnostic: confirm navRouteCoordinates makes it to broadcast
-	if _, hasNav := fields["navRouteCoordinates"]; hasNav {
-		b.logger.Info("broadcaster.handleTelemetry: broadcasting navRouteCoordinates",
-			slog.String("vehicle_id", vehicleID),
-		)
-	}
-
-	b.hub.Broadcast(vehicleID, msg)
 }
 
 // handleDriveStarted transforms a DriveStartedEvent into a drive_started
@@ -215,6 +159,12 @@ func (b *Broadcaster) handleDriveEnded(ctx context.Context, event events.Event) 
 	}
 	b.routes.Clear(payload.VIN)
 
+	// Flush and clear any pending nav fields for this VIN.
+	if navFields := b.nav.Flush(payload.VIN); len(navFields) > 0 {
+		b.flushNav(payload.VIN, navFields)
+	}
+	b.nav.Clear(payload.VIN)
+
 	msg, err := marshalWSMessage(msgTypeDriveEnded, driveEndedPayload{
 		VehicleID: vehicleID,
 		DriveID:   payload.DriveID,
@@ -269,6 +219,12 @@ func (b *Broadcaster) handleConnectivity(ctx context.Context, event events.Event
 	}
 
 	b.hub.Broadcast(vehicleID, msg)
+
+	// Clear pending nav fields when vehicle disconnects to avoid
+	// broadcasting stale navigation data on reconnect.
+	if payload.Status == events.StatusDisconnected {
+		b.nav.Clear(payload.VIN)
+	}
 }
 
 // unsubscribeAll removes all active subscriptions from the bus.
