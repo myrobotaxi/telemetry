@@ -1,6 +1,7 @@
 package store
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
@@ -309,8 +310,8 @@ func TestMapTelemetryToUpdate_InvalidNavFields(t *testing.T) {
 			copy(gotClear, u.ClearFields)
 			wantClear := make([]string, len(tt.wantClear))
 			copy(wantClear, tt.wantClear)
-			sortStrings(gotClear)
-			sortStrings(wantClear)
+			slices.Sort(gotClear)
+			slices.Sort(wantClear)
 
 			if len(gotClear) != len(wantClear) {
 				t.Fatalf("ClearFields = %v, want %v", gotClear, wantClear)
@@ -347,12 +348,3 @@ func ptrVal[T any](p *T) any {
 	return *p
 }
 
-func sortStrings(s []string) {
-	for i := range s {
-		for j := i + 1; j < len(s); j++ {
-			if s[i] > s[j] {
-				s[i], s[j] = s[j], s[i]
-			}
-		}
-	}
-}

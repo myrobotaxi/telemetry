@@ -1,5 +1,7 @@
 package store
 
+import "slices"
+
 // coalesce merges an update into the pending map for the given VIN.
 // Returns true if the batch size threshold has been reached.
 func (w *Writer) coalesce(vin string, update *VehicleUpdate) bool {
@@ -76,8 +78,11 @@ func mergeUpdate(dst, src *VehicleUpdate) {
 		dst.TripDistRemaining = src.TripDistRemaining
 	}
 	// Append ClearFields from source so NULL writes survive coalescing.
-	if len(src.ClearFields) > 0 {
-		dst.ClearFields = append(dst.ClearFields, src.ClearFields...)
+	// Deduplicate to avoid redundant SET NULL clauses.
+	for _, col := range src.ClearFields {
+		if !slices.Contains(dst.ClearFields, col) {
+			dst.ClearFields = append(dst.ClearFields, col)
+		}
 	}
 	// Always take the later timestamp.
 	if src.LastUpdated.After(dst.LastUpdated) {

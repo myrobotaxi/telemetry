@@ -33,12 +33,12 @@ var fieldAppliers = map[telemetry.FieldName]fieldApplier{
 // navFieldColumns maps internal telemetry field names to the DB column
 // names that should be SET NULL when the vehicle marks the field invalid
 // (e.g. navigation cancelled).
-var navFieldColumns = map[string][]string{
-	string(telemetry.FieldDestinationName): {"destinationName"},
-	string(telemetry.FieldMinutesToArrival): {"etaMinutes"},
-	string(telemetry.FieldMilesToArrival):   {"tripDistanceRemaining"},
-	string(telemetry.FieldOriginLocation):   {"originLatitude", "originLongitude"},
-	string(telemetry.FieldDestLocation):     {"destinationLatitude", "destinationLongitude"},
+var navFieldColumns = map[telemetry.FieldName][]string{
+	telemetry.FieldDestinationName: {"destinationName"},
+	telemetry.FieldMinutesToArrival: {"etaMinutes"},
+	telemetry.FieldMilesToArrival:   {"tripDistanceRemaining"},
+	telemetry.FieldOriginLocation:   {"originLatitude", "originLongitude"},
+	telemetry.FieldDestLocation:     {"destinationLatitude", "destinationLongitude"},
 }
 
 // mapTelemetryToUpdate converts a map of telemetry field values into a
@@ -53,7 +53,7 @@ func mapTelemetryToUpdate(fields map[string]events.TelemetryValue) *VehicleUpdat
 	for name, val := range fields {
 		// Nav fields marked invalid → schedule DB columns for NULL.
 		if val.Invalid {
-			if cols, isNav := navFieldColumns[name]; isNav {
+			if cols, isNav := navFieldColumns[telemetry.FieldName(name)]; isNav {
 				u.ClearFields = append(u.ClearFields, cols...)
 				hasFields = true
 			}

@@ -13,6 +13,7 @@ const vehicleSelectColumns = `"id", "userId", "vin", "name", "status",
 	"latitude", "longitude", "interiorTemp", "exteriorTemp",
 	"odometerMiles", "destinationName", "destinationLatitude",
 	"destinationLongitude", "originLatitude", "originLongitude",
+	"etaMinutes", "tripDistanceRemaining",
 	"lastUpdated"`
 
 const queryVehicleByVIN = `SELECT ` + vehicleSelectColumns + `

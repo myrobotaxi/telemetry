@@ -39,6 +39,8 @@ type Vehicle struct {
 	DestinationLongitude *float64 // nullable
 	OriginLatitude       *float64 // nullable
 	OriginLongitude      *float64 // nullable
+	EtaMinutes           *int     // nullable
+	TripDistRemaining    *float64 // nullable
 	LastUpdated          time.Time
 }
 
