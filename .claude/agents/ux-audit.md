@@ -13,8 +13,8 @@ You are NOT a code quality reviewer. You are NOT a security auditor. Other agent
 
 | Project | Path | Role |
 |---------|------|------|
-| **my-robo-taxi-telemetry** | `/Users/thomasnandola/Projects/my-robo-taxi-telemetry` | Go backend — receives Tesla telemetry, broadcasts via WebSocket |
-| **my-robo-taxi** | `/Users/thomasnandola/Projects/my-robo-taxi` | Next.js frontend — displays live vehicle data, drives, sharing |
+| **my-robo-taxi-telemetry** | `.` (this repo) | Go backend — receives Tesla telemetry, broadcasts via WebSocket |
+| **my-robo-taxi** | `../my-robo-taxi` | Next.js frontend — displays live vehicle data, drives, sharing |
 
 ## When You Are Invoked
 

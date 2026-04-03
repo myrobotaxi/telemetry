@@ -47,20 +47,6 @@ func (r *DriveRepo) Create(ctx context.Context, drive DriveRecord) error {
 	return nil
 }
 
-// UpdateStartLocation sets the start location and address for a drive,
-// but only if the current start location is empty or zero. Used to backfill
-// when the first GPS position wasn't available at drive start.
-func (r *DriveRepo) UpdateStartLocation(ctx context.Context, driveID, location, address string) error {
-	start := time.Now()
-	_, err := r.pool.Exec(ctx, queryDriveUpdateStartLocation, driveID, location, address)
-	r.metrics.ObserveQueryDuration("drive.update_start_location", time.Since(start).Seconds())
-	if err != nil {
-		r.metrics.IncQueryError("drive.update_start_location")
-		return fmt.Errorf("DriveRepo.UpdateStartLocation(%s): %w", driveID, err)
-	}
-	return nil
-}
-
 // AppendRoutePoints appends route points to the drive's routePoints JSON
 // array. Uses PostgreSQL jsonb_concat (||) to avoid read-modify-write.
 func (r *DriveRepo) AppendRoutePoints(ctx context.Context, driveID string, points []RoutePointRecord) error {

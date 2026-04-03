@@ -334,6 +334,7 @@ When Claude Review (tnando-gh-bot) leaves review comments, they carry severity l
 | **Low / Suggestion** | Optional — fix if reasonable |
 
 If you disagree with a review comment, respond with a justification on the PR — do not silently ignore it.
+
 ## What NOT to Do
 
 - Do NOT import from `my-robo-taxi` — communicate only via shared database and documented contracts

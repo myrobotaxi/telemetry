@@ -24,7 +24,6 @@ type drivePersister interface {
 	Create(ctx context.Context, drive DriveRecord) error
 	Complete(ctx context.Context, driveID string, stats DriveCompletion) error
 	AppendRoutePoints(ctx context.Context, driveID string, points []RoutePointRecord) error
-	UpdateStartLocation(ctx context.Context, driveID, location, address string) error
 }
 
 // WriterConfig holds tunable parameters for the Writer's batch flush behavior.
@@ -59,11 +58,6 @@ type Writer struct {
 	pendingMu sync.Mutex
 	pending   map[string]*VehicleUpdate // VIN → coalesced update
 	count     int                       // total telemetry events since last flush
-
-	// startBackfill tracks drive IDs that started with (0,0) GPS and need
-	// their start location backfilled from the first valid route point.
-	startBackfillMu sync.Mutex
-	startBackfill   map[string]bool // driveID → needs backfill
 
 	subs      []events.Subscription
 	cancel    context.CancelFunc
@@ -100,8 +94,7 @@ func NewWriter(
 		logger:    logger,
 		cfg:       cfg,
 		routeBuf:  newRouteBuffer(drives, logger, cfg.RouteBuffer),
-		pending:       make(map[string]*VehicleUpdate),
-		startBackfill: make(map[string]bool),
+		pending:   make(map[string]*VehicleUpdate),
 		done:      make(chan struct{}),
 		flushDone: make(chan struct{}),
 	}
