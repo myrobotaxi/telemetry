@@ -190,51 +190,7 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	srv.HandleFunc("GET /api/vehicle-status/{vin}", statusHandler.ServeHTTP)
 
 	// --- Fleet config push endpoint (optional — requires proxy config) ---
-	if cfg.Proxy().URL != "" && cfg.Proxy().FleetTelemetryHostname != "" {
-		fleetClient := telemetry.NewFleetAPIClient(telemetry.FleetAPIConfig{
-			BaseURL:    cfg.Proxy().URL,
-			HTTPClient: proxyHTTPClient(cfg.Proxy().URL, logger),
-		}, logger.With(slog.String("component", "fleet")))
-
-		// Map config.ProxyConfig fields → telemetry.EndpointConfig.
-		// If new proxy fields are added to config, update this mapping.
-		var fleetOpts []telemetry.FleetConfigOption
-		if cfg.TeslaOAuth().ClientID != "" {
-			// Intentional mapping: config.TeslaOAuthConfig and telemetry.TeslaOAuthConfig
-			// have identical fields but live in separate dependency layers. Don't "DRY"
-			// them — config is infra, telemetry is domain. The copy keeps them decoupled.
-			refresher := telemetry.NewTokenRefresher(telemetry.TeslaOAuthConfig{
-				ClientID:     cfg.TeslaOAuth().ClientID,
-				ClientSecret: cfg.TeslaOAuth().ClientSecret,
-			}, logger.With(slog.String("component", "token-refresh")))
-			updater := &teslaTokenUpdaterAdapter{repo: accountRepo}
-			fleetOpts = append(fleetOpts, telemetry.WithTokenRefresher(refresher, updater))
-			logger.Info("Tesla token auto-refresh enabled")
-		} else {
-			logger.Warn("Tesla token auto-refresh disabled: AUTH_TESLA_ID not set")
-		}
-
-		fleetHandler := telemetry.NewFleetConfigHandler(
-			authenticator,
-			&vehicleOwnerAdapter{repo: vehicleRepo},
-			&teslaTokenAdapter{repo: accountRepo},
-			fleetClient,
-			telemetry.EndpointConfig{
-				Hostname: cfg.Proxy().FleetTelemetryHostname,
-				Port:     cfg.Proxy().FleetTelemetryPort,
-				CA:       cfg.Proxy().FleetTelemetryCA,
-			},
-			logger.With(slog.String("component", "fleet-config")),
-			fleetOpts...,
-		)
-
-		srv.HandleFunc("POST /api/fleet-config/{vin}", fleetHandler.ServeHTTP)
-		logger.Info("fleet config push endpoint enabled",
-			slog.String("proxy_url", cfg.Proxy().URL),
-		)
-	} else {
-		logger.Warn("fleet config push disabled: proxy URL or telemetry hostname not configured")
-	}
+	setupFleetConfigEndpoint(cfg, srv, authenticator, vehicleRepo, accountRepo, logger)
 
 	// Configure mTLS on Tesla port. TLS is required for vehicle connections —
 	// without it, Tesla vehicles cannot complete the handshake and report EOF.
@@ -262,6 +218,66 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 
 	logger.Info("telemetry-server stopped cleanly")
 	return nil
+}
+
+// setupFleetConfigEndpoint registers the POST /api/fleet-config/{vin}
+// handler if the proxy URL and fleet telemetry hostname are configured.
+// When Tesla OAuth credentials are available, it also enables automatic
+// token refresh.
+func setupFleetConfigEndpoint(
+	cfg *config.Config,
+	srv *server.Server,
+	authenticator ws.Authenticator,
+	vehicleRepo *store.VehicleRepo,
+	accountRepo *store.AccountRepo,
+	logger *slog.Logger,
+) {
+	if cfg.Proxy().URL == "" || cfg.Proxy().FleetTelemetryHostname == "" {
+		logger.Warn("fleet config push disabled: proxy URL or telemetry hostname not configured")
+		return
+	}
+
+	fleetClient := telemetry.NewFleetAPIClient(telemetry.FleetAPIConfig{
+		BaseURL:    cfg.Proxy().URL,
+		HTTPClient: proxyHTTPClient(cfg.Proxy().URL, logger),
+	}, logger.With(slog.String("component", "fleet")))
+
+	// Map config.ProxyConfig fields → telemetry.EndpointConfig.
+	// If new proxy fields are added to config, update this mapping.
+	var fleetOpts []telemetry.FleetConfigOption
+	if cfg.TeslaOAuth().ClientID != "" {
+		// Intentional mapping: config.TeslaOAuthConfig and telemetry.TeslaOAuthConfig
+		// have identical fields but live in separate dependency layers. Don't "DRY"
+		// them — config is infra, telemetry is domain. The copy keeps them decoupled.
+		refresher := telemetry.NewTokenRefresher(telemetry.TeslaOAuthConfig{
+			ClientID:     cfg.TeslaOAuth().ClientID,
+			ClientSecret: cfg.TeslaOAuth().ClientSecret,
+		}, logger.With(slog.String("component", "token-refresh")))
+		updater := &teslaTokenUpdaterAdapter{repo: accountRepo}
+		fleetOpts = append(fleetOpts, telemetry.WithTokenRefresher(refresher, updater))
+		logger.Info("Tesla token auto-refresh enabled")
+	} else {
+		logger.Warn("Tesla token auto-refresh disabled: AUTH_TESLA_ID not set")
+	}
+
+	fleetHandler := telemetry.NewFleetConfigHandler(
+		authenticator,
+		&vehicleOwnerAdapter{repo: vehicleRepo},
+		&teslaTokenAdapter{repo: accountRepo},
+		fleetClient,
+		telemetry.EndpointConfig{
+			Hostname: cfg.Proxy().FleetTelemetryHostname,
+			Port:     cfg.Proxy().FleetTelemetryPort,
+			CA:       cfg.Proxy().FleetTelemetryCA,
+		},
+		logger.With(slog.String("component", "fleet-config")),
+		fleetOpts...,
+	)
+
+	srv.HandleFunc("POST /api/fleet-config/{vin}", fleetHandler.ServeHTTP)
+	logger.Info("fleet config push endpoint enabled",
+		slog.String("proxy_url", cfg.Proxy().URL),
+	)
 }
 
 func newLogger(level string) (*slog.Logger, error) {
