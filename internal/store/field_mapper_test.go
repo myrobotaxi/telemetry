@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"slices"
 	"testing"
 
@@ -331,6 +332,115 @@ func TestMapTelemetryToUpdate_InvalidNavFields(t *testing.T) {
 					t.Errorf("DestinationName = %v, want nil (invalid field should not apply)", ptrVal(u.DestinationName))
 				}
 			}
+		})
+	}
+}
+
+func TestMapTelemetryToUpdate_RouteLine(t *testing.T) {
+	// Real Base64-encoded protobuf from Tesla RouteLine field (truncated).
+	// Decodes to coordinates near Dallas/Plano TX area.
+	validRouteLine := "CjRnfWZ1fUBwYXJxd0R9eEBsQGdKTH1JTWtHTG1JP3tGP29OTWFTP19jQD95YEBPc0w/Z0Q/"
+
+	tests := []struct {
+		name  string
+		fields map[string]events.TelemetryValue
+		check func(t *testing.T, u *VehicleUpdate)
+	}{
+		{
+			name: "valid routeLine decoded to navRouteCoordinates JSON",
+			fields: map[string]events.TelemetryValue{
+				string(telemetry.FieldRouteLine): {StringVal: strPtr(validRouteLine)},
+			},
+			check: func(t *testing.T, u *VehicleUpdate) {
+				if u == nil {
+					t.Fatal("expected non-nil update")
+				}
+				if u.NavRouteCoordinates == nil {
+					t.Fatal("NavRouteCoordinates should be set")
+				}
+				var coords [][]float64
+				if err := json.Unmarshal(*u.NavRouteCoordinates, &coords); err != nil {
+					t.Fatalf("failed to unmarshal NavRouteCoordinates: %v", err)
+				}
+				if len(coords) == 0 {
+					t.Fatal("expected at least one coordinate pair")
+				}
+				// Coordinates are in [lng, lat] (Mapbox) order.
+				// First point should be near Dallas TX: lng ~-96.77, lat ~32.87.
+				first := coords[0]
+				if first[0] > -95.0 || first[0] < -98.0 {
+					t.Errorf("first lng = %f, expected near -96.77", first[0])
+				}
+				if first[1] < 32.0 || first[1] > 34.0 {
+					t.Errorf("first lat = %f, expected near 32.87", first[1])
+				}
+			},
+		},
+		{
+			name: "empty routeLine clears navRouteCoordinates",
+			fields: map[string]events.TelemetryValue{
+				string(telemetry.FieldRouteLine): {StringVal: strPtr("")},
+			},
+			check: func(t *testing.T, u *VehicleUpdate) {
+				if u == nil {
+					t.Fatal("expected non-nil update")
+				}
+				if u.NavRouteCoordinates != nil {
+					t.Error("NavRouteCoordinates should be nil for empty routeLine")
+				}
+				if !slices.Contains(u.ClearFields, "navRouteCoordinates") {
+					t.Errorf("ClearFields = %v, want navRouteCoordinates", u.ClearFields)
+				}
+			},
+		},
+		{
+			name: "invalid base64 routeLine clears navRouteCoordinates",
+			fields: map[string]events.TelemetryValue{
+				string(telemetry.FieldRouteLine): {StringVal: strPtr("not-valid-base64!!!")},
+			},
+			check: func(t *testing.T, u *VehicleUpdate) {
+				if u == nil {
+					t.Fatal("expected non-nil update")
+				}
+				if u.NavRouteCoordinates != nil {
+					t.Error("NavRouteCoordinates should be nil for invalid routeLine")
+				}
+				if !slices.Contains(u.ClearFields, "navRouteCoordinates") {
+					t.Errorf("ClearFields = %v, want navRouteCoordinates", u.ClearFields)
+				}
+			},
+		},
+		{
+			name: "nil StringVal ignored",
+			fields: map[string]events.TelemetryValue{
+				string(telemetry.FieldRouteLine): {StringVal: nil},
+			},
+			check: func(t *testing.T, u *VehicleUpdate) {
+				if u != nil {
+					t.Errorf("expected nil for nil StringVal routeLine, got %+v", u)
+				}
+			},
+		},
+		{
+			name: "invalid routeLine via Invalid flag clears navRouteCoordinates",
+			fields: map[string]events.TelemetryValue{
+				string(telemetry.FieldRouteLine): {Invalid: true},
+			},
+			check: func(t *testing.T, u *VehicleUpdate) {
+				if u == nil {
+					t.Fatal("expected non-nil update for invalid routeLine")
+				}
+				if !slices.Contains(u.ClearFields, "navRouteCoordinates") {
+					t.Errorf("ClearFields = %v, want navRouteCoordinates", u.ClearFields)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u := mapTelemetryToUpdate(tt.fields)
+			tt.check(t, u)
 		})
 	}
 }
