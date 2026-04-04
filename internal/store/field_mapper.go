@@ -1,9 +1,12 @@
 package store
 
 import (
+	"encoding/json"
+	"log/slog"
 	"math"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/polyline"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/telemetry"
 )
 
@@ -28,6 +31,7 @@ var fieldAppliers = map[telemetry.FieldName]fieldApplier{
 	telemetry.FieldOriginLocation:  applyOriginLocation,
 	telemetry.FieldMinutesToArrival: applyFloatAsInt(func(u *VehicleUpdate) **int { return &u.EtaMinutes }),
 	telemetry.FieldMilesToArrival:   applyFloat(func(u *VehicleUpdate) **float64 { return &u.TripDistRemaining }),
+	telemetry.FieldRouteLine:        applyRouteLine,
 }
 
 // navFieldColumns maps internal telemetry field names to the DB column
@@ -39,6 +43,7 @@ var navFieldColumns = map[telemetry.FieldName][]string{
 	telemetry.FieldMilesToArrival:   {"tripDistanceRemaining"},
 	telemetry.FieldOriginLocation:   {"originLatitude", "originLongitude"},
 	telemetry.FieldDestLocation:     {"destinationLatitude", "destinationLongitude"},
+	telemetry.FieldRouteLine:        {"navRouteCoordinates"},
 }
 
 // mapTelemetryToUpdate converts a map of telemetry field values into a
@@ -150,6 +155,41 @@ func applyOriginLocation(u *VehicleUpdate, val events.TelemetryValue) bool {
 	}
 	u.OriginLatitude = &val.LocationVal.Latitude
 	u.OriginLongitude = &val.LocationVal.Longitude
+	return true
+}
+
+// applyRouteLine decodes Tesla's Base64-encoded RouteLine into [lng, lat]
+// coordinate pairs (Mapbox/GeoJSON order) and marshals them as JSON for
+// persistence in the navRouteCoordinates DB column. Empty strings clear
+// the column (navigation cancelled).
+func applyRouteLine(u *VehicleUpdate, val events.TelemetryValue) bool {
+	if val.StringVal == nil {
+		return false
+	}
+	if *val.StringVal == "" {
+		// Empty RouteLine = navigation cancelled — clear the DB column.
+		u.ClearFields = append(u.ClearFields, "navRouteCoordinates")
+		return true
+	}
+	coords, err := polyline.DecodeRouteLine(*val.StringVal)
+	if err != nil {
+		slog.Warn("applyRouteLine: decode failed, clearing navRouteCoordinates",
+			slog.Any("error", err),
+		)
+		u.ClearFields = append(u.ClearFields, "navRouteCoordinates")
+		return true
+	}
+	// Convert from [lat, lng] (Google) to [lng, lat] (Mapbox/GeoJSON).
+	mapboxCoords := make([][]float64, len(coords))
+	for i, c := range coords {
+		mapboxCoords[i] = []float64{c[1], c[0]}
+	}
+	raw, err := json.Marshal(mapboxCoords)
+	if err != nil {
+		slog.Warn("applyRouteLine: JSON marshal failed", slog.Any("error", err))
+		return false
+	}
+	u.NavRouteCoordinates = jsonRawPtr(raw)
 	return true
 }
 

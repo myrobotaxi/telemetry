@@ -5,6 +5,10 @@ import (
 	"time"
 )
 
+// jsonRawPtr returns a pointer to a json.RawMessage. Used for building
+// VehicleUpdate fields from freshly marshalled JSON.
+func jsonRawPtr(b json.RawMessage) *json.RawMessage { return &b }
+
 // VehicleStatus mirrors the Prisma "VehicleStatus" enum stored in PostgreSQL.
 type VehicleStatus string
 
@@ -40,7 +44,8 @@ type Vehicle struct {
 	OriginLatitude       *float64 // nullable
 	OriginLongitude      *float64 // nullable
 	EtaMinutes           *int     // nullable
-	TripDistRemaining    *float64 // nullable
+	TripDistRemaining    *float64          // nullable
+	NavRouteCoordinates  json.RawMessage   // nullable JSONB
 	LastUpdated          time.Time
 }
 
@@ -67,8 +72,9 @@ type VehicleUpdate struct {
 	OriginLongitude      *float64
 	EtaMinutes           *int
 	TripDistRemaining    *float64
-	ClearFields          []string  // DB column names to explicitly SET NULL
-	LastUpdated          time.Time // always set
+	NavRouteCoordinates  *json.RawMessage // [lng, lat] pairs as JSON array
+	ClearFields          []string         // DB column names to explicitly SET NULL
+	LastUpdated          time.Time        // always set
 }
 
 // DriveRecord maps to the Prisma "Drive" table.

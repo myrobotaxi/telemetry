@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -141,5 +142,51 @@ func TestBuildTelemetryUpdate_NewNavFields(t *testing.T) {
 				t.Errorf("query missing column %q:\n%s", tt.wantCol, query)
 			}
 		})
+	}
+}
+
+func TestBuildTelemetryUpdate_NavRouteCoordinates(t *testing.T) {
+	coords := json.RawMessage(`[[-96.77,32.87],[-96.78,32.88]]`)
+	update := VehicleUpdate{
+		NavRouteCoordinates: &coords,
+		LastUpdated:         time.Now(),
+	}
+
+	query, args, ok := buildTelemetryUpdate("TEST_VIN", update)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+
+	// Verify the column appears with ::jsonb cast.
+	if !strings.Contains(query, `"navRouteCoordinates"`) {
+		t.Errorf("query missing navRouteCoordinates column:\n%s", query)
+	}
+	if !strings.Contains(query, "::jsonb") {
+		t.Errorf("query missing ::jsonb cast:\n%s", query)
+	}
+
+	// args should be: navRouteCoordinates value, lastUpdated, VIN.
+	if len(args) != 3 {
+		t.Fatalf("args = %d values, want 3", len(args))
+	}
+	if args[len(args)-1] != "TEST_VIN" {
+		t.Errorf("last arg = %v, want TEST_VIN", args[len(args)-1])
+	}
+}
+
+func TestBuildTelemetryUpdate_NavRouteCoordinatesClear(t *testing.T) {
+	update := VehicleUpdate{
+		ClearFields: []string{"navRouteCoordinates"},
+		LastUpdated: time.Now(),
+	}
+
+	query, _, ok := buildTelemetryUpdate("TEST_VIN", update)
+	if !ok {
+		t.Fatal("expected ok=true for ClearFields-only update")
+	}
+
+	// Verify navRouteCoordinates is set to NULL.
+	if !strings.Contains(query, `"navRouteCoordinates" = NULL`) {
+		t.Errorf("query missing NULL clause for navRouteCoordinates:\n%s", query)
 	}
 }

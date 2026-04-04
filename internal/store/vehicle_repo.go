@@ -102,7 +102,7 @@ func (r *VehicleRepo) scanVehicle(ctx context.Context, query string, arg any) (V
 		&v.DestinationName, &v.DestinationLatitude,
 		&v.DestinationLongitude, &v.OriginLatitude, &v.OriginLongitude,
 		&v.EtaMinutes, &v.TripDistRemaining,
-		&v.LastUpdated,
+		&v.NavRouteCoordinates, &v.LastUpdated,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Vehicle{}, ErrVehicleNotFound

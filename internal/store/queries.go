@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -14,7 +15,7 @@ const vehicleSelectColumns = `"id", "userId", "vin", "name", "status",
 	"odometerMiles", "destinationName", "destinationLatitude",
 	"destinationLongitude", "originLatitude", "originLongitude",
 	"etaMinutes", "tripDistanceRemaining",
-	"lastUpdated"`
+	"navRouteCoordinates", "lastUpdated"`
 
 const queryVehicleByVIN = `SELECT ` + vehicleSelectColumns + `
 FROM "Vehicle"
@@ -79,33 +80,35 @@ WHERE "userId" = $4 AND "provider" = 'tesla'`
 // updateColumn pairs a PostgreSQL column name with the value to set. A nil
 // value signals that the field was not present in this telemetry event.
 type updateColumn struct {
-	col string
-	val any // nil when the field pointer is nil
+	col  string
+	val  any    // nil when the field pointer is nil
+	cast string // optional PostgreSQL type cast (e.g. "::jsonb")
 }
 
 // updateColumns returns the list of column/value pairs for a VehicleUpdate.
 // Values are dereferenced so callers can check for nil uniformly.
 func updateColumns(u VehicleUpdate) []updateColumn {
 	return []updateColumn{
-		{"speed", derefInt(u.Speed)},
-		{"chargeLevel", derefInt(u.ChargeLevel)},
-		{"estimatedRange", derefInt(u.EstimatedRange)},
-		{"gearPosition", derefString(u.GearPosition)},
-		{"heading", derefInt(u.Heading)},
-		{"latitude", derefFloat(u.Latitude)},
-		{"longitude", derefFloat(u.Longitude)},
-		{"interiorTemp", derefInt(u.InteriorTemp)},
-		{"exteriorTemp", derefInt(u.ExteriorTemp)},
-		{"odometerMiles", derefInt(u.OdometerMiles)},
-		{"locationName", derefString(u.LocationName)},
-		{"locationAddress", derefString(u.LocationAddr)},
-		{"destinationName", derefString(u.DestinationName)},
-		{"destinationLatitude", derefFloat(u.DestinationLatitude)},
-		{"destinationLongitude", derefFloat(u.DestinationLongitude)},
-		{"originLatitude", derefFloat(u.OriginLatitude)},
-		{"originLongitude", derefFloat(u.OriginLongitude)},
-		{"etaMinutes", derefInt(u.EtaMinutes)},
-		{"tripDistanceRemaining", derefFloat(u.TripDistRemaining)},
+		{"speed", derefInt(u.Speed), ""},
+		{"chargeLevel", derefInt(u.ChargeLevel), ""},
+		{"estimatedRange", derefInt(u.EstimatedRange), ""},
+		{"gearPosition", derefString(u.GearPosition), ""},
+		{"heading", derefInt(u.Heading), ""},
+		{"latitude", derefFloat(u.Latitude), ""},
+		{"longitude", derefFloat(u.Longitude), ""},
+		{"interiorTemp", derefInt(u.InteriorTemp), ""},
+		{"exteriorTemp", derefInt(u.ExteriorTemp), ""},
+		{"odometerMiles", derefInt(u.OdometerMiles), ""},
+		{"locationName", derefString(u.LocationName), ""},
+		{"locationAddress", derefString(u.LocationAddr), ""},
+		{"destinationName", derefString(u.DestinationName), ""},
+		{"destinationLatitude", derefFloat(u.DestinationLatitude), ""},
+		{"destinationLongitude", derefFloat(u.DestinationLongitude), ""},
+		{"originLatitude", derefFloat(u.OriginLatitude), ""},
+		{"originLongitude", derefFloat(u.OriginLongitude), ""},
+		{"etaMinutes", derefInt(u.EtaMinutes), ""},
+		{"tripDistanceRemaining", derefFloat(u.TripDistRemaining), ""},
+		{"navRouteCoordinates", derefJSON(u.NavRouteCoordinates), "::jsonb"},
 	}
 }
 
@@ -132,6 +135,13 @@ func derefString(p *string) any {
 	return *p
 }
 
+func derefJSON(p *json.RawMessage) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
 // buildTelemetryUpdate constructs a dynamic UPDATE statement for
 // VehicleUpdate, including only columns whose values are non-nil.
 // Returns the query string, the argument slice, and whether any fields
@@ -152,7 +162,7 @@ func buildTelemetryUpdate(vin string, u VehicleUpdate) (query string, args []any
 		}
 		// %q produces Go double-quoted strings which match PostgreSQL's
 		// double-quoted identifier syntax. Column names are hardcoded constants.
-		setClauses = append(setClauses, fmt.Sprintf("%q = $%d", col.col, argIdx))
+		setClauses = append(setClauses, fmt.Sprintf("%q = $%d%s", col.col, argIdx, col.cast))
 		args = append(args, col.val)
 		argIdx++
 	}

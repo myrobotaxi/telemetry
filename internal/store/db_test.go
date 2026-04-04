@@ -132,6 +132,7 @@ func createSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"etaMinutes"       INT,
 		"tripDistanceMiles" DOUBLE PRECISION,
 		"tripDistanceRemaining" DOUBLE PRECISION,
+		"navRouteCoordinates" JSONB,
 		"lastUpdated"      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		"createdAt"        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		"updatedAt"        TIMESTAMPTZ NOT NULL DEFAULT NOW()

@@ -47,6 +47,7 @@ func mergeUpdate(dst, src *VehicleUpdate) {
 	dst.OriginLongitude = mergePtr(dst.OriginLongitude, src.OriginLongitude)
 	dst.EtaMinutes = mergePtr(dst.EtaMinutes, src.EtaMinutes)
 	dst.TripDistRemaining = mergePtr(dst.TripDistRemaining, src.TripDistRemaining)
+	dst.NavRouteCoordinates = mergePtr(dst.NavRouteCoordinates, src.NavRouteCoordinates)
 
 	// Append ClearFields from source so NULL writes survive coalescing.
 	// Deduplicate to avoid redundant SET NULL clauses.
