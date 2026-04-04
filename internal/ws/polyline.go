@@ -2,14 +2,26 @@
 // package for backward compatibility within the ws package.
 package ws
 
-import "github.com/tnando/my-robo-taxi-telemetry/internal/polyline"
+import (
+	"fmt"
+
+	"github.com/tnando/my-robo-taxi-telemetry/internal/polyline"
+)
 
 // DecodeRouteLine delegates to polyline.DecodeRouteLine.
 func DecodeRouteLine(encoded string) ([][]float64, error) {
-	return polyline.DecodeRouteLine(encoded)
+	coords, err := polyline.DecodeRouteLine(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("DecodeRouteLine: %w", err)
+	}
+	return coords, nil
 }
 
 // DecodePolyline delegates to polyline.DecodePolyline.
 func DecodePolyline(encoded string) ([][]float64, error) {
-	return polyline.DecodePolyline(encoded)
+	coords, err := polyline.DecodePolyline(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("DecodePolyline: %w", err)
+	}
+	return coords, nil
 }
