@@ -132,6 +132,14 @@ cmd/ → internal/* → pkg/sdk (interfaces only)
 - **Test coverage target:** 80%+ on `internal/` packages
 - **No test pollution:** Each test creates its own data, cleans up after itself
 
+## Contracts
+
+The SDK v1 contract surface lives in [`docs/contracts/`](docs/contracts/README.md). It is the authoritative source for every WebSocket message, REST endpoint, persisted field, atomic group, classification label, and state transition exposed by the SDK.
+
+- Read [`docs/contracts/README.md`](docs/contracts/README.md) before touching WebSocket messages, DB schema, or public SDK API surface.
+- Every contract change follows the PR workflow: `sdk-architect` review + `contract-guard` gate, per the Merge Policy above.
+- Contract drift (schema change without doc update, missing P0/P1/P2 label, broken atomic group) blocks merge unconditionally.
+
 ## Linear Issues and Agent Routing
 
 **Linear is the source of truth for issues and roadmap.** Team key: `MYR` (e.g., `MYR-42`). GitHub is connected to Linear for automatic status sync. Every Linear issue is labeled with the **agent** that should implement it. When picking up an issue, Claude MUST use the specified agent(s) for implementation.
