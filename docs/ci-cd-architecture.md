@@ -25,7 +25,7 @@ PR Opened/Updated
        └── Merge allowed
 
 Merge to main
-  └──► CD: Deploy to Railway (wait for CI green)
+  └──► CD: Deploy to Fly.io (wait for CI green)
 
 Tag push (v*)
   └──► Release: GoReleaser → binaries + Docker image → GitHub Release
@@ -105,10 +105,10 @@ Developers can `@claude` in PR comments for follow-up questions, explanations, o
 
 ## CD Pipeline
 
-### Railway Deployment (merge to main)
+### Fly.io Deployment (merge to main)
 
-1. CI must pass (Railway "Wait for CI" feature)
-2. Railway auto-deploys from main branch
+1. CI must pass (the `deploy` job in `ci.yml` depends on `build` and `security`)
+2. `flyctl deploy --remote-only` pushes to Fly.io
 3. Health checks confirm deployment (`/healthz`, `/readyz`)
 
 ### Release (tag push v*)

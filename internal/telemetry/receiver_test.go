@@ -246,7 +246,8 @@ func (te *testEnv) dialWithVIN(ctx context.Context, t *testing.T, vin string) *w
 	return conn
 }
 
-// makeTestPayload creates a serialized protobuf payload for testing.
+// makeTestPayload creates a FlatBuffers-wrapped protobuf payload for testing.
+// The returned bytes match the wire format Tesla vehicles actually send.
 func makeTestPayload(t *testing.T, vin string) []byte {
 	t.Helper()
 
@@ -263,7 +264,8 @@ func makeTestPayload(t *testing.T, vin string) []byte {
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
 	}
-	return raw
+
+	return BuildTestEnvelope(vin, raw)
 }
 
 // waitForEvents waits until the bus has at least n events on the given
@@ -486,7 +488,9 @@ func TestReceiver_VINMismatchUsesCertVIN(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	if err := conn.Write(ctx, websocket.MessageBinary, raw); err != nil {
+	// Wrap in a FlatBuffers envelope with the mismatched VIN as deviceId.
+	envelope := BuildTestEnvelope(payloadVIN, raw)
+	if err := conn.Write(ctx, websocket.MessageBinary, envelope); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 

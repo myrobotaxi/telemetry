@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/config"
@@ -36,6 +37,13 @@ func NewDB(ctx context.Context, cfg config.DatabaseConfig, logger *slog.Logger, 
 		poolCfg.MinConns = int32(cfg.MinConns) // #nosec G115 -- bounds checked above
 	}
 
+	// Disable prepared statement caching for PgBouncer transaction pooling
+	// (Supabase port 6543). Prepared statements are per-connection state that
+	// PgBouncer does not track when rotating connections between queries.
+	if cfg.DisablePreparedStatements {
+		poolCfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	}
+
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		return nil, fmt.Errorf("store.NewDB: create pool: %w", err)
@@ -49,6 +57,7 @@ func NewDB(ctx context.Context, cfg config.DatabaseConfig, logger *slog.Logger, 
 	logger.Info("database connection established",
 		slog.Int("max_conns", int(poolCfg.MaxConns)),
 		slog.Int("min_conns", int(poolCfg.MinConns)),
+		slog.Bool("simple_protocol", cfg.DisablePreparedStatements),
 	)
 
 	return &DB{

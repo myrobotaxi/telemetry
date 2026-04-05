@@ -22,12 +22,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: 'go.mod'
           cache-dependency-path: 'go.sum'
 
-      - uses: golangci/golangci-lint-action@v7
+      - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.11.3
           args: --timeout=5m
@@ -59,7 +59,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: 'go.mod'
           cache-dependency-path: 'go.sum'
@@ -117,7 +117,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: 'go.mod'
           cache-dependency-path: 'go.sum'
@@ -135,7 +135,7 @@ jobs:
           args: '-no-fail -fmt sarif -out gosec-results.sarif -exclude-generated ./...'
 
       - name: Upload gosec SARIF to Security tab
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: gosec-results.sarif
@@ -149,7 +149,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: 'go.mod'
           cache-dependency-path: 'go.sum'
@@ -180,8 +180,28 @@ jobs:
           ignore-unfixed: true
 
       - name: Upload Trivy SARIF to Security tab
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         if: always() && steps.dockerfile.outputs.exists == 'true'
         with:
           sarif_file: trivy-results.sarif
         continue-on-error: true
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 15
+    needs: [build, security]
+    # Only deploy on push to main (not PRs).
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+        with:
+          version: 0.4.27
+
+      - name: Deploy to Fly.io
+        run: flyctl deploy --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

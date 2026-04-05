@@ -15,7 +15,9 @@ set -euo pipefail
 #   --token TOKEN      Tesla Partner Auth Token (Bearer token)
 #
 # Options:
-#   --hostname HOST    Telemetry server hostname (default: myrobotaxi.app)
+#   --ca-file PATH     CA certificate PEM file for vehicle TLS trust anchor.
+#                      If omitted, "ca" is null (for publicly trusted certs like Let's Encrypt).
+#   --hostname HOST    Telemetry server hostname (default: telemetry.myrobotaxi.app)
 #   --port PORT        Telemetry server port (default: 443)
 #   --interval SECS    Telemetry push interval in seconds (default: 5)
 #   --api-base URL     Fleet API base URL (default: https://fleet-api.prd.na.vn.cloud.tesla.com)
@@ -23,11 +25,13 @@ set -euo pipefail
 #   --help             Show this help message
 #
 # Environment variables (alternative to flags):
-#   TESLA_AUTH_TOKEN   Partner Auth Token
-#   TESLA_API_BASE     Fleet API base URL
+#   TESLA_AUTH_TOKEN           Partner Auth Token
+#   TESLA_API_BASE             Fleet API base URL
+#   FLEET_TELEMETRY_CA_FILE    CA certificate PEM file path
 #
 # Examples:
 #   ./scripts/push-fleet-config.sh --vin 5YJ3E7EB2NF000001 --token eyJ...
+#   ./scripts/push-fleet-config.sh --vin 5YJ3E7EB2NF000001 --token eyJ... --ca-file ./certs/ca.crt
 #   TESLA_AUTH_TOKEN=eyJ... ./scripts/push-fleet-config.sh --vin 5YJ3E7EB2NF000001
 #   ./scripts/push-fleet-config.sh --vin 5YJ3E7EB2NF000001 --token eyJ... --dry-run
 
@@ -36,10 +40,11 @@ readonly SCRIPT_NAME="$(basename "$0")"
 # ─── Defaults ──────────────────────────────────────────────────────────
 VIN=""
 AUTH_TOKEN="${TESLA_AUTH_TOKEN:-}"
-HOSTNAME="myrobotaxi.app"
+HOSTNAME="telemetry.myrobotaxi.app"
 PORT=443
 INTERVAL=5
 API_BASE="${TESLA_API_BASE:-https://fleet-api.prd.na.vn.cloud.tesla.com}"
+CA_FILE="${FLEET_TELEMETRY_CA_FILE:-}"
 DRY_RUN=false
 
 # ─── Telemetry fields ─────────────────────────────────────────────────
@@ -120,6 +125,16 @@ validate_token() {
     fi
 }
 
+validate_ca_file() {
+    local ca_file="$1"
+    if [[ ! -f "$ca_file" ]]; then
+        die "CA file not found: $ca_file"
+    fi
+    if ! openssl x509 -in "$ca_file" -noout 2>/dev/null; then
+        die "CA file is not a valid PEM certificate: $ca_file"
+    fi
+}
+
 # Build the JSON config payload.
 build_config_payload() {
     local fields_json=""
@@ -130,17 +145,22 @@ build_config_payload() {
         fields_json+="\"$field\":{\"interval_seconds\":$INTERVAL}"
     done
 
+    # Build the ca value: JSON-escaped PEM string or null.
+    local ca_value="null"
+    if [[ -n "$CA_FILE" ]]; then
+        ca_value="$(jq -Rs . < "$CA_FILE")"
+    fi
+
     cat <<EOF
 {
   "vins": ["$VIN"],
   "config": {
     "hostname": "$HOSTNAME",
     "port": $PORT,
-    "ca": null,
+    "ca": $ca_value,
     "fields": {$fields_json},
     "alert_types": ["service"],
-    "exp": $(( $(date +%s) + 86400 * 30 )),
-    "prefer_typed": true
+    "exp": $(( $(date +%s) + 86400 * 30 ))
   }
 }
 EOF
@@ -157,6 +177,10 @@ parse_args() {
                 ;;
             --token)
                 AUTH_TOKEN="${2:?--token requires a value}"
+                shift 2
+                ;;
+            --ca-file)
+                CA_FILE="${2:?--ca-file requires a value}"
                 shift 2
                 ;;
             --hostname)
@@ -200,6 +224,10 @@ parse_args() {
 
     validate_vin "$VIN"
     validate_token "$AUTH_TOKEN"
+
+    if [[ -n "$CA_FILE" ]]; then
+        validate_ca_file "$CA_FILE"
+    fi
 }
 
 # ─── Main ─────────────────────────────────────────────────────────────
@@ -216,11 +244,16 @@ main() {
     log "Interval: ${INTERVAL}s"
     log "Fields: ${#TELEMETRY_FIELDS[@]}"
     log "API base: $API_BASE"
+    if [[ -n "$CA_FILE" ]]; then
+        log "CA cert: $CA_FILE"
+    else
+        log "CA cert: none (using publicly trusted cert)"
+    fi
 
     local payload
     payload="$(build_config_payload)"
 
-    local api_url="$API_BASE/api/1/vehicles/$VIN/fleet_telemetry_config"
+    local api_url="$API_BASE/api/1/vehicles/fleet_telemetry_config"
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log "DRY RUN — would POST to: $api_url"

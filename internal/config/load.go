@@ -24,6 +24,8 @@ type fileConfig struct {
 	mapboxToken      string
 	teslaPublicKey   string
 	fleetTelemetryCA string
+	teslaClientID    string
+	teslaClientSec   string
 }
 
 type fileServerConfig struct {
@@ -39,8 +41,9 @@ type fileTLSConfig struct {
 }
 
 type fileDatabaseConfig struct {
-	MaxConns int `json:"max_conns"`
-	MinConns int `json:"min_conns"`
+	MaxConns                  int  `json:"max_conns"`
+	MinConns                  int  `json:"min_conns"`
+	DisablePreparedStatements bool `json:"disable_prepared_statements"`
 }
 
 type fileTelemetryConfig struct {
@@ -117,9 +120,16 @@ func applyEnvOverrides(fc *fileConfig) error {
 		missing = append(missing, "AUTH_SECRET")
 	}
 
-	fc.mapboxToken = os.Getenv("MAPBOX_TOKEN")           // optional
-	fc.teslaPublicKey = os.Getenv("TESLA_PUBLIC_KEY")   // optional
+	fc.mapboxToken = os.Getenv("MAPBOX_TOKEN")             // optional
+	fc.teslaPublicKey = os.Getenv("TESLA_PUBLIC_KEY")     // optional
 	fc.fleetTelemetryCA = os.Getenv("FLEET_TELEMETRY_CA") // optional: PEM CA cert
+	fc.teslaClientID = os.Getenv("AUTH_TESLA_ID")         // optional: enables token refresh
+	fc.teslaClientSec = os.Getenv("AUTH_TESLA_SECRET")    // optional: enables token refresh
+
+	// Database env var overrides.
+	if v := os.Getenv("DATABASE_DISABLE_PREPARED_STATEMENTS"); v == "true" || v == "1" {
+		fc.Database.DisablePreparedStatements = true
+	}
 
 	// Proxy env var overrides.
 	if v := os.Getenv("TESLA_PROXY_URL"); v != "" {
@@ -157,9 +167,10 @@ func buildConfig(fc *fileConfig) *Config {
 			CAFile:   fc.TLS.CAFile,
 		},
 		database: DatabaseConfig{
-			URL:      fc.databaseURL,
-			MaxConns: fc.Database.MaxConns,
-			MinConns: fc.Database.MinConns,
+			URL:                       fc.databaseURL,
+			MaxConns:                  fc.Database.MaxConns,
+			MinConns:                  fc.Database.MinConns,
+			DisablePreparedStatements: fc.Database.DisablePreparedStatements,
 		},
 		telemetry: TelemetryConfig{
 			MaxVehicles:        fc.Telemetry.MaxVehicles,
@@ -190,6 +201,10 @@ func buildConfig(fc *fileConfig) *Config {
 			FleetTelemetryHostname: fc.Proxy.FleetTelemetryHostname,
 			FleetTelemetryPort:     fc.Proxy.FleetTelemetryPort,
 			FleetTelemetryCA:       fc.fleetTelemetryCA,
+		},
+		teslaOAuth: TeslaOAuthConfig{
+			ClientID:     fc.teslaClientID,
+			ClientSecret: fc.teslaClientSec,
 		},
 		mapboxToken:    fc.mapboxToken,
 		teslaPublicKey: fc.teslaPublicKey,

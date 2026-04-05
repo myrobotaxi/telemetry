@@ -15,19 +15,26 @@ type FleetConfigRequest struct {
 // FleetConfig describes the telemetry server and field selection
 // that the vehicle should use.
 type FleetConfig struct {
-	Hostname    string                 `json:"hostname"`
-	Port        int                    `json:"port"`
-	CA          string                 `json:"ca"`
-	Fields      map[string]FieldConfig `json:"fields"`
-	AlertTypes  []string               `json:"alert_types,omitempty"`
-	PreferTyped bool                   `json:"prefer_typed"`
+	Hostname   string                 `json:"hostname"`
+	Port       int                    `json:"port"`
+	CA         *string                `json:"ca"`
+	Fields     map[string]FieldConfig `json:"fields"`
+	AlertTypes []string               `json:"alert_types,omitempty"`
+	Exp        *int64                 `json:"exp,omitempty"`
 }
 
 // FieldConfig controls how often a field is emitted and, for spatial
 // fields like Location, the minimum change threshold.
+//
+// ResendIntervalSeconds forces the vehicle to re-emit a field even when
+// its value has not changed. This is critical for "set once, static
+// during trip" fields like DestinationName, RouteLine, and
+// DestinationLocation — without it, Tesla only emits them on change,
+// and a server that misses the initial emission never receives the data.
 type FieldConfig struct {
-	IntervalSeconds int      `json:"interval_seconds"`
-	MinimumDelta    *float64 `json:"minimum_delta,omitempty"`
+	IntervalSeconds       int      `json:"interval_seconds"`
+	MinimumDelta          *float64 `json:"minimum_delta,omitempty"`
+	ResendIntervalSeconds *int     `json:"resend_interval_seconds,omitempty"`
 }
 
 // FleetConfigResponse is the JSON returned by the Fleet API after

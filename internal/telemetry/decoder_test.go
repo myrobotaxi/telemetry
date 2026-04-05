@@ -132,7 +132,7 @@ func TestDecoder_DecodePayload_Validation(t *testing.T) {
 	}
 }
 
-func TestDecoder_Decode_RawBytes(t *testing.T) {
+func TestDecoder_Decode_FlatBuffersEnvelope(t *testing.T) {
 	t.Parallel()
 	dec := NewDecoder()
 
@@ -144,18 +144,26 @@ func TestDecoder_Decode_RawBytes(t *testing.T) {
 		t.Fatalf("Marshal payload: %v", err)
 	}
 
-	evt, fieldErrs, err := dec.Decode(raw)
+	envelope := BuildTestEnvelope(testVIN, raw)
+
+	result, err := dec.Decode(envelope)
 	if err != nil {
 		t.Fatalf("Decode() error = %v", err)
 	}
-	if len(fieldErrs) != 0 {
-		t.Errorf("unexpected field errors: %v", fieldErrs)
+	if len(result.FieldErrors) != 0 {
+		t.Errorf("unexpected field errors: %v", result.FieldErrors)
 	}
-	if evt.VIN != testVIN {
-		t.Errorf("VIN = %q, want %q", evt.VIN, testVIN)
+	if result.Event.VIN != testVIN {
+		t.Errorf("VIN = %q, want %q", result.Event.VIN, testVIN)
+	}
+	if result.Topic != "V" {
+		t.Errorf("Topic = %q, want %q", result.Topic, "V")
+	}
+	if result.DeviceID != testVIN {
+		t.Errorf("DeviceID = %q, want %q", result.DeviceID, testVIN)
 	}
 
-	speed, ok := evt.Fields["speed"]
+	speed, ok := result.Event.Fields["speed"]
 	if !ok {
 		t.Fatal("missing speed field")
 	}
@@ -164,13 +172,78 @@ func TestDecoder_Decode_RawBytes(t *testing.T) {
 	}
 }
 
-func TestDecoder_Decode_InvalidProtobuf(t *testing.T) {
+func TestDecoder_Decode_VINFallbackFromEnvelope(t *testing.T) {
 	t.Parallel()
 	dec := NewDecoder()
 
-	_, _, err := dec.Decode([]byte("not valid protobuf"))
+	// Payload with empty VIN — vehicle doesn't populate it in typed format.
+	payload := &tpb.Payload{
+		Vin:       "",
+		CreatedAt: timestamppb.Now(),
+		Data:      []*tpb.Datum{makeDatum(tpb.Field_VehicleSpeed, stringVal("55"))},
+	}
+	raw, err := proto.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	envelope := BuildTestEnvelope(testVIN, raw)
+	result, err := dec.Decode(envelope)
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if result.Event.VIN != testVIN {
+		t.Errorf("VIN = %q, want %q (from envelope fallback)", result.Event.VIN, testVIN)
+	}
+}
+
+func TestDecoder_Decode_BothVINsEmpty(t *testing.T) {
+	t.Parallel()
+	dec := NewDecoder()
+
+	payload := &tpb.Payload{
+		Vin:       "",
+		CreatedAt: timestamppb.Now(),
+		Data:      []*tpb.Datum{makeDatum(tpb.Field_VehicleSpeed, stringVal("55"))},
+	}
+	raw, err := proto.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	// Envelope with empty deviceId AND empty payload VIN.
+	envelope := BuildTestEnvelope("", raw)
+	_, err = dec.Decode(envelope)
 	if err == nil {
-		t.Error("expected error for invalid protobuf, got nil")
+		t.Fatal("expected error when both VINs are empty, got nil")
+	}
+	if !errors.Is(err, ErrMissingVIN) {
+		t.Errorf("error = %v, want ErrMissingVIN", err)
+	}
+}
+
+func TestDecoder_Decode_InvalidEnvelope(t *testing.T) {
+	t.Parallel()
+	dec := NewDecoder()
+
+	_, err := dec.Decode([]byte("not a valid flatbuffers envelope"))
+	if err == nil {
+		t.Error("expected error for invalid envelope, got nil")
+	}
+}
+
+func TestDecoder_Decode_EmptyEnvelope(t *testing.T) {
+	t.Parallel()
+	dec := NewDecoder()
+
+	_, err := dec.Decode(nil)
+	if err == nil {
+		t.Error("expected error for nil input, got nil")
+	}
+
+	_, err = dec.Decode([]byte{})
+	if err == nil {
+		t.Error("expected error for empty input, got nil")
 	}
 }
 
@@ -527,12 +600,11 @@ func TestDecoder_DecodePayload_InvalidDatum(t *testing.T) {
 		t.Fatalf("DecodePayload() error = %v", err)
 	}
 
-	// The invalid speed datum should produce a field error.
-	if len(fieldErrs) != 1 {
-		t.Fatalf("expected 1 field error, got %d: %v", len(fieldErrs), fieldErrs)
-	}
-	if !errors.Is(fieldErrs[0].Err, ErrInvalidValue) {
-		t.Errorf("field error = %v, want ErrInvalidValue", fieldErrs[0].Err)
+	// Invalid datums are no longer field errors — they are included in
+	// the event with Invalid=true so downstream consumers can clear
+	// stale frontend state.
+	if len(fieldErrs) != 0 {
+		t.Fatalf("expected 0 field errors, got %d: %v", len(fieldErrs), fieldErrs)
 	}
 
 	// The valid odometer field should still be decoded.
@@ -544,9 +616,13 @@ func TestDecoder_DecodePayload_InvalidDatum(t *testing.T) {
 		t.Errorf("odometer = %v, want 12345.6", odo)
 	}
 
-	// Speed should not be present (it was invalid).
-	if _, ok := evt.Fields["speed"]; ok {
-		t.Error("speed field should not be present for invalid datum")
+	// Speed should be present with Invalid=true.
+	spd, ok := evt.Fields["speed"]
+	if !ok {
+		t.Fatal("speed field should be present for invalid datum")
+	}
+	if !spd.Invalid {
+		t.Error("speed.Invalid should be true")
 	}
 }
 
@@ -603,8 +679,8 @@ func TestDecoder_DecodePayload_UntrackedFieldsSkipped(t *testing.T) {
 	dec := NewDecoder()
 
 	payload := makePayload([]*tpb.Datum{
-		// SeatHeaterLeft is not in our fieldMap — should be silently skipped.
-		makeDatum(tpb.Field_SeatHeaterLeft, stringVal("3")),
+		// SeatHeaterRearLeft is not in our fieldMap — should be silently skipped.
+		makeDatum(tpb.Field_SeatHeaterRearLeft, stringVal("3")),
 		makeDatum(tpb.Field_VehicleSpeed, stringVal("70")),
 	})
 
@@ -661,6 +737,11 @@ func TestDecoder_DecodePayload_FullPayload(t *testing.T) {
 	assertFloat(t, evt.Fields, "odometer", 12345.6)
 	assertString(t, evt.Fields, "gear", "D")
 	assertLocation(t, evt.Fields, "location", 33.0903, -96.8237)
+
+	// Temperatures are converted from Celsius to Fahrenheit.
+	// 22.1C -> 71.78F, 28.4C -> 83.12F
+	assertFloatApprox(t, evt.Fields, "insideTemp", 71.78)
+	assertFloatApprox(t, evt.Fields, "outsideTemp", 83.12)
 }
 
 func TestDecoder_DecodePayload_EmptyString(t *testing.T) {
@@ -753,7 +834,8 @@ func TestIsTrackedField(t *testing.T) {
 		{tpb.Field_VehicleSpeed, true},
 		{tpb.Field_Location, true},
 		{tpb.Field_Gear, true},
-		{tpb.Field_SeatHeaterLeft, false},
+		{tpb.Field_SeatHeaterLeft, true},
+		{tpb.Field_SeatHeaterRearLeft, false},
 		{tpb.Field_Unknown, false},
 	}
 
@@ -833,4 +915,268 @@ func assertLocation(t *testing.T, fields map[string]events.TelemetryValue, name 
 	if v.LocationVal.Longitude != wantLng {
 		t.Errorf("field %q lng = %f, want %f", name, v.LocationVal.Longitude, wantLng)
 	}
+}
+
+// assertFloatApprox checks that a float field is within 0.01 of the
+// expected value. Used for converted values where floating-point rounding
+// may produce slight differences.
+func assertFloatApprox(t *testing.T, fields map[string]events.TelemetryValue, name string, want float64) {
+	t.Helper()
+	const epsilon = 0.01
+	v, ok := fields[name]
+	if !ok {
+		t.Errorf("missing field %q", name)
+		return
+	}
+	if v.FloatVal == nil {
+		t.Errorf("field %q: FloatVal is nil", name)
+		return
+	}
+	diff := *v.FloatVal - want
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff > epsilon {
+		t.Errorf("field %q = %f, want %f (within %f)", name, *v.FloatVal, want, epsilon)
+	}
+}
+
+func TestDecoder_DecodePayload_TemperatureConversion(t *testing.T) {
+	t.Parallel()
+	dec := NewDecoder()
+
+	tests := []struct {
+		name      string
+		field     tpb.Field
+		fieldName string
+		celsius   string
+		wantF     float64
+	}{
+		{
+			name:      "inside temp string",
+			field:     tpb.Field_InsideTemp,
+			fieldName: "insideTemp",
+			celsius:   "20.0",
+			wantF:     68.0,
+		},
+		{
+			name:      "outside temp string",
+			field:     tpb.Field_OutsideTemp,
+			fieldName: "outsideTemp",
+			celsius:   "0",
+			wantF:     32.0,
+		},
+		{
+			name:      "driver temp setting",
+			field:     tpb.Field_HvacLeftTemperatureRequest,
+			fieldName: "driverTempSetting",
+			celsius:   "22.0",
+			wantF:     71.6,
+		},
+		{
+			name:      "passenger temp setting",
+			field:     tpb.Field_HvacRightTemperatureRequest,
+			fieldName: "passengerTempSetting",
+			celsius:   "25.0",
+			wantF:     77.0,
+		},
+		{
+			name:      "negative celsius",
+			field:     tpb.Field_OutsideTemp,
+			fieldName: "outsideTemp",
+			celsius:   "-10.0",
+			wantF:     14.0,
+		},
+		{
+			name:      "100 celsius",
+			field:     tpb.Field_InsideTemp,
+			fieldName: "insideTemp",
+			celsius:   "100",
+			wantF:     212.0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			payload := makePayload([]*tpb.Datum{
+				makeDatum(tt.field, stringVal(tt.celsius)),
+			})
+
+			evt, fieldErrs, err := dec.DecodePayload(payload)
+			if err != nil {
+				t.Fatalf("DecodePayload() error = %v", err)
+			}
+			if len(fieldErrs) != 0 {
+				t.Errorf("unexpected field errors: %v", fieldErrs)
+			}
+
+			assertFloatApprox(t, evt.Fields, tt.fieldName, tt.wantF)
+		})
+	}
+}
+
+func TestDecoder_DecodePayload_TemperatureConversionFloat(t *testing.T) {
+	t.Parallel()
+	dec := NewDecoder()
+
+	// Test that float/double values also get converted.
+	payload := makePayload([]*tpb.Datum{
+		makeDatum(tpb.Field_InsideTemp, floatVal(20.0)),
+		makeDatum(tpb.Field_OutsideTemp, doubleVal(25.5)),
+	})
+
+	evt, fieldErrs, err := dec.DecodePayload(payload)
+	if err != nil {
+		t.Fatalf("DecodePayload() error = %v", err)
+	}
+	if len(fieldErrs) != 0 {
+		t.Errorf("unexpected field errors: %v", fieldErrs)
+	}
+
+	assertFloatApprox(t, evt.Fields, "insideTemp", 68.0)
+	assertFloatApprox(t, evt.Fields, "outsideTemp", 77.9)
+}
+
+func TestDecoder_DecodePayload_ClimateEnumFields(t *testing.T) {
+	t.Parallel()
+	dec := NewDecoder()
+
+	tests := []struct {
+		name       string
+		field      tpb.Field
+		value      *tpb.Value
+		fieldName  string
+		wantString string
+	}{
+		{
+			name:       "defrost mode off",
+			field:      tpb.Field_DefrostMode,
+			value:      defrostModeVal(tpb.DefrostModeState_DefrostModeStateOff),
+			fieldName:  "defrostMode",
+			wantString: "Off",
+		},
+		{
+			name:       "defrost mode max",
+			field:      tpb.Field_DefrostMode,
+			value:      defrostModeVal(tpb.DefrostModeState_DefrostModeStateMax),
+			fieldName:  "defrostMode",
+			wantString: "Max",
+		},
+		{
+			name:       "climate keeper dog",
+			field:      tpb.Field_ClimateKeeperMode,
+			value:      climateKeeperModeVal(tpb.ClimateKeeperModeState_ClimateKeeperModeStateDog),
+			fieldName:  "climateKeeperMode",
+			wantString: "Dog",
+		},
+		{
+			name:       "hvac power on",
+			field:      tpb.Field_HvacPower,
+			value:      hvacPowerVal(tpb.HvacPowerState_HvacPowerStateOn),
+			fieldName:  "hvacPower",
+			wantString: "On",
+		},
+		{
+			name:       "hvac power precondition",
+			field:      tpb.Field_HvacPower,
+			value:      hvacPowerVal(tpb.HvacPowerState_HvacPowerStatePrecondition),
+			fieldName:  "hvacPower",
+			wantString: "Precondition",
+		},
+		{
+			name:       "defrost string fallback",
+			field:      tpb.Field_DefrostMode,
+			value:      stringVal("Max"),
+			fieldName:  "defrostMode",
+			wantString: "Max",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			payload := makePayload([]*tpb.Datum{
+				makeDatum(tt.field, tt.value),
+			})
+
+			evt, fieldErrs, err := dec.DecodePayload(payload)
+			if err != nil {
+				t.Fatalf("DecodePayload() error = %v", err)
+			}
+			if len(fieldErrs) != 0 {
+				t.Errorf("unexpected field errors: %v", fieldErrs)
+			}
+
+			assertString(t, evt.Fields, tt.fieldName, tt.wantString)
+		})
+	}
+}
+
+func TestDecoder_DecodePayload_ClimateNumericFields(t *testing.T) {
+	t.Parallel()
+	dec := NewDecoder()
+
+	payload := makePayload([]*tpb.Datum{
+		makeDatum(tpb.Field_HvacFanSpeed, stringVal("5")),
+		makeDatum(tpb.Field_SeatHeaterLeft, stringVal("3")),
+		makeDatum(tpb.Field_SeatHeaterRight, stringVal("0")),
+	})
+
+	evt, fieldErrs, err := dec.DecodePayload(payload)
+	if err != nil {
+		t.Fatalf("DecodePayload() error = %v", err)
+	}
+	if len(fieldErrs) != 0 {
+		t.Errorf("unexpected field errors: %v", fieldErrs)
+	}
+
+	assertFloat(t, evt.Fields, "hvacFanSpeed", 5.0)
+	assertFloat(t, evt.Fields, "seatHeaterLeft", 3.0)
+	assertFloat(t, evt.Fields, "seatHeaterRight", 0.0)
+}
+
+func TestCelsiusToFahrenheit(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		celsius float64
+		wantF   float64
+	}{
+		{"freezing point", 0, 32},
+		{"boiling point", 100, 212},
+		{"body temp", 37, 98.6},
+		{"negative", -40, -40},
+		{"room temp", 20, 68},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := celsiusToFahrenheit(tt.celsius)
+			diff := got - tt.wantF
+			if diff < 0 {
+				diff = -diff
+			}
+			if diff > 0.01 {
+				t.Errorf("celsiusToFahrenheit(%f) = %f, want %f", tt.celsius, got, tt.wantF)
+			}
+		})
+	}
+}
+
+// defrostModeVal creates a Value with a defrost_mode_value.
+func defrostModeVal(dm tpb.DefrostModeState) *tpb.Value {
+	return &tpb.Value{Value: &tpb.Value_DefrostModeValue{DefrostModeValue: dm}}
+}
+
+// climateKeeperModeVal creates a Value with a climate_keeper_mode_value.
+func climateKeeperModeVal(ck tpb.ClimateKeeperModeState) *tpb.Value {
+	return &tpb.Value{Value: &tpb.Value_ClimateKeeperModeValue{ClimateKeeperModeValue: ck}}
+}
+
+// hvacPowerVal creates a Value with an hvac_power_value.
+func hvacPowerVal(hp tpb.HvacPowerState) *tpb.Value {
+	return &tpb.Value{Value: &tpb.Value_HvacPowerValue{HvacPowerValue: hp}}
 }

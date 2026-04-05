@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tnando/my-robo-taxi-telemetry/pkg/sdk"
 )
@@ -33,6 +34,25 @@ type stubVehicleOwner struct {
 
 func (s *stubVehicleOwner) GetVehicleOwner(_ context.Context, _ string) (string, error) {
 	return s.ownerID, s.err
+}
+
+type stubTeslaTokenProvider struct {
+	token TeslaToken
+	err   error
+}
+
+func (s *stubTeslaTokenProvider) GetTeslaToken(_ context.Context, _ string) (TeslaToken, error) {
+	return s.token, s.err
+}
+
+// validTeslaToken returns a stub provider with a non-expired token.
+func validTeslaToken() *stubTeslaTokenProvider {
+	return &stubTeslaTokenProvider{
+		token: TeslaToken{ //nolint:gosec // test fixture, not a real credential
+			AccessToken: "tesla-oauth-token-abc",
+			ExpiresAt:   time.Now().Add(time.Hour),
+		},
+	}
 }
 
 // stubFleetServer starts an httptest.Server that returns predefined responses.
@@ -78,6 +98,7 @@ func TestFleetConfigHandler_ServeHTTP(t *testing.T) {
 		authHeader     string
 		tokenValidator *stubTokenValidator
 		vehicleOwner   *stubVehicleOwner
+		teslaTokens    *stubTeslaTokenProvider
 		fleetStatus    int
 		fleetBody      string
 		wantStatus     int
@@ -89,6 +110,7 @@ func TestFleetConfigHandler_ServeHTTP(t *testing.T) {
 			authHeader:     "Bearer " + authToken,
 			tokenValidator: &stubTokenValidator{userID: userID},
 			vehicleOwner:   &stubVehicleOwner{ownerID: userID},
+			teslaTokens:    validTeslaToken(),
 			fleetStatus:    http.StatusOK,
 			fleetBody:      successBody,
 			wantStatus:     http.StatusOK,
@@ -99,6 +121,7 @@ func TestFleetConfigHandler_ServeHTTP(t *testing.T) {
 			authHeader:     "Bearer " + authToken,
 			tokenValidator: &stubTokenValidator{userID: userID},
 			vehicleOwner:   &stubVehicleOwner{ownerID: userID},
+			teslaTokens:    validTeslaToken(),
 			fleetStatus:    http.StatusOK,
 			fleetBody:      successBody,
 			wantStatus:     http.StatusBadRequest,
@@ -110,6 +133,7 @@ func TestFleetConfigHandler_ServeHTTP(t *testing.T) {
 			authHeader:     "",
 			tokenValidator: &stubTokenValidator{userID: userID},
 			vehicleOwner:   &stubVehicleOwner{ownerID: userID},
+			teslaTokens:    validTeslaToken(),
 			fleetStatus:    http.StatusOK,
 			fleetBody:      successBody,
 			wantStatus:     http.StatusUnauthorized,
@@ -121,6 +145,7 @@ func TestFleetConfigHandler_ServeHTTP(t *testing.T) {
 			authHeader:     "Basic " + authToken,
 			tokenValidator: &stubTokenValidator{userID: userID},
 			vehicleOwner:   &stubVehicleOwner{ownerID: userID},
+			teslaTokens:    validTeslaToken(),
 			fleetStatus:    http.StatusOK,
 			fleetBody:      successBody,
 			wantStatus:     http.StatusUnauthorized,
@@ -132,6 +157,7 @@ func TestFleetConfigHandler_ServeHTTP(t *testing.T) {
 			authHeader:     "Bearer bad-token",
 			tokenValidator: &stubTokenValidator{err: errors.New("token expired")},
 			vehicleOwner:   &stubVehicleOwner{ownerID: userID},
+			teslaTokens:    validTeslaToken(),
 			fleetStatus:    http.StatusOK,
 			fleetBody:      successBody,
 			wantStatus:     http.StatusUnauthorized,
@@ -143,6 +169,7 @@ func TestFleetConfigHandler_ServeHTTP(t *testing.T) {
 			authHeader:     "Bearer " + authToken,
 			tokenValidator: &stubTokenValidator{userID: userID},
 			vehicleOwner:   &stubVehicleOwner{err: fmt.Errorf("VehicleRepo.GetByVIN: %w", sdk.ErrNotFound)},
+			teslaTokens:    validTeslaToken(),
 			fleetStatus:    http.StatusOK,
 			fleetBody:      successBody,
 			wantStatus:     http.StatusNotFound,
@@ -154,10 +181,52 @@ func TestFleetConfigHandler_ServeHTTP(t *testing.T) {
 			authHeader:     "Bearer " + authToken,
 			tokenValidator: &stubTokenValidator{userID: userID},
 			vehicleOwner:   &stubVehicleOwner{ownerID: "other-user"},
+			teslaTokens:    validTeslaToken(),
 			fleetStatus:    http.StatusOK,
 			fleetBody:      successBody,
 			wantStatus:     http.StatusForbidden,
 			wantError:      "you do not own this vehicle",
+		},
+		{
+			name:           "Tesla token not found",
+			vin:            validVIN,
+			authHeader:     "Bearer " + authToken,
+			tokenValidator: &stubTokenValidator{userID: userID},
+			vehicleOwner:   &stubVehicleOwner{ownerID: userID},
+			teslaTokens:    &stubTeslaTokenProvider{err: fmt.Errorf("AccountRepo.GetTeslaToken: %w", sdk.ErrNotFound)},
+			fleetStatus:    http.StatusOK,
+			fleetBody:      successBody,
+			wantStatus:     http.StatusUnauthorized,
+			wantError:      "Tesla account not linked",
+		},
+		{
+			name:           "Tesla token expired",
+			vin:            validVIN,
+			authHeader:     "Bearer " + authToken,
+			tokenValidator: &stubTokenValidator{userID: userID},
+			vehicleOwner:   &stubVehicleOwner{ownerID: userID},
+			teslaTokens: &stubTeslaTokenProvider{
+				token: TeslaToken{ //nolint:gosec // test fixture
+					AccessToken: "expired-tesla-token",
+					ExpiresAt:   time.Now().Add(-time.Hour),
+				},
+			},
+			fleetStatus: http.StatusOK,
+			fleetBody:   successBody,
+			wantStatus:  http.StatusUnauthorized,
+			wantError:   "Tesla token expired",
+		},
+		{
+			name:           "Tesla token lookup internal error",
+			vin:            validVIN,
+			authHeader:     "Bearer " + authToken,
+			tokenValidator: &stubTokenValidator{userID: userID},
+			vehicleOwner:   &stubVehicleOwner{ownerID: userID},
+			teslaTokens:    &stubTeslaTokenProvider{err: errors.New("connection refused")},
+			fleetStatus:    http.StatusOK,
+			fleetBody:      successBody,
+			wantStatus:     http.StatusInternalServerError,
+			wantError:      "internal error",
 		},
 		{
 			name:           "fleet API server error",
@@ -165,6 +234,7 @@ func TestFleetConfigHandler_ServeHTTP(t *testing.T) {
 			authHeader:     "Bearer " + authToken,
 			tokenValidator: &stubTokenValidator{userID: userID},
 			vehicleOwner:   &stubVehicleOwner{ownerID: userID},
+			teslaTokens:    validTeslaToken(),
 			fleetStatus:    http.StatusInternalServerError,
 			fleetBody:      `{"error":"internal server error"}`,
 			wantStatus:     http.StatusBadGateway,
@@ -176,6 +246,7 @@ func TestFleetConfigHandler_ServeHTTP(t *testing.T) {
 			authHeader:     "Bearer " + authToken,
 			tokenValidator: &stubTokenValidator{userID: userID},
 			vehicleOwner:   &stubVehicleOwner{ownerID: userID},
+			teslaTokens:    validTeslaToken(),
 			fleetStatus:    http.StatusUnprocessableEntity,
 			fleetBody:      `{"error":"invalid config"}`,
 			wantStatus:     http.StatusBadGateway,
@@ -187,6 +258,7 @@ func TestFleetConfigHandler_ServeHTTP(t *testing.T) {
 			authHeader:     "Bearer " + authToken,
 			tokenValidator: &stubTokenValidator{userID: userID},
 			vehicleOwner:   &stubVehicleOwner{ownerID: userID},
+			teslaTokens:    validTeslaToken(),
 			fleetStatus:    http.StatusOK,
 			fleetBody:      skippedBody,
 			wantStatus:     http.StatusConflict,
@@ -198,6 +270,7 @@ func TestFleetConfigHandler_ServeHTTP(t *testing.T) {
 			authHeader:     "Bearer " + authToken,
 			tokenValidator: &stubTokenValidator{userID: userID},
 			vehicleOwner:   &stubVehicleOwner{err: errors.New("connection refused")},
+			teslaTokens:    validTeslaToken(),
 			fleetStatus:    http.StatusOK,
 			fleetBody:      successBody,
 			wantStatus:     http.StatusInternalServerError,
@@ -216,6 +289,7 @@ func TestFleetConfigHandler_ServeHTTP(t *testing.T) {
 			handler := NewFleetConfigHandler(
 				tt.tokenValidator,
 				tt.vehicleOwner,
+				tt.teslaTokens,
 				fleetClient,
 				EndpointConfig{
 					Hostname: "telemetry.example.com",
@@ -274,6 +348,100 @@ func TestFleetConfigHandler_ServeHTTP(t *testing.T) {
 	}
 }
 
+func TestFleetConfigHandler_TeslaTokenPassedToFleetAPI(t *testing.T) {
+	const (
+		validVIN       = "5YJ3E1EA1PF000001"
+		userID         = "user-123"
+		teslaToken     = "tesla-oauth-real-token" //nolint:gosec // test fixture, not a real credential
+		successBody    = `{"response":{"updated_vehicles":1,"skipped_vehicles":{}}}`
+	)
+
+	// Capture the Authorization header sent to the Fleet API.
+	var capturedAuth string
+	fleetSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, successBody)
+	}))
+	t.Cleanup(fleetSrv.Close)
+
+	handler := NewFleetConfigHandler(
+		&stubTokenValidator{userID: userID},
+		&stubVehicleOwner{ownerID: userID},
+		&stubTeslaTokenProvider{
+			token: TeslaToken{
+				AccessToken: teslaToken,
+				ExpiresAt:   time.Now().Add(time.Hour),
+			},
+		},
+		newTestFleetClient(fleetSrv.URL),
+		EndpointConfig{
+			Hostname: "telemetry.example.com",
+			Port:     443,
+			CA:       "ca-cert",
+		},
+		discardLogger(),
+	)
+
+	mux := http.NewServeMux()
+	mux.Handle("POST /api/fleet-config/{vin}", handler)
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/fleet-config/"+validVIN, nil)
+	req.Header.Set("Authorization", "Bearer internal-jwt-token")
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code: got %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	// Verify the Fleet API received the Tesla OAuth token, not the internal JWT.
+	wantAuth := "Bearer " + teslaToken
+	if capturedAuth != wantAuth {
+		t.Errorf("Fleet API Authorization header: got %q, want %q", capturedAuth, wantAuth)
+	}
+}
+
+func TestFleetConfigHandler_TeslaTokenNoExpiry(t *testing.T) {
+	const (
+		validVIN    = "5YJ3E1EA1PF000001"
+		userID      = "user-123"
+		successBody = `{"response":{"updated_vehicles":1,"skipped_vehicles":{}}}`
+	)
+
+	// A token with zero ExpiresAt (no expiry info) should be accepted.
+	handler := NewFleetConfigHandler(
+		&stubTokenValidator{userID: userID},
+		&stubVehicleOwner{ownerID: userID},
+		&stubTeslaTokenProvider{
+			token: TeslaToken{ //nolint:gosec // test fixture
+				AccessToken: "token-no-expiry",
+			},
+		},
+		newTestFleetClient(stubFleetServer(t, http.StatusOK, successBody).URL),
+		EndpointConfig{
+			Hostname: "telemetry.example.com",
+			Port:     443,
+			CA:       "ca-cert",
+		},
+		discardLogger(),
+	)
+
+	mux := http.NewServeMux()
+	mux.Handle("POST /api/fleet-config/{vin}", handler)
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/fleet-config/"+validVIN, nil)
+	req.Header.Set("Authorization", "Bearer valid-jwt")
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status code: got %d, want %d (token with no expiry should succeed)", rec.Code, http.StatusOK)
+	}
+}
+
 func TestExtractBearerToken(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -308,6 +476,7 @@ func TestFleetConfigHandler_FleetAPIUnreachable(t *testing.T) {
 	handler := NewFleetConfigHandler(
 		&stubTokenValidator{userID: "user-123"},
 		&stubVehicleOwner{ownerID: "user-123"},
+		validTeslaToken(),
 		fleetClient,
 		EndpointConfig{
 			Hostname: "telemetry.example.com",

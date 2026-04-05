@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -22,6 +23,7 @@ import (
 	"github.com/tnando/my-robo-taxi-telemetry/internal/config"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/drives"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/geocode"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/server"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/telemetry"
@@ -119,10 +121,14 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	// --- Store repos ---
 	vehicleRepo := store.NewVehicleRepo(db.Pool(), store.NoopMetrics{})
 	driveRepo := store.NewDriveRepo(db.Pool(), store.NoopMetrics{})
+	accountRepo := store.NewAccountRepo(db.Pool())
+
+	// --- Geocoder (optional — requires MAPBOX_TOKEN) ---
+	geo := newGeocoder(cfg.MapboxToken(), cfg.Drives().GeocodeTimeout, logger)
 
 	// --- Persistence writer ---
 	writer := store.NewWriter(
-		vehicleRepo, driveRepo, vehicleRepo, bus,
+		vehicleRepo, driveRepo, vehicleRepo, bus, geo,
 		logger.With(slog.String("component", "writer")),
 		store.WriterConfig{
 			FlushInterval: cfg.Telemetry().BatchWriteInterval,
@@ -174,42 +180,35 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 		OriginPatterns: originPatterns,
 	}))
 
+	// --- Vehicle status endpoint (always available) ---
+	statusHandler := telemetry.NewVehicleStatusHandler(
+		authenticator,
+		&vehicleOwnerAdapter{repo: vehicleRepo},
+		recv,
+		logger.With(slog.String("component", "vehicle-status")),
+	)
+	srv.HandleFunc("GET /api/vehicle-status/{vin}", statusHandler.ServeHTTP)
+
 	// --- Fleet config push endpoint (optional — requires proxy config) ---
-	if cfg.Proxy().URL != "" && cfg.Proxy().FleetTelemetryHostname != "" {
-		fleetClient := telemetry.NewFleetAPIClient(telemetry.FleetAPIConfig{
-			BaseURL: cfg.Proxy().URL,
-		}, logger.With(slog.String("component", "fleet")))
+	setupFleetConfigEndpoint(cfg, srv, authenticator, vehicleRepo, accountRepo, logger)
 
-		// Map config.ProxyConfig fields → telemetry.EndpointConfig.
-		// If new proxy fields are added to config, update this mapping.
-		fleetHandler := telemetry.NewFleetConfigHandler(
-			authenticator,
-			&vehicleOwnerAdapter{repo: vehicleRepo},
-			fleetClient,
-			telemetry.EndpointConfig{
-				Hostname: cfg.Proxy().FleetTelemetryHostname,
-				Port:     cfg.Proxy().FleetTelemetryPort,
-				CA:       cfg.Proxy().FleetTelemetryCA,
-			},
-			logger.With(slog.String("component", "fleet-config")),
-		)
-
-		srv.HandleFunc("POST /api/fleet-config/{vin}", fleetHandler.ServeHTTP)
-		logger.Info("fleet config push endpoint enabled",
-			slog.String("proxy_url", cfg.Proxy().URL),
+	// Configure mTLS on Tesla port. TLS is required for vehicle connections —
+	// without it, Tesla vehicles cannot complete the handshake and report EOF.
+	if cfg.TLS().CertFile == "" || cfg.TLS().KeyFile == "" {
+		logger.Warn("TLS cert/key not configured — Tesla mTLS port will serve plain TCP (dev only)",
+			slog.String("cert_file", cfg.TLS().CertFile),
+			slog.String("key_file", cfg.TLS().KeyFile),
 		)
 	} else {
-		logger.Warn("fleet config push disabled: proxy URL or telemetry hostname not configured")
-	}
-
-	// Configure mTLS on Tesla port if TLS cert files are available.
-	if cfg.TLS().CertFile != "" && cfg.TLS().KeyFile != "" {
 		teslaTLS, err := buildTeslaTLS(cfg.TLS())
 		if err != nil {
-			logger.Warn("TLS not configured for Tesla port, skipping mTLS", slog.Any("error", err))
-		} else {
-			srv.SetTeslaTLS(teslaTLS)
+			return fmt.Errorf("building Tesla mTLS config: %w", err)
 		}
+		srv.SetTeslaTLS(teslaTLS)
+		logger.Info("Tesla mTLS configured",
+			slog.String("cert_file", cfg.TLS().CertFile),
+			slog.Bool("client_ca_loaded", cfg.TLS().CAFile != ""),
+		)
 	}
 
 	logger.Info("starting HTTP servers")
@@ -219,6 +218,66 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 
 	logger.Info("telemetry-server stopped cleanly")
 	return nil
+}
+
+// setupFleetConfigEndpoint registers the POST /api/fleet-config/{vin}
+// handler if the proxy URL and fleet telemetry hostname are configured.
+// When Tesla OAuth credentials are available, it also enables automatic
+// token refresh.
+func setupFleetConfigEndpoint(
+	cfg *config.Config,
+	srv *server.Server,
+	authenticator ws.Authenticator,
+	vehicleRepo *store.VehicleRepo,
+	accountRepo *store.AccountRepo,
+	logger *slog.Logger,
+) {
+	if cfg.Proxy().URL == "" || cfg.Proxy().FleetTelemetryHostname == "" {
+		logger.Warn("fleet config push disabled: proxy URL or telemetry hostname not configured")
+		return
+	}
+
+	fleetClient := telemetry.NewFleetAPIClient(telemetry.FleetAPIConfig{
+		BaseURL:    cfg.Proxy().URL,
+		HTTPClient: proxyHTTPClient(cfg.Proxy().URL, logger),
+	}, logger.With(slog.String("component", "fleet")))
+
+	// Map config.ProxyConfig fields → telemetry.EndpointConfig.
+	// If new proxy fields are added to config, update this mapping.
+	var fleetOpts []telemetry.FleetConfigOption
+	if cfg.TeslaOAuth().ClientID != "" {
+		// Intentional mapping: config.TeslaOAuthConfig and telemetry.TeslaOAuthConfig
+		// have identical fields but live in separate dependency layers. Don't "DRY"
+		// them — config is infra, telemetry is domain. The copy keeps them decoupled.
+		refresher := telemetry.NewTokenRefresher(telemetry.TeslaOAuthConfig{
+			ClientID:     cfg.TeslaOAuth().ClientID,
+			ClientSecret: cfg.TeslaOAuth().ClientSecret,
+		}, logger.With(slog.String("component", "token-refresh")))
+		updater := &teslaTokenUpdaterAdapter{repo: accountRepo}
+		fleetOpts = append(fleetOpts, telemetry.WithTokenRefresher(refresher, updater))
+		logger.Info("Tesla token auto-refresh enabled")
+	} else {
+		logger.Warn("Tesla token auto-refresh disabled: AUTH_TESLA_ID not set")
+	}
+
+	fleetHandler := telemetry.NewFleetConfigHandler(
+		authenticator,
+		&vehicleOwnerAdapter{repo: vehicleRepo},
+		&teslaTokenAdapter{repo: accountRepo},
+		fleetClient,
+		telemetry.EndpointConfig{
+			Hostname: cfg.Proxy().FleetTelemetryHostname,
+			Port:     cfg.Proxy().FleetTelemetryPort,
+			CA:       cfg.Proxy().FleetTelemetryCA,
+		},
+		logger.With(slog.String("component", "fleet-config")),
+		fleetOpts...,
+	)
+
+	srv.HandleFunc("POST /api/fleet-config/{vin}", fleetHandler.ServeHTTP)
+	logger.Info("fleet config push endpoint enabled",
+		slog.String("proxy_url", cfg.Proxy().URL),
+	)
 }
 
 func newLogger(level string) (*slog.Logger, error) {
@@ -271,3 +330,13 @@ func buildTeslaTLS(cfg config.TLSConfig) (*tls.Config, error) {
 	return tlsCfg, nil
 }
 
+// newGeocoder creates a Geocoder based on whether a Mapbox token is
+// available. Returns NoopGeocoder when the token is empty.
+func newGeocoder(token string, timeout time.Duration, logger *slog.Logger) geocode.Geocoder {
+	if g := geocode.NewMapboxGeocoder(token, timeout); g != nil {
+		logger.Info("Mapbox reverse geocoding enabled for drive addresses")
+		return g
+	}
+	logger.Warn("Mapbox token not set — drive addresses will show raw coordinates")
+	return geocode.NoopGeocoder{}
+}

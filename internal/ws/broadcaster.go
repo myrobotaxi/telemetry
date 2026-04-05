@@ -19,17 +19,22 @@ type Broadcaster struct {
 	resolver VINResolver
 	logger   *slog.Logger
 	subs     []events.Subscription
+	routes   *routeAccumulator
+	nav      *navAccumulator
 }
 
 // NewBroadcaster creates a Broadcaster ready to start. Call Start to begin
 // subscribing to event bus topics.
 func NewBroadcaster(hub *Hub, bus events.Bus, resolver VINResolver, logger *slog.Logger) *Broadcaster {
-	return &Broadcaster{
+	b := &Broadcaster{
 		hub:      hub,
 		bus:      bus,
 		resolver: resolver,
 		logger:   logger,
+		routes:   newRouteAccumulator(defaultRouteBatchSize, defaultRouteFlushInterval),
 	}
+	b.nav = newNavAccumulator(defaultNavFlushInterval, b.flushNav)
+	return b
 }
 
 // Start subscribes to all relevant event bus topics. The provided context
@@ -43,6 +48,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	subscriptions := []topicHandler{
 		{events.TopicVehicleTelemetry, b.makeHandler(b.handleTelemetry)},
 		{events.TopicDriveStarted, b.makeHandler(b.handleDriveStarted)},
+		{events.TopicDriveUpdated, b.makeHandler(b.handleDriveUpdated)},
 		{events.TopicDriveEnded, b.makeHandler(b.handleDriveEnded)},
 		{events.TopicConnectivity, b.makeHandler(b.handleConnectivity)},
 	}
@@ -63,10 +69,12 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop unsubscribes from all event bus topics. After Stop returns, no
-// further events will be processed.
+// Stop unsubscribes from all event bus topics and cancels any pending
+// nav accumulator timers. After Stop returns, no further events will
+// be processed and no timer callbacks will fire.
 func (b *Broadcaster) Stop() error {
 	b.unsubscribeAll()
+	b.nav.Stop()
 	b.logger.Info("broadcaster stopped")
 	return nil
 }
@@ -84,56 +92,6 @@ func (b *Broadcaster) makeHandler(fn eventHandler) events.Handler {
 		defer cancel()
 		fn(ctx, event)
 	}
-}
-
-// handleTelemetry transforms a VehicleTelemetryEvent into a vehicle_update
-// message and broadcasts it to authorized clients.
-func (b *Broadcaster) handleTelemetry(ctx context.Context, event events.Event) {
-	payload, ok := event.Payload.(events.VehicleTelemetryEvent)
-	if !ok {
-		b.logger.Error("broadcaster.handleTelemetry: unexpected payload type",
-			slog.String("event_id", event.ID),
-		)
-		return
-	}
-
-	vehicleID, err := b.resolver.GetByVIN(ctx, payload.VIN)
-	if err != nil {
-		b.logger.Warn("broadcaster.handleTelemetry: VIN resolution failed, skipping event",
-			slog.String("event_id", event.ID),
-			slog.Any("error", err),
-		)
-		return
-	}
-
-	fields := mapFieldsForClient(payload.Fields)
-	if len(fields) == 0 {
-		return
-	}
-
-	// Inject lastUpdated into fields so it merges into the frontend Vehicle
-	// object. The envelope's Timestamp serves a different purpose (message
-	// ordering) — lastUpdated is what the UI displays.
-	fields["lastUpdated"] = payload.CreatedAt.Format(time.RFC3339)
-
-	// Derive vehicle status from gear and speed. This is a synthetic field
-	// (not from Tesla telemetry) — it drives the frontend's driving/parked UI.
-	fields["status"] = deriveVehicleStatus(fields)
-
-	msg, err := marshalWSMessage(msgTypeVehicleUpdate, vehicleUpdatePayload{
-		VehicleID: vehicleID,
-		Fields:    fields,
-		Timestamp: payload.CreatedAt.Format(time.RFC3339),
-	})
-	if err != nil {
-		b.logger.Error("broadcaster.handleTelemetry: marshal failed",
-			slog.String("event_id", event.ID),
-			slog.Any("error", err),
-		)
-		return
-	}
-
-	b.hub.Broadcast(vehicleID, msg)
 }
 
 // handleDriveStarted transforms a DriveStartedEvent into a drive_started
@@ -177,7 +135,8 @@ func (b *Broadcaster) handleDriveStarted(ctx context.Context, event events.Event
 }
 
 // handleDriveEnded transforms a DriveEndedEvent into a drive_ended
-// message and broadcasts it.
+// message and broadcasts it. It also flushes any remaining accumulated
+// route points and clears the accumulator for the vehicle.
 func (b *Broadcaster) handleDriveEnded(ctx context.Context, event events.Event) {
 	payload, ok := event.Payload.(events.DriveEndedEvent)
 	if !ok {
@@ -194,6 +153,18 @@ func (b *Broadcaster) handleDriveEnded(ctx context.Context, event events.Event) 
 			slog.Any("error", err),
 		)
 		return
+	}
+
+	// Flush any remaining route points before sending drive_ended.
+	if remaining := b.routes.Flush(payload.VIN); len(remaining) > 0 {
+		b.broadcastRoutePoints(ctx, event.ID, payload.VIN, remaining)
+	}
+	b.routes.Clear(payload.VIN)
+
+	// Flush any pending nav fields for this VIN. Flush cancels the timer
+	// and clears state, so a separate Clear call is unnecessary.
+	if navFields := b.nav.Flush(payload.VIN); len(navFields) > 0 {
+		b.flushNav(payload.VIN, navFields)
 	}
 
 	msg, err := marshalWSMessage(msgTypeDriveEnded, driveEndedPayload{
@@ -250,6 +221,12 @@ func (b *Broadcaster) handleConnectivity(ctx context.Context, event events.Event
 	}
 
 	b.hub.Broadcast(vehicleID, msg)
+
+	// Clear pending nav fields when vehicle disconnects to avoid
+	// broadcasting stale navigation data on reconnect.
+	if payload.Status == events.StatusDisconnected {
+		b.nav.Clear(payload.VIN)
+	}
 }
 
 // unsubscribeAll removes all active subscriptions from the bus.

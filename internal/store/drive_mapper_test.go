@@ -97,6 +97,32 @@ func TestMapDriveCompletion(t *testing.T) {
 	}
 }
 
+func TestMapSingleRoutePoint(t *testing.T) {
+	ts := time.Date(2026, 3, 17, 14, 31, 0, 0, time.UTC)
+	pt := events.RoutePoint{
+		Latitude: 33.0975, Longitude: -96.8214,
+		Speed: 45.0, Heading: 245.0, Timestamp: ts,
+	}
+
+	r := mapSingleRoutePoint(pt)
+
+	if r.Latitude != 33.0975 {
+		t.Errorf("Latitude = %f, want 33.0975", r.Latitude)
+	}
+	if r.Longitude != -96.8214 {
+		t.Errorf("Longitude = %f, want -96.8214", r.Longitude)
+	}
+	if r.Speed != 45.0 {
+		t.Errorf("Speed = %f, want 45.0", r.Speed)
+	}
+	if r.Heading != 245.0 {
+		t.Errorf("Heading = %f, want 245.0", r.Heading)
+	}
+	if r.Timestamp != "2026-03-17T14:31:00Z" {
+		t.Errorf("Timestamp = %q, want %q", r.Timestamp, "2026-03-17T14:31:00Z")
+	}
+}
+
 func TestMapRoutePoints(t *testing.T) {
 	ts := time.Date(2026, 3, 17, 14, 31, 0, 0, time.UTC)
 
@@ -163,10 +189,60 @@ func TestMapRoutePoints(t *testing.T) {
 }
 
 func TestFormatLocation(t *testing.T) {
-	loc := events.Location{Latitude: 33.097500, Longitude: -96.821400}
-	got := formatLocation(loc)
-	want := "33.097500,-96.821400"
-	if got != want {
-		t.Errorf("formatLocation = %q, want %q", got, want)
+	tests := []struct {
+		name string
+		loc  events.Location
+		want string
+	}{
+		{
+			name: "valid coordinates",
+			loc:  events.Location{Latitude: 33.097500, Longitude: -96.821400},
+			want: "33.097500,-96.821400",
+		},
+		{
+			name: "zero lat and lng treated as unset",
+			loc:  events.Location{Latitude: 0, Longitude: 0},
+			want: "",
+		},
+		{
+			name: "zero lat with nonzero lng is valid",
+			loc:  events.Location{Latitude: 0, Longitude: -96.821400},
+			want: "0.000000,-96.821400",
+		},
+		{
+			name: "nonzero lat with zero lng is valid",
+			loc:  events.Location{Latitude: 33.097500, Longitude: 0},
+			want: "33.097500,0.000000",
+		},
+		{
+			name: "negative coordinates",
+			loc:  events.Location{Latitude: -33.8688, Longitude: 151.2093},
+			want: "-33.868800,151.209300",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatLocation(tt.loc)
+			if got != tt.want {
+				t.Errorf("formatLocation(%+v) = %q, want %q", tt.loc, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMapDriveStarted_ZeroLocation(t *testing.T) {
+	startedAt := time.Date(2026, 3, 17, 14, 30, 0, 0, time.UTC)
+	evt := events.DriveStartedEvent{
+		VIN:       "5YJ3E1EA1NF000001",
+		DriveID:   "drive_zero_loc",
+		Location:  events.Location{Latitude: 0, Longitude: 0},
+		StartedAt: startedAt,
+	}
+
+	record := mapDriveStarted(evt, "veh_001")
+
+	if record.StartLocation != "" {
+		t.Errorf("StartLocation = %q, want empty for (0,0)", record.StartLocation)
 	}
 }

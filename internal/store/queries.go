@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -11,7 +12,10 @@ import (
 const vehicleSelectColumns = `"id", "userId", "vin", "name", "status",
 	"chargeLevel", "estimatedRange", "speed", "gearPosition", "heading",
 	"latitude", "longitude", "interiorTemp", "exteriorTemp",
-	"odometerMiles", "lastUpdated"`
+	"odometerMiles", "destinationName", "destinationLatitude",
+	"destinationLongitude", "originLatitude", "originLongitude",
+	"etaMinutes", "tripDistanceRemaining",
+	"navRouteCoordinates", "lastUpdated"`
 
 const queryVehicleByVIN = `SELECT ` + vehicleSelectColumns + `
 FROM "Vehicle"
@@ -61,6 +65,83 @@ const queryDriveByID = `SELECT "id", "vehicleId", "date", "startTime", "endTime"
 FROM "Drive"
 WHERE "id" = $1`
 
+// Account queries. The Account table is Prisma-owned (NextAuth). We read
+// tokens and update them in-place when refreshing expired OAuth tokens.
+
+const queryTeslaToken = `SELECT "access_token", "refresh_token", "expires_at"
+FROM "Account"
+WHERE "userId" = $1 AND "provider" = 'tesla'
+LIMIT 1`
+
+const queryUpdateTeslaToken = `UPDATE "Account"
+SET "access_token" = $1, "refresh_token" = $2, "expires_at" = $3
+WHERE "userId" = $4 AND "provider" = 'tesla'`
+
+// updateColumn pairs a PostgreSQL column name with the value to set. A nil
+// value signals that the field was not present in this telemetry event.
+type updateColumn struct {
+	col  string
+	val  any    // nil when the field pointer is nil
+	cast string // optional PostgreSQL type cast (e.g. "::jsonb")
+}
+
+// updateColumns returns the list of column/value pairs for a VehicleUpdate.
+// Values are dereferenced so callers can check for nil uniformly.
+func updateColumns(u VehicleUpdate) []updateColumn {
+	return []updateColumn{
+		{"speed", derefInt(u.Speed), ""},
+		{"chargeLevel", derefInt(u.ChargeLevel), ""},
+		{"estimatedRange", derefInt(u.EstimatedRange), ""},
+		{"gearPosition", derefString(u.GearPosition), ""},
+		{"heading", derefInt(u.Heading), ""},
+		{"latitude", derefFloat(u.Latitude), ""},
+		{"longitude", derefFloat(u.Longitude), ""},
+		{"interiorTemp", derefInt(u.InteriorTemp), ""},
+		{"exteriorTemp", derefInt(u.ExteriorTemp), ""},
+		{"odometerMiles", derefInt(u.OdometerMiles), ""},
+		{"locationName", derefString(u.LocationName), ""},
+		{"locationAddress", derefString(u.LocationAddr), ""},
+		{"destinationName", derefString(u.DestinationName), ""},
+		{"destinationLatitude", derefFloat(u.DestinationLatitude), ""},
+		{"destinationLongitude", derefFloat(u.DestinationLongitude), ""},
+		{"originLatitude", derefFloat(u.OriginLatitude), ""},
+		{"originLongitude", derefFloat(u.OriginLongitude), ""},
+		{"etaMinutes", derefInt(u.EtaMinutes), ""},
+		{"tripDistanceRemaining", derefFloat(u.TripDistRemaining), ""},
+		{"navRouteCoordinates", derefJSON(u.NavRouteCoordinates), "::jsonb"},
+	}
+}
+
+// deref helpers convert typed pointers to any, returning nil when the
+// pointer is nil so the caller can skip the column.
+func derefInt(p *int) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+func derefFloat(p *float64) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+func derefString(p *string) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+func derefJSON(p *json.RawMessage) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
 // buildTelemetryUpdate constructs a dynamic UPDATE statement for
 // VehicleUpdate, including only columns whose values are non-nil.
 // Returns the query string, the argument slice, and whether any fields
@@ -69,49 +150,27 @@ func buildTelemetryUpdate(vin string, u VehicleUpdate) (query string, args []any
 	var setClauses []string
 	argIdx := 1
 
-	// %q produces Go double-quoted strings which match PostgreSQL's
-	// double-quoted identifier syntax. Column names are hardcoded constants.
-	addClause := func(col string, val any) {
-		setClauses = append(setClauses, fmt.Sprintf("%q = $%d", col, argIdx))
-		args = append(args, val)
+	// Build a set of columns to clear so we can skip them in the regular loop.
+	clearSet := make(map[string]bool, len(u.ClearFields))
+	for _, col := range u.ClearFields {
+		clearSet[col] = true
+	}
+
+	for _, col := range updateColumns(u) {
+		if col.val == nil || clearSet[col.col] {
+			continue // skip nil values AND columns being explicitly cleared
+		}
+		// %q produces Go double-quoted strings which match PostgreSQL's
+		// double-quoted identifier syntax. Column names are hardcoded constants.
+		setClauses = append(setClauses, fmt.Sprintf("%q = $%d%s", col.col, argIdx, col.cast))
+		args = append(args, col.val)
 		argIdx++
 	}
 
-	if u.Speed != nil {
-		addClause("speed", *u.Speed)
-	}
-	if u.ChargeLevel != nil {
-		addClause("chargeLevel", *u.ChargeLevel)
-	}
-	if u.EstimatedRange != nil {
-		addClause("estimatedRange", *u.EstimatedRange)
-	}
-	if u.GearPosition != nil {
-		addClause("gearPosition", *u.GearPosition)
-	}
-	if u.Heading != nil {
-		addClause("heading", *u.Heading)
-	}
-	if u.Latitude != nil {
-		addClause("latitude", *u.Latitude)
-	}
-	if u.Longitude != nil {
-		addClause("longitude", *u.Longitude)
-	}
-	if u.InteriorTemp != nil {
-		addClause("interiorTemp", *u.InteriorTemp)
-	}
-	if u.ExteriorTemp != nil {
-		addClause("exteriorTemp", *u.ExteriorTemp)
-	}
-	if u.OdometerMiles != nil {
-		addClause("odometerMiles", *u.OdometerMiles)
-	}
-	if u.LocationName != nil {
-		addClause("locationName", *u.LocationName)
-	}
-	if u.LocationAddr != nil {
-		addClause("locationAddress", *u.LocationAddr)
+	// ClearFields: explicitly SET NULL for columns that should be cleared
+	// (e.g. navigation cancelled by the vehicle).
+	for _, col := range u.ClearFields {
+		setClauses = append(setClauses, fmt.Sprintf("%q = NULL", col))
 	}
 
 	if len(setClauses) == 0 {

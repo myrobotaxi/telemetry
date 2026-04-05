@@ -27,4 +27,11 @@ var (
 	// across firmware versions.
 	ErrUnexpectedValueType = errors.New("unexpected value type for field")
 
+	// ErrUnsupportedMessageType indicates the FlatBuffers envelope contained
+	// a message type other than FlatbuffersStream (type 4).
+	ErrUnsupportedMessageType = errors.New("unsupported FlatBuffers message type")
+
+	// ErrUnsupportedTopic indicates the FlatBuffers envelope had a topic
+	// that we do not handle (only "V" for vehicle data is supported).
+	ErrUnsupportedTopic = errors.New("unsupported envelope topic")
 )

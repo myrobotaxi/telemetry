@@ -154,3 +154,15 @@ func TestMain(m *testing.M) {
 ```
 
 Update your agent memory with test patterns established, common test utilities created, flaky test root causes, and coverage metrics.
+
+## Contract Awareness (SDK v1)
+
+Tests enforce the SDK contract. Coordinate with `contract-tester` for contract/FR/NFR/chaos coverage:
+
+- **Your scope**: unit tests — isolated, fast, table-driven, per-package.
+- **`contract-tester`'s scope**: contract conformance, FR/NFR scenarios, chaos tests.
+
+When writing tests:
+- Reference FR/NFR IDs from `docs/architecture/requirements.md` where applicable.
+- Use the Tesla simulator (`cmd/simulator/`) for realistic protobuf inputs.
+- Consult the `tesla-fleet-telemetry-sme` skill for Tesla-specific edge cases worth testing.

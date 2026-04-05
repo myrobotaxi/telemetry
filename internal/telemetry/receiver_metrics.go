@@ -27,6 +27,10 @@ type ReceiverMetrics interface {
 	// ObserveMessageLatency records the time taken to process a single
 	// message from receipt through event bus publication.
 	ObserveMessageLatency(seconds float64)
+
+	// IncFieldDecodeError increments the count of per-field decode errors.
+	// The vin should be redacted and field is the internal field name.
+	IncFieldDecodeError(vin, field string)
 }
 
 // NoopReceiverMetrics is a ReceiverMetrics where all methods are no-ops.
@@ -35,17 +39,19 @@ type NoopReceiverMetrics struct{}
 
 var _ ReceiverMetrics = NoopReceiverMetrics{}
 
-func (NoopReceiverMetrics) IncMessagesReceived(string) {}
-func (NoopReceiverMetrics) IncDecodeErrors(string)     {}
-func (NoopReceiverMetrics) IncRateLimited(string)      {}
-func (NoopReceiverMetrics) SetConnectedVehicles(int)   {}
-func (NoopReceiverMetrics) ObserveMessageLatency(float64) {}
+func (NoopReceiverMetrics) IncMessagesReceived(string)      {}
+func (NoopReceiverMetrics) IncDecodeErrors(string)          {}
+func (NoopReceiverMetrics) IncRateLimited(string)           {}
+func (NoopReceiverMetrics) SetConnectedVehicles(int)        {}
+func (NoopReceiverMetrics) ObserveMessageLatency(float64)   {}
+func (NoopReceiverMetrics) IncFieldDecodeError(string, string) {}
 
 // PrometheusReceiverMetrics implements ReceiverMetrics using Prometheus.
 type PrometheusReceiverMetrics struct {
 	messagesReceived  *prometheus.CounterVec
 	decodeErrors      *prometheus.CounterVec
 	rateLimited       *prometheus.CounterVec
+	fieldDecodeErrors *prometheus.CounterVec
 	connectedVehicles prometheus.Gauge
 	messageLatency    prometheus.Histogram
 }
@@ -77,6 +83,13 @@ func NewPrometheusReceiverMetrics(reg prometheus.Registerer) *PrometheusReceiver
 			Help:      "Total messages dropped due to rate limiting per vehicle.",
 		}, []string{"vin"}),
 
+		fieldDecodeErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "telemetry",
+			Subsystem: "receiver",
+			Name:      "field_decode_errors_total",
+			Help:      "Total per-field decode errors by vehicle and field name.",
+		}, []string{"vin", "field"}),
+
 		connectedVehicles: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: "telemetry",
 			Subsystem: "receiver",
@@ -97,6 +110,7 @@ func NewPrometheusReceiverMetrics(reg prometheus.Registerer) *PrometheusReceiver
 		m.messagesReceived,
 		m.decodeErrors,
 		m.rateLimited,
+		m.fieldDecodeErrors,
 		m.connectedVehicles,
 		m.messageLatency,
 	}
@@ -131,4 +145,8 @@ func (m *PrometheusReceiverMetrics) SetConnectedVehicles(count int) {
 
 func (m *PrometheusReceiverMetrics) ObserveMessageLatency(seconds float64) {
 	m.messageLatency.Observe(seconds)
+}
+
+func (m *PrometheusReceiverMetrics) IncFieldDecodeError(vin, field string) {
+	m.fieldDecodeErrors.WithLabelValues(vin, field).Inc()
 }

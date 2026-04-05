@@ -4,9 +4,9 @@ set -euo pipefail
 # generate-certs.sh — Generate TLS certificates for Tesla Fleet Telemetry.
 #
 # Produces:
-#   1. EC private key (secp256r1/prime256v1) — required by Tesla
+#   1. CA key + cert (EC secp256r1, self-signed, 10 years) — required by Tesla mTLS
 #   2. Derived public key (host at .well-known endpoint for Tesla registration)
-#   3. Self-signed server certificate (LOCAL DEV / testing only)
+#   3. Server key + cert (RSA 2048, CA-signed) — proven to work with Tesla vehicles
 #   4. Test client certificate (for simulator / integration tests)
 #
 # Usage:
@@ -14,18 +14,21 @@ set -euo pipefail
 #
 # Options:
 #   --output-dir DIR   Output directory (default: ./certs)
-#   --days N           Certificate validity in days (default: 365)
+#   --days N           Server certificate validity in days (default: 365)
 #   --force            Overwrite existing certificates
 #   --client-only      Only generate the test client certificate
 #   --help             Show this help message
 #
 # Examples:
-#   ./scripts/generate-certs.sh myrobotaxi.app
-#   ./scripts/generate-certs.sh myrobotaxi.app --output-dir /etc/certs --days 90
-#   ./scripts/generate-certs.sh myrobotaxi.app --force
+#   ./scripts/generate-certs.sh telemetry.myrobotaxi.app
+#   ./scripts/generate-certs.sh telemetry.myrobotaxi.app --output-dir /etc/certs --days 90
+#   ./scripts/generate-certs.sh telemetry.myrobotaxi.app --force
 
 readonly SCRIPT_NAME="$(basename "$0")"
 readonly REQUIRED_OPENSSL_VERSION="1.1.0"
+
+# CA validity is always 10 years — not configurable to prevent accidental rotation.
+readonly CA_VALIDITY_DAYS=3650
 
 # ─── Defaults ──────────────────────────────────────────────────────────
 CERTS_DIR="./certs"
@@ -85,14 +88,26 @@ file_exists_guard() {
     fi
 }
 
-validate_key() {
+# validate_ec_key validates an EC private key file.
+validate_ec_key() {
     local key_file="$1"
     if ! openssl ec -in "$key_file" -check -noout 2>/dev/null; then
-        die "Generated private key failed validation: $key_file"
+        die "Generated EC private key failed validation: $key_file"
     fi
-    log "Private key validated OK"
+    log "EC private key validated OK: $key_file"
 }
 
+# validate_rsa_key validates an RSA private key file.
+validate_rsa_key() {
+    local key_file="$1"
+    if ! openssl rsa -in "$key_file" -check -noout 2>/dev/null; then
+        die "Generated RSA private key failed validation: $key_file"
+    fi
+    log "RSA private key validated OK: $key_file"
+}
+
+# validate_cert checks cert readability, cert/key match, and prints a summary.
+# Uses openssl pkey for key matching so it works for both EC and RSA keys.
 validate_cert() {
     local cert_file="$1"
     local key_file="$2"
@@ -103,10 +118,10 @@ validate_cert() {
         die "$label certificate is not a valid X.509 file: $cert_file"
     fi
 
-    # Check that cert matches key (compare modulus hashes).
+    # Check that cert matches key using openssl pkey (works for EC and RSA).
     local cert_hash key_hash
     cert_hash="$(openssl x509 -in "$cert_file" -pubkey -noout 2>/dev/null | openssl md5)"
-    key_hash="$(openssl ec -in "$key_file" -pubout 2>/dev/null | openssl md5)"
+    key_hash="$(openssl pkey -in "$key_file" -pubout 2>/dev/null | openssl md5)"
     if [[ "$cert_hash" != "$key_hash" ]]; then
         die "$label certificate does not match its private key"
     fi
@@ -176,47 +191,105 @@ parse_args() {
 
 # ─── Certificate generation ───────────────────────────────────────────
 
-generate_server_key() {
-    local key_file="$CERTS_DIR/server.key"
-    file_exists_guard "$key_file" "Server private key"
+# generate_ca creates the CA key and self-signed cert.
+#
+# The CA key is EC (secp256r1) because Tesla uses the CA's public key for app
+# registration at the .well-known endpoint. The cert is valid for 10 years.
+#
+# The CA is only generated if ca.key does not exist (unless --force), because
+# regenerating the CA invalidates every server cert already signed by it.
+generate_ca() {
+    local ca_key="$CERTS_DIR/ca.key"
+    local ca_cert="$CERTS_DIR/ca.crt"
 
-    log "Generating EC private key (prime256v1/secp256r1)..."
-    openssl ecparam -name prime256v1 -genkey -noout -out "$key_file"
-    chmod 600 "$key_file"
-    validate_key "$key_file"
-}
+    if [[ -f "$ca_key" ]] && [[ "$FORCE" != "true" ]]; then
+        log "CA key already exists at $ca_key — skipping CA generation."
+        log "  (Use --force to regenerate. WARNING: this invalidates all signed server certs.)"
+        return 0
+    fi
 
-generate_public_key() {
-    local key_file="$CERTS_DIR/server.key"
-    local pub_file="$CERTS_DIR/public-key.pem"
-    file_exists_guard "$pub_file" "Public key"
+    log "Generating CA EC private key (prime256v1/secp256r1, 10-year validity)..."
+    openssl ecparam -name prime256v1 -genkey -noout -out "$ca_key"
+    chmod 600 "$ca_key"
+    validate_ec_key "$ca_key"
 
-    log "Deriving public key from private key..."
-    openssl ec -in "$key_file" -pubout -out "$pub_file" 2>/dev/null
-    validate_public_key "$pub_file"
-}
-
-generate_server_cert() {
-    local key_file="$CERTS_DIR/server.key"
-    local cert_file="$CERTS_DIR/server.crt"
-    file_exists_guard "$cert_file" "Server certificate"
-
-    log "Generating self-signed server certificate (valid $VALIDITY_DAYS days)..."
-    log "  WARNING: Self-signed certs are for LOCAL DEV ONLY."
-    log "  For production, use Let's Encrypt or another trusted CA."
-
-    # Create a temporary config for SAN support.
     local tmp_conf
     tmp_conf="$(mktemp)"
     TEMP_FILES+=("$tmp_conf")
 
     cat > "$tmp_conf" <<EOF
 [req]
-default_bits = 256
+prompt = no
+distinguished_name = dn
+
+[dn]
+CN = $DOMAIN CA
+
+[v3_ca]
+basicConstraints = critical, CA:TRUE, pathlen:0
+keyUsage = critical, keyCertSign, cRLSign
+subjectKeyIdentifier = hash
+EOF
+
+    log "Generating self-signed CA certificate (valid ${CA_VALIDITY_DAYS} days)..."
+    openssl req -new -x509 \
+        -key "$ca_key" \
+        -out "$ca_cert" \
+        -days "$CA_VALIDITY_DAYS" \
+        -config "$tmp_conf" \
+        -extensions v3_ca
+
+    validate_cert "$ca_cert" "$ca_key" "CA"
+}
+
+# generate_public_key derives the EC public key from the CA key.
+#
+# Tesla uses this key at .well-known/appspecific/com.tesla.3p.public-key.pem
+# for app registration. It must come from the same EC key used as the CA key.
+generate_public_key() {
+    local ca_key="$CERTS_DIR/ca.key"
+    local pub_file="$CERTS_DIR/public-key.pem"
+    file_exists_guard "$pub_file" "Public key"
+
+    log "Deriving public key from CA private key..."
+    openssl ec -in "$ca_key" -pubout -out "$pub_file" 2>/dev/null
+    validate_public_key "$pub_file"
+}
+
+# generate_server_cert creates an RSA 2048-bit server key and a CA-signed cert.
+#
+# RSA 2048 is used (not EC) because RSA is proven to work with Tesla vehicles
+# for TLS handshake. The CA signs the cert so that Tesla can verify the chain
+# using the ca.crt PEM supplied in the fleet_telemetry_config "ca" field.
+generate_server_cert() {
+    local ca_key="$CERTS_DIR/ca.key"
+    local ca_cert="$CERTS_DIR/ca.crt"
+    local server_key="$CERTS_DIR/server.key"
+    local server_cert="$CERTS_DIR/server.crt"
+    local server_csr
+
+    if [[ ! -f "$ca_key" ]] || [[ ! -f "$ca_cert" ]]; then
+        die "CA key/cert not found. Run without --client-only first to generate the CA."
+    fi
+
+    file_exists_guard "$server_key" "Server private key"
+    file_exists_guard "$server_cert" "Server certificate"
+
+    log "Generating RSA 2048-bit server private key..."
+    openssl genrsa -out "$server_key" 2048 2>/dev/null
+    chmod 600 "$server_key"
+    validate_rsa_key "$server_key"
+
+    # Build a temporary config for SAN and extensions.
+    local tmp_conf
+    tmp_conf="$(mktemp)"
+    TEMP_FILES+=("$tmp_conf")
+
+    cat > "$tmp_conf" <<EOF
+[req]
 prompt = no
 distinguished_name = dn
 req_extensions = v3_req
-x509_extensions = v3_ca
 
 [dn]
 CN = $DOMAIN
@@ -224,22 +297,41 @@ CN = $DOMAIN
 [v3_req]
 subjectAltName = DNS:$DOMAIN
 
-[v3_ca]
-subjectAltName = DNS:$DOMAIN
+[v3_server]
 basicConstraints = CA:FALSE
-keyUsage = digitalSignature, keyEncipherment
+keyUsage = critical, digitalSignature, keyEncipherment
 extendedKeyUsage = serverAuth
+subjectAltName = DNS:$DOMAIN
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid, issuer
 EOF
 
-    openssl req -new -x509 \
-        -key "$key_file" \
-        -out "$cert_file" \
-        -days "$VALIDITY_DAYS" \
+    # Generate CSR.
+    server_csr="$(mktemp)"
+    TEMP_FILES+=("$server_csr")
+
+    log "Generating server CSR..."
+    openssl req -new \
+        -key "$server_key" \
+        -out "$server_csr" \
         -config "$tmp_conf"
 
-    validate_cert "$cert_file" "$key_file" "Server"
+    log "Signing server certificate with CA (valid $VALIDITY_DAYS days)..."
+    openssl x509 -req \
+        -in "$server_csr" \
+        -CA "$ca_cert" \
+        -CAkey "$ca_key" \
+        -CAcreateserial \
+        -out "$server_cert" \
+        -days "$VALIDITY_DAYS" \
+        -extfile "$tmp_conf" \
+        -extensions v3_server 2>/dev/null
+
+    validate_cert "$server_cert" "$server_key" "Server"
 }
 
+# generate_client_cert creates a self-signed EC client cert for local testing.
+# This is used by the simulator and integration tests only — no CA involvement.
 generate_client_cert() {
     local client_key="$CERTS_DIR/client.key"
     local client_cert="$CERTS_DIR/client.crt"
@@ -286,7 +378,8 @@ main() {
 
     log "Domain: $DOMAIN"
     log "Output: $CERTS_DIR"
-    log "Validity: $VALIDITY_DAYS days"
+    log "Server cert validity: $VALIDITY_DAYS days"
+    log "CA cert validity: $CA_VALIDITY_DAYS days (fixed)"
     log "Force overwrite: $FORCE"
 
     check_openssl
@@ -295,10 +388,10 @@ main() {
     mkdir -p "$CERTS_DIR"
 
     if [[ "$CLIENT_ONLY" == "true" ]]; then
-        # Only generate client cert (assumes server key already exists).
+        # Only generate client cert (assumes CA and server certs already exist).
         generate_client_cert
     else
-        generate_server_key
+        generate_ca
         generate_public_key
         generate_server_cert
         generate_client_cert
@@ -322,8 +415,10 @@ main() {
     log "1. Host public key at:"
     log "   https://$DOMAIN/.well-known/appspecific/com.tesla.3p.public-key.pem"
     log "2. Register app at: https://developer.tesla.com"
-    log "3. For production TLS, use Let's Encrypt:"
-    log "   certbot certonly --standalone -d $DOMAIN"
+    log "3. In fleet_telemetry_config, set the 'ca' field to the contents of:"
+    log "   $CERTS_DIR/ca.crt"
+    log "   This is the CA cert that signed the server cert — Tesla uses it"
+    log "   to verify the server during the mTLS handshake."
     log "4. Push fleet telemetry config:"
     log "   ./scripts/push-fleet-config.sh <VIN> <AUTH_TOKEN>"
     log "5. Vehicle owners pair virtual key at:"

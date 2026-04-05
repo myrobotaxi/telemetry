@@ -100,10 +100,10 @@ func (c *FleetAPIClient) PushTelemetryConfig(
 		return nil, fmt.Errorf("PushTelemetryConfig: marshal request: %w", err)
 	}
 
-	// The Fleet API uses a single endpoint for all VINs in the batch.
-	// The first VIN in the path is required but the actual targets come
-	// from the request body's "vins" array.
-	url := c.baseURL + "/api/1/vehicles/" + req.VINs[0] + "/fleet_telemetry_config"
+	// The tesla-http-proxy expects /api/1/vehicles/fleet_telemetry_config
+	// (no VIN in the URL). VINs are passed in the request body's "vins" array.
+	// The proxy signs the config into a JWS token and forwards it to Tesla.
+	url := c.baseURL + "/api/1/vehicles/fleet_telemetry_config"
 
 	c.logger.Debug("pushing telemetry config",
 		slog.String("vin", redactVIN(req.VINs[0])),

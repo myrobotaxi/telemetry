@@ -17,6 +17,7 @@ type Config struct {
 	websocket      WebSocketConfig
 	auth           AuthConfig
 	proxy          ProxyConfig
+	teslaOAuth     TeslaOAuthConfig
 	mapboxToken    string
 	teslaPublicKey string
 }
@@ -37,9 +38,10 @@ type TLSConfig struct {
 
 // DatabaseConfig holds connection pool parameters and the connection URL.
 type DatabaseConfig struct {
-	URL      string
-	MaxConns int
-	MinConns int
+	URL                       string
+	MaxConns                  int
+	MinConns                  int
+	DisablePreparedStatements bool // Set true for PgBouncer transaction pooling (Supabase port 6543)
 }
 
 // TelemetryConfig holds tuning parameters for the telemetry receiver.
@@ -84,6 +86,14 @@ type ProxyConfig struct {
 	FleetTelemetryCA       string // PEM-encoded CA cert
 }
 
+// TeslaOAuthConfig holds the Tesla OAuth2 application credentials needed to
+// refresh expired tokens. Both fields are optional — when ClientID is empty,
+// automatic token refresh is disabled.
+type TeslaOAuthConfig struct {
+	ClientID     string
+	ClientSecret string
+}
+
 // Getters — one per section, returning a copy of the section struct.
 
 // Server returns the server port configuration.
@@ -110,6 +120,10 @@ func (c *Config) Auth() AuthConfig { return c.auth }
 // Proxy returns the Tesla Fleet API proxy configuration. When URL is empty,
 // the fleet config push feature is unavailable.
 func (c *Config) Proxy() ProxyConfig { return c.proxy }
+
+// TeslaOAuth returns the Tesla OAuth2 application credentials. When
+// ClientID is empty, automatic token refresh is disabled.
+func (c *Config) TeslaOAuth() TeslaOAuthConfig { return c.teslaOAuth }
 
 // MapboxToken returns the Mapbox API token. Empty string means geocoding
 // is disabled.

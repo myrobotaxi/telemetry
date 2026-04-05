@@ -3,67 +3,55 @@ package telemetry
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strings"
-
-	"github.com/tnando/my-robo-taxi-telemetry/pkg/sdk"
+	"time"
 )
 
 // vinLength is the standard length of a Vehicle Identification Number.
 const vinLength = 17
 
-// tokenValidator validates JWT tokens and returns the authenticated user ID.
-// Matches auth.JWTAuthenticator.ValidateToken.
-type tokenValidator interface {
-	ValidateToken(ctx context.Context, token string) (userID string, err error)
-}
-
-// VehicleOwnerLookup resolves a VIN to its owning user ID. Implementations
-// should return an error wrapping sdk.ErrNotFound when the VIN is not
-// registered.
-type VehicleOwnerLookup interface {
-	GetVehicleOwner(ctx context.Context, vin string) (userID string, err error)
-}
-
-// EndpointConfig describes the telemetry server that vehicles
-// should connect to after fleet config is pushed.
-type EndpointConfig struct {
-	Hostname string
-	Port     int
-	CA       string // PEM-encoded CA cert
-}
-
 // FleetConfigHandler handles POST /api/fleet-config/{vin} requests. It
 // validates the caller's JWT, verifies vehicle ownership, and pushes a
 // telemetry configuration to the vehicle via the Fleet API proxy.
 type FleetConfigHandler struct {
-	auth     tokenValidator
-	vehicles VehicleOwnerLookup
-	fleet    *FleetAPIClient
-	endpoint EndpointConfig
-	logger   *slog.Logger
+	auth      tokenValidator
+	vehicles  VehicleOwnerLookup
+	tokens    TeslaTokenProvider
+	refresher TeslaTokenRefresher // nil disables auto-refresh
+	updater   TeslaTokenUpdater   // nil disables DB updates after refresh
+	fleet     *FleetAPIClient
+	endpoint  EndpointConfig
+	logger    *slog.Logger
 }
 
 // NewFleetConfigHandler creates a handler that pushes fleet telemetry config
 // for a single vehicle. The endpoint describes the telemetry server that the
-// vehicle should connect to after configuration.
+// vehicle should connect to after configuration. The tokens provider is used
+// to fetch the user's Tesla OAuth token for authenticating with the Fleet API.
+// The refresher and updater are optional — pass nil to disable auto-refresh.
 func NewFleetConfigHandler(
 	auth tokenValidator,
 	vehicles VehicleOwnerLookup,
+	tokens TeslaTokenProvider,
 	fleet *FleetAPIClient,
 	endpoint EndpointConfig,
 	logger *slog.Logger,
+	opts ...FleetConfigOption,
 ) *FleetConfigHandler {
-	return &FleetConfigHandler{
+	h := &FleetConfigHandler{
 		auth:     auth,
 		vehicles: vehicles,
+		tokens:   tokens,
 		fleet:    fleet,
 		endpoint: endpoint,
 		logger:   logger,
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 // ServeHTTP handles the fleet config push request.
@@ -97,33 +85,36 @@ func (h *FleetConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ownerID, err := h.vehicles.GetVehicleOwner(ctx, vin)
-	if err != nil {
-		h.handleVehicleLookupError(w, vin, err)
+	if !h.verifyOwnership(ctx, w, vin, userID) {
 		return
 	}
 
-	if ownerID != userID {
-		h.logger.Warn("fleet config: ownership mismatch",
-			slog.String("vin", redactVIN(vin)),
-			slog.String("user_id", userID),
-		)
-		h.writeError(w, http.StatusForbidden, "you do not own this vehicle")
+	teslaTok, ok := h.resolveTeslaToken(ctx, w, userID)
+	if !ok {
 		return
 	}
+
+	var ca *string
+	if h.endpoint.CA != "" {
+		ca = &h.endpoint.CA
+	}
+
+	// Tesla requires exp between ~31 and ~360 days from now.
+	expTime := time.Now().Add(350 * 24 * time.Hour).Unix()
 
 	req := FleetConfigRequest{
 		VINs: []string{vin},
 		Config: FleetConfig{
-			Hostname:    h.endpoint.Hostname,
-			Port:        h.endpoint.Port,
-			CA:          h.endpoint.CA,
-			Fields:      DefaultFieldConfig(),
-			PreferTyped: true,
+			Hostname:   h.endpoint.Hostname,
+			Port:       h.endpoint.Port,
+			CA:         ca,
+			Fields:     DefaultFieldConfig(),
+			AlertTypes: []string{"service"},
+			Exp:        &expTime,
 		},
 	}
 
-	result, err := h.fleet.PushTelemetryConfig(ctx, token, req)
+	result, err := h.fleet.PushTelemetryConfig(ctx, teslaTok.AccessToken, req)
 	if err != nil {
 		h.handleFleetAPIError(w, vin, err)
 		return
@@ -146,42 +137,103 @@ func (h *FleetConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleVehicleLookupError maps vehicle lookup errors to HTTP responses.
-func (h *FleetConfigHandler) handleVehicleLookupError(w http.ResponseWriter, vin string, err error) {
-	if errors.Is(err, sdk.ErrNotFound) {
-		h.writeError(w, http.StatusNotFound, "vehicle not found")
-		return
+// verifyOwnership checks that userID owns the vehicle identified by vin.
+// Returns true if the ownership check passes. On failure it writes an HTTP
+// error response and returns false.
+func (h *FleetConfigHandler) verifyOwnership(ctx context.Context, w http.ResponseWriter, vin, userID string) bool {
+	ownerID, err := h.vehicles.GetVehicleOwner(ctx, vin)
+	if err != nil {
+		h.handleVehicleLookupError(w, vin, err)
+		return false
 	}
 
-	h.logger.Error("fleet config: vehicle lookup failed",
-		slog.String("vin", redactVIN(vin)),
-		slog.String("error", err.Error()),
-	)
-	h.writeError(w, http.StatusInternalServerError, "internal error")
+	if ownerID != userID {
+		h.logger.Warn("fleet config: ownership mismatch",
+			slog.String("vin", redactVIN(vin)),
+			slog.String("user_id", userID),
+		)
+		h.writeError(w, http.StatusForbidden, "you do not own this vehicle")
+		return false
+	}
+
+	return true
 }
 
-// handleFleetAPIError maps Fleet API errors to HTTP responses.
-func (h *FleetConfigHandler) handleFleetAPIError(w http.ResponseWriter, vin string, err error) {
-	var apiErr *FleetAPIError
-	if errors.As(err, &apiErr) {
-		h.logger.Error("fleet config: proxy error",
-			slog.String("vin", redactVIN(vin)),
-			slog.Int("status", apiErr.StatusCode),
-			slog.String("body", apiErr.Body),
-		)
-		if apiErr.StatusCode >= 500 {
-			h.writeError(w, http.StatusBadGateway, "fleet API error")
-			return
-		}
-		h.writeError(w, http.StatusBadGateway, fmt.Sprintf("fleet API rejected request: %s", apiErr.Body))
-		return
+// resolveTeslaToken fetches the user's Tesla OAuth token and validates its
+// expiry. If the token is expired and a refresh_token is available, it
+// attempts to refresh the token automatically. Returns the token and true
+// on success. On failure it writes an HTTP error response and returns false.
+func (h *FleetConfigHandler) resolveTeslaToken(ctx context.Context, w http.ResponseWriter, userID string) (TeslaToken, bool) {
+	tok, err := h.tokens.GetTeslaToken(ctx, userID)
+	if err != nil {
+		h.handleTeslaTokenError(w, userID, err)
+		return TeslaToken{}, false
 	}
 
-	h.logger.Error("fleet config: push failed",
-		slog.String("vin", redactVIN(vin)),
-		slog.String("error", err.Error()),
+	if tok.ExpiresAt.IsZero() || !tok.ExpiresAt.Before(time.Now()) {
+		return tok, true
+	}
+
+	// Token is expired — attempt auto-refresh if possible.
+	if refreshed, ok := h.tryRefreshToken(ctx, w, userID, tok); ok {
+		return refreshed, true
+	}
+	return TeslaToken{}, false
+}
+
+// tryRefreshToken attempts to refresh an expired Tesla token. Returns the
+// refreshed token and true on success. On failure it writes an HTTP error
+// and returns false.
+func (h *FleetConfigHandler) tryRefreshToken(ctx context.Context, w http.ResponseWriter, userID string, tok TeslaToken) (TeslaToken, bool) {
+	if h.refresher == nil || tok.RefreshToken == "" {
+		h.logger.Warn("fleet config: Tesla token expired, no refresh available",
+			slog.String("user_id", userID),
+			slog.Time("expired_at", tok.ExpiresAt),
+			slog.Bool("has_refresher", h.refresher != nil),
+			slog.Bool("has_refresh_token", tok.RefreshToken != ""),
+		)
+		h.writeError(w, http.StatusUnauthorized,
+			"Tesla token expired — re-link your Tesla account")
+		return TeslaToken{}, false
+	}
+
+	h.logger.Info("fleet config: refreshing expired Tesla token",
+		slog.String("user_id", userID),
+		slog.Time("expired_at", tok.ExpiresAt),
 	)
-	h.writeError(w, http.StatusBadGateway, "failed to reach fleet API proxy")
+
+	refreshed, err := h.refresher.Refresh(ctx, tok.RefreshToken)
+	if err != nil {
+		h.logger.Error("fleet config: Tesla token refresh failed",
+			slog.String("user_id", userID),
+			slog.String("error", err.Error()),
+		)
+		h.writeError(w, http.StatusUnauthorized,
+			"Tesla token expired — re-link your Tesla account")
+		return TeslaToken{}, false
+	}
+
+	// Compute expiry once — ExpiresAt() calls time.Now() internally,
+	// so reuse the same value for DB and in-memory consistency.
+	expiresAt := refreshed.ExpiresAt()
+
+	// Persist the refreshed token if an updater is available.
+	if h.updater != nil {
+		if err := h.updater.UpdateTeslaToken(ctx, userID,
+			refreshed.AccessToken, refreshed.RefreshToken, expiresAt.Unix()); err != nil {
+			h.logger.Error("fleet config: failed to persist refreshed token",
+				slog.String("user_id", userID),
+				slog.String("error", err.Error()),
+			)
+			// Continue with the refreshed token even if persistence fails.
+		}
+	}
+
+	return TeslaToken{
+		AccessToken:  refreshed.AccessToken,
+		RefreshToken: refreshed.RefreshToken,
+		ExpiresAt:    expiresAt,
+	}, true
 }
 
 // writeJSON marshals v as JSON and writes it with the given status code.
@@ -196,29 +248,4 @@ func (h *FleetConfigHandler) writeJSON(w http.ResponseWriter, status int, v any)
 // writeError writes a JSON error response.
 func (h *FleetConfigHandler) writeError(w http.ResponseWriter, status int, msg string) {
 	h.writeJSON(w, status, fleetConfigErrorResponse{Error: msg})
-}
-
-// extractBearerToken extracts the token from an "Authorization: Bearer <token>"
-// header. Returns empty string if the header is missing or malformed.
-func extractBearerToken(r *http.Request) string {
-	auth := r.Header.Get("Authorization")
-	if auth == "" {
-		return ""
-	}
-	const prefix = "Bearer "
-	if !strings.HasPrefix(auth, prefix) {
-		return ""
-	}
-	return auth[len(prefix):]
-}
-
-// fleetConfigResponse is the JSON body returned on a successful config push.
-type fleetConfigResponse struct {
-	Status string `json:"status"`
-	VIN    string `json:"vin"`
-}
-
-// fleetConfigErrorResponse is the JSON body returned when a config push fails.
-type fleetConfigErrorResponse struct {
-	Error string `json:"error"`
 }

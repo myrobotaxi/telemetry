@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,6 +32,9 @@ func TestFleetAPIClient_PushTelemetryConfig_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/api/1/vehicles/fleet_telemetry_config" {
+			t.Errorf("path = %q, want /api/1/vehicles/fleet_telemetry_config", r.URL.Path)
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
 			t.Errorf("auth header = %q, want %q", got, "Bearer test-token")
@@ -62,15 +66,15 @@ func TestFleetAPIClient_PushTelemetryConfig_Success(t *testing.T) {
 		BaseURL: srv.URL,
 	}, fleetTestLogger())
 
+	testCA := "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----"
 	req := FleetConfigRequest{
 		VINs: []string{testVIN},
 		Config: FleetConfig{
-			Hostname:    "telemetry.myrobotaxi.app",
-			Port:        443,
-			CA:          "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
-			Fields:      DefaultFieldConfig(),
-			AlertTypes:  []string{"service"},
-			PreferTyped: true,
+			Hostname:   "telemetry.myrobotaxi.app",
+			Port:       443,
+			CA:         &testCA,
+			Fields:     DefaultFieldConfig(),
+			AlertTypes: []string{"service"},
 		},
 	}
 
@@ -452,29 +456,25 @@ func TestDefaultFieldConfig(t *testing.T) {
 
 	fields := DefaultFieldConfig()
 
-	tests := []struct {
-		field         string
-		wantInterval  int
-		wantHasDelta  bool
-		wantDelta     float64
+	// Spot-check key fields with specific intervals and deltas.
+	spotChecks := []struct {
+		field        string
+		wantInterval int
+		wantHasDelta bool
+		wantDelta    float64
 	}{
 		{FleetFieldVehicleSpeed, 2, false, 0},
 		{FleetFieldLocation, 2, true, 10},
-		{FleetFieldHeading, 5, false, 0},
+		{FleetFieldGpsHeading, 5, false, 0},
 		{FleetFieldGear, 1, false, 0},
-		{FleetFieldSOC, 30, false, 0},
-		{FleetFieldEstBatteryRange, 30, false, 0},
-		{FleetFieldChargeState, 30, false, 0},
+		{FleetFieldDetailedChargeState, 30, false, 0},
 		{FleetFieldOdometer, 60, false, 0},
-		{FleetFieldInsideTemp, 60, false, 0},
-		{FleetFieldOutsideTemp, 60, false, 0},
+		{FleetFieldDestinationName, 1, false, 0},
+		{FleetFieldMilesSinceReset, 60, true, 1},
+		{FleetFieldFSDMilesSinceReset, 60, true, 1},
 	}
 
-	if len(fields) != len(tests) {
-		t.Errorf("field count = %d, want %d", len(fields), len(tests))
-	}
-
-	for _, tt := range tests {
+	for _, tt := range spotChecks {
 		t.Run(tt.field, func(t *testing.T) {
 			t.Parallel()
 			fc, ok := fields[tt.field]
@@ -495,6 +495,30 @@ func TestDefaultFieldConfig(t *testing.T) {
 				t.Errorf("expected minimum_delta to be nil, got %f", *fc.MinimumDelta)
 			}
 		})
+	}
+
+	// Verify every field has a positive interval.
+	for name, fc := range fields {
+		if fc.IntervalSeconds <= 0 {
+			t.Errorf("field %q has non-positive interval: %d", name, fc.IntervalSeconds)
+		}
+	}
+}
+
+// TestDefaultFieldConfig_CoversAllTrackedFields ensures every field in
+// fieldMap has a corresponding entry in DefaultFieldConfig. This prevents
+// the bug where a field is decoded but never requested from the vehicle.
+func TestDefaultFieldConfig_CoversAllTrackedFields(t *testing.T) {
+	t.Parallel()
+
+	config := DefaultFieldConfig()
+
+	for protoField := range fieldMap {
+		apiName := protoField.String()
+		if _, ok := config[apiName]; !ok {
+			t.Errorf("fieldMap contains %s (proto %d) but DefaultFieldConfig has no entry for %q",
+				protoField, int32(protoField), apiName)
+		}
 	}
 }
 
@@ -531,6 +555,43 @@ func TestFleetAPIError_Error(t *testing.T) {
 				t.Fatal("Error() returned empty string")
 			}
 		})
+	}
+}
+
+func TestFleetConfig_CA_NullSerialization(t *testing.T) {
+	t.Parallel()
+
+	// nil CA must serialize as JSON null, not "".
+	cfg := FleetConfig{
+		Hostname: "telemetry.example.com",
+		Port:     8443,
+		CA:       nil,
+		Fields:   map[string]FieldConfig{"Gear": {IntervalSeconds: 1}},
+	}
+
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal error: %v", err)
+	}
+
+	if !strings.Contains(string(data), `"ca":null`) {
+		t.Errorf("nil CA should serialize as null, got: %s", data)
+	}
+
+	// Non-nil CA must serialize as a string.
+	ca := "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----"
+	cfg.CA = &ca
+
+	data, err = json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal error: %v", err)
+	}
+
+	if strings.Contains(string(data), `"ca":null`) {
+		t.Errorf("non-nil CA should not serialize as null, got: %s", data)
+	}
+	if !strings.Contains(string(data), `BEGIN CERTIFICATE`) {
+		t.Errorf("non-nil CA should contain PEM content, got: %s", data)
 	}
 }
 

@@ -12,7 +12,8 @@
   },
   "database": {
     "max_conns": 10,
-    "min_conns": 2
+    "min_conns": 2,
+    "disable_prepared_statements": true
   },
   "telemetry": {
     "max_vehicles": 100,
@@ -39,6 +40,6 @@
   "proxy": {
     "url": "https://127.0.0.1:4443",
     "fleet_telemetry_hostname": "telemetry.myrobotaxi.app",
-    "fleet_telemetry_port": 8443
+    "fleet_telemetry_port": 443
   }
 }
