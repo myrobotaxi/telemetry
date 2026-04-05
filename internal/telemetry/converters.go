@@ -35,6 +35,8 @@ func convertValue(field tpb.Field, v *tpb.Value) (events.TelemetryValue, error) 
 	case tpb.Field_InsideTemp, tpb.Field_OutsideTemp,
 		tpb.Field_HvacLeftTemperatureRequest, tpb.Field_HvacRightTemperatureRequest:
 		return convertTemperature(v)
+	case tpb.Field_RouteLine:
+		return convertRouteLine(v)
 	default:
 		return convertNumericOrString(v)
 	}
@@ -228,6 +230,19 @@ func convertHvacPower(v *tpb.Value) (events.TelemetryValue, error) {
 			"%w: expected hvacPower or string, got %T", ErrUnexpectedValueType, v.Value,
 		)
 	}
+}
+
+// convertRouteLine extracts a RouteLine string value. Tesla sends the nav
+// route as a Google Encoded Polyline in a string_value. Any other Value type
+// is unexpected and treated as an error.
+func convertRouteLine(v *tpb.Value) (events.TelemetryValue, error) {
+	if sv, ok := v.Value.(*tpb.Value_StringValue); ok {
+		s := sv.StringValue
+		return events.TelemetryValue{StringVal: &s}, nil
+	}
+	return events.TelemetryValue{}, fmt.Errorf(
+		"%w: RouteLine expected string, got %T", ErrUnexpectedValueType, v.Value,
+	)
 }
 
 // convertTemperature extracts a numeric Celsius value and converts it to

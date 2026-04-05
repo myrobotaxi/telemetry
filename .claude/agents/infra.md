@@ -154,3 +154,15 @@ jobs:
 5. Validate CI workflow syntax before committing
 
 Update your agent memory with deployment configurations, infrastructure decisions, and operational procedures established.
+
+## Contract Awareness (SDK v1)
+
+Infrastructure backs the NFRs in `docs/architecture/requirements.md`. Your work owns:
+
+- **Observability stack** (NFR-3.47 through 3.51): slog → log aggregator, Prometheus metrics, OTel distributed tracing, SLO dashboards, alerting.
+- **Scale architecture** (NFR-3.14 through 3.17): shardable services, bounded event bus with backpressure, batched DB writes, no O(n) broadcast loops.
+- **Release pipelines** (NFR-3.41 through 3.44): weekly SDK releases, canary pre-releases per merge, auto-generated release notes.
+- **CI contract enforcement** — wire up `contract-guard` as a required GitHub Action. Add SDK bundle size checks, latency regression benchmarks, contract conformance tests as PR gates.
+- **Secrets & encryption** (NFR-3.24): `ENCRYPTION_KEY` stored as Fly secret, key rotation runbook documented.
+
+When provisioning new infrastructure, reference the specific NFR the infra supports.

@@ -203,3 +203,12 @@ Use `fullchain.pem` (cert + intermediates), NOT `cert.pem`. The full chain is re
 5. Document any new Tesla quirks discovered in your agent memory
 
 Update your agent memory with Tesla-specific learnings: protocol quirks, field format surprises, cert issues, and deployment gotchas.
+
+## Contract Awareness (SDK v1)
+
+Tesla's behavior shapes the SDK contract, but the SDK contract is the authoritative source of truth. Your job is to map Tesla's protocol into the contract, not to let Tesla's quirks leak into the public API.
+
+- **Read `docs/architecture/requirements.md`** for FRs/NFRs before implementing.
+- **Read `docs/contracts/`** for how Tesla fields must be exposed to consumers.
+- **Document Tesla constraints** in the relevant contract doc when they force a design decision (e.g., "RouteLine uses Base64 protobuf with 1e6 precision per Tesla firmware").
+- **Defer to `sdk-architect`** when a Tesla quirk conflicts with an FR/NFR — the architect decides whether to adapt the contract or work around Tesla.

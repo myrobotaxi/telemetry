@@ -298,11 +298,11 @@ const (
 
 ## Deployment Architecture
 
-### Phase 1: Single Node (Railway/Fly.io)
+### Phase 1: Single Node (Fly.io)
 
 ```
 ┌─────────────────────────────┐
-│  Railway / Fly.io           │
+│  Fly.io                     │
 │  ┌───────────────────────┐  │
 │  │  telemetry-server     │  │     ┌──────────────┐
 │  │  (single Go binary)   │──────►│  Supabase    │

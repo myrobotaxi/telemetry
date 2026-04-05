@@ -45,6 +45,25 @@ var integerFields = map[string]struct{}{
 	"passengerTempSetting": {},
 }
 
+// navFieldSet contains internal telemetry field names that are considered
+// navigation-related. These fields are accumulated and broadcast together
+// after a time window to avoid race conditions in the frontend.
+var navFieldSet = map[string]struct{}{
+	"routeLine":           {},
+	"destinationName":     {},
+	"minutesToArrival":    {},
+	"milesToArrival":      {},
+	"destinationLocation": {},
+	"originLocation":      {},
+}
+
+// isNavField reports whether the given internal field name is a navigation
+// field that should be routed through the navAccumulator.
+func isNavField(name string) bool {
+	_, ok := navFieldSet[name]
+	return ok
+}
+
 // locationFieldSplit maps internal location field names to the pair of
 // client field names they should be split into (latitude, longitude).
 var locationFieldSplit = map[string][2]string{
@@ -53,15 +72,40 @@ var locationFieldSplit = map[string][2]string{
 	"originLocation":      {"originLatitude", "originLongitude"},
 }
 
+// navClearFields maps internal nav field names to their client-facing keys.
+// When a nav field is marked invalid by the vehicle, these client keys are
+// set to nil so the frontend clears stale destination/route data.
+var navClearFields = map[string][]string{
+	"destinationName":     {"destinationName"},
+	"milesToArrival":      {"tripDistanceRemaining"},
+	"minutesToArrival":    {"etaMinutes"},
+	"routeLine":           {"navRouteCoordinates"},
+	"originLocation":      {"originLatitude", "originLongitude"},
+	"destinationLocation": {"destinationLatitude", "destinationLongitude"},
+}
+
 // mapFieldsForClient converts a map of internal TelemetryValue fields into
 // plain key-value pairs suitable for JSON serialization to browser clients.
 // Pointer-wrapped values are unwrapped, LocationVal fields are split into
 // separate latitude/longitude pairs, routeLine is decoded into coordinates,
 // field names are translated to match the frontend Vehicle model, and
 // isClimateOn is derived from hvacPower when that field is present.
+// Fields marked Invalid by the vehicle produce nil values for nav fields
+// so the frontend clears stale destination/route state.
 func mapFieldsForClient(fields map[string]events.TelemetryValue) map[string]any {
 	out := make(map[string]any, len(fields))
 	for name, val := range fields {
+		// Nav fields marked invalid by the vehicle → send nil to clear
+		// frontend state (e.g. cancelled navigation).
+		if val.Invalid {
+			if clientKeys, isNav := navClearFields[name]; isNav {
+				for _, k := range clientKeys {
+					out[k] = nil
+				}
+			}
+			continue
+		}
+
 		switch {
 		case locationFieldSplit[name] != [2]string{}:
 			splitLocationField(out, name, val)
@@ -84,8 +128,17 @@ func mapFieldsForClient(fields map[string]events.TelemetryValue) map[string]any 
 
 // splitLocationField adds a LocationVal as separate latitude/longitude keys
 // to the output map. If the LocationVal is nil, no keys are added.
+// For origin and destination locations, zero-zero coordinates (protobuf
+// default for "not set") are skipped to prevent overwriting real values.
 func splitLocationField(out map[string]any, name string, val events.TelemetryValue) {
 	if val.LocationVal == nil {
+		return
+	}
+	// Skip zero-zero for origin/destination — protobuf default means "not set".
+	// Vehicle Location is not skipped because it updates frequently and 0,0 is
+	// filtered upstream by the minimum_delta config.
+	if name != "location" &&
+		val.LocationVal.Latitude == 0 && val.LocationVal.Longitude == 0 {
 		return
 	}
 	latLng := locationFieldSplit[name]
@@ -93,18 +146,31 @@ func splitLocationField(out map[string]any, name string, val events.TelemetryVal
 	out[latLng[1]] = val.LocationVal.Longitude
 }
 
-// decodeRouteLineField decodes a Google Encoded Polyline string and adds
-// the resulting coordinates as "routeCoordinates" in [lng, lat] (Mapbox)
+// decodeRouteLineField decodes Tesla's RouteLine field (Base64-encoded
+// protobuf wrapping a Google Encoded Polyline at 1e6 precision) and adds
+// the resulting coordinates as "navRouteCoordinates" in [lng, lat] (Mapbox)
 // format. Empty or nil strings are silently skipped.
 func decodeRouteLineField(out map[string]any, val events.TelemetryValue) {
-	if val.StringVal == nil || *val.StringVal == "" {
+	if val.StringVal == nil {
+		slog.Warn("decodeRouteLineField: routeLine arrived but StringVal is nil, unexpected type")
 		return
 	}
-	coords, err := DecodePolyline(*val.StringVal)
+	if *val.StringVal == "" {
+		// Empty RouteLine = navigation cleared.
+		out["navRouteCoordinates"] = nil
+		return
+	}
+	slog.Info("decodeRouteLineField: routeLine received",
+		slog.Int("encoded_len", len(*val.StringVal)),
+	)
+	coords, err := DecodeRouteLine(*val.StringVal)
 	if err != nil {
-		slog.Warn("mapFieldsForClient: failed to decode routeLine",
+		slog.Warn("decodeRouteLineField: decode failed, clearing navRouteCoordinates",
 			slog.Any("error", err),
 		)
+		// Clear stale route data — Tesla sends undecodable RouteLine (e.g.,
+		// protobuf tag 0x12) when navigation is cancelled or route changes.
+		out["navRouteCoordinates"] = nil
 		return
 	}
 	// Convert from [lat, lng] (Google) to [lng, lat] (Mapbox/GeoJSON).
@@ -112,7 +178,20 @@ func decodeRouteLineField(out map[string]any, val events.TelemetryValue) {
 	for i, c := range coords {
 		mapboxCoords[i] = []float64{c[1], c[0]}
 	}
-	out["routeCoordinates"] = mapboxCoords
+	out["navRouteCoordinates"] = mapboxCoords
+
+	// Diagnostic: log first/last coords and count so we can verify the route
+	if len(mapboxCoords) > 0 {
+		first := mapboxCoords[0]
+		last := mapboxCoords[len(mapboxCoords)-1]
+		slog.Info("decodeRouteLineField: navRouteCoordinates set",
+			slog.Int("points", len(mapboxCoords)),
+			slog.Float64("first_lng", first[0]),
+			slog.Float64("first_lat", first[1]),
+			slog.Float64("last_lng", last[0]),
+			slog.Float64("last_lat", last[1]),
+		)
+	}
 }
 
 // roundIfInteger rounds float64 values to integers for fields the frontend
@@ -150,7 +229,9 @@ func deriveVehicleStatus(fields map[string]any) string {
 	}
 
 	switch {
-	case gear == "D" || gear == "R" || speed > 0:
+	case gear == "D" || gear == "R":
+		return "driving"
+	case speed > 0:
 		return "driving"
 	default:
 		return "parked"

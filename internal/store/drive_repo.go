@@ -59,8 +59,11 @@ func (r *DriveRepo) AppendRoutePoints(ctx context.Context, driveID string, point
 		return fmt.Errorf("DriveRepo.AppendRoutePoints(%s): marshal: %w", driveID, err)
 	}
 
+	// Pass as json.RawMessage so pgx encodes it as JSON (not bytea).
+	// Plain []byte from json.Marshal is sent as bytea by pgx, which fails
+	// the ::jsonb cast with "invalid input syntax for type json".
 	start := time.Now()
-	tag, err := r.pool.Exec(ctx, queryDriveAppendRoutePoints, driveID, pointsJSON)
+	tag, err := r.pool.Exec(ctx, queryDriveAppendRoutePoints, driveID, json.RawMessage(pointsJSON))
 	r.metrics.ObserveQueryDuration("drive.append_route_points", time.Since(start).Seconds())
 	if err != nil {
 		r.metrics.IncQueryError("drive.append_route_points")

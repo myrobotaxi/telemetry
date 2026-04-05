@@ -79,6 +79,9 @@ const (
 	FleetFieldFSDMilesSinceReset = "SelfDrivingMilesSinceReset"
 )
 
+// intPtr returns a pointer to v. Used for optional FieldConfig fields.
+func intPtr(v int) *int { return &v }
+
 // DefaultFieldConfig returns the telemetry fields and intervals that
 // MyRoboTaxi configures on each vehicle. Every field in fieldMap
 // (fields.go) MUST be present here, otherwise we decode it but never
@@ -87,6 +90,11 @@ const (
 // Intervals balance data freshness against the vehicle's 5000-message
 // buffer. Tesla's emission rule: a field is only emitted when BOTH the
 // interval has elapsed AND the value has changed since the last emission.
+//
+// Fields that are "set once, static during trip" (navigation endpoints,
+// route polyline) use ResendIntervalSeconds so the vehicle re-emits them
+// periodically even when the value has not changed. Without this, a
+// server that misses the initial emission never receives the data.
 func DefaultFieldConfig() map[string]FieldConfig {
 	locationDelta := float64(10) // meters; filters out GPS jitter while parked
 	oneMile := float64(1)        // Tesla requires minimum_delta >= 1 for mileage fields
@@ -101,13 +109,13 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		// Location / Navigation — high frequency with delta filter
 		FleetFieldLocation:         {IntervalSeconds: 2, MinimumDelta: &locationDelta},
 		FleetFieldGpsHeading:       {IntervalSeconds: 5},
-		FleetFieldOriginLocation:   {IntervalSeconds: 30},
-		FleetFieldDestLocation:     {IntervalSeconds: 30},
-		FleetFieldDestinationName:  {IntervalSeconds: 30},
-		FleetFieldRouteLine:        {IntervalSeconds: 30},
+		FleetFieldOriginLocation:   {IntervalSeconds: 1, ResendIntervalSeconds: intPtr(30)},
+		FleetFieldDestLocation:     {IntervalSeconds: 1, ResendIntervalSeconds: intPtr(30)},
+		FleetFieldDestinationName:  {IntervalSeconds: 1, ResendIntervalSeconds: intPtr(30)},
+		FleetFieldRouteLine:        {IntervalSeconds: 1, ResendIntervalSeconds: intPtr(30)},
 		// RouteLastUpdated omitted — broken per Tesla docs, wastes buffer.
-		FleetFieldMilesToArrival:   {IntervalSeconds: 10},
-		FleetFieldMinutesToArrival: {IntervalSeconds: 10},
+		FleetFieldMilesToArrival:   {IntervalSeconds: 1, ResendIntervalSeconds: intPtr(30)},
+		FleetFieldMinutesToArrival: {IntervalSeconds: 1, ResendIntervalSeconds: intPtr(30)},
 
 		// Battery / Charging — medium frequency
 		FleetFieldSOC:                 {IntervalSeconds: 30},
@@ -121,8 +129,8 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		FleetFieldDetailedChargeState: {IntervalSeconds: 30},
 
 		// Climate — medium/low frequency
-		FleetFieldInsideTemp:           {IntervalSeconds: 60},
-		FleetFieldOutsideTemp:          {IntervalSeconds: 60},
+		FleetFieldInsideTemp:           {IntervalSeconds: 60, ResendIntervalSeconds: intPtr(120)},
+		FleetFieldOutsideTemp:          {IntervalSeconds: 60, ResendIntervalSeconds: intPtr(120)},
 		FleetFieldHvacPower:            {IntervalSeconds: 10},
 		FleetFieldHvacFanSpeed:         {IntervalSeconds: 30},
 		FleetFieldDriverTempSetting:    {IntervalSeconds: 30},

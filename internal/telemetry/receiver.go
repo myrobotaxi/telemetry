@@ -189,11 +189,14 @@ func (r *Receiver) handleConnection(ctx context.Context, vc *vehicleConn) {
 			continue
 		}
 
-		if len(result.FieldErrors) > 0 {
-			r.logger.Debug("field decode warnings",
+		for _, fe := range result.FieldErrors {
+			r.logger.Warn("field decode error",
 				slog.String("vin", redacted),
-				slog.Int("count", len(result.FieldErrors)),
+				slog.String("field", string(fe.Field)),
+				slog.String("proto_key", fe.Key.String()),
+				slog.Any("error", fe.Err),
 			)
+			r.metrics.IncFieldDecodeError(redacted, string(fe.Field))
 		}
 
 		evt := result.Event

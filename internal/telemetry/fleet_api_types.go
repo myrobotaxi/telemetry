@@ -25,9 +25,16 @@ type FleetConfig struct {
 
 // FieldConfig controls how often a field is emitted and, for spatial
 // fields like Location, the minimum change threshold.
+//
+// ResendIntervalSeconds forces the vehicle to re-emit a field even when
+// its value has not changed. This is critical for "set once, static
+// during trip" fields like DestinationName, RouteLine, and
+// DestinationLocation — without it, Tesla only emits them on change,
+// and a server that misses the initial emission never receives the data.
 type FieldConfig struct {
-	IntervalSeconds int      `json:"interval_seconds"`
-	MinimumDelta    *float64 `json:"minimum_delta,omitempty"`
+	IntervalSeconds       int      `json:"interval_seconds"`
+	MinimumDelta          *float64 `json:"minimum_delta,omitempty"`
+	ResendIntervalSeconds *int     `json:"resend_interval_seconds,omitempty"`
 }
 
 // FleetConfigResponse is the JSON returned by the Fleet API after

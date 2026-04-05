@@ -142,15 +142,19 @@ Issues carry one or more `agent:<name>` labels that map directly to `.claude/age
 
 | Label | Agent File | When to Use |
 |-------|-----------|-------------|
-| `agent:architect` | `architect.md` | System design, interface definitions, module boundaries |
-| `agent:go-engineer` | `go-engineer.md` | Go implementation, code writing, refactoring |
+| `agent:sdk-architect` | `sdk-architect.md` | **Supervisor** — owns requirements + contract docs, reviews every PR for contract adherence, coordinates SDK work. Auto-invoked on contract-relevant paths. |
+| `agent:sdk-typescript` | `sdk-typescript.md` | TypeScript SDK implementation (core, React, RN, Node) |
+| `agent:sdk-swift` | `sdk-swift.md` | Swift SDK implementation (iOS, iPadOS, macOS, watchOS, visionOS) |
+| `agent:contract-tester` | `contract-tester.md` | Contract conformance, FR/NFR, chaos test scenarios |
+| `agent:contract-guard` | `contract-guard.md` | Automated PR gate — blocks contract drift (session + CI) |
+| `agent:go-engineer` | `go-engineer.md` | Go implementation, constrained by SDK contract |
 | `agent:tesla-telemetry` | `tesla-telemetry.md` | Tesla protocol, protobuf, mTLS, cert management |
-| `agent:event-system` | `event-system.md` | Event bus, pub/sub, domain events, concurrency |
-| `agent:websocket-sdk` | `websocket-sdk.md` | Client WebSocket server, SDK interfaces |
-| `agent:security` | `security.md` | Security review, threat modeling, auth, validation |
-| `agent:testing` | `testing.md` | Test writing, test infrastructure, coverage |
-| `agent:infra` | `infra.md` | Docker, CI/CD, deployment, monitoring |
-| `agent:frontend-integration` | `frontend-integration.md` | MyRoboTaxi frontend compatibility |
+| `agent:security` | `security.md` | Security, encryption, data classification (P0/P1/P2), RBAC |
+| `agent:testing` | `testing.md` | Unit tests (contract/FR/NFR/chaos owned by `contract-tester`) |
+| `agent:infra` | `infra.md` | CI/CD, observability stack, deployment, release pipelines |
+| `agent:ux-audit` | `ux-audit.md` | End-user experience quality audit |
+
+**Retired agents (do not use):** `agent:architect`, `agent:event-system`, `agent:websocket-sdk`, `agent:frontend-integration` — their responsibilities are absorbed by `sdk-architect`, `go-engineer`, `sdk-typescript`, and the SDK pattern (UI is a dumb SDK consumer; no dedicated frontend-integration agent needed).
 
 ### Workflow (MUST FOLLOW)
 
@@ -165,42 +169,68 @@ When picking up an issue, execute these steps in order:
 
 ### Agent Execution Order (ENFORCED)
 
-When multiple agents are tagged on an issue, you MUST spin them up in this order:
+**Phase 0 — Architect supervision (AUTO-INVOKED on contract-relevant paths):**
+`sdk-architect` is automatically invoked when the session touches any of:
+- `docs/architecture/` or `docs/contracts/`
+- `internal/ws/`, `internal/store/`, or WebSocket/DB schema changes
+- Public SDK API surface
+- Any PR labeled `contract` or `sdk`
 
-**Phase 1 — Design (if `agent:architect` is tagged):**
-Spin up the `architect` agent FIRST to define interfaces, module boundaries, and design decisions before any code is written. Wait for its output before proceeding.
+The architect reviews the plan, references FRs/NFRs in `docs/architecture/requirements.md`, and approves or redirects before implementation starts.
+
+**Phase 1 — Design (if `agent:sdk-architect` is explicitly tagged):**
+For planning sessions, architectural decisions, or new contract docs. Wait for its output before implementation.
 
 **Phase 2 — Implementation (spin up in parallel where possible):**
-Spin up ALL of these tagged agents to do the work. Launch independent agents in parallel using multiple Agent tool calls in a single message:
-- `agent:go-engineer` — writes the implementation code
-- `agent:tesla-telemetry` — handles Tesla-specific protocol work
-- `agent:event-system` — handles event bus and concurrency work
-- `agent:websocket-sdk` — handles WebSocket server and SDK work
-- `agent:infra` — handles Docker, CI, deployment work
+Launch independent agents in parallel via multiple Agent tool calls in one message:
+- `agent:go-engineer` — server-side Go implementation
+- `agent:sdk-typescript` — TypeScript SDK implementation
+- `agent:sdk-swift` — Swift SDK implementation
+- `agent:tesla-telemetry` — Tesla protocol work
+- `agent:infra` — CI/CD, observability, deployment
 
-**Phase 3 — Testing (if `agent:testing` is tagged):**
-Spin up the `testing` agent AFTER implementation is complete to write/verify tests.
+**Phase 3 — Contract enforcement (AUTO-INVOKED before PR):**
+`contract-guard` runs session-time against the working diff to catch contract drift before the PR is opened. Runs again at CI-time as a required check.
 
-**Phase 4 — Security review (if `agent:security` is tagged):**
-Spin up the `security` agent LAST to review the completed code for vulnerabilities.
+**Phase 4 — Testing:**
+- `agent:testing` for unit tests
+- `agent:contract-tester` for contract conformance, FR/NFR, and chaos scenarios
 
-**Phase 5 — Frontend compatibility (if `agent:frontend-integration` is tagged):**
-Spin up the `frontend-integration` agent to verify protocol compatibility with the MyRoboTaxi Next.js app.
+**Phase 5 — Security review (if `agent:security` is tagged):**
+Reviews for data classification, encryption, RBAC enforcement, audit logging.
+
+**Phase 6 — UX audit (ALWAYS runs):**
+`agent:ux-audit` reviews end-user experience impact.
+
+**Phase 7 — Architect PR review (AUTO-INVOKED on contract-touching PRs):**
+`sdk-architect` performs the final contract-adherence review before merge.
 
 ### Examples
 
-**Issue with labels `agent:go-engineer, agent:testing`:**
-1. Spin up `go-engineer` → writes implementation + inline tests
-2. Spin up `testing` → reviews test coverage, adds missing tests
+**Issue with labels `agent:sdk-architect, agent:go-engineer, agent:testing`:**
+1. `sdk-architect` → defines contract + scopes work (WAIT for output)
+2. `go-engineer` → implements against contract
+3. `contract-guard` → checks diff before PR
+4. `testing` → unit test coverage
+5. `contract-tester` → contract/FR conformance tests
+6. `ux-audit` → UX impact
+7. `sdk-architect` → final PR review
 
-**Issue with labels `agent:architect, agent:event-system, agent:go-engineer, agent:testing`:**
-1. Spin up `architect` → defines interfaces and design (WAIT for output)
-2. Spin up `event-system` + `go-engineer` in parallel → implement
-3. Spin up `testing` → verify tests and coverage
+**Issue with labels `agent:sdk-typescript, agent:contract-tester`:**
+1. `sdk-architect` (auto) → approves the task scope
+2. `sdk-typescript` → implements TS SDK feature
+3. `contract-guard` → checks diff
+4. `contract-tester` → writes FR/NFR tests
+5. `ux-audit` → UX impact
+6. `sdk-architect` → final review
 
 **Issue with labels `agent:tesla-telemetry, agent:go-engineer, agent:security`:**
-1. Spin up `tesla-telemetry` + `go-engineer` in parallel → implement
-2. Spin up `security` → audit the completed code
+1. `sdk-architect` (auto) → approves scope
+2. `tesla-telemetry` + `go-engineer` in parallel → implement
+3. `contract-guard` → checks diff
+4. `security` → data classification + encryption review
+5. `ux-audit` → UX impact
+6. `sdk-architect` → final review
 
 ### Milestones
 
@@ -303,6 +333,32 @@ Run before every commit:
 ### Pre-PR Lint Gate (ENFORCED)
 
 Every agent MUST run `golangci-lint run ./...` and fix all warnings before opening a PR. CI will reject PRs that fail lint. This applies to ALL agents — implementation, testing, infra, etc. No exceptions. If a lint rule seems wrong, suppress it with a targeted `//nolint:rulename // reason` comment, never globally disable the rule.
+
+### Merge Policy (NON-NEGOTIABLE)
+
+A PR MUST NOT be merged until ALL of the following are true:
+
+1. **All CI checks pass** — lint, test, build, security, gosec, contract-guard. No exceptions.
+2. **All review comments are addressed** — every "changes requested" review must be resolved and re-approved before merge. Do not dismiss or skip reviews.
+3. **No pending change requests** — if a reviewer (human or bot) requested changes, fix them and get the review approved. Never use `--admin` or `--force` to bypass.
+4. **All critical and warning-level Claude Review comments are resolved** — Claude Review comments marked as critical, high, or medium severity must be fixed before merge. Low-severity suggestions are optional but encouraged.
+5. **`sdk-architect` review required** for any PR touching `docs/architecture/`, `docs/contracts/`, WebSocket messages, DB schema, public SDK API, or any path under `internal/ws/` or `internal/store/`. The architect must approve the PR with a Contract Adherence checklist before merge.
+6. **`contract-guard` must pass** for all PRs. Contract drift (missing contract doc updates, missing data classification labels, missing atomic group membership) blocks merge unconditionally.
+
+**NEVER use `gh pr merge --admin`** to bypass branch protection. If merge is blocked, fix the root cause — don't circumvent the safeguard.
+
+### Claude Review Comment Severity (ENFORCED)
+
+When Claude Review (tnando-gh-bot) leaves review comments, they carry severity levels. The following MUST be addressed before merge:
+
+| Severity | Action Required |
+|----------|----------------|
+| **Critical** | MUST fix — blocks merge |
+| **High** | MUST fix — blocks merge |
+| **Medium / Warning** | MUST fix — blocks merge |
+| **Low / Suggestion** | Optional — fix if reasonable |
+
+If you disagree with a review comment, respond with a justification on the PR — do not silently ignore it.
 
 ## What NOT to Do
 

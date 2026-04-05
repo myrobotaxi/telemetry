@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/geocode"
 )
 
 // vehicleUpdater is the consumer-site interface for writing vehicle
@@ -29,6 +30,7 @@ type drivePersister interface {
 type WriterConfig struct {
 	FlushInterval time.Duration
 	BatchSize     int
+	RouteBuffer   RouteBufferConfig
 }
 
 // DefaultWriterConfig returns production-ready defaults.
@@ -36,6 +38,7 @@ func DefaultWriterConfig() WriterConfig {
 	return WriterConfig{
 		FlushInterval: 5 * time.Second,
 		BatchSize:     100,
+		RouteBuffer:   DefaultRouteBufferConfig(),
 	}
 }
 
@@ -47,8 +50,10 @@ type Writer struct {
 	drives   drivePersister
 	bus      events.Bus
 	vinCache *vinCache
+	geocoder geocode.Geocoder
 	logger   *slog.Logger
 	cfg      WriterConfig
+	routeBuf *routeBuffer
 
 	pendingMu sync.Mutex
 	pending   map[string]*VehicleUpdate // VIN → coalesced update
@@ -62,12 +67,15 @@ type Writer struct {
 }
 
 // NewWriter creates a Writer that will subscribe to telemetry and drive
-// events, coalesce vehicle updates, and flush them periodically.
+// events, coalesce vehicle updates, and flush them periodically. The
+// geocoder is used to reverse geocode drive start/end locations. Pass
+// geocode.NoopGeocoder{} to disable geocoding.
 func NewWriter(
 	vehicles vehicleUpdater,
 	drives drivePersister,
 	vinLookup vinLookup,
 	bus events.Bus,
+	geocoder geocode.Geocoder,
 	logger *slog.Logger,
 	cfg WriterConfig,
 ) *Writer {
@@ -78,13 +86,15 @@ func NewWriter(
 		cfg.BatchSize = DefaultWriterConfig().BatchSize
 	}
 	return &Writer{
-		vehicles: vehicles,
-		drives:   drives,
-		bus:      bus,
-		vinCache: newVINCache(vinLookup, logger),
-		logger:   logger,
-		cfg:      cfg,
-		pending:  make(map[string]*VehicleUpdate),
+		vehicles:  vehicles,
+		drives:    drives,
+		bus:       bus,
+		vinCache:  newVINCache(vinLookup, logger),
+		geocoder:  geocoder,
+		logger:    logger,
+		cfg:       cfg,
+		routeBuf:  newRouteBuffer(drives, logger, cfg.RouteBuffer),
+		pending:   make(map[string]*VehicleUpdate),
 		done:      make(chan struct{}),
 		flushDone: make(chan struct{}),
 	}
@@ -105,14 +115,22 @@ func (w *Writer) Start(ctx context.Context) error {
 		return fmt.Errorf("Writer.Start: subscribe drive.started: %w", err)
 	}
 
+	updatedSub, err := w.bus.Subscribe(events.TopicDriveUpdated, w.handleDriveUpdated())
+	if err != nil {
+		_ = w.bus.Unsubscribe(telSub)
+		_ = w.bus.Unsubscribe(startSub)
+		return fmt.Errorf("Writer.Start: subscribe drive.updated: %w", err)
+	}
+
 	endSub, err := w.bus.Subscribe(events.TopicDriveEnded, w.handleDriveEnded())
 	if err != nil {
 		_ = w.bus.Unsubscribe(telSub)
 		_ = w.bus.Unsubscribe(startSub)
+		_ = w.bus.Unsubscribe(updatedSub)
 		return fmt.Errorf("Writer.Start: subscribe drive.ended: %w", err)
 	}
 
-	w.subs = []events.Subscription{telSub, startSub, endSub}
+	w.subs = []events.Subscription{telSub, startSub, updatedSub, endSub}
 
 	// #nosec G118 -- cancel is deferred in the goroutine and also stored in w.cancel for Stop()
 	tickCtx, cancel := context.WithCancel(ctx)
@@ -122,6 +140,8 @@ func (w *Writer) Start(ctx context.Context) error {
 		defer close(w.flushDone)
 		w.flushLoop(tickCtx)
 	}()
+
+	w.routeBuf.start(ctx)
 
 	w.logger.Info("store writer started",
 		slog.Duration("flush_interval", w.cfg.FlushInterval),
@@ -149,7 +169,13 @@ func (w *Writer) Stop() error {
 		}
 	}
 
-	// Final flush with a short deadline.
+	// Stop the route buffer and flush any remaining buffered points.
+	w.routeBuf.stop()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	w.routeBuf.flushAll(shutdownCtx)
+
+	// Final telemetry flush with a short deadline.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	w.flush(ctx)
@@ -233,4 +259,3 @@ func (w *Writer) flush(ctx context.Context) {
 		}
 	}
 }
-

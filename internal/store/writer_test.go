@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/geocode"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/telemetry"
 )
 
@@ -141,7 +142,7 @@ func newTestBus(t *testing.T) *events.ChannelBus {
 
 func newTestWriter(t *testing.T, bus events.Bus, vehicles vehicleUpdater, drives drivePersister, lookup vinLookup) *Writer {
 	t.Helper()
-	w := NewWriter(vehicles, drives, lookup, bus, slog.Default(), WriterConfig{
+	w := NewWriter(vehicles, drives, lookup, bus, geocode.NoopGeocoder{}, slog.Default(), WriterConfig{
 		FlushInterval: 50 * time.Millisecond,
 		BatchSize:     1000,
 	})
@@ -348,6 +349,23 @@ func TestWriter_DriveEnded(t *testing.T) {
 	defer func() { _ = w.Stop() }()
 
 	now := time.Now()
+
+	// Buffer a route point via DriveUpdatedEvent (simulates mid-drive GPS).
+	// handleDriveEnded flushes the route buffer, so we need data in it.
+	updateEvt := events.NewEvent(events.DriveUpdatedEvent{
+		VIN:     "5YJ3E1EA1NF000001",
+		DriveID: "drive_001",
+		RoutePoint: events.RoutePoint{
+			Latitude: 33.0975, Longitude: -96.8214, Speed: 45.0, Heading: 245.0, Timestamp: now,
+		},
+	})
+	if err := bus.Publish(context.Background(), updateEvt); err != nil {
+		t.Fatalf("publish DriveUpdatedEvent: %v", err)
+	}
+
+	// Small delay to ensure the update event is processed before drive ends.
+	time.Sleep(20 * time.Millisecond)
+
 	evt := events.NewEvent(events.DriveEndedEvent{
 		VIN:     "5YJ3E1EA1NF000001",
 		DriveID: "drive_001",
@@ -385,7 +403,10 @@ func TestWriter_DriveEnded(t *testing.T) {
 		t.Errorf("DistanceMiles = %f, want 12.5", completes[0].Stats.DistanceMiles)
 	}
 
-	// Verify route points appended.
+	// Verify route points flushed from buffer on drive end.
+	waitForCondition(t, 2*time.Second, func() bool {
+		return len(drives.getAppends()) > 0
+	})
 	appends := drives.getAppends()
 	if len(appends) != 1 {
 		t.Fatalf("expected 1 route append, got %d", len(appends))
@@ -411,7 +432,7 @@ func TestWriter_BatchSizeTriggersFlush(t *testing.T) {
 	lookup := &stubVINLookup{vehicles: map[string]Vehicle{}}
 
 	// Set batch size very low so it triggers before the timer.
-	w := NewWriter(vehicles, drives, lookup, bus, slog.Default(), WriterConfig{
+	w := NewWriter(vehicles, drives, lookup, bus, geocode.NoopGeocoder{}, slog.Default(), WriterConfig{
 		FlushInterval: 10 * time.Second, // very long — should not trigger
 		BatchSize:     3,
 	})
@@ -433,6 +454,247 @@ func TestWriter_BatchSizeTriggersFlush(t *testing.T) {
 	waitForCondition(t, 2*time.Second, func() bool {
 		return len(vehicles.getTelemetryWrites()) >= 3
 	})
+}
+
+func TestWriter_DriveUpdated_FlushOnSize(t *testing.T) {
+	bus := newTestBus(t)
+	vehicles := &mockVehicleUpdater{}
+	drives := &mockDrivePersister{}
+	lookup := &stubVINLookup{vehicles: map[string]Vehicle{}}
+
+	w := NewWriter(vehicles, drives, lookup, bus, geocode.NoopGeocoder{}, slog.Default(), WriterConfig{
+		FlushInterval: 50 * time.Millisecond,
+		BatchSize:     1000,
+		RouteBuffer: RouteBufferConfig{
+			FlushInterval: 10 * time.Second,
+			FlushSize:     3,
+		},
+	})
+	if err := w.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = w.Stop() }()
+
+	now := time.Now()
+	for i := range 3 {
+		evt := events.NewEvent(events.DriveUpdatedEvent{
+			VIN:     "5YJ3E1EA1NF000001",
+			DriveID: "drive_001",
+			RoutePoint: events.RoutePoint{
+				Latitude:  33.0975 + float64(i)*0.001,
+				Longitude: -96.8214,
+				Speed:     45.0,
+				Heading:   245.0,
+				Timestamp: now.Add(time.Duration(i) * time.Second),
+			},
+		})
+		if err := bus.Publish(context.Background(), evt); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+	}
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		return len(drives.getAppends()) > 0
+	})
+
+	appends := drives.getAppends()
+	if appends[0].DriveID != "drive_001" {
+		t.Errorf("DriveID = %q, want drive_001", appends[0].DriveID)
+	}
+	if len(appends[0].Points) != 3 {
+		t.Errorf("route points = %d, want 3", len(appends[0].Points))
+	}
+}
+
+func TestWriter_DriveUpdated_FlushOnTimer(t *testing.T) {
+	bus := newTestBus(t)
+	vehicles := &mockVehicleUpdater{}
+	drives := &mockDrivePersister{}
+	lookup := &stubVINLookup{vehicles: map[string]Vehicle{}}
+
+	w := NewWriter(vehicles, drives, lookup, bus, geocode.NoopGeocoder{}, slog.Default(), WriterConfig{
+		FlushInterval: 50 * time.Millisecond,
+		BatchSize:     1000,
+		RouteBuffer: RouteBufferConfig{
+			FlushInterval: 100 * time.Millisecond,
+			FlushSize:     1000,
+		},
+	})
+	if err := w.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = w.Stop() }()
+
+	now := time.Now()
+	evt := events.NewEvent(events.DriveUpdatedEvent{
+		VIN:     "5YJ3E1EA1NF000001",
+		DriveID: "drive_002",
+		RoutePoint: events.RoutePoint{
+			Latitude:  33.0975,
+			Longitude: -96.8214,
+			Speed:     45.0,
+			Heading:   245.0,
+			Timestamp: now,
+		},
+	})
+	if err := bus.Publish(context.Background(), evt); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		return len(drives.getAppends()) > 0
+	})
+
+	appends := drives.getAppends()
+	if appends[0].DriveID != "drive_002" {
+		t.Errorf("DriveID = %q, want drive_002", appends[0].DriveID)
+	}
+	if len(appends[0].Points) != 1 {
+		t.Errorf("route points = %d, want 1", len(appends[0].Points))
+	}
+}
+
+func TestWriter_DriveEnded_FlushesRemainingBufferedPoints(t *testing.T) {
+	bus := newTestBus(t)
+	vehicles := &mockVehicleUpdater{}
+	drives := &mockDrivePersister{}
+	lookup := &stubVINLookup{vehicles: map[string]Vehicle{}}
+
+	w := NewWriter(vehicles, drives, lookup, bus, geocode.NoopGeocoder{}, slog.Default(), WriterConfig{
+		FlushInterval: 50 * time.Millisecond,
+		BatchSize:     1000,
+		RouteBuffer: RouteBufferConfig{
+			FlushInterval: 10 * time.Second,
+			FlushSize:     1000,
+		},
+	})
+	if err := w.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = w.Stop() }()
+
+	now := time.Now()
+	driveID := "drive_003"
+
+	for i := range 2 {
+		evt := events.NewEvent(events.DriveUpdatedEvent{
+			VIN:     "5YJ3E1EA1NF000001",
+			DriveID: driveID,
+			RoutePoint: events.RoutePoint{
+				Latitude:  33.0975 + float64(i)*0.001,
+				Longitude: -96.8214,
+				Speed:     45.0,
+				Heading:   245.0,
+				Timestamp: now.Add(time.Duration(i) * time.Second),
+			},
+		})
+		if err := bus.Publish(context.Background(), evt); err != nil {
+			t.Fatalf("publish updated: %v", err)
+		}
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	if len(drives.getAppends()) > 0 {
+		t.Fatal("expected no appends before drive ended")
+	}
+
+	endEvt := events.NewEvent(events.DriveEndedEvent{
+		VIN:     "5YJ3E1EA1NF000001",
+		DriveID: driveID,
+		EndedAt: now.Add(5 * time.Minute),
+		Stats: events.DriveStats{
+			Distance:    2.5,
+			Duration:    5 * time.Minute,
+			AvgSpeed:    30.0,
+			MaxSpeed:    45.0,
+			EnergyDelta: 1.0,
+			EndLocation: events.Location{
+				Latitude:  33.1000,
+				Longitude: -96.8300,
+			},
+			EndChargeLevel: 90,
+			RoutePoints: []events.RoutePoint{
+				{Latitude: 33.0975, Longitude: -96.8214, Speed: 45.0, Heading: 245.0, Timestamp: now},
+				{Latitude: 33.0985, Longitude: -96.8214, Speed: 45.0, Heading: 245.0, Timestamp: now.Add(time.Second)},
+			},
+		},
+	})
+	if err := bus.Publish(context.Background(), endEvt); err != nil {
+		t.Fatalf("publish ended: %v", err)
+	}
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		return len(drives.getCompletes()) > 0
+	})
+
+	appends := drives.getAppends()
+	if len(appends) != 1 {
+		t.Fatalf("expected 1 append call from drive end flush, got %d", len(appends))
+	}
+	if appends[0].DriveID != driveID {
+		t.Errorf("DriveID = %q, want %q", appends[0].DriveID, driveID)
+	}
+	if len(appends[0].Points) != 2 {
+		t.Errorf("route points = %d, want 2", len(appends[0].Points))
+	}
+}
+
+func TestWriter_DriveUpdated_MultipleDrivers(t *testing.T) {
+	bus := newTestBus(t)
+	vehicles := &mockVehicleUpdater{}
+	drives := &mockDrivePersister{}
+	lookup := &stubVINLookup{vehicles: map[string]Vehicle{}}
+
+	w := NewWriter(vehicles, drives, lookup, bus, geocode.NoopGeocoder{}, slog.Default(), WriterConfig{
+		FlushInterval: 50 * time.Millisecond,
+		BatchSize:     1000,
+		RouteBuffer: RouteBufferConfig{
+			FlushInterval: 10 * time.Second,
+			FlushSize:     2,
+		},
+	})
+	if err := w.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = w.Stop() }()
+
+	now := time.Now()
+
+	for _, driveID := range []string{"drive_A", "drive_B"} {
+		for i := range 2 {
+			evt := events.NewEvent(events.DriveUpdatedEvent{
+				VIN:     "VIN_" + driveID,
+				DriveID: driveID,
+				RoutePoint: events.RoutePoint{
+					Latitude:  33.0 + float64(i)*0.001,
+					Longitude: -96.0,
+					Speed:     50.0,
+					Heading:   180.0,
+					Timestamp: now.Add(time.Duration(i) * time.Second),
+				},
+			})
+			if err := bus.Publish(context.Background(), evt); err != nil {
+				t.Fatalf("publish: %v", err)
+			}
+		}
+	}
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		return len(drives.getAppends()) >= 2
+	})
+
+	appends := drives.getAppends()
+	driveIDs := map[string]bool{}
+	for _, a := range appends {
+		driveIDs[a.DriveID] = true
+		if len(a.Points) != 2 {
+			t.Errorf("drive %s: route points = %d, want 2", a.DriveID, len(a.Points))
+		}
+	}
+	if !driveIDs["drive_A"] || !driveIDs["drive_B"] {
+		t.Errorf("expected appends for both drives, got %v", driveIDs)
+	}
 }
 
 func TestMergeUpdate(t *testing.T) {
@@ -463,6 +725,125 @@ func TestMergeUpdate(t *testing.T) {
 	}
 	if !dst.LastUpdated.Equal(t2) {
 		t.Errorf("LastUpdated = %v, want %v (later time)", dst.LastUpdated, t2)
+	}
+}
+
+func TestMergeUpdate_ClearFields(t *testing.T) {
+	t1 := time.Date(2026, 3, 17, 14, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 3, 17, 14, 0, 5, 0, time.UTC)
+
+	tests := []struct {
+		name      string
+		dst       *VehicleUpdate
+		src       *VehicleUpdate
+		wantClear []string
+	}{
+		{
+			name: "ClearFields appended from src",
+			dst: &VehicleUpdate{
+				Speed:       intPtr(45),
+				LastUpdated: t1,
+			},
+			src: &VehicleUpdate{
+				ClearFields: []string{"destinationName", "etaMinutes"},
+				LastUpdated: t2,
+			},
+			wantClear: []string{"destinationName", "etaMinutes"},
+		},
+		{
+			name: "ClearFields from both dst and src merged",
+			dst: &VehicleUpdate{
+				ClearFields: []string{"originLatitude"},
+				LastUpdated: t1,
+			},
+			src: &VehicleUpdate{
+				ClearFields: []string{"destinationLatitude"},
+				LastUpdated: t2,
+			},
+			wantClear: []string{"originLatitude", "destinationLatitude"},
+		},
+		{
+			name: "empty src ClearFields preserves dst ClearFields",
+			dst: &VehicleUpdate{
+				ClearFields: []string{"etaMinutes"},
+				LastUpdated: t1,
+			},
+			src: &VehicleUpdate{
+				Speed:       intPtr(72),
+				LastUpdated: t2,
+			},
+			wantClear: []string{"etaMinutes"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mergeUpdate(tt.dst, tt.src)
+
+			if len(tt.dst.ClearFields) != len(tt.wantClear) {
+				t.Fatalf("ClearFields = %v, want %v", tt.dst.ClearFields, tt.wantClear)
+			}
+			for i := range tt.dst.ClearFields {
+				if tt.dst.ClearFields[i] != tt.wantClear[i] {
+					t.Errorf("ClearFields[%d] = %q, want %q", i, tt.dst.ClearFields[i], tt.wantClear[i])
+				}
+			}
+		})
+	}
+}
+
+func TestMergeUpdate_NavFields(t *testing.T) {
+	t1 := time.Date(2026, 3, 17, 14, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 3, 17, 14, 0, 5, 0, time.UTC)
+
+	destName := "Home"
+	destLat := 33.0975
+	destLng := -96.8214
+	origLat := 33.05
+	origLng := -96.80
+	eta := 15
+	dist := 8.3
+
+	dst := &VehicleUpdate{
+		Speed:       intPtr(45),
+		LastUpdated: t1,
+	}
+	src := &VehicleUpdate{
+		DestinationName:      &destName,
+		DestinationLatitude:  &destLat,
+		DestinationLongitude: &destLng,
+		OriginLatitude:       &origLat,
+		OriginLongitude:      &origLng,
+		EtaMinutes:           &eta,
+		TripDistRemaining:    &dist,
+		LastUpdated:          t2,
+	}
+
+	mergeUpdate(dst, src)
+
+	if dst.DestinationName == nil || *dst.DestinationName != "Home" {
+		t.Errorf("DestinationName = %v, want Home", ptrVal(dst.DestinationName))
+	}
+	if dst.DestinationLatitude == nil || *dst.DestinationLatitude != 33.0975 {
+		t.Errorf("DestinationLatitude = %v, want 33.0975", ptrVal(dst.DestinationLatitude))
+	}
+	if dst.DestinationLongitude == nil || *dst.DestinationLongitude != -96.8214 {
+		t.Errorf("DestinationLongitude = %v, want -96.8214", ptrVal(dst.DestinationLongitude))
+	}
+	if dst.OriginLatitude == nil || *dst.OriginLatitude != 33.05 {
+		t.Errorf("OriginLatitude = %v, want 33.05", ptrVal(dst.OriginLatitude))
+	}
+	if dst.OriginLongitude == nil || *dst.OriginLongitude != -96.80 {
+		t.Errorf("OriginLongitude = %v, want -96.80", ptrVal(dst.OriginLongitude))
+	}
+	if dst.EtaMinutes == nil || *dst.EtaMinutes != 15 {
+		t.Errorf("EtaMinutes = %v, want 15", ptrVal(dst.EtaMinutes))
+	}
+	if dst.TripDistRemaining == nil || *dst.TripDistRemaining != 8.3 {
+		t.Errorf("TripDistRemaining = %v, want 8.3", ptrVal(dst.TripDistRemaining))
+	}
+	if dst.Speed == nil || *dst.Speed != 45 {
+		t.Errorf("Speed = %v, want 45 (preserved from dst)", ptrVal(dst.Speed))
 	}
 }
 

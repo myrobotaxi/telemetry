@@ -93,3 +93,15 @@ import (
 ```
 
 Update your agent memory with established code patterns, common gotchas, and package-specific conventions as you work.
+
+## Contract Awareness (SDK v1)
+
+Your work is governed by the SDK contract. Before implementing:
+
+1. **Read `docs/architecture/requirements.md`** — identify which FRs/NFRs your task addresses.
+2. **Read relevant contract docs** in `docs/contracts/` — WebSocket protocol, data lifecycle, vehicle state schema.
+3. **Defer to `sdk-architect`** for architectural decisions. You implement within the contract; you don't reshape it.
+
+When you touch contract-relevant code (WebSocket messages, DB schema, hot-path broadcasting, field mapping), expect `contract-guard` to check your PR. If it blocks you, update the corresponding contract doc in the same PR — don't loosen the contract to match your code.
+
+When Tesla's behavior constrains your implementation, consult the `tesla-fleet-telemetry-sme` skill at `~/.claude/skills/tesla-fleet-telemetry-sme/` and document the constraint in code comments.

@@ -9,10 +9,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// AccountRepo reads from the Prisma-owned "Account" table to retrieve
-// OAuth tokens stored during Tesla account linking. This repo is
-// strictly read-only — the Account table is managed by NextAuth in
-// the Next.js app.
+// AccountRepo reads and updates the Prisma-owned "Account" table for
+// OAuth tokens stored during Tesla account linking. Reads token data
+// for Fleet API calls; writes updated tokens after auto-refresh.
 type AccountRepo struct {
 	pool *pgxpool.Pool
 }
@@ -48,4 +47,18 @@ func (r *AccountRepo) GetTeslaToken(ctx context.Context, userID string) (TeslaOA
 		tok.RefreshToken = *refreshToken
 	}
 	return tok, nil
+}
+
+// UpdateTeslaToken writes a refreshed token set back to the Account table.
+// The expiresAt is a Unix epoch timestamp. Returns an error if the update
+// affects zero rows (user has no Tesla account linked).
+func (r *AccountRepo) UpdateTeslaToken(ctx context.Context, userID, accessToken, refreshToken string, expiresAt int64) error {
+	tag, err := r.pool.Exec(ctx, queryUpdateTeslaToken, accessToken, refreshToken, expiresAt, userID)
+	if err != nil {
+		return fmt.Errorf("AccountRepo.UpdateTeslaToken(user=%s): %w", userID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("AccountRepo.UpdateTeslaToken(user=%s): %w", userID, ErrTeslaTokenNotFound)
+	}
+	return nil
 }

@@ -600,12 +600,11 @@ func TestDecoder_DecodePayload_InvalidDatum(t *testing.T) {
 		t.Fatalf("DecodePayload() error = %v", err)
 	}
 
-	// The invalid speed datum should produce a field error.
-	if len(fieldErrs) != 1 {
-		t.Fatalf("expected 1 field error, got %d: %v", len(fieldErrs), fieldErrs)
-	}
-	if !errors.Is(fieldErrs[0].Err, ErrInvalidValue) {
-		t.Errorf("field error = %v, want ErrInvalidValue", fieldErrs[0].Err)
+	// Invalid datums are no longer field errors — they are included in
+	// the event with Invalid=true so downstream consumers can clear
+	// stale frontend state.
+	if len(fieldErrs) != 0 {
+		t.Fatalf("expected 0 field errors, got %d: %v", len(fieldErrs), fieldErrs)
 	}
 
 	// The valid odometer field should still be decoded.
@@ -617,9 +616,13 @@ func TestDecoder_DecodePayload_InvalidDatum(t *testing.T) {
 		t.Errorf("odometer = %v, want 12345.6", odo)
 	}
 
-	// Speed should not be present (it was invalid).
-	if _, ok := evt.Fields["speed"]; ok {
-		t.Error("speed field should not be present for invalid datum")
+	// Speed should be present with Invalid=true.
+	spd, ok := evt.Fields["speed"]
+	if !ok {
+		t.Fatal("speed field should be present for invalid datum")
+	}
+	if !spd.Invalid {
+		t.Error("speed.Invalid should be true")
 	}
 }
 

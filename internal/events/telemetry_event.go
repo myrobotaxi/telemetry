@@ -23,6 +23,7 @@ type TelemetryValue struct {
 	IntVal      *int64
 	BoolVal     *bool
 	LocationVal *Location
+	Invalid     bool // True when the vehicle marks the datum as invalid
 }
 
 // Location is a geographic coordinate pair.

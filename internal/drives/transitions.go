@@ -94,10 +94,11 @@ func (d *Detector) startDrive(state *vehicleState, vin string, te events.Vehicle
 	driveID := generateDriveID()
 
 	// Determine start location: prefer current event, fall back to cached.
+	// Treat (0,0) as "not set" — protobuf default for unset GPS coordinates.
 	var startLoc events.Location
-	if loc := extractLocation(te.Fields); loc != nil {
+	if loc := extractLocation(te.Fields); loc != nil && (loc.Latitude != 0 || loc.Longitude != 0) {
 		startLoc = *loc
-	} else if state.lastLocation != nil {
+	} else if state.lastLocation != nil && (state.lastLocation.Latitude != 0 || state.lastLocation.Longitude != 0) {
 		startLoc = *state.lastLocation
 	}
 

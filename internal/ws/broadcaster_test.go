@@ -288,8 +288,8 @@ func TestBroadcaster_Stop_Unsubscribes(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	if len(b.subs) != 4 {
-		t.Fatalf("expected 4 subscriptions, got %d", len(b.subs))
+	if len(b.subs) != 5 {
+		t.Fatalf("expected 5 subscriptions, got %d", len(b.subs))
 	}
 
 	if err := b.Stop(); err != nil {
@@ -494,25 +494,24 @@ func TestFieldMapping(t *testing.T) {
 			},
 		},
 		{
-			name: "routeLine decodes to routeCoordinates in lng/lat order",
+			// Tesla's RouteLine is Base64-encoded protobuf wrapping a Google
+			// Encoded Polyline at 1e6 precision. This test uses a real
+			// protobuf-wrapped polyline encoding 3 points near 38.5/-120.2.
+			name: "routeLine decodes to navRouteCoordinates in lng/lat order",
 			fields: map[string]events.TelemetryValue{
-				"routeLine": {StringVal: ptrString("_p~iF~ps|U_ulLnnqC_mqNvxq`@")},
+				"routeLine": {StringVal: ptrString("CiBfaXpsaEF+cmxnZEZfe2dlQ355d2xAX2t3ekNuYHtuSQ==")},
 			},
-			wantKeys: []string{"routeCoordinates"},
+			wantKeys: []string{"navRouteCoordinates"},
 			check: func(t *testing.T, result map[string]any) {
 				t.Helper()
-				coords, ok := result["routeCoordinates"].([][]float64)
+				coords, ok := result["navRouteCoordinates"].([][]float64)
 				if !ok {
-					t.Fatalf("expected routeCoordinates to be [][]float64, got %T", result["routeCoordinates"])
+					t.Fatalf("expected navRouteCoordinates to be [][]float64, got %T", result["navRouteCoordinates"])
 				}
 				if len(coords) != 3 {
 					t.Fatalf("expected 3 coordinates, got %d", len(coords))
 				}
-				// Mapbox format: [lng, lat]
-				if coords[0][0] != coords[0][0] { // sanity: not NaN
-					t.Fatal("coordinate is NaN")
-				}
-				// First point: lat=38.5, lng=-120.2 -> [lng, lat] = [-120.2, 38.5]
+				// First point: lat=38.5, lng=-120.2 -> Mapbox [lng, lat] = [-120.2, 38.5]
 				wantLng, wantLat := -120.2, 38.5
 				if !floatClose(coords[0][0], wantLng) || !floatClose(coords[0][1], wantLat) {
 					t.Fatalf("first coord = [%f, %f], want [%f, %f]",
@@ -521,15 +520,19 @@ func TestFieldMapping(t *testing.T) {
 			},
 		},
 		{
-			name: "empty routeLine is skipped",
+			name: "empty routeLine clears navRouteCoordinates",
 			fields: map[string]events.TelemetryValue{
 				"routeLine": {StringVal: ptrString("")},
 			},
-			wantKeys: nil,
+			wantKeys: []string{"navRouteCoordinates"},
 			check: func(t *testing.T, result map[string]any) {
 				t.Helper()
-				if _, ok := result["routeCoordinates"]; ok {
-					t.Fatal("expected no routeCoordinates for empty routeLine")
+				val, ok := result["navRouteCoordinates"]
+				if !ok {
+					t.Fatal("expected navRouteCoordinates key to be present (as nil)")
+				}
+				if val != nil {
+					t.Fatalf("expected navRouteCoordinates to be nil, got %v", val)
 				}
 			},
 		},
@@ -855,9 +858,12 @@ func TestDeriveVehicleStatus(t *testing.T) {
 		fields map[string]any
 		want   string
 	}{
-		{"gear D speed 0", map[string]any{"gearPosition": "D", "speed": 0.0}, "driving"},
+		{"gear D speed 0 (red light)", map[string]any{"gearPosition": "D", "speed": 0.0}, "driving"},
+		{"gear D speed 35", map[string]any{"gearPosition": "D", "speed": 35.0}, "driving"},
 		{"gear R speed 0", map[string]any{"gearPosition": "R", "speed": 0.0}, "driving"},
+		{"gear R speed 5", map[string]any{"gearPosition": "R", "speed": 5.0}, "driving"},
 		{"gear P speed 0", map[string]any{"gearPosition": "P", "speed": 0.0}, "parked"},
+		{"no gear speed 0", map[string]any{"speed": 0.0}, "parked"},
 		{"no gear speed 65 float", map[string]any{"speed": 65.0}, "driving"},
 		{"no gear speed 65 int", map[string]any{"speed": 65}, "driving"},
 		{"gear N speed 0", map[string]any{"gearPosition": "N", "speed": 0.0}, "parked"},
@@ -922,6 +928,526 @@ func TestUnwrapValue(t *testing.T) {
 			got := unwrapValue(tt.val)
 			if got != tt.want {
 				t.Fatalf("unwrapValue() = %v (%T), want %v (%T)", got, got, tt.want, tt.want)
+			}
+		})
+	}
+}
+
+
+func TestBroadcaster_HandleDriveUpdated(t *testing.T) {
+	bus := events.NewChannelBus(events.DefaultBusConfig(), events.NoopBusMetrics{}, slog.Default())
+	t.Cleanup(func() { _ = bus.Close(context.Background()) })
+
+	resolver := newStubVINResolver(map[string]string{
+		"5YJ3E1EA1NF000001": "vehicle-id-1",
+	})
+
+	hub := NewHub(slog.Default(), NoopHubMetrics{})
+	t.Cleanup(hub.Stop)
+
+	b := NewBroadcaster(hub, bus, resolver, slog.Default())
+	// Override accumulator with batch size 2 for faster test feedback.
+	b.routes = newRouteAccumulator(2, 0)
+
+	ctx := context.Background()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+
+	now := time.Date(2026, 3, 28, 12, 0, 0, 0, time.UTC)
+
+	// Publish first route point — should not trigger a broadcast.
+	event1 := events.NewEvent(events.DriveUpdatedEvent{
+		VIN:     "5YJ3E1EA1NF000001",
+		DriveID: "drive-abc",
+		RoutePoint: events.RoutePoint{
+			Latitude:  37.7749,
+			Longitude: -122.4194,
+			Speed:     35.0,
+			Heading:   180.0,
+			Timestamp: now,
+		},
+	})
+
+	if err := bus.Publish(ctx, event1); err != nil {
+		t.Fatalf("Publish event1: %v", err)
+	}
+
+	// Brief pause to let async handler run.
+	time.Sleep(50 * time.Millisecond)
+
+	// Resolver should not have been called yet (batch not full).
+	resolver.mu.RLock()
+	callsBefore := len(resolver.callLog)
+	resolver.mu.RUnlock()
+
+	// Publish second route point — batch size 2 triggers flush + VIN resolution.
+	event2 := events.NewEvent(events.DriveUpdatedEvent{
+		VIN:     "5YJ3E1EA1NF000001",
+		DriveID: "drive-abc",
+		RoutePoint: events.RoutePoint{
+			Latitude:  37.7750,
+			Longitude: -122.4195,
+			Speed:     40.0,
+			Heading:   185.0,
+			Timestamp: now.Add(time.Second),
+		},
+	})
+
+	if err := bus.Publish(ctx, event2); err != nil {
+		t.Fatalf("Publish event2: %v", err)
+	}
+
+	waitForCondition(t, func() bool {
+		resolver.mu.RLock()
+		defer resolver.mu.RUnlock()
+		return len(resolver.callLog) > callsBefore
+	})
+}
+
+func TestBroadcaster_DriveEndedClearsAccumulator(t *testing.T) {
+	bus := events.NewChannelBus(events.DefaultBusConfig(), events.NoopBusMetrics{}, slog.Default())
+	t.Cleanup(func() { _ = bus.Close(context.Background()) })
+
+	resolver := newStubVINResolver(map[string]string{
+		"5YJ3E1EA1NF000001": "vehicle-id-1",
+	})
+
+	hub := NewHub(slog.Default(), NoopHubMetrics{})
+	t.Cleanup(hub.Stop)
+
+	b := NewBroadcaster(hub, bus, resolver, slog.Default())
+	// Large batch so points accumulate without flushing.
+	b.routes = newRouteAccumulator(100, 0)
+
+	ctx := context.Background()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+
+	now := time.Date(2026, 3, 28, 12, 0, 0, 0, time.UTC)
+
+	// Accumulate some route points.
+	for i := 0; i < 3; i++ {
+		event := events.NewEvent(events.DriveUpdatedEvent{
+			VIN:     "5YJ3E1EA1NF000001",
+			DriveID: "drive-abc",
+			RoutePoint: events.RoutePoint{
+				Latitude:  37.7749 + float64(i)*0.001,
+				Longitude: -122.4194 + float64(i)*0.001,
+				Speed:     35.0,
+				Heading:   180.0,
+				Timestamp: now.Add(time.Duration(i) * time.Second),
+			},
+		})
+		if err := bus.Publish(ctx, event); err != nil {
+			t.Fatalf("Publish route point %d: %v", i, err)
+		}
+	}
+
+	// Wait for route points to be processed.
+	time.Sleep(100 * time.Millisecond)
+
+	// End the drive — flushes remaining points and clears accumulator.
+	endEvent := events.NewEvent(events.DriveEndedEvent{
+		VIN:     "5YJ3E1EA1NF000001",
+		DriveID: "drive-abc",
+		Stats: events.DriveStats{
+			Distance: 5.0,
+			Duration: 10 * time.Minute,
+			AvgSpeed: 30.0,
+			MaxSpeed: 45.0,
+		},
+		EndedAt: now.Add(10 * time.Minute),
+	})
+
+	if err := bus.Publish(ctx, endEvent); err != nil {
+		t.Fatalf("Publish drive ended: %v", err)
+	}
+
+	waitForCondition(t, func() bool {
+		resolver.mu.RLock()
+		defer resolver.mu.RUnlock()
+		return len(resolver.callLog) > 0
+	})
+
+	// Accumulator should be cleared for this VIN.
+	remaining := b.routes.Flush("5YJ3E1EA1NF000001")
+	if remaining != nil {
+		t.Fatalf("expected nil after drive ended, got %d points", len(remaining))
+	}
+}
+
+func TestBroadcaster_NavOnlyEvent_NotBroadcastImmediately(t *testing.T) {
+	bus := events.NewChannelBus(events.DefaultBusConfig(), events.NoopBusMetrics{}, slog.Default())
+	t.Cleanup(func() { _ = bus.Close(context.Background()) })
+
+	resolver := newStubVINResolver(map[string]string{
+		"5YJ3E1EA1NF000001": "vehicle-id-1",
+	})
+
+	hub := NewHub(slog.Default(), NoopHubMetrics{})
+	t.Cleanup(hub.Stop)
+
+	b := NewBroadcaster(hub, bus, resolver, slog.Default())
+	ctx := context.Background()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+
+	now := time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)
+	event := events.NewEvent(events.VehicleTelemetryEvent{
+		VIN:       "5YJ3E1EA1NF000001",
+		CreatedAt: now,
+		Fields: map[string]events.TelemetryValue{
+			"destinationName":  {StringVal: ptrString("Home")},
+			"minutesToArrival": {FloatVal: ptrFloat64(15)},
+		},
+	})
+
+	if err := bus.Publish(ctx, event); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	// Give subscriber time to process event.
+	time.Sleep(50 * time.Millisecond)
+
+	// Nav-only event should NOT trigger immediate VIN resolution
+	// (nav fields are accumulated, not broadcast immediately).
+	resolver.mu.RLock()
+	calls := len(resolver.callLog)
+	resolver.mu.RUnlock()
+	if calls != 0 {
+		t.Fatalf("expected 0 resolver calls for nav-only event, got %d", calls)
+	}
+
+	// After the nav flush interval, the accumulator should flush.
+	waitForCondition(t, func() bool {
+		resolver.mu.RLock()
+		defer resolver.mu.RUnlock()
+		return len(resolver.callLog) > 0
+	})
+}
+
+func TestBroadcaster_NonNavEvent_BroadcastImmediately(t *testing.T) {
+	bus := events.NewChannelBus(events.DefaultBusConfig(), events.NoopBusMetrics{}, slog.Default())
+	t.Cleanup(func() { _ = bus.Close(context.Background()) })
+
+	resolver := newStubVINResolver(map[string]string{
+		"5YJ3E1EA1NF000001": "vehicle-id-1",
+	})
+
+	hub := NewHub(slog.Default(), NoopHubMetrics{})
+	t.Cleanup(hub.Stop)
+
+	b := NewBroadcaster(hub, bus, resolver, slog.Default())
+	ctx := context.Background()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+
+	now := time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)
+	event := events.NewEvent(events.VehicleTelemetryEvent{
+		VIN:       "5YJ3E1EA1NF000001",
+		CreatedAt: now,
+		Fields: map[string]events.TelemetryValue{
+			"speed": {FloatVal: ptrFloat64(65)},
+			"gear":  {StringVal: ptrString("D")},
+		},
+	})
+
+	if err := bus.Publish(ctx, event); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	// Non-nav fields should trigger immediate VIN resolution.
+	waitForCondition(t, func() bool {
+		resolver.mu.RLock()
+		defer resolver.mu.RUnlock()
+		return len(resolver.callLog) > 0
+	})
+
+	resolver.mu.RLock()
+	defer resolver.mu.RUnlock()
+	if resolver.callLog[0] != "5YJ3E1EA1NF000001" {
+		t.Fatalf("expected VIN 5YJ3E1EA1NF000001, got %q", resolver.callLog[0])
+	}
+}
+
+func TestBroadcaster_MixedEvent_NonNavImmediateNavAccumulated(t *testing.T) {
+	bus := events.NewChannelBus(events.DefaultBusConfig(), events.NoopBusMetrics{}, slog.Default())
+	t.Cleanup(func() { _ = bus.Close(context.Background()) })
+
+	resolver := newStubVINResolver(map[string]string{
+		"5YJ3E1EA1NF000001": "vehicle-id-1",
+	})
+
+	hub := NewHub(slog.Default(), NoopHubMetrics{})
+	t.Cleanup(hub.Stop)
+
+	b := NewBroadcaster(hub, bus, resolver, slog.Default())
+	ctx := context.Background()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+
+	now := time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)
+	event := events.NewEvent(events.VehicleTelemetryEvent{
+		VIN:       "5YJ3E1EA1NF000001",
+		CreatedAt: now,
+		Fields: map[string]events.TelemetryValue{
+			"speed":           {FloatVal: ptrFloat64(65)},
+			"destinationName": {StringVal: ptrString("Work")},
+		},
+	})
+
+	if err := bus.Publish(ctx, event); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	// Non-nav field (speed) triggers immediate VIN resolution.
+	waitForCondition(t, func() bool {
+		resolver.mu.RLock()
+		defer resolver.mu.RUnlock()
+		return len(resolver.callLog) > 0
+	})
+
+	// First resolver call is for the immediate non-nav broadcast.
+	resolver.mu.RLock()
+	firstCalls := len(resolver.callLog)
+	resolver.mu.RUnlock()
+	if firstCalls != 1 {
+		t.Fatalf("expected 1 resolver call for non-nav, got %d", firstCalls)
+	}
+
+	// Nav fields are accumulated — a second resolver call happens
+	// after the nav flush interval.
+	waitForCondition(t, func() bool {
+		resolver.mu.RLock()
+		defer resolver.mu.RUnlock()
+		return len(resolver.callLog) > 1
+	})
+}
+
+func TestBroadcaster_DriveEndedClearsNavAccumulator(t *testing.T) {
+	bus := events.NewChannelBus(events.DefaultBusConfig(), events.NoopBusMetrics{}, slog.Default())
+	t.Cleanup(func() { _ = bus.Close(context.Background()) })
+
+	resolver := newStubVINResolver(map[string]string{
+		"5YJ3E1EA1NF000001": "vehicle-id-1",
+	})
+
+	hub := NewHub(slog.Default(), NoopHubMetrics{})
+	t.Cleanup(hub.Stop)
+
+	b := NewBroadcaster(hub, bus, resolver, slog.Default())
+	// Use a long flush interval so nav fields stay pending.
+	b.nav = newNavAccumulator(10*time.Second, b.flushNav)
+
+	ctx := context.Background()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+
+	now := time.Date(2026, 3, 28, 12, 0, 0, 0, time.UTC)
+
+	// Accumulate nav fields via telemetry event.
+	telEvent := events.NewEvent(events.VehicleTelemetryEvent{
+		VIN:       "5YJ3E1EA1NF000001",
+		CreatedAt: now,
+		Fields: map[string]events.TelemetryValue{
+			"destinationName": {StringVal: ptrString("Airport")},
+		},
+	})
+	if err := bus.Publish(ctx, telEvent); err != nil {
+		t.Fatalf("Publish telemetry: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// End drive — should flush and clear nav accumulator.
+	endEvent := events.NewEvent(events.DriveEndedEvent{
+		VIN:     "5YJ3E1EA1NF000001",
+		DriveID: "drive-abc",
+		Stats: events.DriveStats{
+			Distance: 5.0,
+			Duration: 10 * time.Minute,
+			AvgSpeed: 30.0,
+			MaxSpeed: 45.0,
+		},
+		EndedAt: now.Add(10 * time.Minute),
+	})
+	if err := bus.Publish(ctx, endEvent); err != nil {
+		t.Fatalf("Publish drive ended: %v", err)
+	}
+
+	waitForCondition(t, func() bool {
+		resolver.mu.RLock()
+		defer resolver.mu.RUnlock()
+		return len(resolver.callLog) > 0
+	})
+
+	// Nav accumulator should be cleared.
+	remaining := b.nav.Flush("5YJ3E1EA1NF000001")
+	if remaining != nil {
+		t.Fatalf("expected nil nav fields after drive ended, got %v", remaining)
+	}
+}
+
+func TestStatusDerivation_SpeedOnlyDoesNotInjectStatus(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		fields     map[string]events.TelemetryValue
+		wantStatus bool // whether "status" key should exist
+		wantValue  string
+	}{
+		{
+			name: "speed 0 without gear does not inject status",
+			fields: map[string]events.TelemetryValue{
+				"speed": {FloatVal: ptrFloat64(0)},
+			},
+			wantStatus: false,
+		},
+		{
+			name: "speed 65 without gear does not inject status",
+			fields: map[string]events.TelemetryValue{
+				"speed": {FloatVal: ptrFloat64(65)},
+			},
+			wantStatus: false,
+		},
+		{
+			name: "gear D with speed 0 injects driving",
+			fields: map[string]events.TelemetryValue{
+				"gear":  {StringVal: ptrString("D")},
+				"speed": {FloatVal: ptrFloat64(0)},
+			},
+			wantStatus: true,
+			wantValue:  "driving",
+		},
+		{
+			name: "gear P alone injects parked",
+			fields: map[string]events.TelemetryValue{
+				"gear": {StringVal: ptrString("P")},
+			},
+			wantStatus: true,
+			wantValue:  "parked",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clientFields := mapFieldsForClient(tt.fields)
+
+			// Simulate what handleTelemetry does.
+			if _, hasGear := clientFields["gearPosition"]; hasGear {
+				clientFields["status"] = deriveVehicleStatus(clientFields)
+			}
+
+			_, gotStatus := clientFields["status"]
+			if gotStatus != tt.wantStatus {
+				t.Fatalf("status present = %v, want %v (fields: %v)", gotStatus, tt.wantStatus, clientFields)
+			}
+			if tt.wantStatus {
+				if clientFields["status"] != tt.wantValue {
+					t.Fatalf("status = %q, want %q", clientFields["status"], tt.wantValue)
+				}
+			}
+		})
+	}
+}
+
+func TestMapFieldsForClient_InvalidNavFieldsClear(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		fields      map[string]events.TelemetryValue
+		wantNilKeys []string
+		wantAbsent  []string
+	}{
+		{
+			name: "invalid destinationName clears to nil",
+			fields: map[string]events.TelemetryValue{
+				"destinationName": {Invalid: true},
+			},
+			wantNilKeys: []string{"destinationName"},
+		},
+		{
+			name: "invalid milesToArrival clears tripDistanceRemaining",
+			fields: map[string]events.TelemetryValue{
+				"milesToArrival": {Invalid: true},
+			},
+			wantNilKeys: []string{"tripDistanceRemaining"},
+		},
+		{
+			name: "invalid minutesToArrival clears etaMinutes",
+			fields: map[string]events.TelemetryValue{
+				"minutesToArrival": {Invalid: true},
+			},
+			wantNilKeys: []string{"etaMinutes"},
+		},
+		{
+			name: "invalid routeLine clears navRouteCoordinates",
+			fields: map[string]events.TelemetryValue{
+				"routeLine": {Invalid: true},
+			},
+			wantNilKeys: []string{"navRouteCoordinates"},
+		},
+		{
+			name: "invalid originLocation clears lat and lng",
+			fields: map[string]events.TelemetryValue{
+				"originLocation": {Invalid: true},
+			},
+			wantNilKeys: []string{"originLatitude", "originLongitude"},
+		},
+		{
+			name: "invalid destinationLocation clears lat and lng",
+			fields: map[string]events.TelemetryValue{
+				"destinationLocation": {Invalid: true},
+			},
+			wantNilKeys: []string{"destinationLatitude", "destinationLongitude"},
+		},
+		{
+			name: "invalid non-nav field is skipped",
+			fields: map[string]events.TelemetryValue{
+				"speed": {Invalid: true},
+			},
+			wantAbsent: []string{"speed"},
+		},
+		{
+			name: "mix of valid and invalid fields",
+			fields: map[string]events.TelemetryValue{
+				"destinationName": {Invalid: true},
+				"speed":           {FloatVal: ptrFloat64(65)},
+			},
+			wantNilKeys: []string{"destinationName"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			out := mapFieldsForClient(tt.fields)
+
+			for _, key := range tt.wantNilKeys {
+				val, exists := out[key]
+				if !exists {
+					t.Fatalf("expected key %q to be present (nil), but it was absent", key)
+				}
+				if val != nil {
+					t.Fatalf("expected %q = nil, got %v (%T)", key, val, val)
+				}
+			}
+			for _, key := range tt.wantAbsent {
+				if _, exists := out[key]; exists {
+					t.Fatalf("expected key %q to be absent, but it was present", key)
+				}
 			}
 		})
 	}

@@ -58,8 +58,8 @@ func New(cfg config.ServerConfig, logger *slog.Logger, checker ReadinessChecker,
 	}
 	logMiddleware := requestLogger(logger, skipPaths)
 
-	// Client mux includes /healthz so Railway (which probes the public port)
-	// can run healthchecks without needing access to the metrics port.
+	// Client mux includes /healthz so the hosting platform (which probes the
+	// public port) can run healthchecks without needing access to the metrics port.
 	clientMux := http.NewServeMux()
 	clientMux.HandleFunc("GET /healthz", handleHealthz)
 

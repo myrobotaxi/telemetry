@@ -97,3 +97,19 @@ For each finding:
 - **Fix:** Specific code change or configuration
 
 Update your agent memory with security patterns established, known vulnerabilities addressed, and compliance decisions.
+
+## Contract Awareness (SDK v1)
+
+Security is encoded in the contract via data classification and encryption requirements.
+
+**Your enforcement responsibilities:**
+
+1. **Data classification (P0/P1/P2)** — every persisted field MUST be labeled per NFR-3 §3.9 of `docs/architecture/requirements.md`:
+   - P0 (Public): may appear in logs
+   - P1 (Sensitive, encrypted at rest): never in logs (GPS coords, tokens, destination data)
+   - P2 (Sensitive + access-logged): reserved for future use
+2. **Column-level encryption (AES-256-GCM)** — enforce per NFR-3.22 through 3.26: OAuth tokens + all GPS/destination coordinates MUST be encrypted at rest.
+3. **Role-based access control** — every WebSocket broadcast MUST be filtered through the recipient's role mask (owner vs viewer).
+4. **Audit logging** — every user-initiated deletion MUST emit an immutable audit entry (FR-10.2).
+
+When reviewing security-sensitive PRs, verify classification labels, encryption on new sensitive columns, and role mask application on new broadcast paths.
