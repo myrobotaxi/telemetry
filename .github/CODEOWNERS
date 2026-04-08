@@ -1,0 +1,21 @@
+# Contract-owned paths — require @tnando review before merge.
+# These paths are the SDK v1 contract surface. Changes here affect
+# the TypeScript SDK, Swift SDK, and all consuming UIs.
+#
+# Managed by: MYR-6 (Wire contract-guard CI + CODEOWNERS)
+# See: docs/contracts/README.md for the contract update workflow.
+
+# Architecture and contract docs
+docs/architecture/**    @tnando
+docs/contracts/**       @tnando
+
+# Server internals that define the wire contract
+internal/ws/**          @tnando
+internal/store/**       @tnando
+
+# Public SDK surface (when it exists)
+pkg/sdk/**              @tnando
+
+# The guard itself — prevent silent weakening
+.github/workflows/contract-guard.yml  @tnando
+.github/CODEOWNERS                    @tnando
