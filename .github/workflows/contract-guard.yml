@@ -1,0 +1,143 @@
+name: Contract Guard
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write  # To post failure comments
+
+concurrency:
+  group: contract-guard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract-guard:
+    name: Contract Guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # Need full history for diff
+
+      - name: Get changed files
+        id: changed
+        run: |
+          # Get list of changed files in this PR
+          CHANGED=$(git diff --name-only origin/main...HEAD)
+          echo "files<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$CHANGED" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          # Categorize changes
+          echo "has_contract_docs=false" >> "$GITHUB_OUTPUT"
+          echo "has_store_changes=false" >> "$GITHUB_OUTPUT"
+          echo "has_ws_changes=false" >> "$GITHUB_OUTPUT"
+
+          if echo "$CHANGED" | grep -q '^docs/contracts/'; then
+            echo "has_contract_docs=true" >> "$GITHUB_OUTPUT"
+          fi
+          if echo "$CHANGED" | grep -q '^internal/store/'; then
+            echo "has_store_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+          if echo "$CHANGED" | grep -q '^internal/ws/'; then
+            echo "has_ws_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rule 1 — Contract docs must reference FRs/NFRs
+        if: steps.changed.outputs.has_contract_docs == 'true'
+        run: |
+          echo "Checking contract docs for FR/NFR references..."
+          FAILURES=""
+
+          # Check each changed contract doc
+          while IFS= read -r file; do
+            case "$file" in
+              docs/contracts/*.md)
+                # Skip README.md — it's an index, not a contract
+                if [ "$(basename "$file")" = "README.md" ]; then
+                  continue
+                fi
+                # Skip fixture READMEs
+                if echo "$file" | grep -q 'fixtures/'; then
+                  continue
+                fi
+                # Check for FR-X.Y or NFR-X.Y references
+                if ! grep -qE '(FR-[0-9]+\.[0-9]+|NFR-[0-9]+\.[0-9]+)' "$file" 2>/dev/null; then
+                  FAILURES="$FAILURES\n- $file has no FR/NFR references"
+                fi
+                ;;
+            esac
+          done <<< "${{ steps.changed.outputs.files }}"
+
+          if [ -n "$FAILURES" ]; then
+            echo "::error::Contract docs missing FR/NFR references:$FAILURES"
+            echo ""
+            echo "Every contract doc must reference at least one FR-X.Y or NFR-X.Y"
+            echo "from docs/architecture/requirements.md."
+            exit 1
+          fi
+          echo "✓ All changed contract docs reference FRs/NFRs"
+
+      - name: Rule 2 — Store changes need data classification
+        if: steps.changed.outputs.has_store_changes == 'true'
+        run: |
+          echo "Checking if store changes have matching data classification..."
+
+          # Look for new struct fields or column additions in changed store files
+          NEW_FIELDS=$(git diff origin/main...HEAD -- 'internal/store/*.go' | grep '^+' | grep -iE '(column|field|Column\b)' | grep -v '^\+\+\+' || true)
+
+          if [ -n "$NEW_FIELDS" ]; then
+            # Check if data-classification.md was also modified
+            if ! echo "${{ steps.changed.outputs.files }}" | grep -q 'docs/contracts/data-classification.md'; then
+              # Check if PR body declares classification (fallback)
+              echo "::warning::New store fields detected but docs/contracts/data-classification.md was not updated."
+              echo ""
+              echo "Detected field changes:"
+              echo "$NEW_FIELDS"
+              echo ""
+              echo "If these are new persisted fields, update data-classification.md with their P0/P1/P2 tier."
+              echo "If these are not new persisted fields (e.g., internal refactors), this warning can be ignored."
+            else
+              echo "✓ data-classification.md was updated alongside store changes"
+            fi
+          else
+            echo "✓ No new field patterns detected in store changes"
+          fi
+
+      - name: Rule 3 — WebSocket changes need protocol doc update
+        if: steps.changed.outputs.has_ws_changes == 'true'
+        run: |
+          echo "Checking if WebSocket changes have matching protocol doc..."
+
+          # Look for message type changes in ws package
+          MSG_CHANGES=$(git diff origin/main...HEAD -- 'internal/ws/*.go' | grep '^+' | grep -iE '(MessageType|msgType|"type"|message_type|EventType)' | grep -v '^\+\+\+' || true)
+
+          if [ -n "$MSG_CHANGES" ]; then
+            if ! echo "${{ steps.changed.outputs.files }}" | grep -q 'docs/contracts/websocket-protocol.md'; then
+              echo "::error::WebSocket message changes detected without updating docs/contracts/websocket-protocol.md"
+              echo ""
+              echo "Detected message changes:"
+              echo "$MSG_CHANGES"
+              echo ""
+              echo "The WebSocket protocol contract must stay in sync with the implementation."
+              echo "Update websocket-protocol.md to reflect these changes."
+              exit 1
+            else
+              echo "✓ websocket-protocol.md was updated alongside WS changes"
+            fi
+          else
+            echo "✓ No message type changes detected in WS package"
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "Contract Guard v1 complete."
+          echo ""
+          echo "Checked:"
+          echo "  - Contract docs reference FRs/NFRs: ${{ steps.changed.outputs.has_contract_docs }}"
+          echo "  - Store field classification: ${{ steps.changed.outputs.has_store_changes }}"
+          echo "  - WS protocol sync: ${{ steps.changed.outputs.has_ws_changes }}"
