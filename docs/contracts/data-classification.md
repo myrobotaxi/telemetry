@@ -51,7 +51,7 @@ Every column in every persisted table is listed below. The **Tier** column is th
 | `userId` | `String` | P0 | No | Yes | FK to User — opaque identifier |
 | `type` | `String` | P0 | No | Yes | OAuth account type descriptor |
 | `provider` | `String` | P0 | No | Yes | OAuth provider name (e.g., `tesla`) |
-| `providerAccountId` | `String` | P0 | No | Yes | Provider-scoped opaque ID |
+| `providerAccountId` | `String` | P0 | No | Yes | Opaque, provider-scoped ID (Tesla returns non-correlatable ID). Reclassify to P1 if a future provider exposes cross-service correlatable IDs |
 | `refresh_token` | `Text?` | P1 | **Yes** | No | OAuth credential — NFR-3.23 |
 | `access_token` | `Text?` | P1 | **Yes** | No | OAuth credential — NFR-3.23 |
 | `expires_at` | `Int?` | P0 | No | Yes | Token expiry epoch — no secret material |
@@ -69,7 +69,7 @@ Every column in every persisted table is listed below. The **Tier** column is th
 | `id` | `String` (cuid) | P0 | No | Yes | Opaque internal identifier |
 | `userId` | `String` | P0 | No | Yes | FK to User — opaque identifier |
 | `teslaVehicleId` | `String?` | P0 | No | Yes | Tesla-assigned vehicle ID — opaque |
-| `vin` | `String?` | P0 | No | **Last-4 only** | Publicly visible on vehicle exterior; redact in logs to `***XXXX` format per CLAUDE.md security rules |
+| `vin` | `String?` | P0 | No | **Last-4 only** | Publicly visible on vehicle exterior; P1 encryption would be overkill for a value stamped on the car. Risk is mitigated by mandatory `redactVIN()` redaction to `***XXXX` in all logs (see §2.1 VIN redaction rule) |
 | `name` | `String` | P0 | No | Yes | User-assigned vehicle name |
 | `model` | `String` | P0 | No | Yes | Vehicle model (e.g., "Model 3") |
 | `year` | `Int` | P0 | No | Yes | Model year |
@@ -90,7 +90,7 @@ Every column in every persisted table is listed below. The **Tier** column is th
 | `odometerMiles` | `Int` | P0 | No | Yes | Odometer reading — not identifying |
 | `fsdMilesToday` | `Float` | P0 | No | Yes | FSD miles driven today — not identifying |
 | `virtualKeyPaired` | `Boolean` | P0 | No | Yes | Pairing status flag |
-| `setupStatus` | `SetupStatus` | P0 | No | Yes | Enum: setup lifecycle state |
+| `setupStatus` | `SetupStatus` | P0 | No | Yes | Enum: setup lifecycle state — **Prisma-owned**, not currently accessed by the telemetry server |
 | `destinationName` | `String?` | P1 | No | No | Reveals travel intent/plans |
 | `destinationAddress` | `String?` | P1 | No | No | Reveals travel intent/plans |
 | `destinationLatitude` | `Float?` | P1 | **Yes** | No | GPS coordinate — NFR-3.23 |
@@ -358,6 +358,8 @@ The `contract-guard` agent/CI check enforces the following rules derived from th
 **Trigger:** Any PR that adds or modifies a column in `internal/store/types.go` (Go structs), `internal/store/queries.go` (SQL column lists), `internal/store/db_test.go` (test schema), or `prisma/schema.prisma` (in the partner repo).
 
 **Check:** Every column name present in the Go struct or SQL query MUST have a corresponding row in Section 1 of this document. Missing classifications block merge.
+
+**Scope note:** This rule validates against Go structs (the subset of columns the telemetry server uses). Prisma-only tables (User, Account, Invite, TripStop, Settings) are documented in this contract for completeness but are validated against the Prisma schema in the partner frontend repo — not by this rule. Columns in this doc that don't appear in Go structs are annotated "Prisma-owned" and are not enforced by the telemetry server's contract-guard.
 
 **Fix:** Follow the new-field checklist (Section 4).
 
