@@ -1047,8 +1047,13 @@ func TestBroadcaster_DriveEndedClearsAccumulator(t *testing.T) {
 		}
 	}
 
-	// Wait for route points to be processed.
-	time.Sleep(100 * time.Millisecond)
+	// Wait for all 3 route points to be processed (one resolver call each).
+	// Polling instead of time.Sleep per CLAUDE.md "no sleep in tests" rule.
+	waitForCondition(t, func() bool {
+		resolver.mu.RLock()
+		defer resolver.mu.RUnlock()
+		return len(resolver.callLog) >= 3
+	})
 
 	// Capture call log length BEFORE publishing drive-end. Route point
 	// processing already added entries to callLog (one per point), so the

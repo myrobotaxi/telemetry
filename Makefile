@@ -11,7 +11,7 @@ LDFLAGS     := -s -w \
                -X main.commit=$(COMMIT) \
                -X main.date=$(DATE)
 
-.PHONY: build test lint vet run clean proto help
+.PHONY: build test lint vet run clean proto gen-ts-types help
 
 ## build: Compile the telemetry-server binary
 build:
@@ -37,6 +37,15 @@ run: build
 ## proto: Generate Go types from Tesla protobuf definitions
 proto:
 	./scripts/generate-proto.sh
+
+## gen-ts-types: Generate TypeScript types from vehicle-state.schema.json (for @myrobotaxi/sdk)
+gen-ts-types:
+	@command -v npx >/dev/null 2>&1 || { echo "npx not found — install Node.js"; exit 1; }
+	npx --yes json-schema-to-typescript@^15 \
+		docs/contracts/schemas/vehicle-state.schema.json \
+		--output sdk/typescript/src/types/vehicle-state.ts \
+		--style.singleQuote --style.semi --additionalProperties false
+	@echo "Generated sdk/typescript/src/types/vehicle-state.ts"
 
 ## clean: Remove build artifacts
 clean:

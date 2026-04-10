@@ -163,7 +163,7 @@ Enforced by `contract-tester` (runtime) + server persistence layer (write-time).
 
 2. **Active navigation completeness.** If `destinationName` is non-null, then `destinationLatitude`, `destinationLongitude`, and `navRouteCoordinates` MUST also be non-null (NFR-3.3). The reverse is also true: if `navRouteCoordinates` is non-null, then `destinationName` MUST be non-null. Semantic invariant only; not schema-enforceable.
 
-3. **All-or-nothing clear.** When navigation is cancelled, ALL navigation fields MUST be null. A snapshot where `destinationName` is null but `navRouteCoordinates` is non-null is invalid (FR-2.3, NFR-3.4). Semantic invariant only; not schema-enforceable.
+3. **All-or-nothing clear.** When navigation is cancelled, ALL navigation fields MUST be null. A snapshot where `destinationName` is null but `navRouteCoordinates` is non-null is invalid (FR-2.3, NFR-3.4). Semantic invariant only; not schema-enforceable. **Spec-only exemption:** Fields marked `x-spec-only: true` (currently `destinationAddress`, until MYR-24 lands) are exempt from this invariant — they will always be null today regardless of nav state. `contract-tester` MUST skip spec-only fields when evaluating this predicate.
 
 4. **ETA/distance independence during accumulation.** `etaMinutes` and `tripDistanceRemaining` MAY arrive slightly after other nav fields during the 500ms accumulation window. However, the DB snapshot (used for cold page load) MUST be fully consistent -- these fields are either all present or all null. Semantic invariant only; not schema-enforceable.
 
@@ -252,12 +252,10 @@ The schema deliberately contains **no `$defs`**. Atomic group membership is enco
 **Generation command:**
 
 ```bash
-npx json-schema-to-typescript \
-  --input docs/contracts/schemas/vehicle-state.schema.json \
-  --output packages/sdk-core/src/types/vehicle-state.ts \
-  --style.singleQuote \
-  --no-additionalProperties
+make gen-ts-types
 ```
+
+The `gen-ts-types` Makefile target invokes `npx json-schema-to-typescript` against `docs/contracts/schemas/vehicle-state.schema.json` and writes to `sdk/typescript/src/types/vehicle-state.ts`. CI runs the same target so the doc and the actual command can never drift. See the Makefile for the exact arguments.
 
 **Expected output:** A `VehicleState` interface with all fields typed, nullable fields as `T | null`, and the `status` / `gearPosition` fields as string literal unions.
 
