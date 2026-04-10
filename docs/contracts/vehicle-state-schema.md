@@ -29,15 +29,17 @@ The `VehicleState` object represents the complete current state of a single vehi
 
 Every field below corresponds to a column in the `Vehicle` table or a value derived at broadcast time. Fields are grouped by category. The **Group** column indicates atomic group membership (fields without a group are delivered individually).
 
+> **SPEC-ONLY CALLOUT (MYR-24):** Seven fields in this schema are not yet loaded by the Go `Vehicle` struct in [`internal/store/types.go`](../../internal/store/types.go) and therefore cannot be populated by the server today: `model`, `year`, `color`, `fsdMilesToday`, `locationName`, `locationAddress`, and `destinationAddress`. These fields are marked **nullable** (`Spec-only`) in the table below and in the JSON Schema until the follow-up issue **[MYR-24](https://linear.app/myrobotaxi/issue/MYR-24)** extends the `Vehicle` struct (and the underlying persistence path) to load them. Once MYR-24 lands, they will be promoted to non-nullable and this callout removed. SDK consumers MUST tolerate `null` for every spec-only field until then. See §7.2 for the full open question entry.
+
 #### Identity fields
 
 | Field | Type | Nullable | Unit | Classification | Group | Source |
 |-------|------|----------|------|----------------|-------|--------|
 | `vehicleId` | `string` | No | -- | P0 | -- | DB `Vehicle.id` |
 | `name` | `string` | No | -- | P0 | -- | DB `Vehicle.name` |
-| `model` | `string` | No | -- | P0 | -- | DB `Vehicle.model` |
-| `year` | `integer` | No | -- | P0 | -- | DB `Vehicle.year` |
-| `color` | `string` | No | -- | P0 | -- | DB `Vehicle.color` |
+| `model` | `string` or `null` | Yes (Spec-only, MYR-24) | -- | P0 | -- | DB `Vehicle.model` |
+| `year` | `integer` or `null` | Yes (Spec-only, MYR-24) | -- | P0 | -- | DB `Vehicle.year` |
+| `color` | `string` or `null` | Yes (Spec-only, MYR-24) | -- | P0 | -- | DB `Vehicle.color` |
 
 #### GPS group
 
@@ -69,7 +71,7 @@ Every field below corresponds to a column in the `Vehicle` table or a value deri
 | Field | Type | Nullable | Unit | Classification | Group | Source |
 |-------|------|----------|------|----------------|-------|--------|
 | `destinationName` | `string` or `null` | Yes | -- | P1 | `navigation` | Tesla `DestinationName` |
-| `destinationAddress` | `string` or `null` | Yes | -- | P1 | `navigation` | Tesla / reverse-geocoded |
+| `destinationAddress` | `string` or `null` | Yes (Spec-only, MYR-24) | -- | P1 | `navigation` | Tesla / reverse-geocoded |
 | `destinationLatitude` | `number` or `null` | Yes | degrees | P1 (encrypted) | `navigation` | Tesla `DestinationLocation` |
 | `destinationLongitude` | `number` or `null` | Yes | degrees | P1 (encrypted) | `navigation` | Tesla `DestinationLocation` |
 | `originLatitude` | `number` or `null` | Yes | degrees | P1 (encrypted) | `navigation` | Tesla `OriginLocation` |
@@ -86,9 +88,9 @@ Every field below corresponds to a column in the `Vehicle` table or a value deri
 | `odometerMiles` | `integer` | No | miles | P0 | -- | Tesla `Odometer` |
 | `interiorTemp` | `integer` | No | fahrenheit | P0 | -- | Tesla `InsideTemp` |
 | `exteriorTemp` | `integer` | No | fahrenheit | P0 | -- | Tesla `OutsideTemp` |
-| `fsdMilesToday` | `number` | No | miles | P0 | -- | Tesla `SelfDrivingMilesSinceReset` |
-| `locationName` | `string` | No | -- | P1 | -- | Reverse-geocoded server-side |
-| `locationAddress` | `string` | No | -- | P1 | -- | Reverse-geocoded server-side |
+| `fsdMilesToday` | `number` or `null` | Yes (Spec-only, MYR-24) | miles | P0 | -- | Tesla `SelfDrivingMilesSinceReset` |
+| `locationName` | `string` or `null` | Yes (Spec-only, MYR-24) | -- | P1 | -- | Reverse-geocoded server-side |
+| `locationAddress` | `string` or `null` | Yes (Spec-only, MYR-24) | -- | P1 | -- | Reverse-geocoded server-side |
 | `lastUpdated` | `string` (ISO 8601) | No | -- | P0 | -- | Server timestamp |
 
 ### 1.2 Design notes
@@ -151,15 +153,19 @@ Every field below corresponds to a column in the `Vehicle` table or a value deri
 
 These predicates define what constitutes a valid vehicle state snapshot. The server MUST enforce these on every DB write. The SDK validates these on snapshot load and live updates.
 
+> **Enforcement boundary.** The predicates in this section are **semantic invariants** -- they constrain _values_ (null vs non-null, cross-field equivalence, enum derivation) in ways that JSON Schema cannot express. JSON Schema keywords like `dependentRequired` only enforce the _presence_ of sibling _keys_, not the non-nullness of their values, and `dependentSchemas` cannot express "if A's value is non-null, then B's value must be non-null" across independently-typed fields. Therefore these predicates are **NOT enforced by the `vehicle-state.schema.json` file** -- they are enforced at runtime by the [`contract-tester`](../../.claude/agents/contract-tester.md) agent's FR/NFR conformance suite, and at write-time by the server's persistence layer. Any wording below that sounds prescriptive applies to the runtime validators, not the schema. If you need to confirm an invariant, check the `contract-tester` fixtures, not `vehicle-state.schema.json`.
+
 ### 3.1 Navigation group predicates
 
-1. **Coordinate pairs are atomic.** If `destinationLatitude` is non-null, then `destinationLongitude` MUST also be non-null, and vice versa. Same rule applies to `originLatitude`/`originLongitude`.
+Enforced by `contract-tester` (runtime) + server persistence layer (write-time). NOT enforced by JSON Schema.
 
-2. **Active navigation completeness.** If `destinationName` is non-null, then `destinationLatitude`, `destinationLongitude`, and `navRouteCoordinates` MUST also be non-null (NFR-3.3). The reverse is also true: if `navRouteCoordinates` is non-null, then `destinationName` MUST be non-null.
+1. **Coordinate pairs are atomic.** If `destinationLatitude` is non-null, then `destinationLongitude` MUST also be non-null, and vice versa. Same rule applies to `originLatitude`/`originLongitude`. (`dependentRequired` in the schema enforces _key presence_ as a weaker best-effort hint, but the non-null invariant is a semantic check by `contract-tester`.)
 
-3. **All-or-nothing clear.** When navigation is cancelled, ALL navigation fields MUST be null. A snapshot where `destinationName` is null but `navRouteCoordinates` is non-null is invalid (FR-2.3, NFR-3.4).
+2. **Active navigation completeness.** If `destinationName` is non-null, then `destinationLatitude`, `destinationLongitude`, and `navRouteCoordinates` MUST also be non-null (NFR-3.3). The reverse is also true: if `navRouteCoordinates` is non-null, then `destinationName` MUST be non-null. Semantic invariant only; not schema-enforceable.
 
-4. **ETA/distance independence during accumulation.** `etaMinutes` and `tripDistanceRemaining` MAY arrive slightly after other nav fields during the 500ms accumulation window. However, the DB snapshot (used for cold page load) MUST be fully consistent -- these fields are either all present or all null.
+3. **All-or-nothing clear.** When navigation is cancelled, ALL navigation fields MUST be null. A snapshot where `destinationName` is null but `navRouteCoordinates` is non-null is invalid (FR-2.3, NFR-3.4). Semantic invariant only; not schema-enforceable.
+
+4. **ETA/distance independence during accumulation.** `etaMinutes` and `tripDistanceRemaining` MAY arrive slightly after other nav fields during the 500ms accumulation window. However, the DB snapshot (used for cold page load) MUST be fully consistent -- these fields are either all present or all null. Semantic invariant only; not schema-enforceable.
 
 ### 3.2 Charge group predicates
 
@@ -233,13 +239,7 @@ The schema uses the following `x-*` extension keywords for tooling and contract 
 
 ### 5.2 Sub-schemas (`$defs`)
 
-The schema defines reusable sub-schemas under `$defs` for each atomic group:
-
-- `NavigationGroup` -- with `dependentRequired` constraints for coordinate pairs
-- `ChargeGroup` -- with `required` for both fields
-- `GpsGroup` -- with `required` and `dependentRequired`
-- `GearGroup` -- with `required` for `status`
-- `Coordinate` -- reusable `[lng, lat]` pair definition
+The schema deliberately contains **no `$defs`**. Atomic group membership is encoded entirely via per-field `x-atomic-group` annotations and the root-level `x-atomic-groups` object (which lists each group's fields, consistency predicates, and nullability rules). Earlier drafts defined `NavigationGroup`/`ChargeGroup`/`GpsGroup`/`GearGroup`/`Coordinate` sub-schemas under `$defs`, but none of them were ever `$ref`'d from the main schema -- they were dead code -- and atomic-group validation happens at runtime in `contract-tester` (see §3), not through schema composition. To avoid confusing type generators and contract tooling with unreachable definitions, those stubs were removed.
 
 ---
 
@@ -274,24 +274,28 @@ npx json-schema-to-typescript \
 public struct VehicleState: Codable, Sendable {
     public let vehicleId: String
     public let name: String
-    public let model: String
-    public let year: Int
-    public let color: String
+    // Spec-only until MYR-24 -- Optional until the Go Vehicle struct loads these.
+    public let model: String?
+    public let year: Int?
+    public let color: String?
     public let status: VehicleStatus
     public let speed: Int
     public let heading: Int
     public let latitude: Double
     public let longitude: Double
-    public let locationName: String
-    public let locationAddress: String
+    // Spec-only until MYR-24.
+    public let locationName: String?
+    public let locationAddress: String?
     public let gearPosition: String?
     public let chargeLevel: Int
     public let estimatedRange: Int
     public let interiorTemp: Int
     public let exteriorTemp: Int
     public let odometerMiles: Int
-    public let fsdMilesToday: Double
+    // Spec-only until MYR-24.
+    public let fsdMilesToday: Double?
     public let destinationName: String?
+    // Spec-only until MYR-24.
     public let destinationAddress: String?
     public let destinationLatitude: Double?
     public let destinationLongitude: Double?
@@ -338,6 +342,7 @@ public enum GearPosition: String, Codable, Sendable {
 
 | Question | Owner | Target |
 |----------|-------|--------|
+| **Schema vs `internal/store/types.go` gap (spec-only fields).** The canonical v1 schema defines seven fields that the current Go `Vehicle` struct does not load: `model`, `year`, `color`, `fsdMilesToday`, `locationName`, `locationAddress`, and `destinationAddress`. Until the Go struct is extended (and the SELECT / scan path in `internal/store` is updated), the server physically cannot populate these fields, so they are marked **nullable and `x-spec-only: true`** in both the MD (§1.1) and JSON Schema. SDK consumers MUST tolerate `null` for every spec-only field until MYR-24 lands. Once MYR-24 ships, these fields will be promoted back to non-nullable, the `x-spec-only` markers and the §1.1 callout removed, and this row closed. The gap is explicitly tracked in **[MYR-24](https://linear.app/myrobotaxi/issue/MYR-24)** ("Extend `internal/store.Vehicle` to load `model`/`year`/`color`/`fsdMilesToday`/`locationName`/`locationAddress`/`destinationAddress`"). | sdk-architect + go-engineer | **MYR-24** |
 | Should `chargingState` (string enum) be added to the charge group in v1? | sdk-architect | MYR-TBD |
 | Should `tripStartTime` be derived from drive detection events and added to nav group? | sdk-architect | MYR-TBD |
 | Should temperature units be configurable (C/F) at the SDK level? | sdk-architect | v2 |
@@ -349,3 +354,4 @@ public enum GearPosition: String, Codable, Sendable {
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-04-09 | Initial draft -- all fields, atomic groups, consistency predicates, type generation docs | sdk-architect agent |
+| 2026-04-09 | PR #161 review fixes: (1) mark 7 spec-only fields nullable + add §1.1 callout; (2) add §7.2 entry for MYR-24 Go struct gap; (3) clarify §3.1 predicates are `contract-tester`-enforced, not schema-enforced; (4) remove unreachable `$defs` sub-schemas from schema and rewrite §5.2; (5) fix latitude/longitude descriptions to reference the `0,0` convention instead of "nullable"; (6) align schema `chargeLevel: 0` semantics with §2.2 (context-dependent on `status`); update Swift struct in §6.2 to reflect new optionality | sdk-architect agent |

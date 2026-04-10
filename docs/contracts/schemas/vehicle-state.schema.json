@@ -33,21 +33,27 @@
       "examples": ["Optimus"]
     },
     "model": {
-      "type": "string",
-      "description": "Vehicle model (e.g., 'Model 3', 'Model Y').",
+      "type": ["string", "null"],
+      "description": "Vehicle model (e.g., 'Model 3', 'Model Y'). SPEC-ONLY until MYR-24: not currently loaded by the Go Vehicle struct in internal/store/types.go. Will be nullable until MYR-24 lands; consumers MUST tolerate null.",
       "x-classification": "P0",
+      "x-spec-only": true,
+      "x-spec-only-issue": "MYR-24",
       "examples": ["Model 3"]
     },
     "year": {
-      "type": "integer",
-      "description": "Model year.",
+      "type": ["integer", "null"],
+      "description": "Model year. SPEC-ONLY until MYR-24: not currently loaded by the Go Vehicle struct in internal/store/types.go. Will be nullable until MYR-24 lands; consumers MUST tolerate null.",
       "x-classification": "P0",
+      "x-spec-only": true,
+      "x-spec-only-issue": "MYR-24",
       "examples": [2024]
     },
     "color": {
-      "type": "string",
-      "description": "Vehicle exterior color.",
+      "type": ["string", "null"],
+      "description": "Vehicle exterior color. SPEC-ONLY until MYR-24: not currently loaded by the Go Vehicle struct in internal/store/types.go. Will be nullable until MYR-24 lands; consumers MUST tolerate null.",
       "x-classification": "P0",
+      "x-spec-only": true,
+      "x-spec-only-issue": "MYR-24",
       "examples": ["Midnight Silver Metallic"]
     },
     "status": {
@@ -75,7 +81,7 @@
     },
     "latitude": {
       "type": "number",
-      "description": "Current GPS latitude. Encrypted at rest (AES-256-GCM). Nullable on initial connect before first GPS fix.",
+      "description": "Current GPS latitude. Encrypted at rest (AES-256-GCM). Non-nullable: on initial connect before the first GPS fix, latitude/longitude default to 0. Per the '0,0 = no fix' convention (§2.3), SDK consumers MUST treat latitude == 0 && longitude == 0 as 'no position available' rather than a valid location in the Gulf of Guinea.",
       "x-unit": "degrees",
       "x-classification": "P1",
       "x-encrypted": true,
@@ -85,7 +91,7 @@
     },
     "longitude": {
       "type": "number",
-      "description": "Current GPS longitude. Encrypted at rest (AES-256-GCM). Nullable on initial connect before first GPS fix.",
+      "description": "Current GPS longitude. Encrypted at rest (AES-256-GCM). Non-nullable: on initial connect before the first GPS fix, latitude/longitude default to 0. Per the '0,0 = no fix' convention (§2.3), SDK consumers MUST treat latitude == 0 && longitude == 0 as 'no position available' rather than a valid location in the Gulf of Guinea.",
       "x-unit": "degrees",
       "x-classification": "P1",
       "x-encrypted": true,
@@ -94,14 +100,18 @@
       "x-atomic-group": "gps"
     },
     "locationName": {
-      "type": "string",
-      "description": "Reverse-geocoded place name for current location (e.g., 'Home', 'Whole Foods Market'). Derived from GPS coordinates server-side.",
-      "x-classification": "P1"
+      "type": ["string", "null"],
+      "description": "Reverse-geocoded place name for current location (e.g., 'Home', 'Whole Foods Market'). Derived from GPS coordinates server-side. SPEC-ONLY until MYR-24: not currently loaded by the Go Vehicle struct in internal/store/types.go. Will be nullable until MYR-24 lands; consumers MUST tolerate null.",
+      "x-classification": "P1",
+      "x-spec-only": true,
+      "x-spec-only-issue": "MYR-24"
     },
     "locationAddress": {
-      "type": "string",
-      "description": "Reverse-geocoded street address for current location. Derived from GPS coordinates server-side.",
-      "x-classification": "P1"
+      "type": ["string", "null"],
+      "description": "Reverse-geocoded street address for current location. Derived from GPS coordinates server-side. SPEC-ONLY until MYR-24: not currently loaded by the Go Vehicle struct in internal/store/types.go. Will be nullable until MYR-24 lands; consumers MUST tolerate null.",
+      "x-classification": "P1",
+      "x-spec-only": true,
+      "x-spec-only-issue": "MYR-24"
     },
     "gearPosition": {
       "type": ["string", "null"],
@@ -147,10 +157,12 @@
       "minimum": 0
     },
     "fsdMilesToday": {
-      "type": "number",
-      "description": "Full Self-Driving miles driven since last counter reset (typically daily).",
+      "type": ["number", "null"],
+      "description": "Full Self-Driving miles driven since last counter reset (typically daily). SPEC-ONLY until MYR-24: not currently loaded by the Go Vehicle struct in internal/store/types.go. Will be nullable until MYR-24 lands; consumers MUST tolerate null.",
       "x-unit": "miles",
       "x-classification": "P0",
+      "x-spec-only": true,
+      "x-spec-only-issue": "MYR-24",
       "minimum": 0
     },
     "destinationName": {
@@ -162,9 +174,11 @@
     },
     "destinationAddress": {
       "type": ["string", "null"],
-      "description": "Street address of the active navigation destination. Null when no navigation is active.",
+      "description": "Street address of the active navigation destination. Null when no navigation is active. SPEC-ONLY until MYR-24: not currently loaded by the Go Vehicle struct in internal/store/types.go; will always be null in snapshots until MYR-24 lands.",
       "x-classification": "P1",
-      "x-atomic-group": "navigation"
+      "x-atomic-group": "navigation",
+      "x-spec-only": true,
+      "x-spec-only-issue": "MYR-24"
     },
     "destinationLatitude": {
       "type": ["number", "null"],
@@ -276,7 +290,7 @@
       ],
       "consistency-predicates": [
         "chargeLevel and estimatedRange MUST both be present in the DB snapshot (NFR-3.5). They are non-nullable with default 0.",
-        "If chargeLevel is 0 and estimatedRange is 0, this represents either a genuinely depleted battery or an initial-state default -- the UI SHOULD treat this as valid data."
+        "chargeLevel: 0 is context-dependent. With status == 'offline', the UI SHOULD interpret chargeLevel: 0 as 'unknown' (no telemetry received yet, DB default). With status == 'driving' or 'parked' (i.e., the vehicle is online), chargeLevel: 0 SHOULD be interpreted as 'critical' or 'empty battery'. See §2.2 of vehicle-state-schema.md."
       ],
       "nullability": "Non-nullable. Default 0 on initial vehicle creation."
     },
@@ -306,68 +320,6 @@
         "status is always present; gearPosition is nullable (null = vehicle asleep or gear not yet reported)."
       ],
       "nullability": "gearPosition is nullable. status is non-nullable (default 'offline')."
-    }
-  },
-  "$defs": {
-    "NavigationGroup": {
-      "type": "object",
-      "description": "Sub-schema for the navigation atomic group. Used for validation of partial updates.",
-      "properties": {
-        "destinationName": { "$ref": "#/properties/destinationName" },
-        "destinationAddress": { "$ref": "#/properties/destinationAddress" },
-        "destinationLatitude": { "$ref": "#/properties/destinationLatitude" },
-        "destinationLongitude": { "$ref": "#/properties/destinationLongitude" },
-        "originLatitude": { "$ref": "#/properties/originLatitude" },
-        "originLongitude": { "$ref": "#/properties/originLongitude" },
-        "etaMinutes": { "$ref": "#/properties/etaMinutes" },
-        "tripDistanceRemaining": { "$ref": "#/properties/tripDistanceRemaining" },
-        "navRouteCoordinates": { "$ref": "#/properties/navRouteCoordinates" }
-      },
-      "dependentRequired": {
-        "destinationLatitude": ["destinationLongitude"],
-        "destinationLongitude": ["destinationLatitude"],
-        "originLatitude": ["originLongitude"],
-        "originLongitude": ["originLatitude"]
-      }
-    },
-    "ChargeGroup": {
-      "type": "object",
-      "description": "Sub-schema for the charge atomic group.",
-      "properties": {
-        "chargeLevel": { "$ref": "#/properties/chargeLevel" },
-        "estimatedRange": { "$ref": "#/properties/estimatedRange" }
-      },
-      "required": ["chargeLevel", "estimatedRange"]
-    },
-    "GpsGroup": {
-      "type": "object",
-      "description": "Sub-schema for the GPS atomic group.",
-      "properties": {
-        "latitude": { "$ref": "#/properties/latitude" },
-        "longitude": { "$ref": "#/properties/longitude" },
-        "heading": { "$ref": "#/properties/heading" }
-      },
-      "required": ["latitude", "longitude", "heading"],
-      "dependentRequired": {
-        "latitude": ["longitude"],
-        "longitude": ["latitude"]
-      }
-    },
-    "GearGroup": {
-      "type": "object",
-      "description": "Sub-schema for the gear atomic group.",
-      "properties": {
-        "gearPosition": { "$ref": "#/properties/gearPosition" },
-        "status": { "$ref": "#/properties/status" }
-      },
-      "required": ["status"]
-    },
-    "Coordinate": {
-      "type": "array",
-      "items": { "type": "number" },
-      "minItems": 2,
-      "maxItems": 2,
-      "description": "A [longitude, latitude] coordinate pair in GeoJSON/Mapbox order."
     }
   },
   "dependentRequired": {
