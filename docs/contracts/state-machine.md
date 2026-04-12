@@ -130,9 +130,6 @@ stateDiagram-v2
     stale --> loading : RECONNECT_SNAPSHOT_REQUESTED
     stale --> stale : (no timer-based transitions — NFR-3.7)
 
-    loading --> ready : SNAPSHOT_LOADED
-    loading --> error : SNAPSHOT_FAILED
-
     cleared --> loading : RECONNECT_SNAPSHOT_REQUESTED
     cleared --> ready : LIVE_UPDATE_RECEIVED
     cleared --> error : INVALID_DATA_RECEIVED
@@ -164,8 +161,9 @@ stateDiagram-v2
 | D-7 | `stale` | `RECONNECT_SNAPSHOT_REQUESTED` | `connectionState` transitioned to `connecting` (reconnect) | `loading` | Begin snapshot re-fetch (NFR-3.11); cached data remains visible during fetch |
 | D-8 | `cleared` | `RECONNECT_SNAPSHOT_REQUESTED` | `connectionState` transitioned to `connecting` (reconnect) | `loading` | Begin snapshot re-fetch |
 | D-9 | `cleared` | `LIVE_UPDATE_RECEIVED` | WebSocket delivers new data for this group | `ready` | Populate group fields; emit `dataState` change |
-| D-10 | `error` | `RECONNECT_SNAPSHOT_REQUESTED` | Reconnect initiated | `loading` | Retry snapshot fetch |
-| D-11 | `error` | `LIVE_UPDATE_RECEIVED` | WebSocket delivers valid data for this group | `ready` | Populate group fields; emit `dataState` change |
+| D-10 | `cleared` | `INVALID_DATA_RECEIVED` | Data fails consistency predicates (see `vehicle-state-schema.md` Section 3) | `error` | Log error; emit `dataState` change |
+| D-11 | `error` | `RECONNECT_SNAPSHOT_REQUESTED` | Reconnect initiated | `loading` | Retry snapshot fetch |
+| D-12 | `error` | `LIVE_UPDATE_RECEIVED` | WebSocket delivers valid data for this group | `ready` | Populate group fields; emit `dataState` change |
 
 ### 2.4 Critical constraints
 
@@ -258,11 +256,15 @@ This section maps every WebSocket server message type to the state transitions i
 |--------------|-----------|---------------|--------|
 | Vehicle update | `vehicle_update` | `{ vehicleId, fields, timestamp }` | Telemetry event on bus |
 | Drive started | `drive_started` | `{ vehicleId, driveId, startLocation, timestamp }` | Drive detector |
-| Drive ended | `drive_ended` | `{ vehicleId, driveId, distance, duration, avgSpeed, maxSpeed, timestamp }` | Drive detector (post micro-drive filter) |
+| Drive ended | `drive_ended` | `{ vehicleId, driveId, distance, duration, avgSpeed, maxSpeed, timestamp }` | Drive detector (post micro-drive filter). See note below. |
 | Connectivity | `connectivity` | `{ vehicleId, online, timestamp }` | Vehicle mTLS connection state |
 | Heartbeat | `heartbeat` | (empty or `{ timestamp }`) | Server keepalive |
 | Error | `error` | `{ code, message }` | Server error |
 | Auth | `auth` | `{ token }` | Client-to-server only |
+
+> **`drive_ended` payload scope.** The WebSocket `drive_ended` payload contains summary fields for immediate UI feedback. The full drive record with all FR-3.4 fields (energy used, FSD miles, intervention count, start/end charge level, start/end location + address) is available via the REST drive detail endpoint (see `rest-api.md`). SDK consumers that need the complete drive record should fetch it via REST after receiving `drive_ended`.
+
+> **`drive_updated` is not a distinct wire message.** During an active drive, the SDK interprets incoming `vehicle_update` messages containing GPS route point fields as drive updates. The SDK emits `drive_updated` to consumers as a logical event, but the wire carries `vehicle_update`. Do not look for a `"drive_updated"` message type string on the wire.
 
 ### 4.2 Event-to-transition mapping
 
