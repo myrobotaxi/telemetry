@@ -70,7 +70,7 @@ The Vehicle table is a **live snapshot**: the DB row is overwritten on each tele
 | `originLatitude` | DB | WebSocket | Go store (overwrite) | Telemetry-driven, AES-256-GCM encrypted |
 | `originLongitude` | DB | WebSocket | Go store (overwrite) | Telemetry-driven, AES-256-GCM encrypted |
 | `etaMinutes` | DB | WebSocket | Go store (overwrite) | Telemetry-driven, navigation group |
-| `tripDistanceMiles` | DB | WebSocket | Go store (overwrite) | Telemetry-driven |
+| `tripDistanceMiles` | DB | WebSocket | Go store (overwrite) | Telemetry-driven. Not yet in `vehicle-state-schema.md` SDK schema — DB/store only until added |
 | `tripDistanceRemaining` | DB | WebSocket | Go store (overwrite) | Telemetry-driven |
 | `navRouteCoordinates` | DB | WebSocket | Go store (overwrite) | Telemetry-driven, AES-256-GCM encrypted |
 | `lastUpdated` | DB | -- | Go store (overwrite) | Set on each telemetry write |
@@ -184,7 +184,7 @@ The deletion is executed as a single database transaction with the following ste
 BEGIN TRANSACTION;
 
 -- Step 1: Write audit log FIRST (before any destructive operations)
-INSERT INTO "AuditLog" (id, "userId", timestamp, action, "targetType", "targetId", initiator, metadata)
+INSERT INTO "AuditLog" ("id", "userId", "timestamp", "action", "targetType", "targetId", "initiator", "metadata")
 VALUES (
   cuid(),
   '<user-id>',
@@ -197,7 +197,7 @@ VALUES (
 );
 
 -- Step 2: Delete the User row — Prisma cascades handle the rest
-DELETE FROM "User" WHERE id = '<user-id>';
+DELETE FROM "User" WHERE "id" = '<user-id>';
 
 -- Prisma onDelete: Cascade propagation (automatic):
 --   User delete  -> Account[]      (all OAuth tokens for this user)
@@ -398,7 +398,7 @@ FOR each batch:
        DELETE FROM "Drive" WHERE id IN (<batch_ids>)
 
        -- Write audit log entry for this batch
-       INSERT INTO "AuditLog" (id, userId, timestamp, action, targetType, targetId, initiator, metadata)
+       INSERT INTO "AuditLog" ("id", "userId", "timestamp", "action", "targetType", "targetId", "initiator", "metadata")
        VALUES (
          cuid(),
          '<vehicle-owner-user-id>',
@@ -461,7 +461,7 @@ Per NFR-3.3 and `vehicle-state-schema.md` Section 3, the following fields form a
 | Field | Required when navigation active | May be null when navigation inactive |
 |-------|-------------------------------|--------------------------------------|
 | `destinationName` | Yes | Yes |
-| `destinationAddress` | Yes | Yes |
+| `destinationAddress` | Yes* | Yes |
 | `destinationLatitude` | Yes | Yes |
 | `destinationLongitude` | Yes | Yes |
 | `originLatitude` | Yes | Yes |
@@ -469,6 +469,8 @@ Per NFR-3.3 and `vehicle-state-schema.md` Section 3, the following fields form a
 | `etaMinutes` | Yes | Yes |
 | `tripDistanceRemaining` | Yes | Yes |
 | `navRouteCoordinates` | Yes | Yes |
+
+> \*`destinationAddress` is currently spec-only (MYR-24). Until MYR-24 lands, this field is exempt from the active-navigation completeness predicate and will be null regardless of nav state. See `vehicle-state-schema.md` §3.1 predicate 3.
 
 ### 6.2 Coordinate pair atomicity
 
