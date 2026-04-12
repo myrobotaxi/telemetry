@@ -456,7 +456,7 @@ The pruning job runs as a scheduled task within the telemetry server process (no
 
 Per NFR-3.3 and `vehicle-state-schema.md` Section 3, the following fields form an atomic group. A Vehicle snapshot write MUST persist all members or none:
 
-**Rule:** If `destinationName` is non-null, then `destinationLatitude`, `destinationLongitude`, `navRouteCoordinates`, and `etaMinutes` MUST also be non-null. Conversely, if all navigation fields are null, this represents "no active navigation" and is valid.
+**Rule (active navigation completeness):** If `destinationName` is non-null, then `destinationLatitude`, `destinationLongitude`, and `navRouteCoordinates` MUST also be non-null (and vice versa). Per `vehicle-state-schema.md` Section 3.1 predicate 4, `etaMinutes` and `tripDistanceRemaining` MAY arrive slightly after other nav fields during the 500ms accumulation window, but the DB snapshot MUST be fully consistent — these fields are either all present or all null. When all navigation fields are null, this represents "no active navigation" and is valid.
 
 | Field | Required when navigation active | May be null when navigation inactive |
 |-------|-------------------------------|--------------------------------------|
@@ -543,7 +543,7 @@ The `contract-guard` agent/CI check enforces the following rules derived from th
 
 **Trigger:** Any PR that modifies Vehicle UPDATE paths in `internal/store/`.
 
-**Check:** Vehicle writes that touch any navigation group field MUST validate the full group per Section 6.1. A write that sets `destinationName` without also setting `destinationLatitude`, `destinationLongitude`, `navRouteCoordinates`, and `etaMinutes` is invalid.
+**Check:** Vehicle writes that touch any navigation group field MUST validate the full group per Section 6.1. A write that sets `destinationName` without also setting `destinationLatitude`, `destinationLongitude`, and `navRouteCoordinates` is invalid. The DB snapshot must also be fully consistent for `etaMinutes` and `tripDistanceRemaining` (all present or all null).
 
 **Fix:** Implement group-completeness validation before the UPDATE. See `vehicle-state-schema.md` Section 3 for the predicate definitions.
 
