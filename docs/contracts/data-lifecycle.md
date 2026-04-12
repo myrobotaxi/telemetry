@@ -383,7 +383,17 @@ A background job that enforces the 1-year rolling retention window for Drive rec
 | Frequency | Once per day | Drive creation rate does not justify more frequent runs |
 | Timezone | UTC | Server operates in UTC |
 
-### 5.3 Execution
+### 5.3 Recommended index
+
+The pruning query filters on `createdAt` and the audit entry groups by vehicle owner (via `vehicleId`). A composite index supports both the range scan and the owner lookup:
+
+```sql
+CREATE INDEX "Drive_createdAt_vehicleId_idx" ON "Drive" ("createdAt", "vehicleId");
+```
+
+This index should be added alongside the pruning job implementation. It covers the `WHERE createdAt < ... ORDER BY createdAt ASC LIMIT 100` scan and allows the job to efficiently resolve the vehicle owner for the audit log entry.
+
+### 5.4 Execution
 
 ```
 FOR each batch:
@@ -414,7 +424,7 @@ FOR each batch:
   4. Continue to next batch
 ```
 
-### 5.4 Batch configuration
+### 5.5 Batch configuration
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
@@ -422,7 +432,7 @@ FOR each batch:
 | Audit granularity | One audit entry per batch per vehicle owner | Groups pruned drives by owner for readable audit history |
 | Iteration limit | None (runs until no eligible drives remain) | Daily schedule means at most ~365 new eligible drives per vehicle per run |
 
-### 5.5 Failure handling
+### 5.6 Failure handling
 
 | Scenario | Behavior |
 |----------|----------|
@@ -432,7 +442,7 @@ FOR each batch:
 | Audit log insert fails | The entire batch transaction rolls back. No drives are deleted without an audit trail. |
 | Job takes longer than expected | No hard timeout. The job processes all eligible drives. If this becomes a concern, the batch size can be tuned. |
 
-### 5.6 Observability
+### 5.7 Observability
 
 The pruning job emits the following metrics:
 
@@ -444,7 +454,7 @@ The pruning job emits the following metrics:
 | `pruner_run_duration_seconds` | Histogram | Wall-clock time for the entire pruning run |
 | `pruner_last_success_timestamp` | Gauge | Unix timestamp of last successful completion |
 
-### 5.7 Deployment
+### 5.8 Deployment
 
 The pruning job runs as a scheduled task within the telemetry server process (not a separate service). On Fly.io, this is implemented as a goroutine with a `time.Ticker` that fires daily at 03:00 UTC. The job is leader-elected if multiple instances are running (only one instance executes the prune).
 
