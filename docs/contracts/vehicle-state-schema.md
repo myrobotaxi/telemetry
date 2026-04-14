@@ -64,7 +64,9 @@ Every field below corresponds to a column in the `Vehicle` table or a value deri
 | Field | Type | Nullable | Unit | Classification | Group | Source |
 |-------|------|----------|------|----------------|-------|--------|
 | `chargeLevel` | `integer` | No | percent (0-100) | P0 | `charge` | Tesla `Soc` / `BatteryLevel` |
+| `chargeState` | `string` (enum) | Yes (until wired) | -- | P0 | `charge` | Tesla proto field **2** (`ChargeState`). Enum: `Unknown`, `Disconnected`, `NoPower`, `Starting`, `Charging`, `Complete`, `Stopped`. v1 field; implementation follow-up pending -- see `websocket-protocol.md` §10 DV-03 (RESOLVED). |
 | `estimatedRange` | `integer` | No | miles | P0 | `charge` | Tesla `EstBatteryRange` |
+| `timeToFull` | `number` | Yes (until wired) | seconds | P0 | `charge` | Tesla proto field **43** (`TimeToFullCharge`, `double`). v1 field; implementation follow-up pending -- see `websocket-protocol.md` §10 DV-04 (RESOLVED). |
 
 #### Navigation group
 
@@ -121,11 +123,22 @@ Every field below corresponds to a column in the `Vehicle` table or a value deri
 
 **Requirement traceability:** FR-1.2, NFR-3.1
 
-**Members:** `chargeLevel`, `estimatedRange`
+**Members (v1):** `chargeLevel`, `chargeState`, `estimatedRange`, `timeToFull`
 
-**Server-side implementation:** Both fields are mapped from Tesla telemetry (`Soc`/`BatteryLevel` and `EstBatteryRange`) and delivered together in the same `vehicle_update` message when either field changes. Tesla emits these at a 30-second interval.
+**Server-side implementation:** All four fields are mapped from native Tesla Fleet Telemetry fields and delivered together in the same `vehicle_update` message when any of them change:
 
-**Nullability:** Non-nullable. Both fields default to `0` in the database on vehicle creation. A value of `0` means either the battery is genuinely depleted or no telemetry has been received yet -- the UI should interpret `chargeLevel: 0` with `status: offline` as "unknown" and with `status: driving` as "critical".
+| Wire field | Tesla proto field | Notes |
+|------------|-------------------|-------|
+| `chargeLevel` | `Soc` / `BatteryLevel` | Integer-rounded server-side. |
+| `chargeState` | **Field 2** `ChargeState` (enum) | Native Tesla emission. Enum values: `Unknown`, `Disconnected`, `NoPower`, `Starting`, `Charging`, `Complete`, `Stopped`. `DetailedChargeState` (proto field 179) is the finer-grained companion already configured at 30 s interval in [`internal/telemetry/fleet_api_fields.go`](../../internal/telemetry/fleet_api_fields.go) line 129 and MAY be layered in later via the ungrouped-field path. |
+| `estimatedRange` | `EstBatteryRange` | Integer-rounded server-side. |
+| `timeToFull` | **Field 43** `TimeToFullCharge` (`double`, seconds) | Tesla proto type is `double`; the wire value is a JSON number (NOT rounded to integer). |
+
+Tesla emits these fields on the shared 30-second charge cadence. They arrive in the same `VehicleTelemetryEvent.Fields` batch (same Tesla 500 ms bucket), so no additional server-side coalescing is required beyond the NFR-3.1 atomic-group rule.
+
+**Nullability:** `chargeLevel` and `estimatedRange` are non-nullable and default to `0` in the database on vehicle creation. A value of `0` for `chargeLevel` with `status: offline` means "unknown"; with `status: driving` it means "critical". `chargeState` and `timeToFull` are **transitional nullable** until the implementation follow-up (see `websocket-protocol.md` §10 DV-03 / DV-04): SDK consumers MUST tolerate `null` for these two fields on any frame delivered before the server begins emitting them. Once the implementation ships, the charge atomic group will arrive as a four-field batch.
+
+**Implementation follow-up:** `chargeState` and `timeToFull` are part of the v1 wire contract but are not yet wired in the Go server. The follow-up issue must add `FleetFieldChargeState` (proto 2) and `FleetFieldTimeToFullCharge` (proto 43) to [`internal/telemetry/fleet_api_fields.go`](../../internal/telemetry/fleet_api_fields.go), extend the decoder mapping, add DB columns (P0, non-encrypted), and wire through [`internal/ws/field_mapping.go`](../../internal/ws/field_mapping.go) under their canonical wire names.
 
 ### 2.3 GPS group
 
@@ -329,9 +342,9 @@ public enum GearPosition: String, Codable, Sendable {
 | Decision | Rationale |
 |----------|-----------|
 | `speed` excluded from GPS atomic group | Speed updates at 2s while GPS uses a 10m delta filter. Coupling them would either delay speed updates or flood GPS updates. Documented divergence from NFR-3.1 text. |
-| No `chargingState` in charge group | Tesla emits `DetailedChargeState` but the current Vehicle table and Go structs do not persist it. Adding it is a v1 stretch goal tracked separately. The `status` field set to `charging` provides a coarse equivalent. |
-| No `timeToFull` in charge group | Not available from Tesla Fleet Telemetry in v1 field set. Deferred to v2. |
-| No `tripStartTime` in navigation group | The requirements doc (NFR-3.1) lists `tripStartTime` in the navigation atomic group, but this field is not currently received from Tesla telemetry nor persisted in the Vehicle table. Deferred to v2 or implementation tracked separately. |
+| `chargeState` IS in the v1 charge group (was previously deferred) | **Overturned 2026-04-13 by MYR-11.** Tesla emits `ChargeState` natively as proto field **2** (enum: `Unknown`, `Disconnected`, `NoPower`, `Starting`, `Charging`, `Complete`, `Stopped`). The earlier "deferred; `status = charging` is the coarse equivalent" rationale was based on the assumption that only `DetailedChargeState` (proto 179) was available, which is incorrect. Implementation follow-up tracked as DV-03 (RESOLVED) in `websocket-protocol.md` §10. |
+| `timeToFull` IS in the v1 charge group (was previously deferred with an incorrect rationale) | **Overturned 2026-04-13 by MYR-11.** Tesla emits `TimeToFullCharge` natively as proto field **43** (`double`, seconds), verified in `vehicle_data.proto:57`. The earlier claim that this field was "not available from Tesla Fleet Telemetry" was **factually wrong** -- it was authored without checking the Tesla proto schema. Implementation follow-up tracked as DV-04 (RESOLVED) in `websocket-protocol.md` §10. |
+| `tripStartTime` relocated from navigation group to drive group | **Clarified 2026-04-13 by MYR-11.** `tripStartTime` is derived from the drive detector's `started_at` timestamp in [`internal/drives/`](../../internal/drives/) and has no corresponding Tesla field. Forcing it into the navigation atomic group would require a cross-subsystem join that Tesla's 500 ms bucket floor cannot deliver atomically, and a vehicle can have no nav but still have an active drive. v1 therefore carries `tripStartTime` as `drive_started.payload.startedAt` on the wire (see `websocket-protocol.md` §4.2). NFR-3.1 literal amendment pending -- tracked as DV-13 in `websocket-protocol.md` §10. |
 | Temperatures in Fahrenheit | Matches the current DB schema and frontend display. Conversion to user-preferred units is a UI concern, not an SDK concern. |
 | `navRouteCoordinates` uses `[lng, lat]` order | GeoJSON/Mapbox standard. Tesla's raw protobuf uses `[lat, lng]`; the server converts on decode. |
 | Integer rounding applied server-side | SDK consumers receive pre-rounded values. This prevents inconsistent rounding across TypeScript/Swift/etc. |
@@ -341,8 +354,8 @@ public enum GearPosition: String, Codable, Sendable {
 | Question | Owner | Target |
 |----------|-------|--------|
 | **Schema vs `internal/store/types.go` gap (spec-only fields).** The canonical v1 schema defines seven fields that the current Go `Vehicle` struct does not load: `model`, `year`, `color`, `fsdMilesToday`, `locationName`, `locationAddress`, and `destinationAddress`. Until the Go struct is extended (and the SELECT / scan path in `internal/store` is updated), the server physically cannot populate these fields, so they are marked **nullable and `x-spec-only: true`** in both the MD (§1.1) and JSON Schema. SDK consumers MUST tolerate `null` for every spec-only field until MYR-24 lands. Once MYR-24 ships, these fields will be promoted back to non-nullable, the `x-spec-only` markers and the §1.1 callout removed, and this row closed. The gap is explicitly tracked in **[MYR-24](https://linear.app/myrobotaxi/issue/MYR-24)** ("Extend `internal/store.Vehicle` to load `model`/`year`/`color`/`fsdMilesToday`/`locationName`/`locationAddress`/`destinationAddress`"). | sdk-architect + go-engineer | **MYR-24** |
-| Should `chargingState` (string enum) be added to the charge group in v1? | sdk-architect | MYR-TBD |
-| Should `tripStartTime` be derived from drive detection events and added to nav group? | sdk-architect | MYR-TBD |
+| ~~Should `chargingState` (string enum) be added to the charge group in v1?~~ | RESOLVED 2026-04-13 by MYR-11: YES. Tesla proto field 2 (`ChargeState`) is native. See §7.1 resolved decisions and `websocket-protocol.md` §10 DV-03. | RESOLVED |
+| ~~Should `tripStartTime` be derived from drive detection events and added to nav group?~~ | RESOLVED 2026-04-13 by MYR-11: `tripStartTime` is relocated from the navigation group to the drive group; it is derived from the drive detector's `started_at` and carried as `drive_started.payload.startedAt`. See §7.1 resolved decisions and `websocket-protocol.md` §10 DV-13. | RESOLVED |
 | Should temperature units be configurable (C/F) at the SDK level? | sdk-architect | v2 |
 
 ---
@@ -353,3 +366,4 @@ public enum GearPosition: String, Codable, Sendable {
 |------|--------|--------|
 | 2026-04-09 | Initial draft -- all fields, atomic groups, consistency predicates, type generation docs | sdk-architect agent |
 | 2026-04-09 | PR #161 review fixes: (1) mark 7 spec-only fields nullable + add §1.1 callout; (2) add §7.2 entry for MYR-24 Go struct gap; (3) clarify §3.1 predicates are `contract-tester`-enforced, not schema-enforced; (4) remove unreachable `$defs` sub-schemas from schema and rewrite §5.2; (5) fix latitude/longitude descriptions to reference the `0,0` convention instead of "nullable"; (6) align schema `chargeLevel: 0` semantics with §2.2 (context-dependent on `status`); update Swift struct in §6.2 to reflect new optionality | sdk-architect agent |
+| 2026-04-13 | **MYR-11 v1 contract freeze, cross-contract updates from WebSocket protocol decisions.** (1) Charge group §1.1 and §2.2: added `chargeState` (Tesla proto field 2, enum) and `timeToFull` (Tesla proto field 43, `double` seconds) as v1 members; both are transitional nullable until server wiring lands. (2) §7.1 resolved decisions: overturned the previous "deferred" rulings for `chargingState` and `timeToFull`; explicitly flagged the prior "not available from Tesla Fleet Telemetry" rationale for `timeToFull` as factually wrong. (3) §7.1 resolved decisions: clarified that `tripStartTime` is relocated from the navigation group to the drive group (carried as `drive_started.payload.startedAt`, not as a vehicle_update field). (4) §7.2 open questions: closed the `chargingState` and `tripStartTime` entries as RESOLVED by MYR-11. Implementation follow-ups for `chargeState`, `timeToFull`, and the NFR-3.1 amendment for `tripStartTime` are tracked in `websocket-protocol.md` §10 as DV-03 (RESOLVED), DV-04 (RESOLVED), and DV-13 (amendment pending). | sdk-architect |
