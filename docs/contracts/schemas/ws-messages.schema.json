@@ -18,6 +18,31 @@
         }
       }
     },
+    "AuthOkPayload": {
+      "type": "object",
+      "description": "Server->client positive authentication acknowledgement. v1-required. Emitted as the FIRST frame after successful `Authenticator.ValidateToken` + `GetUserVehicles` + `Hub.Register`. Triggers the SDK `connectionState` transition `connecting -> connected` (state-machine C-3). Without this frame, SDKs on idle vehicles would sit in `connecting` up to one heartbeat interval waiting for telemetry traffic — an unacceptable regression on cold watchOS wakes. See websocket-protocol.md §2.3 for the full handshake contract. Note: `auth_ok` has been pulled OUT of divergence DV-07 and is v1-required; the rest of DV-07 (subscribe/unsubscribe/ping/pong + typed permission_denied) remains deferred. `state-machine.md` §1.3 C-3 trigger alignment is tracked as DV-15 (requires a follow-up MYR-10 amendment PR). Anchored by FR-6.1, FR-8.1, NFR-3.21.",
+      "required": ["userId", "vehicleCount", "issuedAt"],
+      "additionalProperties": false,
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Opaque cuid of the authenticated user. Echoed back from the resolved token so the SDK can sanity-check ownership set on reconnect (e.g., compare against a cached userId and clear caches if they disagree, defending against consumer token-mixup bugs). P1 per data-classification.md §1.1 User.id.",
+          "x-classification": "P1"
+        },
+        "vehicleCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Size of the user's vehicle set at handshake time (length of `Authenticator.GetUserVehicles(userId)`). Informational integrity check against the SDK's cached snapshot; the authoritative ownership set is populated via the REST snapshot fetch on reconnect (NFR-3.11). P1 because vehicle count leaks the shape of a user's fleet.",
+          "x-classification": "P1"
+        },
+        "issuedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server-authoritative ISO 8601 UTC timestamp at which Hub.Register returned success. Debug/telemetry only — the SDK MUST NOT use this value for any behavioral decision. P2 because it reveals server-side timing to an observer.",
+          "x-classification": "P2"
+        }
+      }
+    },
     "VehicleUpdatePayload": {
       "type": "object",
       "description": "Server->client telemetry update for a single vehicle. The `fields` map carries one or more atomic-group members from VehicleState (see vehicle-state.schema.json). Each call to broadcast carries fields from at most ONE atomic group plus optionally non-grouped fields delivered alongside (NFR-3.1). Anchored by FR-1.1, FR-1.2, FR-1.3, FR-2.1, FR-2.2, FR-2.3, NFR-3.1, NFR-3.2.",
@@ -31,7 +56,7 @@
         },
         "fields": {
           "type": "object",
-          "description": "Map of field name -> value. Field names and per-field classifications are defined in vehicle-state.schema.json. A single vehicle_update message contains the members of at most ONE atomic group (navigation, charge, gps, gear) plus any individually-delivered fields (speed, odometerMiles, interiorTemp, exteriorTemp, fsdMilesToday, locationName, locationAddress, lastUpdated). Server explicitly clears a navigation field by sending it as JSON null; the SDK MUST atomically null all members of the affected group per NFR-3.9. The optional `routeCoordinates` field (array of [lng, lat] pairs) carries an active drive's accumulated GPS trail and is not part of a normal atomic group — it is always paired with an active drive and routed to dataState.gps.",
+          "description": "Map of field name -> value. Field names and per-field classifications are defined in vehicle-state.schema.json. A single vehicle_update message contains the members of at most ONE atomic group plus any individually-delivered fields (speed, odometerMiles, interiorTemp, exteriorTemp, fsdMilesToday, locationName, locationAddress, lastUpdated). v1 atomic groups: navigation = {destinationName, destinationAddress (spec-only), destinationLatitude, destinationLongitude, originLatitude, originLongitude, etaMinutes, tripDistanceRemaining, navRouteCoordinates}; charge = {chargeLevel, chargeState, estimatedRange, timeToFull}; gps = {latitude, longitude, heading}; gear = {gearPosition, status}. The `drive` atomic group's single member `startedAt` is delivered via the `drive_started` lifecycle message, not via `vehicle_update.fields` — see DV-13 in websocket-protocol.md §10. Server explicitly clears a navigation field by sending it as JSON null; the SDK MUST atomically null all members of the affected group per NFR-3.9. The optional `routeCoordinates` field (array of [lng, lat] pairs) carries an active drive's accumulated GPS trail and is not part of a normal atomic group — it is always paired with an active drive and routed to dataState.gps.",
           "additionalProperties": true,
           "x-classification": "mixed (per-field; see vehicle-state.schema.json)"
         },
@@ -45,8 +70,8 @@
     },
     "DriveStartedPayload": {
       "type": "object",
-      "description": "Server->client message announcing the start of a new drive. Anchored by FR-3.1.",
-      "required": ["vehicleId", "driveId", "startLocation", "timestamp"],
+      "description": "Server->client message announcing the start of a new drive. Also carries the drive atomic group's `startedAt` field, which is the v1 home of `tripStartTime` (relocated from the navigation group per DV-13 — see websocket-protocol.md §4.2). The drive group is NOT delivered via vehicle_update.fields; it is delivered via this message. Anchored by FR-3.1, NFR-3.1.",
+      "required": ["vehicleId", "driveId", "startLocation", "startedAt", "timestamp"],
       "additionalProperties": false,
       "properties": {
         "vehicleId": {
@@ -81,18 +106,24 @@
             }
           }
         },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "v1 home of `tripStartTime` (per DV-13). Server-authoritative ISO 8601 UTC timestamp at which the drive detector's `started_at` was recorded. SDKs MUST surface this as the authoritative tripStartTime for consumers. Value is always equal to `timestamp` for drive_started; the two fields are separate so `timestamp` can remain the uniform envelope-event time across every server->client message while `startedAt` carries the semantic drive-lifecycle meaning.",
+          "x-classification": "P0"
+        },
         "timestamp": {
           "type": "string",
           "format": "date-time",
-          "description": "Server-authoritative ISO 8601 UTC timestamp at which the drive detector (`internal/drives/`) declared the drive started.",
+          "description": "Server-authoritative ISO 8601 UTC timestamp at which the drive detector (`internal/drives/`) declared the drive started. Equal to `startedAt` for this message type.",
           "x-classification": "P0"
         }
       }
     },
     "DriveEndedPayload": {
       "type": "object",
-      "description": "Server->client message announcing a completed drive that passed the micro-drive filter (state-machine.md §3.5). The summary fields here are for immediate UI feedback; the full FR-3.4 drive record (energy used, FSD miles, intervention count, start/end charge level, start/end addresses, full route polyline) is fetched via REST `/drives/{id}` (see rest-api.md). Anchored by FR-3.1, FR-3.4.",
-      "required": ["vehicleId", "driveId", "distance", "duration", "avgSpeed", "maxSpeed", "timestamp"],
+      "description": "Server->client message announcing a completed drive that passed the micro-drive filter (state-machine.md §3.5). The wire payload is intentionally a SUMMARY — it carries only the handful of fields the SDK needs for an immediate 'drive finished' toast or card. The full FR-3.4 drive record (energy used, FSD miles, intervention count, start/end charge level, start/end addresses, full route polyline) is fetched on demand via REST `GET /drives/{id}` (see rest-api.md) using the SDK's `fetchDrive(driveId)` helper. Neither the TypeScript nor the Swift SDK auto-fetches the full record on drive_ended; doing so would burn cellular bandwidth on idle consumers (per NFR-3.36, this is especially bad for watchOS). Tracked as DV-11 (RESOLVED) in websocket-protocol.md §10. Anchored by FR-3.1, FR-3.4.",
+      "required": ["vehicleId", "driveId", "distance", "durationSeconds", "avgSpeed", "maxSpeed", "timestamp"],
       "additionalProperties": false,
       "properties": {
         "vehicleId": {
@@ -102,7 +133,7 @@
         },
         "driveId": {
           "type": "string",
-          "description": "Opaque drive cuid (matches the persisted Drive row id).",
+          "description": "Opaque drive cuid (matches the persisted Drive row id). Input to `fetchDrive(driveId)` for the full FR-3.4 record.",
           "x-classification": "P0"
         },
         "distance": {
@@ -112,9 +143,11 @@
           "x-unit": "miles",
           "x-classification": "P0"
         },
-        "duration": {
-          "type": "string",
-          "description": "Drive duration as a Go time.Duration string (e.g., '12m34.5s'). The SDK SHOULD parse this and re-expose it as seconds/minutes for consumers.",
+        "durationSeconds": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Drive duration in seconds, as a JSON number (double). Server-side value is `DriveStats.Duration.Seconds()`. This replaces the earlier `duration` string field (Go `time.Duration` format like '12m34s'), which was dropped before v1 ship — there are no pre-v1 consumers, so there is no deprecation tail. TypeScript consumers construct `Temporal.Duration` or a Date delta from this value; Swift consumers map directly to `Duration(secondsComponent:attosecondsComponent:)` or `TimeInterval`. Tracked as DV-12 (RESOLVED) in websocket-protocol.md §10.",
+          "x-unit": "seconds",
           "x-classification": "P0"
         },
         "avgSpeed": {
@@ -180,14 +213,15 @@
       "properties": {
         "code": {
           "type": "string",
-          "description": "Stable typed error code from the catalog in websocket-protocol.md §6. Consumer SDKs map these to typed errors per FR-7.1.",
+          "description": "Stable typed error code from the catalog in websocket-protocol.md §6.1.1. Consumer SDKs map these to typed errors per FR-7.1 and MUST NOT string-match on the sibling `message` field. `auth_failed` and `auth_timeout` are emitted today; the remaining values are reserved for PLANNED server emission tracked by divergences DV-02 / DV-07 / DV-08 in websocket-protocol.md §10. `rate_limited` has two carriers: (a) an HTTP 429 response on the WS upgrade (per-IP cap breach, pre-auth) and (b) an `error` frame paired with WebSocket close code 4003 Server Overload (per-user cap breach, post-auth). The SDK MUST treat both carriers as the same typed error and apply the extended reconnect backoff documented in websocket-protocol.md §6.1.1 and §7.1.",
           "enum": [
             "auth_failed",
             "auth_timeout",
             "permission_denied",
             "vehicle_not_owned",
             "rate_limited",
-            "internal_error"
+            "internal_error",
+            "snapshot_required"
           ],
           "x-classification": "P0"
         },
@@ -200,7 +234,7 @@
     },
     "SubscribePayload": {
       "type": "object",
-      "description": "PLANNED (not yet accepted by the server). Client->server request to begin or resume streaming a specific vehicle. Today the server implicitly subscribes the client to ALL vehicles owned by the authenticated user as part of the auth handshake (handler.go authenticateClient -> Authenticator.GetUserVehicles). Adding explicit subscribe/unsubscribe is tracked as a follow-up issue (see websocket-protocol.md §10). When implemented, `sinceSeq` enables per-vehicle snapshot-resume per NFR-3.11.",
+      "description": "PLANNED — NOT accepted by the server today. Client->server request to begin or resume streaming a specific vehicle. Today the server implicitly subscribes the client to ALL vehicles owned by the authenticated user as part of the auth handshake (handler.go authenticateClient -> Authenticator.GetUserVehicles). Adding explicit subscribe/unsubscribe is tracked as divergence DV-07 in websocket-protocol.md §10. `sinceSeq` snapshot-resume depends on divergence DV-02 (envelope `seq`) landing first.",
       "required": ["vehicleId"],
       "additionalProperties": false,
       "properties": {
@@ -218,7 +252,7 @@
     },
     "UnsubscribePayload": {
       "type": "object",
-      "description": "PLANNED (not yet accepted by the server). Client->server request to stop receiving updates for a specific vehicle. Tracked as a follow-up issue.",
+      "description": "PLANNED — NOT accepted by the server today. Client->server request to stop receiving updates for a specific vehicle without closing the underlying WebSocket. Tracked as divergence DV-07 in websocket-protocol.md §10. Note: `auth_ok` has been pulled out of DV-07 and is v1-required (see AuthOkPayload); the rest of DV-07 remains deferred.",
       "required": ["vehicleId"],
       "additionalProperties": false,
       "properties": {
@@ -230,7 +264,7 @@
     },
     "PingPayload": {
       "type": "object",
-      "description": "PLANNED (not yet accepted by the server). Client->server ping. Today, browser clients rely on the server's outbound `heartbeat` frames and the underlying WebSocket protocol's PING/PONG control frames (handled transparently by coder/websocket) to detect liveness. An app-level `ping` is a follow-up to enable client-driven keepalive on platforms where the WebSocket library does not expose RFC 6455 PING/PONG (some React Native runtimes, watchOS background sessions).",
+      "description": "PLANNED — NOT accepted by the server today. Client->server ping. Today, browser clients rely on the server's outbound `heartbeat` frames (§7.4) and the underlying WebSocket protocol's PING/PONG control frames (handled transparently by coder/websocket) to detect liveness. An app-level `ping` is reserved for platforms where the WebSocket library does not expose RFC 6455 PING/PONG (some React Native runtimes, watchOS background sessions — NFR-3.36). Tracked as divergence DV-07 in websocket-protocol.md §10. Note: `auth_ok` has been pulled out of DV-07 and is v1-required (see AuthOkPayload); the rest of DV-07 remains deferred.",
       "additionalProperties": false,
       "properties": {
         "nonce": {
@@ -242,7 +276,7 @@
     },
     "PongPayload": {
       "type": "object",
-      "description": "PLANNED. Server->client response to a client-initiated `ping`. Echoes the nonce.",
+      "description": "PLANNED — NOT emitted by the server today. Server->client response to a client-initiated `ping`. Echoes the nonce so the client can compute round-trip latency. Tracked as divergence DV-07 in websocket-protocol.md §10. Note: `auth_ok` has been pulled out of DV-07 and is v1-required (see AuthOkPayload); the rest of DV-07 remains deferred.",
       "additionalProperties": false,
       "properties": {
         "nonce": {

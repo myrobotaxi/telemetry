@@ -15,7 +15,20 @@ info:
     failure (contract-guard).
 
     Anchored requirements: FR-1.1, FR-1.2, FR-1.3, FR-2.1, FR-2.2, FR-2.3,
-    FR-3.1, FR-8.1, FR-8.2, NFR-3.1, NFR-3.2, NFR-3.10, NFR-3.11.
+    FR-3.1, FR-6.1, FR-6.2, FR-7.1, FR-7.3, FR-8.1, FR-8.2, NFR-3.1, NFR-3.2,
+    NFR-3.9, NFR-3.10, NFR-3.11, NFR-3.12, NFR-3.13, NFR-3.21, NFR-3.22.
+
+    v1 charge atomic group: {chargeLevel, chargeState, estimatedRange,
+    timeToFull}. tripStartTime is relocated from the navigation group to the
+    drive group and is carried via drive_started.payload.startedAt. auth_ok
+    is a required v1 server->client frame (see the messages catalogue). The
+    canonical NFR-3.2 debounce window is 500 ms, constrained by Tesla's
+    500 ms batch floor (the NFR literal currently reads 200 ms and an
+    amendment PR is pending -- see divergences DV-01 and DV-13).
+
+    Known, accepted divergences between this spec and the current `internal/ws/`
+    implementation are catalogued in websocket-protocol.md §10 with stable
+    DV-NN identifiers. Any divergence not listed there is contract drift.
   contact:
     name: sdk-architect
     url: https://github.com/tnando/my-robo-taxi-telemetry/tree/main/docs/contracts
@@ -58,13 +71,16 @@ channels:
       auth handshake completes, the server implicitly subscribes the client to
       every vehicle returned by `Authenticator.GetUserVehicles(userID)` and
       streams updates for them. Per-vehicle subscribe/unsubscribe is PLANNED
-      (see websocket-protocol.md §10).
+      (tracked as divergence DV-07 in websocket-protocol.md §10).
 
       Anchored: FR-1.1, FR-1.2, FR-1.3, FR-2.1, FR-2.2, FR-2.3, FR-3.1,
-      FR-8.1, NFR-3.1, NFR-3.2.
+      FR-7.1, FR-8.1, FR-8.2, NFR-3.1, NFR-3.2, NFR-3.9, NFR-3.10, NFR-3.11,
+      NFR-3.21, NFR-3.22.
     messages:
       auth:
         $ref: '#/components/messages/Auth'
+      authOk:
+        $ref: '#/components/messages/AuthOk'
       vehicleUpdate:
         $ref: '#/components/messages/VehicleUpdate'
       driveStarted:
@@ -99,9 +115,12 @@ operations:
       always corresponds to AT MOST ONE atomic group (NFR-3.1) plus optionally
       individually-delivered fields (speed, odometerMiles, etc.).
 
-      Anchored: NFR-3.1, NFR-3.2 (200ms target debounce; current
-      implementation uses 500ms — see websocket-protocol.md §3.2).
+      Anchored: NFR-3.1, NFR-3.2 (canonical v1 window is 500 ms, constrained
+      by Tesla's 500 ms batch floor -- NOT a server-side choice. The
+      NFR-3.2 literal of 200 ms is incorrect; amendment pending -- see
+      websocket-protocol.md §3.2.1 and divergence DV-01 in §10).
     messages:
+      - $ref: '#/channels/vehicleStream/messages/authOk'
       - $ref: '#/channels/vehicleStream/messages/vehicleUpdate'
       - $ref: '#/channels/vehicleStream/messages/driveStarted'
       - $ref: '#/channels/vehicleStream/messages/driveEnded'
@@ -120,7 +139,8 @@ operations:
       The first frame on every connection MUST be `auth`. Today, the server
       ignores all post-auth client frames (`internal/ws/client.go:74-90`). The
       `subscribe`, `unsubscribe`, and `ping` operations are reserved for a
-      follow-up implementation (see websocket-protocol.md §10).
+      follow-up implementation tracked as divergence DV-07 in
+      websocket-protocol.md §10.
     messages:
       - $ref: '#/channels/vehicleStream/messages/auth'
       - $ref: '#/channels/vehicleStream/messages/subscribe'
@@ -174,6 +194,44 @@ components:
             payload:
               token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 
+    AuthOk:
+      name: auth_ok
+      title: Auth OK (server->client)
+      summary: v1-required positive auth acknowledgement. First frame the client receives on success.
+      description: |
+        Emitted by the server as the FIRST frame after a successful auth
+        handshake and successful `Hub.Register`. Transitions the client
+        `connectionState` from `connecting` to `connected` (state-machine.md
+        C-3). Without this frame, SDKs on idle vehicles would sit in
+        `connecting` for up to one heartbeat interval (default 15s) before
+        transitioning to `connected` -- a regression on cold watchOS wakes
+        that was flagged by sdk-swift.
+
+        NOTE: state-machine.md C-3 currently reads "first data frame OR
+        heartbeat arrives" because it was authored before auth_ok was
+        pulled into v1. Aligning C-3 is a follow-up tracked as DV-15 in
+        websocket-protocol.md §10.
+
+        Anchored: FR-6.1, FR-8.1, NFR-3.21.
+      contentType: application/json
+      payload:
+        type: object
+        required: [type, payload]
+        properties:
+          type:
+            const: auth_ok
+          payload:
+            $ref: 'https://myrobotaxi.com/schemas/ws-messages.schema.json#/$defs/AuthOkPayload'
+      examples:
+        - name: happy-path
+          summary: Successful handshake acknowledgement
+          payload:
+            type: auth_ok
+            payload:
+              userId: clxyz1234567890userid
+              vehicleCount: 3
+              issuedAt: '2026-04-13T18:22:00Z'
+
     VehicleUpdate:
       name: vehicle_update
       title: Vehicle update (server->client)
@@ -207,14 +265,16 @@ components:
             $ref: 'https://myrobotaxi.com/schemas/ws-messages.schema.json#/$defs/VehicleUpdatePayload'
       examples:
         - name: charge-group
-          summary: Atomic charge update (chargeLevel + estimatedRange)
+          summary: Atomic charge update (all four v1 members)
           payload:
             type: vehicle_update
             payload:
               vehicleId: clxyz1234567890abcdef
               fields:
                 chargeLevel: 78
+                chargeState: Charging
                 estimatedRange: 245
+                timeToFull: 5400
                 lastUpdated: '2026-04-13T18:22:01Z'
               timestamp: '2026-04-13T18:22:01Z'
         - name: nav-clear
@@ -236,8 +296,15 @@ components:
     DriveStarted:
       name: drive_started
       title: Drive started (server->client)
-      summary: Drive detector announced a new drive for a vehicle.
-      description: Anchored by FR-3.1.
+      summary: Drive detector announced a new drive for a vehicle. Carries the drive atomic group's `startedAt` (v1 home of `tripStartTime`).
+      description: |
+        Anchored by FR-3.1 and NFR-3.1 (drive atomic group membership).
+        `startedAt` is the v1 home of `tripStartTime` per DV-13:
+        tripStartTime was relocated from the navigation atomic group to
+        the drive atomic group because Tesla has no corresponding nav
+        field and the value is derived from the drive detector. The
+        NFR-3.1 literal amendment is a separate follow-up PR (see
+        websocket-protocol.md §10 DV-13).
       contentType: application/json
       payload:
         type: object
@@ -257,15 +324,23 @@ components:
               startLocation:
                 latitude: 37.7749
                 longitude: -122.4194
+              startedAt: '2026-04-13T18:22:00Z'
               timestamp: '2026-04-13T18:22:00Z'
 
     DriveEnded:
       name: drive_ended
       title: Drive ended (server->client)
-      summary: Completed drive that passed the micro-drive filter.
+      summary: Completed drive that passed the micro-drive filter. Wire payload is a SUMMARY.
       description: |
-        Summary fields for immediate UI feedback. Full FR-3.4 fields are
-        retrieved via REST `/drives/{id}` after this frame.
+        Summary fields for immediate UI feedback. The wire payload is
+        intentionally narrow; the full FR-3.4 drive record is retrieved
+        via REST GET /drives/{id} on demand via the SDK's
+        `fetchDrive(driveId)` helper (see websocket-protocol.md §4.3 for
+        the SDK public API surface).
+
+        The v1 wire emits `durationSeconds` (number, seconds). The earlier
+        Go time.Duration string format has been dropped before v1 ship
+        -- see divergence DV-12 in websocket-protocol.md §10 (RESOLVED).
 
         Anchored: FR-3.1, FR-3.4.
       contentType: application/json
@@ -285,7 +360,7 @@ components:
               vehicleId: clxyz1234567890abcdef
               driveId: clmno9876543210zyxw
               distance: 12.4
-              duration: 24m18s
+              durationSeconds: 1458
               avgSpeed: 30.5
               maxSpeed: 65.2
               timestamp: '2026-04-13T18:46:18Z'
@@ -356,7 +431,10 @@ components:
         Anchored by FR-7.1, FR-7.3. The server sends this frame for transport
         and authorization failures. After sending an `auth_failed` or
         `auth_timeout` error, the server immediately closes the WebSocket
-        with close code 1008 (Policy Violation).
+        with close code 1008 (Policy Violation). After sending a
+        `rate_limited` error for a per-user cap breach, the server closes
+        with close code 4003 (Server Overload) -- see websocket-protocol.md
+        §1.3 and §6.2.
 
         See websocket-protocol.md §6 for the close-code matrix.
       contentType: application/json
@@ -381,6 +459,13 @@ components:
             payload:
               code: auth_timeout
               message: 'hub.authenticateClient: auth timeout'
+        - name: rate-limited-per-user
+          summary: Per-user concurrent-connection cap exceeded; paired with close code 4003.
+          payload:
+            type: error
+            payload:
+              code: rate_limited
+              message: per-user connection cap exceeded
 
     Subscribe:
       name: subscribe
@@ -390,7 +475,8 @@ components:
         NOT yet accepted by the server. Today, the server implicitly
         subscribes the client to ALL vehicles returned by
         `Authenticator.GetUserVehicles(userID)` during the auth handshake.
-        See websocket-protocol.md §10 follow-up.
+        Tracked as divergence DV-07 in websocket-protocol.md §10.
+        `sinceSeq` snapshot-resume requires DV-02 (envelope `seq`) first.
       contentType: application/json
       payload:
         type: object
@@ -405,7 +491,12 @@ components:
       name: unsubscribe
       title: Unsubscribe (client->server, PLANNED)
       summary: PLANNED — release a per-vehicle subscription.
-      description: NOT yet accepted by the server. Tracked as a follow-up.
+      description: |
+        NOT yet accepted by the server. Tracked as divergence DV-07 in
+        websocket-protocol.md §10. Note: `auth_ok` has been pulled out
+        of DV-07 and is v1-required; the remainder of DV-07 (explicit
+        subscribe/unsubscribe/ping/pong and typed `permission_denied`)
+        is still deferred.
       contentType: application/json
       payload:
         type: object
@@ -439,7 +530,12 @@ components:
       name: pong
       title: Pong (server->client, PLANNED)
       summary: PLANNED — response to a client `ping`.
-      description: NOT yet emitted by the server. Tracked as a follow-up.
+      description: |
+        NOT yet emitted by the server. Tracked as divergence DV-07 in
+        websocket-protocol.md §10. Note: `auth_ok` has been pulled out
+        of DV-07 and is v1-required; the remainder of DV-07 (explicit
+        subscribe/unsubscribe/ping/pong and typed `permission_denied`)
+        is still deferred.
       contentType: application/json
       payload:
         type: object

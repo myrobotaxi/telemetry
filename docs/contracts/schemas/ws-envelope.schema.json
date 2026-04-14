@@ -9,9 +9,10 @@
   "properties": {
     "type": {
       "type": "string",
-      "description": "Discriminator naming the message type. Server->client values: 'vehicle_update', 'drive_started', 'drive_ended', 'connectivity', 'heartbeat', 'error'. Client->server values: 'auth' (only message currently accepted; 'subscribe', 'unsubscribe', 'ping' are reserved for follow-up — see websocket-protocol.md §10).",
+      "description": "Discriminator naming the message type. Server->client values: 'auth_ok' (v1-required positive auth acknowledgement, triggers state-machine C-3 — see websocket-protocol.md §2.3), 'vehicle_update', 'drive_started', 'drive_ended', 'connectivity', 'heartbeat', 'error'. Client->server values: 'auth' (only message currently accepted; 'subscribe', 'unsubscribe', 'ping' are reserved for follow-up — see websocket-protocol.md §10 DV-07).",
       "enum": [
         "auth",
+        "auth_ok",
         "vehicle_update",
         "drive_started",
         "drive_ended",
@@ -32,13 +33,13 @@
     "seq": {
       "type": "integer",
       "minimum": 0,
-      "description": "PLANNED (not yet emitted by the server). Monotonic per-connection sequence number assigned by the server, starting at 0 on each successful authenticated session. Used by clients on reconnect to request snapshot-resume from sequence N (NFR-3.11). Until the server is extended to emit `seq`, clients MUST tolerate its absence and treat every frame as gap-free. Tracked by follow-up issue (see websocket-protocol.md §10 open questions).",
+      "description": "PLANNED — NOT emitted by the server today. Monotonic per-connection sequence number assigned by the server, starting at 0 on each successful authenticated session. Used by clients on reconnect to request snapshot-resume from sequence N (NFR-3.11) via the planned `subscribe.sinceSeq` field. Until the server is extended to emit `seq`, clients MUST tolerate its absence and treat every frame as gap-free. Tracked as divergence DV-02 in websocket-protocol.md §10.",
       "x-classification": "P0"
     },
     "ts": {
       "type": "string",
       "format": "date-time",
-      "description": "PLANNED top-level timestamp (not yet emitted by the server). Server-authoritative ISO 8601 UTC timestamp for the envelope itself, distinct from any payload-internal `timestamp` field. Clients MUST tolerate its absence today; the per-payload `timestamp` field (e.g., `vehicle_update.timestamp`, `drive_started.timestamp`) carries the same information in v1.0. Tracked by follow-up issue.",
+      "description": "PLANNED — NOT emitted by the server today. Server-authoritative ISO 8601 UTC timestamp for the envelope itself, distinct from any payload-internal `timestamp` field. Clients MUST tolerate its absence today; the per-payload `timestamp` field (e.g., `vehicle_update.timestamp`, `drive_started.timestamp`) carries the same information in v1.0. Tracked as divergence DV-02 in websocket-protocol.md §10.",
       "x-classification": "P0"
     }
   },
@@ -47,6 +48,7 @@
       "type": "string",
       "enum": [
         "auth",
+        "auth_ok",
         "vehicle_update",
         "drive_started",
         "drive_ended",
