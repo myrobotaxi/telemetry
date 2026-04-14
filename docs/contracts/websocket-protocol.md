@@ -168,8 +168,9 @@ SDK handling:
 1. On receipt of `auth_ok`, the SDK transitions `connectionState`: `connecting -> connected` (state-machine.md C-3). This is the canonical trigger for C-3 -- the SDK MUST NOT use "first data frame" or "first heartbeat" as the trigger. See DV-15 for the required state-machine.md amendment aligning C-3's trigger.
 2. If the `userId` field does not match a previously-cached user ID for this consumer, the SDK SHOULD surface this as a warning and clear any per-user cache that may contain values from the wrong account. This is a defense against token mix-up bugs in consumer code, not a server-side issue.
 3. `vehicleCount` is informational; the authoritative ownership set is populated on the next REST snapshot fetch (§7.2).
+4. **Pre-`auth_ok` liveness bound.** The SDK MUST bound its wait for `auth_ok` with a local timer of **6 seconds** (1-second grace over the server's 5-second `HandlerConfig.AuthTimeout`, to absorb one-way network latency). The timer starts the moment the `auth` frame has been handed to the socket (i.e., alongside C-1 `initializing -> connecting`). If `auth_ok` has not arrived AND no `error` frame has arrived AND the WebSocket has not closed within this window, the SDK MUST treat this as a silent handshake failure: close the socket locally with code 1001 and transition `connecting -> disconnected` (C-4) with a typed reason of `auth_timeout`. This bounds the "Connecting..." UI state on degraded paths (e.g., upgrade succeeded but the server stalled post-`Hub.Register`). Without this bound the only fallback is the §7.4.1 liveness watchdog, which does not start until the first frame arrives and therefore cannot cover the pre-`auth_ok` window. The liveness watchdog (§7.4.1) is a separate, post-`auth_ok` mechanism.
 
-The server **also** sends an explicit error frame on failure (§6.1) followed by a close frame with code 1008. Failure and success paths are mutually exclusive -- the client either sees `auth_ok` (success) or an `error` frame followed by close 1008 (failure), never both.
+The server **also** sends an explicit error frame on failure (§6.1) followed by a close frame with code 1008. Failure and success paths are mutually exclusive -- the client either sees `auth_ok` (success) or an `error` frame followed by close 1008 (failure) or the SDK pre-`auth_ok` timer expires (silent failure), never more than one.
 
 > **Note on DV-07:** `auth_ok` is v1-required and has been pulled OUT of DV-07. The rest of DV-07 (explicit `subscribe` / `unsubscribe` / `ping` / `pong` control frames, typed `permission_denied` error) remains deferred.
 
@@ -181,6 +182,7 @@ The handshake drives the following [`state-machine.md`](state-machine.md) §1.3 
 |------------|------------------------------|-------|
 | HTTP 101 + outbound `auth` frame | `initializing -> connecting` (C-1) | Token in flight |
 | Receipt of `auth_ok` frame | `connecting -> connected` (C-3) | Canonical trigger. Reset retry counter; start SDK liveness watchdog (§7.4.1). See DV-15 -- state-machine.md C-3 currently reads "first data frame OR heartbeat" and must be amended to "receipt of `auth_ok`" in a follow-up PR. |
+| SDK pre-`auth_ok` timer expires (6 s, §2.3 rule 4) | `connecting -> disconnected` (C-4) | Bounds the "Connecting..." UI state on degraded paths (post-upgrade stall, dropped `auth_ok` in flight). Surface as typed `auth_timeout`; auto-retry with backoff. Independent of the post-`auth_ok` liveness watchdog (§7.4.1). |
 | `Authenticator.ValidateToken` returns error | `connecting -> error` (C-5 terminal if `auth_failed`) | Surface `auth_failed` typed error; no auto-retry |
 | Auth deadline exceeded (`ErrAuthTimeout`) | `connecting -> disconnected` (C-4) | Surface `auth_timeout`; auto-retry with backoff. See DV-06. |
 | Per-user cap breach (close code 4003) | `connecting -> disconnected` (C-4) | Surface `rate_limited`; auto-retry with extended backoff. See DV-08. |
@@ -300,7 +302,7 @@ This section is the wire-level catalog. Field-level types, units, nullability, a
 
 | `type` | Direction | Source (Go) | Atomic group | Triggers `dataState` transition | Fixture (planned) |
 |--------|-----------|-------------|--------------|---------------------------------|-------------------|
-| `auth_ok` | server->client | `handler.go:authenticateClient` (PLANNED per DV-08 wiring; see §2.3) | n/a | `connecting -> connected` (C-3) | [`fixtures/websocket/auth_ok.json`](fixtures/README.md) |
+| `auth_ok` | server->client | `handler.go:authenticateClient` (v1-required; see §2.3. Independent of DV-08 caps wiring — the two changes land together in follow-up implementation but are logically separable.) | n/a | `connecting -> connected` (C-3) | [`fixtures/websocket/auth_ok.json`](fixtures/README.md) |
 | `vehicle_update` | server->client | [`nav_broadcast.go`](../../internal/ws/nav_broadcast.go) / [`route_broadcast.go`](../../internal/ws/route_broadcast.go) | one of `navigation`, `charge`, `gps`, `gear`, or none | per-group `ready/cleared/error -> ready` (D-3 / D-9 / D-12), or `ready -> cleared` on nav clear (D-5) | [`fixtures/websocket/vehicle_update.*.json`](fixtures/README.md) |
 | `drive_started` | server->client | [`broadcaster.go:handleDriveStarted`](../../internal/ws/broadcaster.go) | n/a | drive lifecycle `idle -> driving` (DR-1) / `ended -> driving` (DR-6) | [`fixtures/websocket/drive_started.json`](fixtures/README.md) |
 | `drive_ended` | server->client | [`broadcaster.go:handleDriveEnded`](../../internal/ws/broadcaster.go) | n/a | drive lifecycle `driving -> ended` (DR-3) | [`fixtures/websocket/drive_ended.json`](fixtures/README.md) |
@@ -875,6 +877,8 @@ The SDK uses the heartbeat as a positive liveness signal:
 - If the watchdog fires (no frame for `2 * heartbeatInterval`, default 30 s), the SDK treats it as a silent disconnect and triggers `WS_CLOSED` -> `connecting` (C-6 -> C-9).
 
 Per Rule CG-SM-1 ([`state-machine.md`](state-machine.md) §7), the watchdog MUST NOT be used to mark `dataState` as `stale`. `dataState` transitions to `stale` only when the WebSocket actually closes (NFR-3.7, NFR-3.8b).
+
+**Two-watchdog model.** The liveness watchdog described above is the **post-`auth_ok`** mechanism: it is armed on receipt of `auth_ok` and reset on every subsequent frame. Before `auth_ok` arrives, a separate **pre-`auth_ok` timer** is in effect (§2.3 rule 4) — a 6-second bound starting when the SDK hands the `auth` frame to the socket. The two timers never overlap: the pre-`auth_ok` timer is cancelled the moment `auth_ok` arrives or C-3 fires, whichever happens first; the liveness watchdog is armed at that same moment. Any "no frame" window between `connecting` and `connected` is covered by the pre-`auth_ok` timer; every "no frame" window after `connected` is covered by the liveness watchdog. Together they bound the end-user "Connecting..." banner to at most 6 s on degraded paths and bound silent data-plane stalls to at most 30 s.
 
 #### 7.4.2 SDK MUST NOT use heartbeat for freshness
 

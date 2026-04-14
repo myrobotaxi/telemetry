@@ -76,7 +76,9 @@ Every column in every persisted table is listed below. The **Tier** column is th
 | `color` | `String` | P0 | No | Yes | Vehicle color |
 | `licensePlate` | `String` | P1 | No | No | Can be used to look up registered owner — PII |
 | `chargeLevel` | `Int` | P0 | No | Yes | Battery percentage — not identifying |
+| `chargeState` | `String` (enum) | P0 | No | Yes | Charge state enum (`Disconnected`, `Charging`, `Complete`, …) — not identifying. Tesla proto field 2. Added by MYR-11 (v1 charge atomic group). |
 | `estimatedRange` | `Int` | P0 | No | Yes | Range in miles — not identifying |
+| `timeToFull` | `Float` | P0 | No | Yes | Seconds to full charge at current rate — not identifying. Tesla proto field 43 (`TimeToFullCharge`, double). Added by MYR-11 (v1 charge atomic group). |
 | `status` | `VehicleStatus` | P0 | No | Yes | Enum: driving/parked/charging/offline/in_service |
 | `speed` | `Int` | P0 | No | Yes | Speed in mph — not identifying without GPS |
 | `gearPosition` | `String?` | P0 | No | Yes | Gear state — not identifying |
@@ -397,7 +399,7 @@ The `contract-guard` agent/CI check enforces the following rules derived from th
 
 | Tier | Count | Description |
 |------|-------|-------------|
-| P0 | 83 | Public — timestamps, opaque IDs, aggregate stats, feature flags, enums |
+| P0 | 85 | Public — timestamps, opaque IDs, aggregate stats, feature flags, enums |
 | P1 | 26 | Sensitive — GPS coordinates, location names/addresses, OAuth tokens, PII, route data |
 | P2 | 0 | Access-logged — reserved for future use |
 
