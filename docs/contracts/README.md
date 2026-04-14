@@ -18,13 +18,24 @@ These contracts are the single source of truth. If the code and the contract dis
 
 | Document | Purpose | Target artifact |
 |----------|---------|-----------------|
-| [`websocket-protocol.md`](websocket-protocol.md) | Defines every WebSocket message exchanged between server and clients: message shapes, atomic group payloads, connection lifecycle, server→client and client→server message catalogs. | AsyncAPI 3.0 spec |
+| [`websocket-protocol.md`](websocket-protocol.md) | Defines every WebSocket message exchanged between server and clients: message shapes, atomic group payloads, connection lifecycle, server→client and client→server message catalogs. | AsyncAPI 3.0 spec at [`specs/websocket.asyncapi.yaml`](specs/websocket.asyncapi.yaml) + JSON Schemas under [`schemas/`](schemas/) |
 | [`rest-api.md`](rest-api.md) | Defines REST endpoints for snapshot fetches, drive history pagination, sharing/invite flows, and user data deletion. | OpenAPI 3.1 spec |
-| [`vehicle-state-schema.md`](vehicle-state-schema.md) | Canonical JSON Schema for vehicle, nav, charge, GPS, and gear state. Declares atomic groups and per-field types, nullability, and units. | JSON Schema draft-2020-12 |
+| [`vehicle-state-schema.md`](vehicle-state-schema.md) | Canonical JSON Schema for vehicle, nav, charge, GPS, and gear state. Declares atomic groups and per-field types, nullability, and units. | JSON Schema draft-2020-12 at [`schemas/vehicle-state.schema.json`](schemas/vehicle-state.schema.json) |
 | [`data-classification.md`](data-classification.md) | Labels every persisted field P0 (public), P1 (sensitive, encrypted at rest), or P2 (sensitive + access-logged). Drives logging redaction rules and encryption boundaries. | Reference table |
 | [`data-lifecycle.md`](data-lifecycle.md) | Retention windows, deletion semantics, audit log format, and the single-source-of-truth rule for every persisted field. | Policy doc + DB schema notes |
 | [`state-machine.md`](state-machine.md) | Connection state machine (`initializing | connecting | connected | disconnected | error`), drive lifecycle states, and per-group data freshness states (`loading | ready | stale | cleared | error`). | State diagrams + transition tables |
 | [`fixtures/README.md`](fixtures/README.md) | Index of canonical payload fixtures used for contract conformance testing across both SDKs and the server. | Fixture library |
+
+### Machine-readable specs and schemas
+
+The human-readable contract docs above are paired with machine-readable specs and schemas that SDK code generators, contract-tester, and contract-guard consume directly. Drift between a markdown doc and its machine twin is a CI failure.
+
+| File | Anchored doc | Purpose |
+|------|--------------|---------|
+| [`specs/websocket.asyncapi.yaml`](specs/websocket.asyncapi.yaml) | [`websocket-protocol.md`](websocket-protocol.md) | AsyncAPI 3.0 description of the `/api/ws` channel, every server↔client message, and the auth security scheme. References JSON Schemas via `$ref` rather than duplicating payloads. |
+| [`schemas/vehicle-state.schema.json`](schemas/vehicle-state.schema.json) | [`vehicle-state-schema.md`](vehicle-state-schema.md) | Canonical `VehicleState` shape, atomic-group annotations, classification labels. |
+| [`schemas/ws-envelope.schema.json`](schemas/ws-envelope.schema.json) | [`websocket-protocol.md`](websocket-protocol.md) §3 | Top-level envelope (`type` discriminator, `payload`, planned `seq`/`ts`). |
+| [`schemas/ws-messages.schema.json`](schemas/ws-messages.schema.json) | [`websocket-protocol.md`](websocket-protocol.md) §4–§5 | Per-message payload schemas: auth, vehicle_update, drive_started, drive_ended, connectivity, heartbeat, error, plus the planned subscribe/unsubscribe/ping/pong control messages. |
 
 ---
 
