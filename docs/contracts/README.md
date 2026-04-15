@@ -1,6 +1,6 @@
 # MyRoboTaxi SDK v1 — Contracts
 
-**Status:** Scaffold — individual contracts are TODO placeholders
+**Status:** Active — v1 contracts authored (six markdown docs + four machine-readable specs). Fixtures library is still scaffold.
 **Owner:** `sdk-architect` agent
 **Anchors:** All contracts in this directory trace back to [`docs/architecture/requirements.md`](../architecture/requirements.md).
 
@@ -19,7 +19,7 @@ These contracts are the single source of truth. If the code and the contract dis
 | Document | Purpose | Target artifact |
 |----------|---------|-----------------|
 | [`websocket-protocol.md`](websocket-protocol.md) | Defines every WebSocket message exchanged between server and clients: message shapes, atomic group payloads, connection lifecycle, server→client and client→server message catalogs. | AsyncAPI 3.0 spec at [`specs/websocket.asyncapi.yaml`](specs/websocket.asyncapi.yaml) + JSON Schemas under [`schemas/`](schemas/) |
-| [`rest-api.md`](rest-api.md) | Defines REST endpoints for snapshot fetches, drive detail fetches (`GET /drives/{id}` — the canonical source for the full FR-3.4 drive record per DV-11, paired with the `drive_ended` WebSocket summary and the SDK's `fetchDrive(driveId)` helper), drive history pagination, sharing/invite flows, and user data deletion. TODO: document is not yet authored. | OpenAPI 3.1 spec |
+| [`rest-api.md`](rest-api.md) | Defines REST endpoints for snapshot fetches, drive detail fetches (`GET /drives/{id}` — the canonical source for the full FR-3.4 drive record per DV-11, paired with the `drive_ended` WebSocket summary and the SDK's `fetchDrive(driveId)` helper), drive history pagination (cursor-based), sharing/invite flows, and user data deletion. Reuses the shared bearer-token auth scheme and typed error catalog from the WebSocket contract. | OpenAPI 3.1 spec at [`specs/rest.openapi.yaml`](specs/rest.openapi.yaml) |
 | [`vehicle-state-schema.md`](vehicle-state-schema.md) | Canonical JSON Schema for vehicle, nav, charge, GPS, and gear state. Declares atomic groups and per-field types, nullability, and units. | JSON Schema draft-2020-12 at [`schemas/vehicle-state.schema.json`](schemas/vehicle-state.schema.json) |
 | [`data-classification.md`](data-classification.md) | Labels every persisted field P0 (public), P1 (sensitive, encrypted at rest), or P2 (sensitive + access-logged). Drives logging redaction rules and encryption boundaries. | Reference table |
 | [`data-lifecycle.md`](data-lifecycle.md) | Retention windows, deletion semantics, audit log format, and the single-source-of-truth rule for every persisted field. | Policy doc + DB schema notes |
@@ -33,6 +33,7 @@ The human-readable contract docs above are paired with machine-readable specs an
 | File | Anchored doc | Purpose |
 |------|--------------|---------|
 | [`specs/websocket.asyncapi.yaml`](specs/websocket.asyncapi.yaml) | [`websocket-protocol.md`](websocket-protocol.md) | AsyncAPI 3.0 description of the `/api/ws` channel, every server↔client message, and the auth security scheme. References JSON Schemas via `$ref` rather than duplicating payloads. |
+| [`specs/rest.openapi.yaml`](specs/rest.openapi.yaml) | [`rest-api.md`](rest-api.md) | OpenAPI 3.1 description of every REST endpoint (snapshot, drives list, drive detail, drive route, invite lifecycle, user deletion), the shared bearer-token security scheme, the REST-only extensions to the typed error catalog, and the cursor-based pagination wrapper. References `vehicle-state.schema.json` via `$ref` for the snapshot response; REST-only shapes are declared inline. |
 | [`schemas/vehicle-state.schema.json`](schemas/vehicle-state.schema.json) | [`vehicle-state-schema.md`](vehicle-state-schema.md) | Canonical `VehicleState` shape, atomic-group annotations, classification labels. |
 | [`schemas/ws-envelope.schema.json`](schemas/ws-envelope.schema.json) | [`websocket-protocol.md`](websocket-protocol.md) §3 | Top-level envelope (`type` discriminator, `payload`, planned `seq`/`ts`). |
 | [`schemas/ws-messages.schema.json`](schemas/ws-messages.schema.json) | [`websocket-protocol.md`](websocket-protocol.md) §4–§5 | Per-message payload schemas: auth, vehicle_update, drive_started, drive_ended, connectivity, heartbeat, error, plus the planned subscribe/unsubscribe/ping/pong control messages. |

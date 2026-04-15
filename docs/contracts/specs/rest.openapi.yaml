@@ -1,0 +1,1414 @@
+openapi: 3.1.0
+info:
+  title: MyRoboTaxi Telemetry REST API
+  version: 1.0.0
+  summary: REST surface for the MyRoboTaxi SDK v1.
+  description: |
+    Non-streaming REST surface that binds the Go telemetry server's REST
+    handlers (PLANNED, see divergences DV-19/DV-20) to the MyRoboTaxi
+    TypeScript and Swift SDKs. This document is the machine-readable twin
+    of `docs/contracts/rest-api.md`. The markdown is the human source of
+    truth; this YAML is consumed by OpenAPI tooling, `contract-tester`
+    fixtures, and SDK code generators.
+
+    The snapshot response references `schemas/vehicle-state.schema.json`
+    via `$ref` rather than re-declaring the VehicleState shape. REST-only
+    shapes (DriveSummary, DriveDetail, DriveRoute, RoutePoint, Invite,
+    CreateInviteRequest, ErrorEnvelope, PaginatedDrives, PaginatedInvites,
+    DeleteUserResponse) are declared inline under components/schemas for
+    the v1 scope. A follow-up will extract them to sibling JSON Schemas.
+
+    Anchored requirements: FR-3.2, FR-3.3, FR-3.4, FR-5.1, FR-5.2, FR-5.3,
+    FR-5.4, FR-5.5, FR-6.1, FR-6.2, FR-7.1, FR-7.3, FR-9.1, FR-9.2, FR-10.1,
+    FR-10.2, NFR-3.5, NFR-3.11, NFR-3.19, NFR-3.20, NFR-3.21, NFR-3.22,
+    NFR-3.23, NFR-3.27, NFR-3.29.
+
+    Known, accepted divergences between this spec and the current
+    `internal/server/` + `internal/store/` implementation are catalogued
+    in rest-api.md §10 with stable DV-NN identifiers (DV-19 through DV-23
+    in this PR). Any divergence not listed there is contract drift.
+  contact:
+    name: sdk-architect
+    url: https://github.com/tnando/my-robo-taxi-telemetry/tree/main/docs/contracts
+  license:
+    name: Proprietary
+    identifier: LicenseRef-Proprietary
+
+servers:
+  - url: https://api.myrobotaxi.com/api
+    description: |
+      Production telemetry server. HTTPS required (NFR-3.22). TLS
+      termination at the Fly.io edge. Browser clients originate from
+      https://app.myrobotaxi.com. Same host as the WebSocket channel
+      (/api/ws) -- the /api prefix is shared with the existing
+      Tesla-owned endpoints /api/vehicle-status/{vin} and
+      /api/fleet-config/{vin}.
+  - url: http://localhost:8080/api
+    description: |
+      Local development server. Plain HTTP allowed only when the server
+      is bound to loopback. The SDK MUST refuse non-loopback HTTP hosts
+      in production builds.
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: snapshot
+    description: Cold-load vehicle state snapshot (NFR-3.5, NFR-3.11).
+  - name: drives
+    description: Drive history list, per-drive detail, per-drive route playback (FR-3.2, FR-3.3, FR-3.4, FR-9.1, FR-9.2).
+  - name: invites
+    description: Sharing invite lifecycle (FR-5.1, FR-5.2, FR-5.3).
+  - name: account
+    description: User-initiated data deletion (FR-10.1, FR-10.2).
+
+paths:
+  /vehicles/{vehicleId}/snapshot:
+    get:
+      operationId: getVehicleSnapshot
+      tags: [snapshot]
+      summary: Cold-load vehicle state snapshot.
+      description: |
+        Returns the full current VehicleState for a single vehicle. This
+        is the snapshot the SDK fetches on cold page load and on every
+        reconnect per NFR-3.11 (see websocket-protocol.md §7.2 reconnect
+        sequence). The snapshot is the DB source-of-truth
+        (data-lifecycle.md §1.2); the WebSocket is the real-time channel.
+
+        Latency target: p95 < 500 ms end-to-end per requirements.md §3.1.
+
+        RBAC: owners see all fields in vehicle-state.schema.json; viewers
+        see all fields EXCEPT licensePlate (forward-looking mask -- see
+        rest-api.md §5.2.1). The limited_viewer extension slot (FR-5.5)
+        is NOT implemented in v1 but is documented as the extension seam.
+      x-anchored-requirements:
+        - NFR-3.5
+        - NFR-3.11
+        - FR-1.1
+        - FR-1.2
+        - FR-2.1
+      x-divergence: DV-20
+      parameters:
+        - $ref: '#/components/parameters/VehicleIdPath'
+      responses:
+        '200':
+          description: Current VehicleState snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: 'https://myrobotaxi.com/schemas/vehicle-state.schema.json'
+              examples:
+                parked-vehicle:
+                  summary: Parked vehicle, no active navigation, disconnected from charger.
+                  value:
+                    vehicleId: clxyz1234567890abcdef
+                    name: Stumpy
+                    model: null
+                    year: null
+                    color: null
+                    status: parked
+                    speed: 0
+                    heading: 180
+                    latitude: 10.0
+                    longitude: 20.0
+                    locationName: null
+                    locationAddress: null
+                    gearPosition: P
+                    chargeLevel: 78
+                    chargeState: Disconnected
+                    estimatedRange: 245
+                    timeToFull: null
+                    interiorTemp: 68
+                    exteriorTemp: 55
+                    odometerMiles: 12458
+                    fsdMilesToday: null
+                    destinationName: null
+                    destinationAddress: null
+                    destinationLatitude: null
+                    destinationLongitude: null
+                    originLatitude: null
+                    originLongitude: null
+                    etaMinutes: null
+                    tripDistanceRemaining: null
+                    navRouteCoordinates: null
+                    lastUpdated: '2026-04-13T18:22:01Z'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/VehicleNotOwned'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      x-role-masks:
+        owner: ['*']
+        viewer:
+          description: All VehicleState fields except licensePlate (forward-looking; licensePlate is not currently a member of VehicleState).
+          excludes:
+            - licensePlate
+        limited_viewer:
+          description: FR-5.5 extension seam -- NOT implemented in v1. Documented for future readiness.
+          excludes:
+            - licensePlate
+            - navRouteCoordinates
+            - destinationName
+            - destinationAddress
+            - destinationLatitude
+            - destinationLongitude
+            - originLatitude
+            - originLongitude
+          modifications:
+            latitude: coarse_hash
+            longitude: coarse_hash
+
+  /vehicles/{vehicleId}/drives:
+    get:
+      operationId: listVehicleDrives
+      tags: [drives]
+      summary: Paginated drive history for a vehicle.
+      description: |
+        Returns a cursor-paginated list of completed drives for a
+        vehicle, ordered by startTime DESC, id DESC. This is the
+        one-shot paginated fetch half of FR-9.1 / FR-9.2; the reactive
+        half is the WebSocket drive_ended subscription (see
+        websocket-protocol.md §4.3). The SDK prepends newly-completed
+        drives to its in-memory list on drive_ended WITHOUT re-fetching,
+        satisfying FR-9.2.
+
+        Ordering tiebreaker: id DESC is required for cursor stability
+        when multiple drives share the same startTime millisecond.
+
+        Retention: drives older than 365 days are pruned by the
+        background retention job per NFR-3.27 (see data-lifecycle.md §5).
+        A cursor scan that straddles a prune event MAY observe items
+        disappearing from the tail -- this is acceptable.
+
+        RBAC: owners and viewers see the same summary field set.
+        startAddress/endAddress/energyUsedKwh/etc are intentionally NOT
+        in the list response -- they are returned by the drive detail
+        endpoint. See rest-api.md §5.2.2.
+      x-anchored-requirements:
+        - FR-3.2
+        - FR-9.1
+        - FR-9.2
+        - NFR-3.27
+      x-divergence: DV-20
+      parameters:
+        - $ref: '#/components/parameters/VehicleIdPath'
+        - $ref: '#/components/parameters/LimitQuery'
+        - $ref: '#/components/parameters/CursorQuery'
+      responses:
+        '200':
+          description: Paginated drive summary list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedDrives'
+              examples:
+                two-drives:
+                  summary: First page with two drives.
+                  value:
+                    items:
+                      - id: clmno9876543210zyxw0001
+                        vehicleId: clxyz1234567890abcdef
+                        startTime: '2026-04-13T18:22:00Z'
+                        endTime: '2026-04-13T18:46:18Z'
+                        date: '2026-04-13'
+                        distanceMiles: 12.4
+                        durationSeconds: 1458
+                        avgSpeedMph: 30.5
+                        maxSpeedMph: 65.2
+                        startChargeLevel: 82
+                        endChargeLevel: 76
+                        createdAt: '2026-04-13T18:46:19Z'
+                      - id: clmno9876543210zyxw0002
+                        vehicleId: clxyz1234567890abcdef
+                        startTime: '2026-04-13T08:14:00Z'
+                        endTime: '2026-04-13T08:29:07Z'
+                        date: '2026-04-13'
+                        distanceMiles: 5.1
+                        durationSeconds: 907
+                        avgSpeedMph: 20.2
+                        maxSpeedMph: 42.0
+                        startChargeLevel: 85
+                        endChargeLevel: 82
+                        createdAt: '2026-04-13T08:29:08Z'
+                    nextCursor: eyJzdGFydFRpbWUiOiIyMDI2LTA0LTEzVDA4OjE0OjAwWiIsImlkIjoiY2xtbm85ODc2NTQzMjEwenl4dzAwMDIifQ==
+                    hasMore: true
+                final-page:
+                  summary: Final page (nextCursor null, hasMore false).
+                  value:
+                    items: []
+                    nextCursor: null
+                    hasMore: false
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/VehicleNotOwned'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      x-role-masks:
+        owner: ['*']
+        viewer: ['*']
+
+  /drives/{driveId}:
+    get:
+      operationId: getDriveDetail
+      tags: [drives]
+      summary: Single drive detail with full FR-3.4 stats.
+      description: |
+        Returns the full FR-3.4 stats for a single completed drive. This
+        is the endpoint invoked by the SDK's fetchDrive(driveId) helper
+        paired with the drive_ended WebSocket message (see
+        websocket-protocol.md §4.3 DV-11 resolution). The drive_ended
+        wire payload is deliberately a summary; the full record lives
+        here.
+
+        Does NOT include routePoints -- those are returned by the
+        separate GET /drives/{driveId}/route endpoint (heavy payload;
+        lazy-fetch guidance on the route endpoint).
+
+        RBAC: owners and viewers see the same field set including
+        start/end location and address (both are P1 per
+        data-classification.md §1.4). The viewer has explicit consent
+        via the accepted invite -- denying them the start/end address
+        would defeat the sharing use case (FR-5.1).
+      x-anchored-requirements:
+        - FR-3.4
+        - FR-9.1
+      x-divergence: DV-20
+      parameters:
+        - $ref: '#/components/parameters/DriveIdPath'
+      responses:
+        '200':
+          description: Full drive detail record.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DriveDetail'
+              examples:
+                happy-path:
+                  summary: Completed morning commute.
+                  value:
+                    id: clmno9876543210zyxw0001
+                    vehicleId: clxyz1234567890abcdef
+                    startTime: '2026-04-13T18:22:00Z'
+                    endTime: '2026-04-13T18:46:18Z'
+                    date: '2026-04-13'
+                    distanceMiles: 12.4
+                    durationSeconds: 1458
+                    avgSpeedMph: 30.5
+                    maxSpeedMph: 65.2
+                    energyUsedKwh: 4.2
+                    startChargeLevel: 82
+                    endChargeLevel: 76
+                    fsdMiles: 8.1
+                    fsdPercentage: 65.3
+                    interventions: 1
+                    startLocation: Location A
+                    startAddress: synthetic-start-address
+                    endLocation: Location B
+                    endAddress: synthetic-end-address
+                    createdAt: '2026-04-13T18:46:19Z'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/VehicleNotOwned'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      x-role-masks:
+        owner: ['*']
+        viewer: ['*']
+
+  /drives/{driveId}/route:
+    get:
+      operationId: getDriveRoute
+      tags: [drives]
+      summary: Full GPS polyline for drive playback.
+      description: |
+        Returns the full GPS polyline for a drive as an array of
+        RoutePoint records. The polyline is encrypted at rest via
+        AES-256-GCM (NFR-3.23) on Drive.routePoints
+        (data-classification.md §1.5), decrypted in the store layer per
+        NFR-3.25, and transported plaintext over TLS (NFR-3.22). The
+        SDK never sees ciphertext.
+
+        Payload size: a 60-minute drive at 1 Hz is ~3,600 points and
+        serializes to ~200-300 KB of JSON. This fits in any v1 target
+        runtime (including watchOS). The SDK SHOULD fetch this endpoint
+        lazily on user tap-through, not eagerly for every drive in the
+        list -- NOT because of heap pressure (the payload is
+        memory-safe) but to protect cellular bandwidth on low-bandwidth
+        networks, especially watchOS per NFR-3.36. Eager prefetch on
+        WiFi is acceptable for the top 1-3 drives.
+
+        RBAC: owners and viewers see the full polyline.
+      x-anchored-requirements:
+        - FR-3.3
+        - NFR-3.23
+      x-divergence: DV-20
+      parameters:
+        - $ref: '#/components/parameters/DriveIdPath'
+      responses:
+        '200':
+          description: Drive route polyline.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DriveRoute'
+              examples:
+                three-points:
+                  summary: Short polyline excerpt (real drives are ~3,600 points).
+                  value:
+                    driveId: clmno9876543210zyxw0001
+                    routePoints:
+                      - lat: 10.0000
+                        lng: 20.0000
+                        speed: 0
+                        heading: 180
+                        timestamp: '2026-04-13T18:22:00Z'
+                      - lat: 10.0002
+                        lng: 20.0003
+                        speed: 15
+                        heading: 175
+                        timestamp: '2026-04-13T18:22:03Z'
+                      - lat: 10.0005
+                        lng: 20.0007
+                        speed: 22
+                        heading: 170
+                        timestamp: '2026-04-13T18:22:06Z'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/VehicleNotOwned'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      x-role-masks:
+        owner: ['*']
+        viewer: ['*']
+
+  /vehicles/{vehicleId}/invites:
+    get:
+      operationId: listVehicleInvites
+      tags: [invites]
+      summary: List viewers and pending invites for a vehicle.
+      description: |
+        Returns the list of active viewers and pending invites for a
+        vehicle. Not paginated in v1 -- typical viewer counts are small
+        (1-10). Future pagination can be added as an additive change.
+
+        RBAC: owner only. Viewers who call this receive 403
+        permission_denied per FR-5.4 (the viewer list is an owner-only
+        concern per FR-5.2).
+      x-anchored-requirements:
+        - FR-5.2
+        - FR-5.4
+      x-divergence: DV-23
+      parameters:
+        - $ref: '#/components/parameters/VehicleIdPath'
+      responses:
+        '200':
+          description: Invite list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedInvites'
+              examples:
+                two-invites:
+                  summary: One accepted viewer, one pending invite.
+                  value:
+                    items:
+                      - id: clxyz1234567890invite01
+                        vehicleId: clxyz1234567890abcdef
+                        senderId: clxyz1234567890userid
+                        label: Viewer A
+                        email: invitee-a@example.com
+                        status: accepted
+                        permission: live_history
+                        sentDate: '2026-04-01T10:00:00Z'
+                        acceptedDate: '2026-04-01T11:23:00Z'
+                        lastSeen: '2026-04-14T09:45:00Z'
+                        isOnline: true
+                        createdAt: '2026-04-01T10:00:00Z'
+                        updatedAt: '2026-04-14T09:45:00Z'
+                      - id: clxyz1234567890invite02
+                        vehicleId: clxyz1234567890abcdef
+                        senderId: clxyz1234567890userid
+                        label: Viewer B
+                        email: invitee-b@example.com
+                        status: pending
+                        permission: live_history
+                        sentDate: '2026-04-14T10:00:00Z'
+                        acceptedDate: null
+                        lastSeen: null
+                        isOnline: false
+                        createdAt: '2026-04-14T10:00:00Z'
+                        updatedAt: '2026-04-14T10:00:00Z'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/PermissionDenied'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      x-role-masks:
+        owner: ['*']
+        viewer: denied
+    post:
+      operationId: createVehicleInvite
+      tags: [invites]
+      summary: Create a sharing invite for a vehicle.
+      description: |
+        Creates a sharing invite that grants the recipient (identified
+        by email) read access to the vehicle as a viewer. The recipient
+        accepts out-of-band via the Next.js app's invite-acceptance
+        flow.
+
+        Not idempotent in v1 (no Idempotency-Key). A retry after a
+        network blip MAY create two invites for the same email; the
+        owner can revoke either via DELETE /invites/{inviteId}. See
+        rest-api.md §4.5.
+
+        RBAC: owner only.
+      x-anchored-requirements:
+        - FR-5.1
+        - FR-5.4
+      x-divergence: DV-23
+      parameters:
+        - $ref: '#/components/parameters/VehicleIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateInviteRequest'
+            examples:
+              history-invite:
+                summary: Invite with history permission.
+                value:
+                  label: Viewer
+                  email: invitee-a@example.com
+                  permission: live_history
+              live-only:
+                summary: Invite with live permission only.
+                value:
+                  label: Viewer
+                  email: invitee-c@example.com
+                  permission: live
+      responses:
+        '201':
+          description: Invite created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invite'
+              examples:
+                happy-path:
+                  value:
+                    id: clxyz1234567890invite01
+                    vehicleId: clxyz1234567890abcdef
+                    senderId: clxyz1234567890userid
+                    label: Viewer
+                    email: invitee-a@example.com
+                    status: pending
+                    permission: live_history
+                    sentDate: '2026-04-14T10:00:00Z'
+                    acceptedDate: null
+                    lastSeen: null
+                    isOnline: false
+                    createdAt: '2026-04-14T10:00:00Z'
+                    updatedAt: '2026-04-14T10:00:00Z'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/PermissionDenied'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      x-role-masks:
+        owner: ['*']
+        viewer: denied
+
+  /invites/{inviteId}:
+    delete:
+      operationId: revokeInvite
+      tags: [invites]
+      summary: Revoke a sharing invite.
+      description: |
+        Revokes a sharing invite. If the invite was in pending state,
+        it is deleted and the recipient cannot accept it. If the
+        invite was in accepted state, the corresponding viewer
+        immediately loses read access to the vehicle.
+
+        Per websocket-protocol.md §10 DV-09, the mid-connection
+        ownership snapshot is stale on the WS path today -- a revoked
+        viewer who is currently connected over the WS continues to
+        receive broadcasts until they reconnect. Closing DV-09 wires
+        this REST endpoint's effect into the live WebSocket path.
+
+        Idempotent in the "equivalent final state" sense: a second
+        DELETE returns 404 not_found.
+
+        RBAC: owner of the invite's target vehicle only.
+      x-anchored-requirements:
+        - FR-5.3
+        - FR-5.4
+      x-divergence: DV-23
+      parameters:
+        - $ref: '#/components/parameters/InviteIdPath'
+      responses:
+        '204':
+          description: Invite revoked. Empty body.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/PermissionDenied'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      x-role-masks:
+        owner: ['*']
+        viewer: denied
+
+  /users/me:
+    delete:
+      operationId: deleteCurrentUser
+      tags: [account]
+      summary: Delete the authenticated user's account and all associated data.
+      description: |
+        Deletes the authenticated user and all associated data per the
+        cascade in data-lifecycle.md §3. The audit log entry is written
+        BEFORE the destructive operation per FR-10.2 / NFR-3.29 /
+        data-lifecycle.md §3.1. The cascade runs as a single database
+        transaction and v1 returns synchronous 200 OK on commit.
+
+        No cross-user deletion: this endpoint operates on /users/me
+        only. There is no 403 path.
+
+        Idempotent in the "equivalent final state" sense: a second
+        DELETE returns 401 auth_failed because the token has been
+        invalidated.
+
+        Handler location: depending on the DV-23 decision, this
+        endpoint may be served from the Next.js app rather than the
+        Go telemetry server. The SDK is unaware of the handler
+        location.
+      x-anchored-requirements:
+        - FR-10.1
+        - FR-10.2
+        - NFR-3.29
+      x-divergence: DV-20
+      responses:
+        '200':
+          description: Account deleted, audit log written.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteUserResponse'
+              examples:
+                happy-path:
+                  value:
+                    deleted: true
+                    auditLogId: claud0g123456789deletion
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      x-role-masks:
+        owner: self-only
+        viewer: self-only
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Bearer-style session token resolved by the consumer's
+        getToken() callback (FR-6.1). The token is the SAME value the
+        SDK passes in the WebSocket auth frame (websocket-protocol.md
+        §2.2) -- the SDK maintains a single credential surface across
+        WS and REST.
+
+        Unlike the WebSocket path (which puts the token in the first
+        WebSocket frame because browsers cannot set arbitrary headers
+        on an upgrade), REST uses the standard Authorization header
+        because REST has no upgrade handshake.
+
+        On 401 the SDK MUST call getToken() to refresh and retry the
+        request exactly once per FR-6.2. A second 401 is terminal and
+        the error surfaces to the consumer as a typed auth_failed
+        error.
+
+        The token is P1 per data-classification.md §1.2. The server
+        MUST NOT log the Authorization header in any structured log
+        field, error message, metric label, or crash report.
+
+  parameters:
+    VehicleIdPath:
+      name: vehicleId
+      in: path
+      required: true
+      description: Opaque DB cuid for the vehicle (FR-4.2). Never a VIN.
+      schema:
+        type: string
+        pattern: '^c[a-z0-9]+$'
+        minLength: 20
+        maxLength: 40
+      example: clxyz1234567890abcdef
+    DriveIdPath:
+      name: driveId
+      in: path
+      required: true
+      description: Opaque DB cuid for a completed drive. Matches the driveId carried by drive_started and drive_ended WebSocket frames.
+      schema:
+        type: string
+        pattern: '^c[a-z0-9]+$'
+        minLength: 20
+        maxLength: 40
+      example: clmno9876543210zyxw0001
+    InviteIdPath:
+      name: inviteId
+      in: path
+      required: true
+      description: Opaque DB cuid for a sharing invite.
+      schema:
+        type: string
+        pattern: '^c[a-z0-9]+$'
+        minLength: 20
+        maxLength: 40
+      example: clxyz1234567890invite01
+    LimitQuery:
+      name: limit
+      in: query
+      required: false
+      description: Maximum number of items to return. Default 20, min 1, max 100. Requests with limit outside [1, 100] return 400 invalid_request.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+      example: 20
+    CursorQuery:
+      name: cursor
+      in: query
+      required: false
+      description: Opaque base64 pagination cursor returned by a prior response's nextCursor. The SDK MUST treat the cursor as opaque; the server reserves the right to change the encoding without a contract version bump.
+      schema:
+        type: string
+      example: eyJzdGFydFRpbWUiOiIyMDI2LTA0LTEzVDA4OjE0OjAwWiIsImlkIjoiY2xtbm85ODc2NTQzMjEwenl4dzAwMDIifQ==
+
+  responses:
+    Unauthorized:
+      description: Missing, malformed, or invalid bearer token. On receipt the SDK MUST call getToken() and retry once per FR-6.2. A second 401 is terminal and surfaces as a typed auth_failed error.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            auth-failed:
+              value:
+                error:
+                  code: auth_failed
+                  message: invalid token
+            auth-timeout:
+              value:
+                error:
+                  code: auth_timeout
+                  message: 'authenticator.ValidateToken: deadline exceeded'
+    VehicleNotOwned:
+      description: Caller is not the owner or an accepted viewer of the requested vehicleId (or drive's parent vehicleId).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            vehicle-not-owned:
+              value:
+                error:
+                  code: vehicle_not_owned
+                  message: caller does not own this vehicle
+    PermissionDenied:
+      description: Caller is authenticated but lacks the role required for this operation (e.g., viewer calling an invite endpoint).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            permission-denied:
+              value:
+                error:
+                  code: permission_denied
+                  message: owner role required for this operation
+    NotFound:
+      description: |
+        The requested resource does not exist, or it exists but is not
+        visible to the caller. REST-only error code -- the WebSocket
+        path enforces ownership via silent filtering in Hub.Broadcast
+        (websocket-protocol.md §4.5) and has no request-response
+        equivalent. Added to the shared ErrorPayload.code enum as a
+        REST-only extension -- see rest-api.md §4.1.1.a and DV-20.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            unknown-vehicle:
+              value:
+                error:
+                  code: not_found
+                  message: vehicle does not exist
+            unknown-drive:
+              value:
+                error:
+                  code: not_found
+                  message: drive does not exist
+    InvalidRequest:
+      description: |
+        Request body, path params, or query string failed server-side
+        validation. REST-only error code -- the WS protocol has no v1
+        client->server frames with structured payloads beyond auth, so
+        malformed-body errors cannot arise there. Added to the shared
+        ErrorPayload.code enum as a REST-only extension -- see
+        rest-api.md §4.1.1.a and DV-20.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            bad-cursor:
+              value:
+                error:
+                  code: invalid_request
+                  message: malformed cursor
+            limit-out-of-range:
+              value:
+                error:
+                  code: invalid_request
+                  message: limit must be between 1 and 100
+            bad-email:
+              value:
+                error:
+                  code: invalid_request
+                  message: invalid email address
+    RateLimited:
+      description: |
+        Per-user REST rate limit breached (PLANNED: 120 requests/minute,
+        see DV-22). SDK MUST apply exponential backoff per
+        websocket-protocol.md §7.1 reconnect curve.
+      headers:
+        Retry-After:
+          description: Advisory delay in seconds before the SDK should retry.
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            rest-rate-limited:
+              value:
+                error:
+                  code: rate_limited
+                  message: REST rate limit exceeded
+    ServiceUnavailable:
+      description: |
+        Reserved for maintenance windows and graceful-shutdown states
+        (DV-21). Not emitted in v1; documented here so SDK consumers
+        can write forward-compatible handlers.
+      headers:
+        Retry-After:
+          description: Advisory delay in seconds before the SDK should retry.
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            maintenance:
+              value:
+                error:
+                  code: service_unavailable
+                  message: scheduled maintenance in progress
+    InternalError:
+      description: Unexpected server failure. SDK auto-retries with exponential backoff up to 3 attempts before surfacing.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            catchall:
+              value:
+                error:
+                  code: internal_error
+                  message: internal server error
+
+  schemas:
+    ErrorEnvelope:
+      type: object
+      description: |
+        Standard error envelope for all non-2xx REST responses. The
+        `error.code` field is a stable typed enum that SDK consumers
+        branch on per FR-7.1. The `error.message` field is a
+        human-readable description for logs and developer tooling and
+        MUST NOT contain any P1 value (no GPS, no addresses, no tokens,
+        no emails, no raw VINs). See rest-api.md §4.1 and
+        data-classification.md §2.2.
+
+        The code enum is a superset of the WebSocket ErrorPayload.code
+        enum in schemas/ws-messages.schema.json. REST-only codes
+        (not_found, invalid_request, service_unavailable) are called
+        out in the value descriptions. Consumers that share a CoreError
+        type across transports reuse the same enum values as the WS
+        side -- the enums intentionally overlap.
+      required: [error]
+      additionalProperties: false
+      properties:
+        error:
+          type: object
+          description: Nested error object carrying the typed code, human-readable message, and optional sub-code. All inner fields are P0; this wrapper is P0 overall.
+          x-classification: P0
+          required: [code, message]
+          additionalProperties: false
+          properties:
+            code:
+              type: string
+              description: |
+                Stable typed error code. Reuses the WebSocket
+                ErrorPayload.code catalog plus the REST-only extensions
+                not_found, invalid_request, and service_unavailable.
+                SDK consumers branch on this value, never on `message`.
+              enum:
+                - auth_failed
+                - auth_timeout
+                - permission_denied
+                - vehicle_not_owned
+                - not_found
+                - invalid_request
+                - rate_limited
+                - internal_error
+                - service_unavailable
+              x-classification: P0
+            message:
+              type: string
+              description: |
+                Human-readable description for logs and developer
+                tooling. P0 but MUST NOT contain P1 values -- no GPS,
+                no addresses, no tokens, no emails, no VINs (unless
+                redacted to ***XXXX via redactVIN()). Error
+                construction sites use opaque IDs (vehicleId, driveId,
+                userId, inviteId) for correlation.
+              x-classification: P0
+            subCode:
+              type: string
+              description: |
+                Optional typed sub-code. Currently only device_cap,
+                shared with the WebSocket ErrorPayload. REST v1 does
+                not emit device_cap -- it is specific to the per-user
+                concurrent-connection cap on the WS path -- but the
+                field is declared here for shared-type compatibility
+                with the SDK's CoreError union.
+              enum: [device_cap]
+              x-classification: P0
+
+    DriveSummary:
+      type: object
+      description: |
+        Lightweight drive record returned by the paginated drive list
+        endpoint. Deliberately omits startAddress/endAddress/
+        energyUsedKwh/fsdMiles/fsdPercentage/interventions/routePoints
+        -- those are in DriveDetail and DriveRoute. Omitting the
+        address fields from the list payload keeps the response lean
+        and reduces the P1 surface area per list request (addresses
+        are P1 per data-classification.md §1.4).
+      required:
+        - id
+        - vehicleId
+        - startTime
+        - endTime
+        - date
+        - distanceMiles
+        - durationSeconds
+        - avgSpeedMph
+        - maxSpeedMph
+        - startChargeLevel
+        - endChargeLevel
+        - createdAt
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          description: Opaque DB cuid for this drive.
+          x-classification: P0
+        vehicleId:
+          type: string
+          description: Opaque DB cuid for the drive's parent vehicle.
+          x-classification: P0
+        startTime:
+          type: string
+          format: date-time
+          description: ISO 8601 UTC timestamp when the drive began.
+          x-classification: P0
+        endTime:
+          type: string
+          format: date-time
+          description: ISO 8601 UTC timestamp when the drive ended.
+          x-classification: P0
+        date:
+          type: string
+          description: Local date string (e.g., "2026-04-13").
+          x-classification: P0
+        distanceMiles:
+          type: number
+          minimum: 0
+          description: Total distance driven in miles (FR-3.4).
+          x-classification: P0
+          x-unit: miles
+        durationSeconds:
+          type: integer
+          minimum: 0
+          description: Total drive duration in seconds (FR-3.4). Matches the WebSocket drive_ended.payload.durationSeconds shape (DV-12 resolution).
+          x-classification: P0
+          x-unit: seconds
+        avgSpeedMph:
+          type: number
+          minimum: 0
+          description: Average speed in miles per hour (FR-3.4).
+          x-classification: P0
+          x-unit: mph
+        maxSpeedMph:
+          type: number
+          minimum: 0
+          description: Max speed in miles per hour (FR-3.4).
+          x-classification: P0
+          x-unit: mph
+        startChargeLevel:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Battery percent at drive start (FR-3.4).
+          x-classification: P0
+          x-unit: percent
+        endChargeLevel:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Battery percent at drive end (FR-3.4).
+          x-classification: P0
+          x-unit: percent
+        createdAt:
+          type: string
+          format: date-time
+          description: ISO 8601 UTC row-creation timestamp.
+          x-classification: P0
+
+    DriveDetail:
+      type: object
+      description: |
+        Full FR-3.4 drive record returned by GET /drives/{driveId}.
+        Contains every FR-3.4 field EXCEPT routePoints, which is
+        returned by the separate GET /drives/{driveId}/route endpoint.
+        startAddress/endAddress/startLocation/endLocation are P1 per
+        data-classification.md §1.4 -- both owners and viewers see
+        them (viewer has explicit consent via the accepted invite).
+      required:
+        - id
+        - vehicleId
+        - startTime
+        - endTime
+        - date
+        - distanceMiles
+        - durationSeconds
+        - avgSpeedMph
+        - maxSpeedMph
+        - energyUsedKwh
+        - startChargeLevel
+        - endChargeLevel
+        - fsdMiles
+        - fsdPercentage
+        - interventions
+        - createdAt
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          x-classification: P0
+        vehicleId:
+          type: string
+          x-classification: P0
+        startTime:
+          type: string
+          format: date-time
+          x-classification: P0
+        endTime:
+          type: string
+          format: date-time
+          x-classification: P0
+        date:
+          type: string
+          x-classification: P0
+        distanceMiles:
+          type: number
+          minimum: 0
+          x-classification: P0
+          x-unit: miles
+        durationSeconds:
+          type: integer
+          minimum: 0
+          x-classification: P0
+          x-unit: seconds
+        avgSpeedMph:
+          type: number
+          minimum: 0
+          x-classification: P0
+          x-unit: mph
+        maxSpeedMph:
+          type: number
+          minimum: 0
+          x-classification: P0
+          x-unit: mph
+        energyUsedKwh:
+          type: number
+          minimum: 0
+          description: Energy consumed during the drive in kilowatt-hours (FR-3.4).
+          x-classification: P0
+          x-unit: kWh
+        startChargeLevel:
+          type: integer
+          minimum: 0
+          maximum: 100
+          x-classification: P0
+          x-unit: percent
+        endChargeLevel:
+          type: integer
+          minimum: 0
+          maximum: 100
+          x-classification: P0
+          x-unit: percent
+        fsdMiles:
+          type: number
+          minimum: 0
+          description: Miles driven under Full Self-Driving during this drive (FR-3.4).
+          x-classification: P0
+          x-unit: miles
+        fsdPercentage:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: Percent of the drive covered by FSD (FR-3.4).
+          x-classification: P0
+          x-unit: percent
+        interventions:
+          type: integer
+          minimum: 0
+          description: Count of FSD interventions recorded during the drive (FR-3.4).
+          x-classification: P0
+        startLocation:
+          type:
+            - string
+            - 'null'
+          description: Reverse-geocoded place name at the drive's start. P1 per data-classification.md §1.4. Shared with viewers under FR-5.4.
+          x-classification: P1
+        startAddress:
+          type:
+            - string
+            - 'null'
+          description: Reverse-geocoded street address at the drive's start. P1 per data-classification.md §1.4.
+          x-classification: P1
+        endLocation:
+          type:
+            - string
+            - 'null'
+          description: Reverse-geocoded place name at the drive's end. P1 per data-classification.md §1.4.
+          x-classification: P1
+        endAddress:
+          type:
+            - string
+            - 'null'
+          description: Reverse-geocoded street address at the drive's end. P1 per data-classification.md §1.4.
+          x-classification: P1
+        createdAt:
+          type: string
+          format: date-time
+          x-classification: P0
+
+    DriveRoute:
+      type: object
+      description: |
+        Full GPS polyline for a drive. The polyline is encrypted at rest
+        via AES-256-GCM on Drive.routePoints (NFR-3.23,
+        data-classification.md §1.5) and decrypted in the store layer
+        (NFR-3.25) before this handler serializes the response.
+      required: [driveId, routePoints]
+      additionalProperties: false
+      properties:
+        driveId:
+          type: string
+          description: Opaque DB cuid for this drive.
+          x-classification: P0
+        routePoints:
+          type: array
+          description: |
+            Array of per-point records. A 60-minute drive at 1 Hz is
+            ~3,600 points. See rest-api.md §7.4 for lazy-fetch guidance
+            (cellular bandwidth, not heap pressure).
+          x-classification: mixed
+          items:
+            $ref: '#/components/schemas/RoutePoint'
+
+    RoutePoint:
+      type: object
+      description: |
+        One GPS point on a drive's polyline. Matches the RoutePointRecord
+        shape from data-classification.md §1.5. lat/lng are P1; speed,
+        heading, and timestamp are P0 in isolation but encrypted at rest
+        alongside the parent polyline column.
+      required: [lat, lng, speed, heading, timestamp]
+      additionalProperties: false
+      properties:
+        lat:
+          type: number
+          minimum: -90
+          maximum: 90
+          description: Latitude in degrees. P1 per data-classification.md §1.5; encrypted at rest within Drive.routePoints.
+          x-classification: P1
+          x-encrypted-at-rest: true
+          x-unit: degrees
+        lng:
+          type: number
+          minimum: -180
+          maximum: 180
+          description: Longitude in degrees. P1 per data-classification.md §1.5; encrypted at rest within Drive.routePoints.
+          x-classification: P1
+          x-encrypted-at-rest: true
+          x-unit: degrees
+        speed:
+          type: number
+          minimum: 0
+          description: Speed in miles per hour at this point. P0 in isolation; encrypted at rest with the parent polyline.
+          x-classification: P0
+          x-unit: mph
+        heading:
+          type: number
+          minimum: 0
+          maximum: 360
+          description: Compass heading in degrees at this point.
+          x-classification: P0
+          x-unit: degrees
+        timestamp:
+          type: string
+          format: date-time
+          description: ISO 8601 UTC timestamp at which this point was captured.
+          x-classification: P0
+
+    Invite:
+      type: object
+      description: |
+        Full sharing-invite record matching data-classification.md §1.6
+        (Invite table, Prisma-owned). The email field is P1; all other
+        fields are P0. Returned to the owner in full; any future
+        limited_viewer role would mask email.
+      required:
+        - id
+        - vehicleId
+        - senderId
+        - label
+        - email
+        - status
+        - permission
+        - sentDate
+        - isOnline
+        - createdAt
+        - updatedAt
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          description: Opaque DB cuid for this invite.
+          x-classification: P0
+        vehicleId:
+          type: string
+          description: Opaque DB cuid for the vehicle this invite targets.
+          x-classification: P0
+        senderId:
+          type: string
+          description: Opaque DB cuid for the owner who created the invite.
+          x-classification: P0
+        label:
+          type: string
+          maxLength: 64
+          description: Display label the owner chose for the invite (e.g., "Mom"). P0.
+          x-classification: P0
+        email:
+          type: string
+          format: email
+          description: Invitee's email address. P1 per data-classification.md §1.6.
+          x-classification: P1
+        status:
+          type: string
+          enum: [pending, accepted]
+          description: Invite status enum.
+          x-classification: P0
+        permission:
+          type: string
+          enum: [live, live_history]
+          description: |
+            Permission tier granted by the invite. `live` grants real-time
+            vehicle state only; `live_history` adds access to completed
+            drive history (GET /vehicles/{id}/drives, GET /drives/{id},
+            GET /drives/{id}/route).
+          x-classification: P0
+        sentDate:
+          type: string
+          format: date-time
+          description: ISO 8601 UTC timestamp when the invite was created.
+          x-classification: P0
+        acceptedDate:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: ISO 8601 UTC timestamp when the recipient accepted; null for pending invites.
+          x-classification: P0
+        lastSeen:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: ISO 8601 UTC timestamp of the viewer's last active WebSocket session; null if never connected.
+          x-classification: P0
+        isOnline:
+          type: boolean
+          description: True iff the viewer currently has an active WebSocket session.
+          x-classification: P0
+        createdAt:
+          type: string
+          format: date-time
+          x-classification: P0
+        updatedAt:
+          type: string
+          format: date-time
+          x-classification: P0
+
+    CreateInviteRequest:
+      type: object
+      description: Request body for POST /vehicles/{vehicleId}/invites.
+      required: [label, email, permission]
+      additionalProperties: false
+      properties:
+        label:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Display label the owner chooses for the invite.
+          x-classification: P0
+        email:
+          type: string
+          format: email
+          description: Invitee's email address. P1 per data-classification.md §1.6.
+          x-classification: P1
+        permission:
+          type: string
+          enum: [live, live_history]
+          description: Permission tier. See Invite.permission.
+          x-classification: P0
+
+    PaginatedDrives:
+      type: object
+      description: Cursor-paginated drive summary list. See rest-api.md §4.2.
+      required: [items, nextCursor, hasMore]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          description: Zero or more DriveSummary items. Empty array on the final page (NOT null).
+          x-classification: P0
+          items:
+            $ref: '#/components/schemas/DriveSummary'
+        nextCursor:
+          type:
+            - string
+            - 'null'
+          description: Opaque base64 cursor for the next page. Null on the final page.
+          x-classification: P0
+        hasMore:
+          type: boolean
+          description: True iff more pages exist. Redundant with nextCursor != null for caller convenience.
+          x-classification: P0
+
+    PaginatedInvites:
+      type: object
+      description: |
+        Unpaginated invite list. v1 does not paginate invites because
+        typical viewer counts per vehicle are small (1-10). Named
+        "Paginated" for consistency with PaginatedDrives so a future
+        additive change could introduce nextCursor/hasMore without a
+        breaking schema rename. In v1 the wrapper has only the `items`
+        field.
+      required: [items]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          description: Zero or more Invite records.
+          x-classification: mixed
+          items:
+            $ref: '#/components/schemas/Invite'
+
+    DeleteUserResponse:
+      type: object
+      description: |
+        Synchronous response from DELETE /users/me. Returned after the
+        cascading DELETE transaction commits per data-lifecycle.md §3.1.
+        Contains the AuditLog row ID written in step 1 of the
+        transaction per FR-10.2 / NFR-3.29.
+      required: [deleted, auditLogId]
+      additionalProperties: false
+      properties:
+        deleted:
+          type: boolean
+          const: true
+          description: Always true on a successful 200 response.
+          x-classification: P0
+        auditLogId:
+          type: string
+          description: |
+            Opaque cuid of the AuditLog row written per FR-10.2 /
+            NFR-3.29 / data-lifecycle.md §3.1 / §4. The SDK and web
+            test bench can cross-reference this ID against the audit
+            log store to verify the write. The row itself is P0
+            (data-lifecycle.md §4.4).
+          x-classification: P0
