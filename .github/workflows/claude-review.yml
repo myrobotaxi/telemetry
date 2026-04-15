@@ -67,7 +67,7 @@ jobs:
           track_progress: true
           claude_args: >-
             --agent pr-reviewer
-            --max-turns 25
+            --max-turns 50
           prompt: |
             Review this pull request.
 
