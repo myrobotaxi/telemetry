@@ -403,7 +403,7 @@ The `contract-guard` agent/CI check enforces the following rules derived from th
 | P1 | 26 | Sensitive — GPS coordinates, location names/addresses, OAuth tokens, PII, route data |
 | P2 | 0 | Access-logged — reserved for future use |
 
-> **Count audit trail.** The P0 count was bumped from 83 → 85 by [MYR-11](https://linear.app/myrobotaxi/issue/MYR-11) when it added `Vehicle.chargeState` (Tesla proto field 2, enum) and `Vehicle.timeToFull` (Tesla proto field 43, `Float` seconds) to the v1 charge atomic group. Both fields are P0 because they describe charge state, not identity or location. See §1.3 Vehicle table and `vehicle-state-schema.md` §2.2 for the wire contract. Future count changes MUST add a one-line entry here so the total is auditable without `git blame`.
+> **Count audit trail.** The P0 count was bumped from 83 → 85 by [MYR-11](https://linear.app/myrobotaxi/issue/MYR-11) when it added `Vehicle.chargeState` (Tesla proto field 2, enum) and `Vehicle.timeToFull` (Tesla proto field 43, `Float` **hours (decimal)**) to the v1 charge atomic group. Both fields are P0 because they describe charge state, not identity or location. See §1.3 Vehicle table and `vehicle-state-schema.md` §2.2 for the wire contract. The `timeToFull` unit is tracked for empirical verification as `websocket-protocol.md` §10 DV-17 ([MYR-25](https://linear.app/myrobotaxi/issue/MYR-25)). Future count changes MUST add a one-line entry here so the total is auditable without `git blame`.
 
 ### P1 fields requiring AES-256-GCM encryption (11 columns)
 

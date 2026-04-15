@@ -131,8 +131,8 @@
     },
     "chargeState": {
       "type": ["string", "null"],
-      "description": "Charge state enum from Tesla proto field 2 (ChargeState). Added as a v1 charge atomic group member by MYR-11 (see websocket-protocol.md §4.1.4 and §10 DV-03). Nullable until the DV-03 server wiring lands — SDK consumers MUST tolerate null and render a neutral placeholder (not a spinner). Once wired, the charge atomic group will arrive as a four-field batch alongside chargeLevel, estimatedRange, and timeToFull.",
-      "enum": [null, "Unknown", "Disconnected", "NoPower", "Starting", "Charging", "Complete", "Stopped"],
+      "description": "Charge state enum from Tesla proto field 2 (ChargeState). Added as a v1 charge atomic group member by MYR-11 (see websocket-protocol.md §4.1.4 and §10 DV-03). Nullable until the DV-03 server wiring lands — SDK consumers MUST tolerate null and render a neutral placeholder (not a spinner). Once wired, the charge atomic group will arrive as a four-field batch alongside chargeLevel, estimatedRange, and timeToFull. Nullability is expressed via the union `type: [\"string\", \"null\"]`; the `enum` list intentionally contains only the string values so that naive JSON Schema validators (some Go and Python libraries coerce `null` out of mixed-type enums) behave consistently. A null value validates against the type clause and is exempt from the enum constraint per JSON Schema draft 2020-12.",
+      "enum": ["Unknown", "Disconnected", "NoPower", "Starting", "Charging", "Complete", "Stopped"],
       "x-classification": "P0",
       "x-atomic-group": "charge",
       "x-tesla-proto-field": 2,
