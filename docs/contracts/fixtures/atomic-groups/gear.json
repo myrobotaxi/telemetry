@@ -1,0 +1,11 @@
+{
+  "_meta": {
+    "description": "Gear atomic group -- gearPosition and derived status. Both P0. status is derived server-side from gearPosition: D/R -> 'driving', P/N -> 'parked' (unless overridden by charging/offline/in_service logic). gearPosition is nullable (null = vehicle asleep); status is non-nullable (default 'offline').",
+    "anchoredFRs": ["FR-1.1", "NFR-3.1"],
+    "scenario": "happy-path"
+  },
+  "fields": {
+    "gearPosition": "D",
+    "status": "driving"
+  }
+}

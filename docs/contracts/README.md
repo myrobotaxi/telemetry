@@ -1,6 +1,6 @@
 # MyRoboTaxi SDK v1 — Contracts
 
-**Status:** Active — v1 contracts authored (six markdown docs + four machine-readable specs). Fixtures library is still scaffold.
+**Status:** Active — v1 contracts authored (six markdown docs + four machine-readable specs + 35 canonical fixtures).
 **Owner:** `sdk-architect` agent
 **Anchors:** All contracts in this directory trace back to [`docs/architecture/requirements.md`](../architecture/requirements.md).
 

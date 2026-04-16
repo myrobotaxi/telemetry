@@ -1,0 +1,17 @@
+{
+  "_meta": {
+    "description": "GPS atomic group update with all three members. latitude/longitude are P1 (encrypted at rest); heading is P0. SDK MUST treat lat==0 && lng==0 as 'no GPS fix' per vehicle-state-schema.md section 2.3.",
+    "anchoredFRs": ["FR-1.1", "NFR-3.1"],
+    "scenario": "happy-path"
+  },
+  "type": "vehicle_update",
+  "payload": {
+    "vehicleId": "clxyz1234567890abcdef",
+    "fields": {
+      "latitude": 37.7749,
+      "longitude": -122.4194,
+      "heading": 275
+    },
+    "timestamp": "2026-04-13T18:22:01Z"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "_meta": {
+    "description": "Null gearPosition with status offline. gearPosition is null when the vehicle is asleep or gear has not yet been reported. status is non-nullable and defaults to 'offline'. SDK MUST tolerate null gearPosition and render based on the status field alone.",
+    "anchoredFRs": ["FR-1.1", "NFR-3.1"],
+    "scenario": "edge-case"
+  },
+  "type": "vehicle_update",
+  "payload": {
+    "vehicleId": "clxyz1234567890abcdef",
+    "fields": {
+      "gearPosition": null,
+      "status": "offline"
+    },
+    "timestamp": "2026-04-13T18:55:00Z"
+  }
+}

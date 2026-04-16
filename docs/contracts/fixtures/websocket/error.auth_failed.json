@@ -1,0 +1,12 @@
+{
+  "_meta": {
+    "description": "Auth failure error frame. Sent when Authenticator.ValidateToken rejects the token (signature, issuer, audience, or expiry check failed). Precedes WebSocket close code 1008. SDK transitions connecting->error (C-5, terminal). SDK MUST call getToken() to refresh and retry once per FR-6.2.",
+    "anchoredFRs": ["FR-6.2", "FR-7.1", "FR-7.3"],
+    "scenario": "error"
+  },
+  "type": "error",
+  "payload": {
+    "code": "auth_failed",
+    "message": "invalid token"
+  }
+}

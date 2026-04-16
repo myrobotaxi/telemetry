@@ -1,0 +1,13 @@
+{
+  "_meta": {
+    "description": "Vehicle mTLS connection went offline. Reports vehicle<->server connectivity loss (vehicle asleep, network drop). When the server emits this, it also clears any pending nav accumulator state for that VIN to prevent stale nav data on reconnect.",
+    "anchoredFRs": ["FR-1.3", "FR-8.1"],
+    "scenario": "happy-path"
+  },
+  "type": "connectivity",
+  "payload": {
+    "vehicleId": "clxyz1234567890abcdef",
+    "online": false,
+    "timestamp": "2026-04-13T18:55:00Z"
+  }
+}

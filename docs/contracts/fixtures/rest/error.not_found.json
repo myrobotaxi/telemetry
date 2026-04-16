@@ -1,0 +1,11 @@
+{
+  "_meta": {
+    "description": "REST 404 error envelope. REST-only error code -- the WS path enforces ownership via silent filtering in Hub.Broadcast and has no request-response equivalent. The server intentionally does not distinguish 'never existed' from 'revoked access' to avoid leaking resource existence.",
+    "anchoredFRs": ["FR-7.1"],
+    "scenario": "error"
+  },
+  "error": {
+    "code": "not_found",
+    "message": "vehicle does not exist"
+  }
+}

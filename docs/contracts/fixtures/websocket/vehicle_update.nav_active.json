@@ -1,0 +1,30 @@
+{
+  "_meta": {
+    "description": "Navigation atomic group update with an active route. All 9 nav members present (destinationAddress is spec-only, always null until MYR-24). navRouteCoordinates uses [lng, lat] GeoJSON order. The server accumulates nav fields over a 500ms debounce window before flushing.",
+    "anchoredFRs": ["FR-2.1", "FR-2.2", "NFR-3.1", "NFR-3.2"],
+    "scenario": "happy-path"
+  },
+  "type": "vehicle_update",
+  "payload": {
+    "vehicleId": "clxyz1234567890abcdef",
+    "fields": {
+      "destinationName": "Whole Foods Market",
+      "destinationAddress": null,
+      "destinationLatitude": 37.7651,
+      "destinationLongitude": -122.4195,
+      "originLatitude": 37.7749,
+      "originLongitude": -122.4194,
+      "etaMinutes": 12,
+      "tripDistanceRemaining": 3.2,
+      "navRouteCoordinates": [
+        [-122.4194, 37.7749],
+        [-122.4190, 37.7740],
+        [-122.4188, 37.7720],
+        [-122.4192, 37.7700],
+        [-122.4195, 37.7680],
+        [-122.4195, 37.7651]
+      ]
+    },
+    "timestamp": "2026-04-13T18:22:01Z"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "_meta": {
+    "description": "Full FR-3.4 drive record from GET /api/drives/{driveId}. Contains every FR-3.4 field EXCEPT routePoints (returned by GET /api/drives/{driveId}/route). Includes P1 start/end location and address fields. startLocation/endLocation are reverse-geocoded place names; startAddress/endAddress are street addresses.",
+    "anchoredFRs": ["FR-3.4", "FR-9.1"],
+    "scenario": "happy-path"
+  },
+  "id": "clmno9876543210zyxw0001",
+  "vehicleId": "clxyz1234567890abcdef",
+  "startTime": "2026-04-13T18:22:00Z",
+  "endTime": "2026-04-13T18:46:18Z",
+  "date": "2026-04-13",
+  "distanceMiles": 12.4,
+  "durationSeconds": 1458,
+  "avgSpeedMph": 30.5,
+  "maxSpeedMph": 65.2,
+  "energyUsedKwh": 4.2,
+  "startChargeLevel": 82,
+  "endChargeLevel": 76,
+  "fsdMiles": 8.1,
+  "fsdPercentage": 65.3,
+  "interventions": 1,
+  "startLocation": "Home",
+  "startAddress": "742 Evergreen Terrace, San Francisco, CA 94107",
+  "endLocation": "Whole Foods Market",
+  "endAddress": "399 4th Street, San Francisco, CA 94107",
+  "createdAt": "2026-04-13T18:46:19Z"
+}

@@ -1,0 +1,17 @@
+{
+  "_meta": {
+    "description": "Minimal valid drive that passed the micro-drive filter. The default micro-drive threshold is 2 minutes / 0.1 miles (state-machine.md section 3.5). This fixture represents a drive that barely clears the filter: 2.1 minutes (126 seconds) and 0.15 miles. Drives below the threshold never produce a drive_ended frame.",
+    "anchoredFRs": ["FR-3.1", "FR-3.4"],
+    "scenario": "edge-case"
+  },
+  "type": "drive_ended",
+  "payload": {
+    "vehicleId": "clxyz1234567890abcdef",
+    "driveId": "clmno9876543210zyxw0002",
+    "distance": 0.15,
+    "durationSeconds": 126,
+    "avgSpeed": 4.3,
+    "maxSpeed": 12.0,
+    "timestamp": "2026-04-13T19:02:06Z"
+  }
+}

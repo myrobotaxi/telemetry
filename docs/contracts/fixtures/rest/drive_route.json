@@ -1,0 +1,15 @@
+{
+  "_meta": {
+    "description": "Full GPS polyline from GET /api/drives/{driveId}/route. Each RoutePoint matches the RoutePointRecord shape from data-classification.md. lat/lng are P1 (encrypted at rest). Decrypted in the store layer per NFR-3.25 before the handler serializes the response. SDK SHOULD fetch lazily (on user tap) to protect cellular bandwidth, especially on watchOS (NFR-3.36).",
+    "anchoredFRs": ["FR-3.3", "NFR-3.23"],
+    "scenario": "happy-path"
+  },
+  "driveId": "clmno9876543210zyxw0001",
+  "routePoints": [
+    { "lat": 37.7749, "lng": -122.4194, "speed": 0,  "heading": 180, "timestamp": "2026-04-13T18:22:00Z" },
+    { "lat": 37.7751, "lng": -122.4191, "speed": 15, "heading": 175, "timestamp": "2026-04-13T18:22:03Z" },
+    { "lat": 37.7754, "lng": -122.4185, "speed": 25, "heading": 170, "timestamp": "2026-04-13T18:22:06Z" },
+    { "lat": 37.7758, "lng": -122.4178, "speed": 35, "heading": 168, "timestamp": "2026-04-13T18:22:09Z" },
+    { "lat": 37.7762, "lng": -122.4170, "speed": 35, "heading": 165, "timestamp": "2026-04-13T18:22:12Z" }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "_meta": {
+    "description": "Paginated drive list from GET /api/vehicles/{vehicleId}/drives. Each item is a DriveSummary (subset of FR-3.4 for list rendering). Ordered startTime DESC, id DESC. Deliberately omits startAddress/endAddress/energyUsedKwh/fsdMiles/routePoints -- those are in DriveDetail and DriveRoute. The SDK pairs this REST fetch with the WebSocket drive_ended subscription for FR-9.1/FR-9.2.",
+    "anchoredFRs": ["FR-3.2", "FR-9.1", "FR-9.2"],
+    "scenario": "happy-path"
+  },
+  "items": [
+    {
+      "id": "clmno9876543210zyxw0001",
+      "vehicleId": "clxyz1234567890abcdef",
+      "startTime": "2026-04-13T18:22:00Z",
+      "endTime": "2026-04-13T18:46:18Z",
+      "date": "2026-04-13",
+      "distanceMiles": 12.4,
+      "durationSeconds": 1458,
+      "avgSpeedMph": 30.5,
+      "maxSpeedMph": 65.2,
+      "startChargeLevel": 82,
+      "endChargeLevel": 76,
+      "createdAt": "2026-04-13T18:46:19Z"
+    },
+    {
+      "id": "clmno9876543210zyxw0002",
+      "vehicleId": "clxyz1234567890abcdef",
+      "startTime": "2026-04-13T08:14:00Z",
+      "endTime": "2026-04-13T08:29:07Z",
+      "date": "2026-04-13",
+      "distanceMiles": 5.1,
+      "durationSeconds": 907,
+      "avgSpeedMph": 20.2,
+      "maxSpeedMph": 42.0,
+      "startChargeLevel": 85,
+      "endChargeLevel": 82,
+      "createdAt": "2026-04-13T08:29:08Z"
+    }
+  ],
+  "nextCursor": "eyJzdGFydFRpbWUiOiIyMDI2LTA0LTEzVDA4OjE0OjAwWiIsImlkIjoiY2xtbm85ODc2NTQzMjEwenl4dzAwMDIifQ==",
+  "hasMore": true
+}

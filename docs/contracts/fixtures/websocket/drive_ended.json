@@ -1,0 +1,17 @@
+{
+  "_meta": {
+    "description": "Drive lifecycle end with summary stats. The wire payload is a SUMMARY -- the full FR-3.4 drive record is fetched via REST GET /drives/{driveId}. durationSeconds is a JSON number (not Go time.Duration string, per DV-12). Triggers drive lifecycle driving->ended (DR-3). Drives that fail the micro-drive filter never produce this frame.",
+    "anchoredFRs": ["FR-3.1", "FR-3.4"],
+    "scenario": "happy-path"
+  },
+  "type": "drive_ended",
+  "payload": {
+    "vehicleId": "clxyz1234567890abcdef",
+    "driveId": "clmno9876543210zyxw0001",
+    "distance": 12.4,
+    "durationSeconds": 1458,
+    "avgSpeed": 30.5,
+    "maxSpeed": 65.2,
+    "timestamp": "2026-04-13T18:46:18Z"
+  }
+}
