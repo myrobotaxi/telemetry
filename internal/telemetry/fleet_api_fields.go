@@ -126,7 +126,7 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		FleetFieldEnergyRemaining:     {IntervalSeconds: 30},
 		FleetFieldPackVoltage:         {IntervalSeconds: 30},
 		FleetFieldPackCurrent:         {IntervalSeconds: 30},
-		FleetFieldDetailedChargeState: {IntervalSeconds: 30},
+		FleetFieldDetailedChargeState: {IntervalSeconds: 30}, // maps to FieldDetailedChargeState (proto 179)
 
 		// Climate — medium/low frequency
 		FleetFieldInsideTemp:           {IntervalSeconds: 60, ResendIntervalSeconds: intPtr(120)},

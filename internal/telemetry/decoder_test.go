@@ -505,9 +505,9 @@ func TestDecoder_DecodePayload_ChargeState(t *testing.T) {
 				t.Fatalf("DecodePayload() error = %v", err)
 			}
 
-			cs := evt.Fields["chargeState"]
+			cs := evt.Fields["detailedChargeState"]
 			if cs.StringVal == nil || *cs.StringVal != tt.wantString {
-				t.Errorf("chargeState = %v, want %q", cs, tt.wantString)
+				t.Errorf("detailedChargeState = %v, want %q", cs, tt.wantString)
 			}
 		})
 	}

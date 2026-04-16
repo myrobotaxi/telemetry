@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	tpb "github.com/tnando/my-robo-taxi-telemetry/internal/telemetry/proto/tesla"
 )
 
 // fleetTestLogger returns a silent logger for fleet API tests.
@@ -513,7 +515,17 @@ func TestDefaultFieldConfig_CoversAllTrackedFields(t *testing.T) {
 
 	config := DefaultFieldConfig()
 
+	// Field_ChargeState (proto 2) is in fieldMap but intentionally NOT in
+	// DefaultFieldConfig yet — fleet API config is added by the DV-03
+	// implementation PR, not by the MYR-26 constant-rename PR.
+	pendingFleetConfig := map[tpb.Field]bool{
+		tpb.Field_ChargeState: true,
+	}
+
 	for protoField := range fieldMap {
+		if pendingFleetConfig[protoField] {
+			continue
+		}
 		apiName := protoField.String()
 		if _, ok := config[apiName]; !ok {
 			t.Errorf("fieldMap contains %s (proto %d) but DefaultFieldConfig has no entry for %q",

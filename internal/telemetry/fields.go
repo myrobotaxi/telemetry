@@ -19,7 +19,8 @@ const (
 	FieldGear               FieldName = "gear"
 	FieldSOC                FieldName = "soc"
 	FieldEstBatteryRange    FieldName = "estimatedRange"
-	FieldChargeState        FieldName = "chargeState"
+	FieldChargeState         FieldName = "chargeState"
+	FieldDetailedChargeState FieldName = "detailedChargeState"
 	FieldOdometer           FieldName = "odometer"
 	FieldInsideTemp           FieldName = "insideTemp"
 	FieldOutsideTemp          FieldName = "outsideTemp"
@@ -64,7 +65,8 @@ var fieldMap = map[tpb.Field]FieldName{
 	tpb.Field_Gear:                     FieldGear,
 	tpb.Field_Soc:                      FieldSOC,
 	tpb.Field_EstBatteryRange:          FieldEstBatteryRange,
-	tpb.Field_DetailedChargeState:      FieldChargeState,
+	tpb.Field_ChargeState:              FieldChargeState,
+	tpb.Field_DetailedChargeState:      FieldDetailedChargeState,
 	tpb.Field_Odometer:                 FieldOdometer,
 	tpb.Field_InsideTemp:                  FieldInsideTemp,
 	tpb.Field_OutsideTemp:                 FieldOutsideTemp,
