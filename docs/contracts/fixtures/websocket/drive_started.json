@@ -1,0 +1,18 @@
+{
+  "_meta": {
+    "description": "Drive lifecycle start event. startedAt is the v1 home of tripStartTime (relocated from nav group per DV-13). startedAt == timestamp for this message type. Triggers drive lifecycle idle->driving (DR-1). startLocation coordinates are P1 (encrypted at rest in Drive.routePoints).",
+    "anchoredFRs": ["FR-3.1", "NFR-3.1"],
+    "scenario": "happy-path"
+  },
+  "type": "drive_started",
+  "payload": {
+    "vehicleId": "clxyz1234567890abcdef",
+    "driveId": "clmno9876543210zyxw0001",
+    "startLocation": {
+      "latitude": 37.7749,
+      "longitude": -122.4194
+    },
+    "startedAt": "2026-04-13T18:22:00Z",
+    "timestamp": "2026-04-13T18:22:00Z"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "_meta": {
+    "description": "Bare server keepalive frame. heartbeat has NO payload -- the Go server marshals the bare envelope once at init. SDKs MUST reset their liveness watchdog timer on receipt. Broadcast to ALL connected clients regardless of vehicle ownership.",
+    "anchoredFRs": ["NFR-3.10"],
+    "scenario": "happy-path"
+  },
+  "type": "heartbeat"
+}

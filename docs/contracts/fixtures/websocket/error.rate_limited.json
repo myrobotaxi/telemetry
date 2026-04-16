@@ -1,0 +1,13 @@
+{
+  "_meta": {
+    "description": "Per-user concurrent-connection cap breach with subCode device_cap. Sent when the user exceeds MaxConnectionsPerUser (default 5). Precedes WebSocket close code 4003 Server Overload. subCode device_cap enables the SDK to surface an actionable 'Too many devices signed in' message. SDK transitions connecting->disconnected (C-4) and auto-retries with extended backoff.",
+    "anchoredFRs": ["FR-7.1", "FR-7.3"],
+    "scenario": "error"
+  },
+  "type": "error",
+  "payload": {
+    "code": "rate_limited",
+    "message": "concurrent connection limit exceeded",
+    "subCode": "device_cap"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "_meta": {
+    "description": "Auth deadline exceeded error frame. Sent when the client fails to deliver the auth frame within the 5-second HandlerConfig.AuthTimeout window. Precedes WebSocket close code 1008. SDK transitions connecting->disconnected (C-4) and auto-retries with backoff.",
+    "anchoredFRs": ["FR-6.2", "FR-7.1"],
+    "scenario": "error"
+  },
+  "type": "error",
+  "payload": {
+    "code": "auth_timeout",
+    "message": "authentication deadline exceeded"
+  }
+}

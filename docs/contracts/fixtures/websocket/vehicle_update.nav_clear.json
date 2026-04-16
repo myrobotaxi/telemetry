@@ -1,0 +1,23 @@
+{
+  "_meta": {
+    "description": "Navigation atomic clear. Tesla cancelled navigation -- every nav field is atomically set to null (FR-2.3). SDK MUST amplify any partial clear to the full group per NFR-3.9: when ANY nav field arrives as null, ALL nav fields MUST be nulled in SDK state.",
+    "anchoredFRs": ["FR-2.3", "NFR-3.1", "NFR-3.9"],
+    "scenario": "happy-path"
+  },
+  "type": "vehicle_update",
+  "payload": {
+    "vehicleId": "clxyz1234567890abcdef",
+    "fields": {
+      "destinationName": null,
+      "destinationAddress": null,
+      "destinationLatitude": null,
+      "destinationLongitude": null,
+      "originLatitude": null,
+      "originLongitude": null,
+      "etaMinutes": null,
+      "tripDistanceRemaining": null,
+      "navRouteCoordinates": null
+    },
+    "timestamp": "2026-04-13T18:23:15Z"
+  }
+}

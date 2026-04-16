@@ -1,0 +1,15 @@
+{
+  "_meta": {
+    "description": "Ungrouped individual field update for speed. speed is NOT in the GPS group (vehicle-state-schema.md section 1.2) -- it updates at 2s cadence independently of GPS position. Integer-rounded server-side from Tesla's float emission.",
+    "anchoredFRs": ["FR-1.1"],
+    "scenario": "happy-path"
+  },
+  "type": "vehicle_update",
+  "payload": {
+    "vehicleId": "clxyz1234567890abcdef",
+    "fields": {
+      "speed": 35
+    },
+    "timestamp": "2026-04-13T18:22:03Z"
+  }
+}

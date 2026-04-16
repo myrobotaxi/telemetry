@@ -1,0 +1,13 @@
+{
+  "_meta": {
+    "description": "Vehicle mTLS connection came online. Reports vehicle<->server connectivity, NOT client<->server WebSocket status. Informational signal -- does not directly transition connectionState. UI may show 'Vehicle online' indicator.",
+    "anchoredFRs": ["FR-1.3", "FR-8.1"],
+    "scenario": "happy-path"
+  },
+  "type": "connectivity",
+  "payload": {
+    "vehicleId": "clxyz1234567890abcdef",
+    "online": true,
+    "timestamp": "2026-04-13T18:22:00Z"
+  }
+}

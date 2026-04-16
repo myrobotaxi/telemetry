@@ -1,0 +1,13 @@
+{
+  "_meta": {
+    "description": "Server->client positive auth acknowledgement. v1-required first frame after successful handshake. Triggers connectionState connecting->connected (C-3). Without this frame, SDKs on idle vehicles would sit in connecting indefinitely.",
+    "anchoredFRs": ["FR-6.1", "FR-8.1", "NFR-3.21"],
+    "scenario": "happy-path"
+  },
+  "type": "auth_ok",
+  "payload": {
+    "userId": "clxyz1234567890userid",
+    "vehicleCount": 1,
+    "issuedAt": "2026-04-13T18:22:00Z"
+  }
+}

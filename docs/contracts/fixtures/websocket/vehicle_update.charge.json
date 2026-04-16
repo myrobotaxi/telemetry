@@ -1,0 +1,18 @@
+{
+  "_meta": {
+    "description": "Charge atomic group update with all four v1 members. Represents the target wire shape after DV-03/DV-04 wiring ships. chargeState and timeToFull are non-null here; see vehicle_update.charge_partial.json for the transitional form.",
+    "anchoredFRs": ["FR-1.2", "NFR-3.1"],
+    "scenario": "happy-path"
+  },
+  "type": "vehicle_update",
+  "payload": {
+    "vehicleId": "clxyz1234567890abcdef",
+    "fields": {
+      "chargeLevel": 78,
+      "chargeState": "Disconnected",
+      "estimatedRange": 245,
+      "timeToFull": null
+    },
+    "timestamp": "2026-04-13T18:22:01Z"
+  }
+}

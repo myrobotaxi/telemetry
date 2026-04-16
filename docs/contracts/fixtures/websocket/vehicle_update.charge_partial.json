@@ -1,0 +1,18 @@
+{
+  "_meta": {
+    "description": "Transitional charge group update before DV-03/DV-04 wiring ships. chargeState and timeToFull are null because the server does not yet emit them. SDK consumers MUST tolerate null for both fields and render a neutral placeholder (not a spinner).",
+    "anchoredFRs": ["FR-1.2", "NFR-3.1"],
+    "scenario": "transitional"
+  },
+  "type": "vehicle_update",
+  "payload": {
+    "vehicleId": "clxyz1234567890abcdef",
+    "fields": {
+      "chargeLevel": 78,
+      "chargeState": null,
+      "estimatedRange": 245,
+      "timeToFull": null
+    },
+    "timestamp": "2026-04-13T18:22:01Z"
+  }
+}
