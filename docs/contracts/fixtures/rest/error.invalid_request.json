@@ -1,0 +1,11 @@
+{
+  "_meta": {
+    "description": "REST 400 error envelope. REST-only error code for malformed request body, path params, or query string. The WS protocol has no v1 client->server frames with structured payloads beyond auth, so malformed-body errors cannot arise there.",
+    "anchoredFRs": ["FR-7.1"],
+    "scenario": "error"
+  },
+  "error": {
+    "code": "invalid_request",
+    "message": "limit must be between 1 and 100"
+  }
+}

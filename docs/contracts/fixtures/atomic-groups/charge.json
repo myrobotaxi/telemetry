@@ -1,0 +1,13 @@
+{
+  "_meta": {
+    "description": "Charge atomic group -- all 4 v1 members. chargeLevel and estimatedRange are non-nullable (default 0). chargeState and timeToFull are transitional-nullable until DV-03/DV-04 wiring ships. This fixture shows the target four-field shape. All fields are P0 (log-safe, no encryption at rest).",
+    "anchoredFRs": ["FR-1.2", "NFR-3.1"],
+    "scenario": "happy-path"
+  },
+  "fields": {
+    "chargeLevel": 78,
+    "chargeState": "Disconnected",
+    "estimatedRange": 245,
+    "timeToFull": null
+  }
+}

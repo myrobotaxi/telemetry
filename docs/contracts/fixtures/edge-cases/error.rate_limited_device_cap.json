@@ -1,0 +1,13 @@
+{
+  "_meta": {
+    "description": "rate_limited error with subCode device_cap. This is the post-auth per-user concurrent-connection cap breach (close code 4003). The subCode device_cap enables the SDK to surface an actionable 'Too many devices signed in' message. Distinct from per-IP rate limit (HTTP 429 on upgrade, no subCode) and REST rate limit (HTTP 429, no subCode).",
+    "anchoredFRs": ["FR-7.1", "FR-7.3"],
+    "scenario": "edge-case"
+  },
+  "type": "error",
+  "payload": {
+    "code": "rate_limited",
+    "message": "concurrent connection limit exceeded",
+    "subCode": "device_cap"
+  }
+}

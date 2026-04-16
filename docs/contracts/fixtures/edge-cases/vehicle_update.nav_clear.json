@@ -1,0 +1,23 @@
+{
+  "_meta": {
+    "description": "Full atomic nav clear edge case. Tesla cancelled navigation -- every nav field is atomically null. This is an edge-case fixture (vs. the happy-path version in websocket/) because it exercises the SDK amplification rule: when ANY nav field arrives as null, the SDK MUST null ALL navigation fields atomically in its in-memory state, regardless of whether the server explicitly sent every member.",
+    "anchoredFRs": ["FR-2.3", "NFR-3.4", "NFR-3.9"],
+    "scenario": "edge-case"
+  },
+  "type": "vehicle_update",
+  "payload": {
+    "vehicleId": "clxyz1234567890abcdef",
+    "fields": {
+      "destinationName": null,
+      "destinationAddress": null,
+      "destinationLatitude": null,
+      "destinationLongitude": null,
+      "originLatitude": null,
+      "originLongitude": null,
+      "etaMinutes": null,
+      "tripDistanceRemaining": null,
+      "navRouteCoordinates": null
+    },
+    "timestamp": "2026-04-13T18:23:15Z"
+  }
+}

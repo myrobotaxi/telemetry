@@ -1,0 +1,17 @@
+{
+  "_meta": {
+    "description": "GPS 0,0 sentinel edge case. latitude==0 && longitude==0 represents the DB default before a GPS fix, NOT a valid location in the Gulf of Guinea. SDK consumers MUST treat this as 'no position available'. heading is 0 (North) as the default. This fixture validates that SDKs handle the 0,0 sentinel correctly.",
+    "anchoredFRs": ["FR-1.1", "NFR-3.1"],
+    "scenario": "edge-case"
+  },
+  "type": "vehicle_update",
+  "payload": {
+    "vehicleId": "clxyz1234567890abcdef",
+    "fields": {
+      "latitude": 0,
+      "longitude": 0,
+      "heading": 0
+    },
+    "timestamp": "2026-04-13T18:20:00Z"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "_meta": {
+    "description": "GPS atomic group -- latitude, longitude, heading. latitude/longitude are P1 (encrypted at rest via AES-256-GCM); heading is P0. Non-nullable in DB (default 0). SDK MUST treat lat==0 && lng==0 as 'no GPS fix'. speed is NOT in this group -- it is delivered ungrouped at a higher cadence.",
+    "anchoredFRs": ["FR-1.1", "NFR-3.1"],
+    "scenario": "happy-path"
+  },
+  "fields": {
+    "latitude": 37.7749,
+    "longitude": -122.4194,
+    "heading": 275
+  }
+}
