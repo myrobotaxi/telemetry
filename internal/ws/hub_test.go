@@ -65,8 +65,24 @@ func newTestServer(t *testing.T, hub *Hub, auth Authenticator) *httptest.Server 
 	return httptest.NewServer(handler)
 }
 
-// dialAndAuth connects to the test server and sends an auth message.
+// dialAndAuth connects to the test server, sends an auth message, and
+// consumes the auth_ok response frame. Tests that need to inspect auth_ok
+// directly should use dialAndAuthRaw instead.
 func dialAndAuth(t *testing.T, url, token string) *websocket.Conn {
+	t.Helper()
+	conn := dialAndAuthRaw(t, url, token)
+
+	// Consume the auth_ok frame so downstream reads see only data frames.
+	msg := readMessage(t, conn)
+	if msg.Type != msgTypeAuthOk {
+		t.Fatalf("dialAndAuth: expected first frame %q, got %q", msgTypeAuthOk, msg.Type)
+	}
+	return conn
+}
+
+// dialAndAuthRaw connects and sends auth but does NOT read the auth_ok
+// response. Use this when you need to inspect the auth_ok frame directly.
+func dialAndAuthRaw(t *testing.T, url, token string) *websocket.Conn {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -173,7 +189,7 @@ func TestHub_AuthFailure_InvalidToken(t *testing.T) {
 	srv := newTestServer(t, hub, auth)
 	t.Cleanup(srv.Close)
 
-	conn := dialAndAuth(t, srv.URL, "bad-token")
+	conn := dialAndAuthRaw(t, srv.URL, "bad-token")
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
 	// Should receive an error message before disconnect.
@@ -520,4 +536,149 @@ func TestNoopAuthenticator(t *testing.T) {
 			t.Fatalf("expected 2 vehicle IDs, got %d", len(ids))
 		}
 	})
+}
+
+func TestHub_AuthOk_FirstFrame(t *testing.T) {
+	tests := []struct {
+		name         string
+		userID       string
+		vehicleIDs   []string
+		wantUserID   string
+		wantVehCount int
+	}{
+		{
+			name:         "single vehicle",
+			userID:       "user-abc",
+			vehicleIDs:   []string{"v-1"},
+			wantUserID:   "user-abc",
+			wantVehCount: 1,
+		},
+		{
+			name:         "multiple vehicles",
+			userID:       "user-xyz",
+			vehicleIDs:   []string{"v-1", "v-2", "v-3"},
+			wantUserID:   "user-xyz",
+			wantVehCount: 3,
+		},
+		{
+			name:         "no vehicles",
+			userID:       "user-empty",
+			vehicleIDs:   []string{},
+			wantUserID:   "user-empty",
+			wantVehCount: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hub := newTestHub(t)
+			t.Cleanup(hub.Stop)
+
+			auth := &testAuth{userID: tt.userID, vehicleIDs: tt.vehicleIDs}
+			srv := newTestServer(t, hub, auth)
+			t.Cleanup(srv.Close)
+
+			conn := dialAndAuthRaw(t, srv.URL, "valid-token")
+			defer conn.Close(websocket.StatusNormalClosure, "")
+
+			// The FIRST frame must be auth_ok.
+			msg := readMessage(t, conn)
+			if msg.Type != msgTypeAuthOk {
+				t.Fatalf("expected first frame type %q, got %q", msgTypeAuthOk, msg.Type)
+			}
+
+			var payload authOkPayload
+			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+				t.Fatalf("unmarshal auth_ok payload: %v", err)
+			}
+
+			if payload.UserID != tt.wantUserID {
+				t.Errorf("userId = %q, want %q", payload.UserID, tt.wantUserID)
+			}
+			if payload.VehicleCount != tt.wantVehCount {
+				t.Errorf("vehicleCount = %d, want %d", payload.VehicleCount, tt.wantVehCount)
+			}
+
+			// issuedAt must be a valid RFC3339 timestamp.
+			if _, err := time.Parse(time.RFC3339, payload.IssuedAt); err != nil {
+				t.Errorf("issuedAt %q is not valid RFC3339: %v", payload.IssuedAt, err)
+			}
+		})
+	}
+}
+
+func TestHub_AuthOk_NotEmittedOnFailure(t *testing.T) {
+	tests := []struct {
+		name     string
+		auth     *testAuth
+		sendAuth bool // false = trigger auth_timeout by not sending auth
+		wantCode string
+	}{
+		{
+			name:     "auth_failed on invalid token",
+			auth:     &testAuth{err: ErrInvalidToken},
+			sendAuth: true,
+			wantCode: errCodeAuthFailed,
+		},
+		{
+			name:     "auth_timeout on no auth frame",
+			auth:     &testAuth{userID: "user-1", vehicleIDs: []string{"v-1"}},
+			sendAuth: false,
+			wantCode: errCodeAuthTimeout,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hub := newTestHub(t)
+			t.Cleanup(hub.Stop)
+
+			handler := hub.Handler(tt.auth, HandlerConfig{
+				AuthTimeout:  200 * time.Millisecond,
+				WriteTimeout: 2 * time.Second,
+			})
+			srv := httptest.NewServer(handler)
+			t.Cleanup(srv.Close)
+
+			var conn *websocket.Conn
+			if tt.sendAuth {
+				conn = dialAndAuthRaw(t, srv.URL, "bad-token")
+			} else {
+				conn = dialOnly(t, srv.URL)
+			}
+			defer conn.Close(websocket.StatusNormalClosure, "")
+
+			// Read whatever frame the server sends. It must be an error,
+			// NOT auth_ok.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			_, data, err := conn.Read(ctx)
+			if err != nil {
+				// On timeout path the server may close the connection
+				// before we read; that is acceptable — no auth_ok was sent.
+				return
+			}
+
+			var msg wsMessage
+			if err := json.Unmarshal(data, &msg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+
+			if msg.Type == msgTypeAuthOk {
+				t.Fatal("auth_ok must NOT be emitted on failed auth paths")
+			}
+			if msg.Type != msgTypeError {
+				t.Fatalf("expected error frame, got %q", msg.Type)
+			}
+
+			var errPl errorPayload
+			if err := json.Unmarshal(msg.Payload, &errPl); err != nil {
+				t.Fatalf("unmarshal error payload: %v", err)
+			}
+			if errPl.Code != tt.wantCode {
+				t.Fatalf("error code = %q, want %q", errPl.Code, tt.wantCode)
+			}
+		})
+	}
 }

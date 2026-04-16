@@ -8,6 +8,7 @@ import "encoding/json"
 // Message type constants matching the frontend protocol.
 const (
 	msgTypeAuth          = "auth"
+	msgTypeAuthOk        = "auth_ok"
 	msgTypeVehicleUpdate = "vehicle_update"
 	msgTypeDriveStarted  = "drive_started"
 	msgTypeDriveEnded    = "drive_ended"
@@ -35,6 +36,17 @@ type vehicleUpdatePayload struct {
 // WebSocket connection to authenticate the session.
 type authPayload struct {
 	Token string `json:"token"`
+}
+
+// authOkPayload is the server-to-client positive authentication
+// acknowledgement. Emitted as the FIRST frame after successful
+// Authenticator.ValidateToken + GetUserVehicles + Hub.Register.
+// Triggers the SDK connectionState transition connecting -> connected (C-3).
+// See websocket-protocol.md §2.3 for the full handshake contract.
+type authOkPayload struct {
+	UserID       string `json:"userId"`
+	VehicleCount int    `json:"vehicleCount"`
+	IssuedAt     string `json:"issuedAt"`
 }
 
 // errorPayload is the server-to-client payload for error messages.

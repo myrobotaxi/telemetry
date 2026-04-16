@@ -97,6 +97,17 @@ func (h *Hub) handleUpgrade(w http.ResponseWriter, r *http.Request, auth Authent
 	// Client authenticated — register and start pumps.
 	h.Register(client)
 
+	// Emit auth_ok as the FIRST frame the client receives (§2.3).
+	if err := sendAuthOk(r.Context(), client, cfg.WriteTimeout); err != nil {
+		h.logger.Error("auth_ok write failed, closing client",
+			slog.String("user_id", client.userID),
+			slog.Any("error", err),
+		)
+		h.Unregister(client)
+		_ = conn.Close(websocket.StatusInternalError, "auth_ok write failed")
+		return
+	}
+
 	ctx, cancel := context.WithCancel(r.Context())
 
 	g, gctx := errgroup.WithContext(ctx)
@@ -156,6 +167,33 @@ func (h *Hub) authenticateClient(ctx context.Context, client *Client, auth Authe
 
 	client.userID = userID
 	client.vehicleIDs = vehicleIDs
+	return nil
+}
+
+// sendAuthOk writes the auth_ok frame to the client as the FIRST
+// server-to-client message after successful authentication.
+// See websocket-protocol.md §2.3 for the wire shape contract.
+func sendAuthOk(ctx context.Context, client *Client, writeTimeout time.Duration) error {
+	payload, err := json.Marshal(authOkPayload{
+		UserID:       client.userID,
+		VehicleCount: len(client.vehicleIDs),
+		IssuedAt:     time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		return fmt.Errorf("sendAuthOk: marshal payload: %w", err)
+	}
+
+	msg, err := json.Marshal(wsMessage{Type: msgTypeAuthOk, Payload: payload})
+	if err != nil {
+		return fmt.Errorf("sendAuthOk: marshal message: %w", err)
+	}
+
+	writeCtx, cancel := context.WithTimeout(ctx, writeTimeout)
+	defer cancel()
+
+	if err = client.conn.Write(writeCtx, websocket.MessageText, msg); err != nil {
+		return fmt.Errorf("sendAuthOk(user=%s): write: %w", client.userID, err)
+	}
 	return nil
 }
 
