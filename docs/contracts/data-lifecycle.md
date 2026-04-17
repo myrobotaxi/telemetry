@@ -60,7 +60,7 @@ The Vehicle table is a **live snapshot**: the DB row is overwritten on each tele
 | `interiorTemp` | DB | WebSocket | Go store (overwrite) | Telemetry-driven |
 | `exteriorTemp` | DB | WebSocket | Go store (overwrite) | Telemetry-driven |
 | `odometerMiles` | DB | WebSocket | Go store (overwrite) | Telemetry-driven |
-| `fsdMilesToday` | DB | WebSocket | Go store (overwrite) | Telemetry-driven |
+| `fsdMilesSinceReset` | DB | WebSocket | Go store (overwrite) | Telemetry-driven |
 | `virtualKeyPaired` | DB | -- | Prisma (setup) | Pairing status flag |
 | `setupStatus` | DB | -- | Prisma (setup) | Prisma-owned lifecycle enum |
 | `destinationName` | DB | WebSocket | Go store (overwrite) | Telemetry-driven, navigation group |

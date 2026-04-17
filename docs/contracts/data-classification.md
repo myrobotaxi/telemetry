@@ -90,7 +90,7 @@ Every column in every persisted table is listed below. The **Tier** column is th
 | `interiorTemp` | `Int` | P0 | No | Yes | Cabin temperature — not identifying |
 | `exteriorTemp` | `Int` | P0 | No | Yes | Ambient temperature — not identifying |
 | `odometerMiles` | `Int` | P0 | No | Yes | Odometer reading — not identifying |
-| `fsdMilesToday` | `Float` | P0 | No | Yes | FSD miles driven today — not identifying |
+| `fsdMilesSinceReset` | `Float` | P0 | No | Yes | FSD miles driven since last reset — not identifying |
 | `virtualKeyPaired` | `Boolean` | P0 | No | Yes | Pairing status flag |
 | `setupStatus` | `SetupStatus` | P0 | No | Yes | Enum: setup lifecycle state — **Prisma-owned**, not currently accessed by the telemetry server |
 | `destinationName` | `String?` | P1 | No | No | Reveals travel intent/plans |

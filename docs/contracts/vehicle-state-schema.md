@@ -29,7 +29,7 @@ The `VehicleState` object represents the complete current state of a single vehi
 
 Every field below corresponds to a column in the `Vehicle` table or a value derived at broadcast time. Fields are grouped by category. The **Group** column indicates atomic group membership (fields without a group are delivered individually).
 
-> **SPEC-ONLY CALLOUT (MYR-24):** Seven fields in this schema are not yet loaded by the Go `Vehicle` struct in [`internal/store/types.go`](../../internal/store/types.go) and therefore cannot be populated by the server today: `model`, `year`, `color`, `fsdMilesToday`, `locationName`, `locationAddress`, and `destinationAddress`. These fields are marked **nullable** (`Spec-only`) in the table below and in the JSON Schema until the follow-up issue **[MYR-24](https://linear.app/myrobotaxi/issue/MYR-24)** extends the `Vehicle` struct (and the underlying persistence path) to load them. Once MYR-24 lands, they will be promoted to non-nullable and this callout removed. SDK consumers MUST tolerate `null` for every spec-only field until then. See §7.2 for the full open question entry.
+> **SPEC-ONLY CALLOUT (MYR-24):** Seven fields in this schema are not yet loaded by the Go `Vehicle` struct in [`internal/store/types.go`](../../internal/store/types.go) and therefore cannot be populated by the server today: `model`, `year`, `color`, `fsdMilesSinceReset`, `locationName`, `locationAddress`, and `destinationAddress`. These fields are marked **nullable** (`Spec-only`) in the table below and in the JSON Schema until the follow-up issue **[MYR-24](https://linear.app/myrobotaxi/issue/MYR-24)** extends the `Vehicle` struct (and the underlying persistence path) to load them. Once MYR-24 lands, they will be promoted to non-nullable and this callout removed. SDK consumers MUST tolerate `null` for every spec-only field until then. See §7.2 for the full open question entry.
 
 #### Identity fields
 
@@ -90,7 +90,7 @@ Every field below corresponds to a column in the `Vehicle` table or a value deri
 | `odometerMiles` | `integer` | No | miles | P0 | -- | Tesla `Odometer` |
 | `interiorTemp` | `integer` | No | fahrenheit | P0 | -- | Tesla `InsideTemp` |
 | `exteriorTemp` | `integer` | No | fahrenheit | P0 | -- | Tesla `OutsideTemp` |
-| `fsdMilesToday` | `number` or `null` | Yes (Spec-only, MYR-24) | miles | P0 | -- | Tesla `SelfDrivingMilesSinceReset` |
+| `fsdMilesSinceReset` | `number` or `null` | Yes (Spec-only, MYR-24) | miles | P0 | -- | Tesla `SelfDrivingMilesSinceReset` |
 | `locationName` | `string` or `null` | Yes (Spec-only, MYR-24) | -- | P1 | -- | Reverse-geocoded server-side |
 | `locationAddress` | `string` or `null` | Yes (Spec-only, MYR-24) | -- | P1 | -- | Reverse-geocoded server-side |
 | `lastUpdated` | `string` (ISO 8601) | No | -- | P0 | -- | Server timestamp |
@@ -215,7 +215,7 @@ Every field has exactly one authoritative source. This mapping is critical for u
 | `interiorTemp` | Tesla `InsideTemp` telemetry | Live stream; 60s interval, 120s resend |
 | `exteriorTemp` | Tesla `OutsideTemp` telemetry | Live stream; 60s interval, 120s resend |
 | `odometerMiles` | Tesla `Odometer` telemetry | Live stream; 60s interval |
-| `fsdMilesToday` | Tesla `SelfDrivingMilesSinceReset` telemetry | Live stream; 60s interval |
+| `fsdMilesSinceReset` | Tesla `SelfDrivingMilesSinceReset` telemetry | Live stream; 60s interval |
 | `locationName`, `locationAddress` | Reverse-geocoded from GPS coordinates (server-side) | Derived; async update after GPS change |
 | `destinationName` | Tesla `DestinationName` telemetry | Live stream; 1s interval, 30s resend |
 | `destinationAddress` | Tesla / reverse-geocoded | Live stream or derived |
@@ -304,7 +304,7 @@ public struct VehicleState: Codable, Sendable {
     public let exteriorTemp: Int
     public let odometerMiles: Int
     // Spec-only until MYR-24.
-    public let fsdMilesToday: Double?
+    public let fsdMilesSinceReset: Double?
     public let destinationName: String?
     // Spec-only until MYR-24.
     public let destinationAddress: String?
@@ -348,12 +348,13 @@ public enum GearPosition: String, Codable, Sendable {
 | Temperatures in Fahrenheit | Matches the current DB schema and frontend display. Conversion to user-preferred units is a UI concern, not an SDK concern. |
 | `navRouteCoordinates` uses `[lng, lat]` order | GeoJSON/Mapbox standard. Tesla's raw protobuf uses `[lat, lng]`; the server converts on decode. |
 | Integer rounding applied server-side | SDK consumers receive pre-rounded values. This prevents inconsistent rounding across TypeScript/Swift/etc. |
+| `fsdMilesToday` renamed to `fsdMilesSinceReset` (MYR-27, 2026-04-15) | Tesla's `SelfDrivingMilesSinceReset` does NOT reset daily -- it resets on OTA updates, factory resets, etc. The wire name `fsdMilesToday` was a cosmetic label applied without checking the upstream source. Renamed to `fsdMilesSinceReset` before any SDK type-gen ships, avoiding a breaking change. If a "miles today" metric is needed, the SDK can compute it by sampling `fsdMilesSinceReset` at midnight. |
 
 ### 7.2 Open questions
 
 | Question | Owner | Target |
 |----------|-------|--------|
-| **Schema vs `internal/store/types.go` gap (spec-only fields).** The canonical v1 schema defines seven fields that the current Go `Vehicle` struct does not load: `model`, `year`, `color`, `fsdMilesToday`, `locationName`, `locationAddress`, and `destinationAddress`. Until the Go struct is extended (and the SELECT / scan path in `internal/store` is updated), the server physically cannot populate these fields, so they are marked **nullable and `x-spec-only: true`** in both the MD (§1.1) and JSON Schema. SDK consumers MUST tolerate `null` for every spec-only field until MYR-24 lands. Once MYR-24 ships, these fields will be promoted back to non-nullable, the `x-spec-only` markers and the §1.1 callout removed, and this row closed. The gap is explicitly tracked in **[MYR-24](https://linear.app/myrobotaxi/issue/MYR-24)** ("Extend `internal/store.Vehicle` to load `model`/`year`/`color`/`fsdMilesToday`/`locationName`/`locationAddress`/`destinationAddress`"). | sdk-architect + go-engineer | **MYR-24** |
+| **Schema vs `internal/store/types.go` gap (spec-only fields).** The canonical v1 schema defines seven fields that the current Go `Vehicle` struct does not load: `model`, `year`, `color`, `fsdMilesSinceReset`, `locationName`, `locationAddress`, and `destinationAddress`. Until the Go struct is extended (and the SELECT / scan path in `internal/store` is updated), the server physically cannot populate these fields, so they are marked **nullable and `x-spec-only: true`** in both the MD (§1.1) and JSON Schema. SDK consumers MUST tolerate `null` for every spec-only field until MYR-24 lands. Once MYR-24 ships, these fields will be promoted back to non-nullable, the `x-spec-only` markers and the §1.1 callout removed, and this row closed. The gap is explicitly tracked in **[MYR-24](https://linear.app/myrobotaxi/issue/MYR-24)** ("Extend `internal/store.Vehicle` to load `model`/`year`/`color`/`fsdMilesSinceReset`/`locationName`/`locationAddress`/`destinationAddress`"). | sdk-architect + go-engineer | **MYR-24** |
 | ~~Should `chargingState` (string enum) be added to the charge group in v1?~~ | RESOLVED 2026-04-13 by MYR-11: YES. Tesla proto field 2 (`ChargeState`) is native. See §7.1 resolved decisions and `websocket-protocol.md` §10 DV-03. | RESOLVED |
 | ~~Should `tripStartTime` be derived from drive detection events and added to nav group?~~ | RESOLVED 2026-04-13 by MYR-11: `tripStartTime` is relocated from the navigation group to the drive group; it is derived from the drive detector's `started_at` and carried as `drive_started.payload.startedAt`. See §7.1 resolved decisions and `websocket-protocol.md` §10 DV-13. | RESOLVED |
 | Should temperature units be configurable (C/F) at the SDK level? | sdk-architect | v2 |
@@ -368,3 +369,4 @@ public enum GearPosition: String, Codable, Sendable {
 | 2026-04-09 | PR #161 review fixes: (1) mark 7 spec-only fields nullable + add §1.1 callout; (2) add §7.2 entry for MYR-24 Go struct gap; (3) clarify §3.1 predicates are `contract-tester`-enforced, not schema-enforced; (4) remove unreachable `$defs` sub-schemas from schema and rewrite §5.2; (5) fix latitude/longitude descriptions to reference the `0,0` convention instead of "nullable"; (6) align schema `chargeLevel: 0` semantics with §2.2 (context-dependent on `status`); update Swift struct in §6.2 to reflect new optionality | sdk-architect agent |
 | 2026-04-13 | **MYR-11 v1 contract freeze, cross-contract updates from WebSocket protocol decisions.** (1) Charge group §1.1 and §2.2: added `chargeState` (Tesla proto field 2, enum) and `timeToFull` (Tesla proto field 43, `double` seconds) as v1 members; both are transitional nullable until server wiring lands. (2) §7.1 resolved decisions: overturned the previous "deferred" rulings for `chargingState` and `timeToFull`; explicitly flagged the prior "not available from Tesla Fleet Telemetry" rationale for `timeToFull` as factually wrong. (3) §7.1 resolved decisions: clarified that `tripStartTime` is relocated from the navigation group to the drive group (carried as `drive_started.payload.startedAt`, not as a vehicle_update field). (4) §7.2 open questions: closed the `chargingState` and `tripStartTime` entries as RESOLVED by MYR-11. Implementation follow-ups for `chargeState`, `timeToFull`, and the NFR-3.1 amendment for `tripStartTime` are tracked in `websocket-protocol.md` §10 as DV-03 (RESOLVED), DV-04 (RESOLVED), and DV-13 (amendment pending). | sdk-architect |
 | 2026-04-14 | **MYR-11 Tesla SME audit corrections.** The `tesla-telemetry` subagent performed a trust-but-verify audit of every Tesla claim in the P1 contract foundation and found three errors in the previous freeze. Corrections: (1) `timeToFull` unit is **hours** (decimal), NOT seconds. The skill and the legacy Tesla REST API both use hours; the "seconds" label was fabricated. Corrected in §1.1 charge table, §2.2 wire field table, §7.1 resolved decisions, and the change log. (2) `VehicleTelemetryEvent.Fields` is a fabricated protobuf type name; Tesla's actual top-level message is `Payload` with repeated `Datum` entries. Corrected in §2.2. (3) Flagged that `chargeState` + `timeToFull` are not yet in `DefaultFieldConfig`, so the "shared 30-second charge cadence" claim is aspirational until DV-04 ships. New divergences DV-17 (empirical unit verification) and DV-18 (`FieldChargeState` internal constant collision) added to `websocket-protocol.md` §10. | sdk-architect |
+| 2026-04-15 | **MYR-27: Rename `fsdMilesToday` to `fsdMilesSinceReset`.** Tesla's `SelfDrivingMilesSinceReset` does not reset daily; shipping the cosmetic `fsdMilesToday` wire name would bake a lie into SDK types. Renamed across §1.1 field table, §4 source-of-truth mapping, §6.2 Swift struct, §7.1 resolved decisions. Matching updates in all sibling contract docs, JSON Schema, fixtures, AsyncAPI, OpenAPI, and Go code (`field_mapping.go`, `broadcaster_test.go`, `db_test.go`). | sdk-architect |
