@@ -19,12 +19,12 @@ var internalToClientField = map[string]string{
 	"outsideTemp":            "exteriorTemp",
 	"minutesToArrival":       "etaMinutes",
 	"milesToArrival":         "tripDistanceRemaining",
-	"fsdMilesSinceReset":     "fsdMilesSinceReset",
 	"hvacFanSpeed":           "fanSpeed",
-	// These fields map 1:1 and are listed for explicitness:
-	// speed, heading, estimatedRange, location (handled separately)
+	// These fields pass through unchanged (internal name == wire name):
+	// speed, heading, estimatedRange, fsdMilesSinceReset,
+	// location (handled separately),
 	// hvacPower, defrostMode, climateKeeperMode, driverTempSetting,
-	// passengerTempSetting, seatHeaterLeft, seatHeaterRight pass through unchanged.
+	// passengerTempSetting, seatHeaterLeft, seatHeaterRight.
 }
 
 // integerFields are client field names that the frontend Vehicle model types
