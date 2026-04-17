@@ -250,7 +250,7 @@ A single `vehicle_update` frame's `payload.fields` map MUST contain members of *
 
 \* `destinationAddress` is a **spec-only** member pending MYR-24 (see [`vehicle-state-schema.md`](vehicle-state-schema.md) §1.1). Until MYR-24 lands, this field is always `null` regardless of nav state and is exempt from the active-navigation predicate.
 
-Ungrouped fields (delivered individually, no group membership): `speed`, `odometerMiles`, `interiorTemp`, `exteriorTemp`, `fsdMilesToday`, `locationName`, `locationAddress`, `lastUpdated`, and the drive-only `routeCoordinates` field (§4.1.6). Their classification tiers are defined in [`vehicle-state-schema.md`](vehicle-state-schema.md) §1.1.
+Ungrouped fields (delivered individually, no group membership): `speed`, `odometerMiles`, `interiorTemp`, `exteriorTemp`, `fsdMilesSinceReset`, `locationName`, `locationAddress`, `lastUpdated`, and the drive-only `routeCoordinates` field (§4.1.6). Their classification tiers are defined in [`vehicle-state-schema.md`](vehicle-state-schema.md) §1.1.
 
 **Server enforcement** ([`internal/ws/nav_broadcast.go:handleTelemetry`](../../internal/ws/nav_broadcast.go)):
 
@@ -358,7 +358,7 @@ The wire field names in `payload.fields` are the **frontend / SDK** names, not t
 | `outsideTemp` | `exteriorTemp` |
 | `minutesToArrival` | `etaMinutes` |
 | `milesToArrival` | `tripDistanceRemaining` |
-| `fsdMilesSinceReset` | `fsdMilesToday` |
+| `fsdMilesSinceReset` | `fsdMilesSinceReset` |
 | `location` (compound) | split into `latitude` + `longitude` |
 | `destinationLocation` | split into `destinationLatitude` + `destinationLongitude` |
 | `originLocation` | split into `originLatitude` + `originLongitude` |
@@ -510,7 +510,7 @@ Per [`state-machine.md`](state-machine.md) §4.1, `drive_updated` is **NOT a dis
 
 `speed` is delivered ungrouped even though `requirements.md` NFR-3.1 text puts it in the GPS group. This is a resolved decision in [`vehicle-state-schema.md`](vehicle-state-schema.md) §7.1: speed updates at 2 s cadence while GPS uses a 10 m delta filter, so coupling them would either delay speed updates or flood GPS updates. DV-10 records this as an accepted divergence from the NFR literal.
 
-Other ungrouped fields: `odometerMiles`, `interiorTemp`, `exteriorTemp`, `fsdMilesToday`, `locationName`, `locationAddress`, `lastUpdated`. None of these transition a `dataState` group on receipt (per [`state-machine.md`](state-machine.md) §4.3 footnote). Their freshness is implied by `connectionState`.
+Other ungrouped fields: `odometerMiles`, `interiorTemp`, `exteriorTemp`, `fsdMilesSinceReset`, `locationName`, `locationAddress`, `lastUpdated`. None of these transition a `dataState` group on receipt (per [`state-machine.md`](state-machine.md) §4.3 footnote). Their freshness is implied by `connectionState`.
 
 `lastUpdated` is set by the server on every outbound `vehicle_update` (`nav_broadcast.go` lines 59 and 99) to the event's `CreatedAt` for non-nav broadcasts or `time.Now().UTC()` for nav flushes. SDKs SHOULD surface this to consumers as the "most recent telemetry timestamp" for the vehicle.
 
@@ -1029,3 +1029,4 @@ Read this legend before scanning the catalogue. A row's **Status** column classi
 | 2026-04-15 | **DV-15 RESOLVED** by MYR-31. `state-machine.md` §1.3 C-3 trigger amended from "first data frame OR heartbeat" to "receipt of `auth_ok`". Both docs now agree on the canonical C-3 trigger. | sdk-architect |
 | 2026-04-15 | **DV-12 RESOLVED by [MYR-32](https://linear.app/myrobotaxi/issue/MYR-32).** Server now emits `durationSeconds` (float64) instead of `duration` (Go string) on `drive_ended` frames. `messages.go` field renamed, `broadcaster.go` calls `.Seconds()` instead of `.String()`. §10 DV-12 status flipped from "RESOLVED (target documented; wiring still pending)" to "RESOLVED". | go-engineer |
 | 2026-04-15 | **DV-18 RESOLVED by [MYR-26](https://linear.app/myrobotaxi/issue/MYR-26).** Renamed `FieldChargeState` (proto 179) to `FieldDetailedChargeState`; added new `FieldChargeState` for proto field 2 (`Field_ChargeState`). The naming collision that would have blocked DV-03 wiring is eliminated. §10 DV-18 status flipped from "New (implementation trap)" to "RESOLVED". | go-engineer |
+| 2026-04-15 | **MYR-27: Rename `fsdMilesToday` to `fsdMilesSinceReset`.** Wire field name in §3.2 ungrouped list, §4.1 rename table, and §4.1.7 ungrouped field list updated. Tesla's `SelfDrivingMilesSinceReset` does not reset daily; the cosmetic label was wrong. | sdk-architect |

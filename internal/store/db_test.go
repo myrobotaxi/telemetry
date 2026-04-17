@@ -121,7 +121,7 @@ func createSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"interiorTemp"     INT NOT NULL DEFAULT 0,
 		"exteriorTemp"     INT NOT NULL DEFAULT 0,
 		"odometerMiles"    INT NOT NULL DEFAULT 0,
-		"fsdMilesToday"    DOUBLE PRECISION NOT NULL DEFAULT 0,
+		"fsdMilesSinceReset" DOUBLE PRECISION NOT NULL DEFAULT 0,
 		"virtualKeyPaired" BOOLEAN NOT NULL DEFAULT FALSE,
 		"destinationName"  TEXT,
 		"destinationLatitude"  DOUBLE PRECISION,

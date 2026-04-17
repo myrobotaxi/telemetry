@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "description": "VehicleState snapshot with all spec-only fields null. Validates that SDKs tolerate null for every MYR-24 spec-only field (model, year, color, fsdMilesToday, locationName, locationAddress, destinationAddress) and the transitional-nullable charge fields (chargeState, timeToFull). This is the expected shape before MYR-24 and DV-03/DV-04 land.",
+    "description": "VehicleState snapshot with all spec-only fields null. Validates that SDKs tolerate null for every MYR-24 spec-only field (model, year, color, fsdMilesSinceReset, locationName, locationAddress, destinationAddress) and the transitional-nullable charge fields (chargeState, timeToFull). This is the expected shape before MYR-24 and DV-03/DV-04 land.",
     "anchoredFRs": ["NFR-3.5", "NFR-3.6"],
     "scenario": "edge-case"
   },
@@ -24,7 +24,7 @@
   "interiorTemp": 0,
   "exteriorTemp": 0,
   "odometerMiles": 0,
-  "fsdMilesToday": null,
+  "fsdMilesSinceReset": null,
   "destinationName": null,
   "destinationAddress": null,
   "destinationLatitude": null,

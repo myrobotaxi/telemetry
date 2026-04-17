@@ -950,7 +950,7 @@ func TestTranslateFieldName(t *testing.T) {
 		{"insideTemp", "interiorTemp"},
 		{"outsideTemp", "exteriorTemp"},
 		{"minutesToArrival", "etaMinutes"},
-		{"fsdMilesSinceReset", "fsdMilesToday"},
+		{"fsdMilesSinceReset", "fsdMilesSinceReset"},
 		{"milesToArrival", "tripDistanceRemaining"},
 		{"unknownField", "unknownField"}, // passthrough
 	}

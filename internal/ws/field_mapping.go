@@ -19,7 +19,7 @@ var internalToClientField = map[string]string{
 	"outsideTemp":            "exteriorTemp",
 	"minutesToArrival":       "etaMinutes",
 	"milesToArrival":         "tripDistanceRemaining",
-	"fsdMilesSinceReset":     "fsdMilesToday",
+	"fsdMilesSinceReset":     "fsdMilesSinceReset",
 	"hvacFanSpeed":           "fanSpeed",
 	// These fields map 1:1 and are listed for explicitness:
 	// speed, heading, estimatedRange, location (handled separately)

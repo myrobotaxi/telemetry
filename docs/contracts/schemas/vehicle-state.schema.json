@@ -175,9 +175,9 @@
       "x-classification": "P0",
       "minimum": 0
     },
-    "fsdMilesToday": {
+    "fsdMilesSinceReset": {
       "type": ["number", "null"],
-      "description": "Full Self-Driving miles driven since last counter reset (typically daily). SPEC-ONLY until MYR-24: not currently loaded by the Go Vehicle struct in internal/store/types.go. Will be nullable until MYR-24 lands; consumers MUST tolerate null.",
+      "description": "Miles driven using Full Self-Driving since last reset. The counter resets on OTA updates and factory resets, NOT daily. Maps from Tesla SelfDrivingMilesSinceReset. SPEC-ONLY until MYR-24: not currently loaded by the Go Vehicle struct in internal/store/types.go. Will be nullable until MYR-24 lands; consumers MUST tolerate null.",
       "x-unit": "miles",
       "x-classification": "P0",
       "x-spec-only": true,

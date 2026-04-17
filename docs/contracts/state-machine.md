@@ -305,7 +305,7 @@ When a `vehicle_update` message arrives, the SDK routes each field in the `field
 | `gearPosition`, `status` | Gear | `dataState.gear` |
 | `chargeLevel`, `estimatedRange` | Charge | `dataState.charge` |
 | `destinationName`, `destinationAddress`, `destinationLatitude`, `destinationLongitude`, `originLatitude`, `originLongitude`, `etaMinutes`, `tripDistanceRemaining`, `navRouteCoordinates` | Navigation | `dataState.navigation` |
-| `speed`, `odometerMiles`, `interiorTemp`, `exteriorTemp`, `fsdMilesToday`, `locationName`, `locationAddress` | (ungrouped) | No `dataState` dimension — these fields update individually |
+| `speed`, `odometerMiles`, `interiorTemp`, `exteriorTemp`, `fsdMilesSinceReset`, `locationName`, `locationAddress` | (ungrouped) | No `dataState` dimension — these fields update individually |
 
 > **Ungrouped fields** do not participate in the `dataState` model. They are updated directly in the vehicle state object when received. Their freshness is implied by `connectionState`: if connected, they are fresh; if disconnected, they are stale alongside everything else.
 

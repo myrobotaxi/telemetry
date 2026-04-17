@@ -470,7 +470,7 @@ Example:
   "interiorTemp": 68,
   "exteriorTemp": 55,
   "odometerMiles": 12458,
-  "fsdMilesToday": null,
+  "fsdMilesSinceReset": null,
   "destinationName": null,
   "destinationAddress": null,
   "destinationLatitude": null,

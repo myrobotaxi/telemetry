@@ -240,7 +240,7 @@ components:
         The primary server->client payload. Each frame carries the members of
         AT MOST ONE atomic group (navigation, charge, gps, gear) plus
         individually-delivered fields (speed, odometerMiles, interiorTemp,
-        exteriorTemp, fsdMilesToday, locationName, locationAddress,
+        exteriorTemp, fsdMilesSinceReset, locationName, locationAddress,
         lastUpdated, routeCoordinates).
 
         Per-field types, units, nullability, and classification are defined
