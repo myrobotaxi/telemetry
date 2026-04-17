@@ -1112,14 +1112,6 @@ func TestBroadcaster_DriveEndedClearsAccumulator(t *testing.T) {
 		return b.routes.Len("5YJ3E1EA1NF000001") >= 3
 	})
 
-	// Capture call log length BEFORE publishing drive-end. Route point
-	// processing already added entries to callLog (one per point), so the
-	// classic `len(callLog) > 0` wait would be satisfied immediately and
-	// race with handleDriveEnded's accumulator clear.
-	resolver.mu.RLock()
-	callLogBefore := len(resolver.callLog)
-	resolver.mu.RUnlock()
-
 	// End the drive — flushes remaining points and clears accumulator.
 	endEvent := events.NewEvent(events.DriveEndedEvent{
 		VIN:     "5YJ3E1EA1NF000001",
@@ -1137,12 +1129,14 @@ func TestBroadcaster_DriveEndedClearsAccumulator(t *testing.T) {
 		t.Fatalf("Publish drive ended: %v", err)
 	}
 
-	// Wait for handleDriveEnded to call the resolver — guarantees
-	// the accumulator clear in handleDriveEnded has executed.
+	// Wait for handleDriveEnded to clear the accumulator. The previous
+	// wait condition polled the resolver call log, but the resolver is
+	// called BEFORE the accumulator is cleared in handleDriveEnded,
+	// so the old condition could be satisfied while routes.Clear had
+	// not yet executed — a race. Polling Len directly asserts the exact
+	// invariant this test verifies.
 	waitForCondition(t, func() bool {
-		resolver.mu.RLock()
-		defer resolver.mu.RUnlock()
-		return len(resolver.callLog) > callLogBefore
+		return b.routes.Len("5YJ3E1EA1NF000001") == 0
 	})
 
 	// Accumulator should be cleared for this VIN.
