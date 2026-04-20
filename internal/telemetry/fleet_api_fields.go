@@ -43,7 +43,9 @@ const (
 	FleetFieldEnergyRemaining      = "EnergyRemaining"
 	FleetFieldPackVoltage          = "PackVoltage"
 	FleetFieldPackCurrent          = "PackCurrent"
-	FleetFieldDetailedChargeState  = "DetailedChargeState"
+	FleetFieldDetailedChargeState              = "DetailedChargeState"
+	FleetFieldTimeToFullCharge                 = "TimeToFullCharge"
+	FleetFieldEstimatedHoursToChargeTermination = "EstimatedHoursToChargeTermination"
 )
 
 // --- Climate ---
@@ -126,7 +128,9 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		FleetFieldEnergyRemaining:     {IntervalSeconds: 30},
 		FleetFieldPackVoltage:         {IntervalSeconds: 30},
 		FleetFieldPackCurrent:         {IntervalSeconds: 30},
-		FleetFieldDetailedChargeState: {IntervalSeconds: 30}, // maps to FieldDetailedChargeState (proto 179)
+		FleetFieldDetailedChargeState:              {IntervalSeconds: 30}, // maps to FieldDetailedChargeState (proto 179)
+		FleetFieldTimeToFullCharge:                 {IntervalSeconds: 30}, // MYR-25: proto 43, unit verification (hours vs seconds)
+		FleetFieldEstimatedHoursToChargeTermination: {IntervalSeconds: 30}, // MYR-28: proto 190, delineation vs TimeToFullCharge
 
 		// Climate — medium/low frequency
 		FleetFieldInsideTemp:           {IntervalSeconds: 60, ResendIntervalSeconds: intPtr(120)},

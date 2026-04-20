@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"fmt"
+	"log/slog"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -122,6 +123,17 @@ func (d *Decoder) DecodePayload(payload *tpb.Payload) (events.VehicleTelemetryEv
 		}
 
 		fields[string(name)] = tv
+
+		// MYR-25/28/29: Temporary debug log for Tesla field unit verification.
+		// Remove after empirical verification is complete.
+		switch name {
+		case FieldTimeToFullCharge, FieldEstimatedHoursToChargeTermination, FieldMilesToArrival:
+			slog.Info("MYR-25/28/29 FIELD VERIFICATION",
+				slog.String("field", string(name)),
+				slog.String("vin_last4", payload.GetVin()[len(payload.GetVin())-4:]),
+				slog.Any("raw_value", tv),
+			)
+		}
 	}
 
 	evt := events.VehicleTelemetryEvent{

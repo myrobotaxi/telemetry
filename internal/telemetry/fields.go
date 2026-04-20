@@ -52,7 +52,9 @@ const (
 	FieldMinutesToArrival   FieldName = "minutesToArrival"
 	FieldLatAccel            FieldName = "lateralAcceleration"
 	FieldLongAccel           FieldName = "longitudinalAcceleration"
-	FieldMilesSinceReset    FieldName = "milesSinceReset"
+	FieldMilesSinceReset                    FieldName = "milesSinceReset"
+	FieldTimeToFullCharge                   FieldName = "timeToFullCharge"
+	FieldEstimatedHoursToChargeTermination  FieldName = "estimatedHoursToChargeTermination"
 )
 
 // fieldMap maps Tesla's proto Field enum values to our internal field names.
@@ -98,7 +100,9 @@ var fieldMap = map[tpb.Field]FieldName{
 	tpb.Field_MinutesToArrival:         FieldMinutesToArrival,
 	tpb.Field_LateralAcceleration:      FieldLatAccel,
 	tpb.Field_LongitudinalAcceleration: FieldLongAccel,
-	tpb.Field_MilesSinceReset:          FieldMilesSinceReset,
+	tpb.Field_MilesSinceReset:                    FieldMilesSinceReset,
+	tpb.Field_TimeToFullCharge:                   FieldTimeToFullCharge,
+	tpb.Field_EstimatedHoursToChargeTermination:  FieldEstimatedHoursToChargeTermination,
 	// Field_RouteLastUpdated omitted — Tesla docs state this field is broken.
 }
 
