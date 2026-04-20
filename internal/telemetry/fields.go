@@ -13,15 +13,15 @@ type FieldName string
 // detector, WebSocket broadcast, store) reference these constants, not
 // Tesla's proto enum names.
 const (
-	FieldSpeed              FieldName = "speed"
-	FieldLocation           FieldName = "location"
-	FieldHeading            FieldName = "heading"
-	FieldGear               FieldName = "gear"
-	FieldSOC                FieldName = "soc"
-	FieldEstBatteryRange    FieldName = "estimatedRange"
-	FieldChargeState         FieldName = "chargeState"
-	FieldDetailedChargeState FieldName = "detailedChargeState"
-	FieldOdometer           FieldName = "odometer"
+	FieldSpeed                FieldName = "speed"
+	FieldLocation             FieldName = "location"
+	FieldHeading              FieldName = "heading"
+	FieldGear                 FieldName = "gear"
+	FieldSOC                  FieldName = "soc"
+	FieldEstBatteryRange      FieldName = "estimatedRange"
+	FieldChargeState          FieldName = "chargeState"
+	FieldDetailedChargeState  FieldName = "detailedChargeState"
+	FieldOdometer             FieldName = "odometer"
 	FieldInsideTemp           FieldName = "insideTemp"
 	FieldOutsideTemp          FieldName = "outsideTemp"
 	FieldHvacPower            FieldName = "hvacPower"
@@ -33,43 +33,41 @@ const (
 	FieldSeatHeaterRight      FieldName = "seatHeaterRight"
 	FieldClimateKeeperMode    FieldName = "climateKeeperMode"
 	FieldDestinationName      FieldName = "destinationName"
-	FieldRouteLine          FieldName = "routeLine"
-	FieldFSDMiles           FieldName = "fsdMilesSinceReset"
-	FieldBatteryLevel       FieldName = "batteryLevel"
-	FieldIdealBatteryRange  FieldName = "idealBatteryRange"
-	FieldRatedRange         FieldName = "ratedRange"
-	FieldEnergyRemaining    FieldName = "energyRemaining"
-	FieldPackVoltage        FieldName = "packVoltage"
-	FieldPackCurrent        FieldName = "packCurrent"
-	FieldVehicleName        FieldName = "vehicleName"
-	FieldCarType            FieldName = "carType"
-	FieldVersion            FieldName = "version"
-	FieldLocked             FieldName = "locked"
-	FieldSentryMode         FieldName = "sentryMode"
-	FieldOriginLocation     FieldName = "originLocation"
-	FieldDestLocation       FieldName = "destinationLocation"
-	FieldMilesToArrival     FieldName = "milesToArrival"
-	FieldMinutesToArrival   FieldName = "minutesToArrival"
-	FieldLatAccel            FieldName = "lateralAcceleration"
-	FieldLongAccel           FieldName = "longitudinalAcceleration"
-	FieldMilesSinceReset                    FieldName = "milesSinceReset"
-	FieldTimeToFullCharge                   FieldName = "timeToFullCharge"
-	FieldEstimatedHoursToChargeTermination  FieldName = "estimatedHoursToChargeTermination"
+	FieldRouteLine            FieldName = "routeLine"
+	FieldFSDMiles             FieldName = "fsdMilesSinceReset"
+	FieldBatteryLevel         FieldName = "batteryLevel"
+	FieldIdealBatteryRange    FieldName = "idealBatteryRange"
+	FieldRatedRange           FieldName = "ratedRange"
+	FieldEnergyRemaining      FieldName = "energyRemaining"
+	FieldPackVoltage          FieldName = "packVoltage"
+	FieldPackCurrent          FieldName = "packCurrent"
+	FieldVehicleName          FieldName = "vehicleName"
+	FieldCarType              FieldName = "carType"
+	FieldVersion              FieldName = "version"
+	FieldLocked               FieldName = "locked"
+	FieldSentryMode           FieldName = "sentryMode"
+	FieldOriginLocation       FieldName = "originLocation"
+	FieldDestLocation         FieldName = "destinationLocation"
+	FieldMilesToArrival       FieldName = "milesToArrival"
+	FieldMinutesToArrival     FieldName = "minutesToArrival"
+	FieldLatAccel             FieldName = "lateralAcceleration"
+	FieldLongAccel            FieldName = "longitudinalAcceleration"
+	FieldMilesSinceReset      FieldName = "milesSinceReset"
 )
 
 // fieldMap maps Tesla's proto Field enum values to our internal field names.
 // Only fields that MyRoboTaxi cares about are included. Unlisted fields are
 // silently skipped during decoding.
 var fieldMap = map[tpb.Field]FieldName{
-	tpb.Field_VehicleSpeed:             FieldSpeed,
-	tpb.Field_Location:                 FieldLocation,
-	tpb.Field_GpsHeading:               FieldHeading,
-	tpb.Field_Gear:                     FieldGear,
-	tpb.Field_Soc:                      FieldSOC,
-	tpb.Field_EstBatteryRange:          FieldEstBatteryRange,
-	tpb.Field_ChargeState:              FieldChargeState,
-	tpb.Field_DetailedChargeState:      FieldDetailedChargeState,
-	tpb.Field_Odometer:                 FieldOdometer,
+	tpb.Field_VehicleSpeed:                FieldSpeed,
+	tpb.Field_Location:                    FieldLocation,
+	tpb.Field_GpsHeading:                  FieldHeading,
+	tpb.Field_Gear:                        FieldGear,
+	tpb.Field_Soc:                         FieldSOC,
+	tpb.Field_EstBatteryRange:             FieldEstBatteryRange,
+	tpb.Field_ChargeState:                 FieldChargeState,
+	tpb.Field_DetailedChargeState:         FieldDetailedChargeState,
+	tpb.Field_Odometer:                    FieldOdometer,
 	tpb.Field_InsideTemp:                  FieldInsideTemp,
 	tpb.Field_OutsideTemp:                 FieldOutsideTemp,
 	tpb.Field_HvacPower:                   FieldHvacPower,
@@ -81,28 +79,30 @@ var fieldMap = map[tpb.Field]FieldName{
 	tpb.Field_SeatHeaterRight:             FieldSeatHeaterRight,
 	tpb.Field_ClimateKeeperMode:           FieldClimateKeeperMode,
 	tpb.Field_DestinationName:             FieldDestinationName,
-	tpb.Field_RouteLine:                FieldRouteLine,
-	tpb.Field_SelfDrivingMilesSinceReset: FieldFSDMiles,
-	tpb.Field_BatteryLevel:             FieldBatteryLevel,
-	tpb.Field_IdealBatteryRange:        FieldIdealBatteryRange,
-	tpb.Field_RatedRange:               FieldRatedRange,
-	tpb.Field_EnergyRemaining:          FieldEnergyRemaining,
-	tpb.Field_PackVoltage:              FieldPackVoltage,
-	tpb.Field_PackCurrent:              FieldPackCurrent,
-	tpb.Field_VehicleName:              FieldVehicleName,
-	tpb.Field_CarType:                  FieldCarType,
-	tpb.Field_Version:                  FieldVersion,
-	tpb.Field_Locked:                   FieldLocked,
-	tpb.Field_SentryMode:               FieldSentryMode,
-	tpb.Field_OriginLocation:           FieldOriginLocation,
-	tpb.Field_DestinationLocation:      FieldDestLocation,
-	tpb.Field_MilesToArrival:           FieldMilesToArrival,
-	tpb.Field_MinutesToArrival:         FieldMinutesToArrival,
-	tpb.Field_LateralAcceleration:      FieldLatAccel,
-	tpb.Field_LongitudinalAcceleration: FieldLongAccel,
-	tpb.Field_MilesSinceReset:                    FieldMilesSinceReset,
-	tpb.Field_TimeToFullCharge:                   FieldTimeToFullCharge,
-	tpb.Field_EstimatedHoursToChargeTermination:  FieldEstimatedHoursToChargeTermination,
+	tpb.Field_RouteLine:                   FieldRouteLine,
+	tpb.Field_SelfDrivingMilesSinceReset:  FieldFSDMiles,
+	tpb.Field_BatteryLevel:                FieldBatteryLevel,
+	tpb.Field_IdealBatteryRange:           FieldIdealBatteryRange,
+	tpb.Field_RatedRange:                  FieldRatedRange,
+	tpb.Field_EnergyRemaining:             FieldEnergyRemaining,
+	tpb.Field_PackVoltage:                 FieldPackVoltage,
+	tpb.Field_PackCurrent:                 FieldPackCurrent,
+	tpb.Field_VehicleName:                 FieldVehicleName,
+	tpb.Field_CarType:                     FieldCarType,
+	tpb.Field_Version:                     FieldVersion,
+	tpb.Field_Locked:                      FieldLocked,
+	tpb.Field_SentryMode:                  FieldSentryMode,
+	tpb.Field_OriginLocation:              FieldOriginLocation,
+	tpb.Field_DestinationLocation:         FieldDestLocation,
+	tpb.Field_MilesToArrival:              FieldMilesToArrival,
+	tpb.Field_MinutesToArrival:            FieldMinutesToArrival,
+	tpb.Field_LateralAcceleration:         FieldLatAccel,
+	tpb.Field_LongitudinalAcceleration:    FieldLongAccel,
+	tpb.Field_MilesSinceReset:             FieldMilesSinceReset,
+	// Field_TimeToFullCharge (43) and Field_EstimatedHoursToChargeTermination (190)
+	// are intentionally NOT in fieldMap — they are observation-only via the MYR-25
+	// debug log in decoder.go. Adding them here would leak uncontracted fields to
+	// WS clients via the event bus. They will be added after empirical verification.
 	// Field_RouteLastUpdated omitted — Tesla docs state this field is broken.
 }
 

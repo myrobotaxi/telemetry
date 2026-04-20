@@ -21,30 +21,30 @@ const (
 // --- Location / Navigation ---
 
 const (
-	FleetFieldLocation           = "Location"
-	FleetFieldGpsHeading         = "GpsHeading"
-	FleetFieldOriginLocation     = "OriginLocation"
-	FleetFieldDestLocation       = "DestinationLocation"
-	FleetFieldDestinationName    = "DestinationName"
-	FleetFieldRouteLine          = "RouteLine"
+	FleetFieldLocation        = "Location"
+	FleetFieldGpsHeading      = "GpsHeading"
+	FleetFieldOriginLocation  = "OriginLocation"
+	FleetFieldDestLocation    = "DestinationLocation"
+	FleetFieldDestinationName = "DestinationName"
+	FleetFieldRouteLine       = "RouteLine"
 	// RouteLastUpdated omitted — Tesla docs state this field is broken and never returns data.
-	FleetFieldMilesToArrival     = "MilesToArrival"
-	FleetFieldMinutesToArrival   = "MinutesToArrival"
+	FleetFieldMilesToArrival   = "MilesToArrival"
+	FleetFieldMinutesToArrival = "MinutesToArrival"
 )
 
 // --- Battery / Charging ---
 
 const (
-	FleetFieldSOC                  = "Soc"
-	FleetFieldBatteryLevel         = "BatteryLevel"
-	FleetFieldEstBatteryRange      = "EstBatteryRange"
-	FleetFieldIdealBatteryRange    = "IdealBatteryRange"
-	FleetFieldRatedRange           = "RatedRange"
-	FleetFieldEnergyRemaining      = "EnergyRemaining"
-	FleetFieldPackVoltage          = "PackVoltage"
-	FleetFieldPackCurrent          = "PackCurrent"
-	FleetFieldDetailedChargeState              = "DetailedChargeState"
-	FleetFieldTimeToFullCharge                 = "TimeToFullCharge"
+	FleetFieldSOC                               = "Soc"
+	FleetFieldBatteryLevel                      = "BatteryLevel"
+	FleetFieldEstBatteryRange                   = "EstBatteryRange"
+	FleetFieldIdealBatteryRange                 = "IdealBatteryRange"
+	FleetFieldRatedRange                        = "RatedRange"
+	FleetFieldEnergyRemaining                   = "EnergyRemaining"
+	FleetFieldPackVoltage                       = "PackVoltage"
+	FleetFieldPackCurrent                       = "PackCurrent"
+	FleetFieldDetailedChargeState               = "DetailedChargeState"
+	FleetFieldTimeToFullCharge                  = "TimeToFullCharge"
 	FleetFieldEstimatedHoursToChargeTermination = "EstimatedHoursToChargeTermination"
 )
 
@@ -109,27 +109,27 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		FleetFieldLongAccel:    {IntervalSeconds: 2},
 
 		// Location / Navigation — high frequency with delta filter
-		FleetFieldLocation:         {IntervalSeconds: 2, MinimumDelta: &locationDelta},
-		FleetFieldGpsHeading:       {IntervalSeconds: 5},
-		FleetFieldOriginLocation:   {IntervalSeconds: 1, ResendIntervalSeconds: intPtr(30)},
-		FleetFieldDestLocation:     {IntervalSeconds: 1, ResendIntervalSeconds: intPtr(30)},
-		FleetFieldDestinationName:  {IntervalSeconds: 1, ResendIntervalSeconds: intPtr(30)},
-		FleetFieldRouteLine:        {IntervalSeconds: 1, ResendIntervalSeconds: intPtr(30)},
+		FleetFieldLocation:        {IntervalSeconds: 2, MinimumDelta: &locationDelta},
+		FleetFieldGpsHeading:      {IntervalSeconds: 5},
+		FleetFieldOriginLocation:  {IntervalSeconds: 1, ResendIntervalSeconds: intPtr(30)},
+		FleetFieldDestLocation:    {IntervalSeconds: 1, ResendIntervalSeconds: intPtr(30)},
+		FleetFieldDestinationName: {IntervalSeconds: 1, ResendIntervalSeconds: intPtr(30)},
+		FleetFieldRouteLine:       {IntervalSeconds: 1, ResendIntervalSeconds: intPtr(30)},
 		// RouteLastUpdated omitted — broken per Tesla docs, wastes buffer.
 		FleetFieldMilesToArrival:   {IntervalSeconds: 1, ResendIntervalSeconds: intPtr(30)},
 		FleetFieldMinutesToArrival: {IntervalSeconds: 1, ResendIntervalSeconds: intPtr(30)},
 
 		// Battery / Charging — medium frequency
-		FleetFieldSOC:                 {IntervalSeconds: 30},
-		FleetFieldBatteryLevel:        {IntervalSeconds: 30},
-		FleetFieldEstBatteryRange:     {IntervalSeconds: 30},
-		FleetFieldIdealBatteryRange:   {IntervalSeconds: 30},
-		FleetFieldRatedRange:          {IntervalSeconds: 30},
-		FleetFieldEnergyRemaining:     {IntervalSeconds: 30},
-		FleetFieldPackVoltage:         {IntervalSeconds: 30},
-		FleetFieldPackCurrent:         {IntervalSeconds: 30},
-		FleetFieldDetailedChargeState:              {IntervalSeconds: 30}, // maps to FieldDetailedChargeState (proto 179)
-		FleetFieldTimeToFullCharge:                 {IntervalSeconds: 30}, // MYR-25: proto 43, unit verification (hours vs seconds)
+		FleetFieldSOC:                               {IntervalSeconds: 30},
+		FleetFieldBatteryLevel:                      {IntervalSeconds: 30},
+		FleetFieldEstBatteryRange:                   {IntervalSeconds: 30},
+		FleetFieldIdealBatteryRange:                 {IntervalSeconds: 30},
+		FleetFieldRatedRange:                        {IntervalSeconds: 30},
+		FleetFieldEnergyRemaining:                   {IntervalSeconds: 30},
+		FleetFieldPackVoltage:                       {IntervalSeconds: 30},
+		FleetFieldPackCurrent:                       {IntervalSeconds: 30},
+		FleetFieldDetailedChargeState:               {IntervalSeconds: 30}, // maps to FieldDetailedChargeState (proto 179)
+		FleetFieldTimeToFullCharge:                  {IntervalSeconds: 30}, // MYR-25: proto 43, unit verification (hours vs seconds)
 		FleetFieldEstimatedHoursToChargeTermination: {IntervalSeconds: 30}, // MYR-28: proto 190, delineation vs TimeToFullCharge
 
 		// Climate — medium/low frequency

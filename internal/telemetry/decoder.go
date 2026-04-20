@@ -107,6 +107,26 @@ func (d *Decoder) DecodePayload(payload *tpb.Payload) (events.VehicleTelemetryEv
 			continue
 		}
 
+		// MYR-25/28/29: Temporary debug log for Tesla field unit verification.
+		// These fields are NOT in fieldMap (intentionally excluded from the event
+		// bus to avoid leaking uncontracted fields to WS clients). We intercept
+		// them here for observation only. Remove after empirical verification.
+		switch datum.GetKey() {
+		case tpb.Field_TimeToFullCharge, tpb.Field_EstimatedHoursToChargeTermination:
+			if tv, err := extractValue(datum); err == nil {
+				vin := payload.GetVin()
+				vinSuffix := vin
+				if len(vin) > 4 {
+					vinSuffix = vin[len(vin)-4:]
+				}
+				slog.Info("MYR-25/28/29 FIELD VERIFICATION",
+					slog.String("field", datum.GetKey().String()),
+					slog.String("vin_last4", vinSuffix),
+					slog.Any("raw_value", tv),
+				)
+			}
+		}
+
 		name, ok := InternalFieldName(datum.GetKey())
 		if !ok {
 			continue // untracked field, skip silently
@@ -124,13 +144,17 @@ func (d *Decoder) DecodePayload(payload *tpb.Payload) (events.VehicleTelemetryEv
 
 		fields[string(name)] = tv
 
-		// MYR-25/28/29: Temporary debug log for Tesla field unit verification.
+		// MYR-25/29: Log MilesToArrival (already in fieldMap) for unit verification.
 		// Remove after empirical verification is complete.
-		switch name {
-		case FieldTimeToFullCharge, FieldEstimatedHoursToChargeTermination, FieldMilesToArrival:
+		if name == FieldMilesToArrival {
+			vin := payload.GetVin()
+			vinSuffix := vin
+			if len(vin) > 4 {
+				vinSuffix = vin[len(vin)-4:]
+			}
 			slog.Info("MYR-25/28/29 FIELD VERIFICATION",
 				slog.String("field", string(name)),
-				slog.String("vin_last4", payload.GetVin()[len(payload.GetVin())-4:]),
+				slog.String("vin_last4", vinSuffix),
 				slog.Any("raw_value", tv),
 			)
 		}
