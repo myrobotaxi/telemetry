@@ -17,7 +17,7 @@ go build -o ./bin/ops ./cmd/ops
 | Variable | Required for | Notes |
 |---|---|---|
 | `DATABASE_URL` | every subcommand | Supabase Postgres connection string. PgBouncer mode (`:6543`) is auto-detected. |
-| `AUTH_TESLA_ID` | `auth token`, `fleet-config push` (when refresh needed) | Tesla OAuth client id. |
+| `AUTH_TESLA_ID` | `auth token`, `auth link`, `fleet-config push` | Tesla OAuth client id. |
 | `AUTH_TESLA_SECRET` | same as above | Tesla OAuth client secret. |
 | `TESLA_PROXY_URL` | `fleet-config push` | Base URL of the running `tesla-http-proxy` sidecar (e.g. `https://localhost:4443`). |
 | `FLEET_TELEMETRY_HOSTNAME` | `fleet-config push` | Hostname vehicles connect to after config (e.g. `telemetry.myrobotaxi.app`). |
@@ -34,6 +34,30 @@ set -a && source ../my-robo-taxi/.env.local && set +a
 ## Subcommands
 
 Run `ops help` any time for the flag summary. Every subcommand prints JSON to stdout; progress/warning logs go to stderr so you can pipe through `jq`.
+
+### `ops auth link --user-id <id> [--port 8765]`
+
+Runs the full Tesla OAuth browser flow and writes fresh `access_token` + `refresh_token` to the DB. Use this when `ops auth token` fails with `401 login_required` (meaning the stored refresh_token has been revoked or expired — Tesla rotates aggressively).
+
+**One-time setup on Tesla Developer portal:** add `http://localhost:8765/callback` to your Fleet API app's allowed redirect URIs. Tesla apps support multiple redirect URIs, so this sits next to your production web redirect with no conflict.
+
+```bash
+ops auth link --user-id clxy...
+```
+
+The CLI opens Tesla's login page in your browser, you approve the scopes, Tesla redirects back to `localhost:8765/callback`, the CLI swaps the code for tokens and persists them. Then:
+
+```bash
+ops auth token --user-id clxy...   # should now succeed
+```
+
+Flags:
+
+- `--port` — local HTTP port the CLI listens on. Default `8765`. Must match the redirect URI registered on the Tesla app.
+- `--scopes` — space-separated OAuth scopes. Default includes `openid`, `offline_access`, `vehicle_device_data`, `vehicle_cmds`, `vehicle_charging_cmds`.
+- `--timeout` — how long to wait for the browser flow. Default `2m`.
+
+PKCE (S256) is implemented per RFC 7636 — no client secret is sent in the authorize URL, and the code exchange is bound to a fresh verifier per flow.
 
 ### `ops auth token --user-id <id>`
 
@@ -183,3 +207,5 @@ Watch a few frames, compare against the in-car display, and you can conclude whe
 - **Empty output from `fields watch`** — the vehicle isn't connected. Check the server logs for a `vehicle connected` line, or confirm with `ops fields snapshot --vin <vin>` that `lastUpdated` is recent.
 - **`unexpected client frame` debug logs on the server** — safe to ignore. The debug endpoint is server→client only; any frame the client sends is logged and discarded.
 - **`unauthorized` on `fields watch`** — `DEBUG_FIELDS_TOKEN` on the server does not match `--token`/the env var. Both sides must agree (or both be empty).
+- **`401 login_required` on `ops auth token`** — the stored `refresh_token` is dead. Run `ops auth link --user-id <id>` to refresh via the browser OAuth flow, then retry.
+- **`listen on port 8765 ... address already in use` on `ops auth link`** — another process holds the port. Close it or pass `--port <free-port>` (and make sure that port is registered on the Tesla app's redirect URIs).

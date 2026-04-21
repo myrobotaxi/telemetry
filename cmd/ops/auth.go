@@ -20,11 +20,13 @@ var errRefreshSkipped = errors.New("tesla token refresh skipped")
 
 func runAuth(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("auth requires a subcommand (token)")
+		return fmt.Errorf("auth requires a subcommand (token | link)")
 	}
 	switch args[0] {
 	case "token":
 		return runAuthToken(ctx, args[1:])
+	case "link":
+		return runAuthLink(ctx, args[1:])
 	default:
 		return fmt.Errorf("unknown auth subcommand %q", args[0])
 	}

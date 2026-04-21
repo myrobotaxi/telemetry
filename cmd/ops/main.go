@@ -72,6 +72,7 @@ Usage:
 
 Commands:
   auth token          --user-id <id>                 Print the user's Tesla token (auto-refreshes if expired)
+  auth link           --user-id <id> [--port N]      Run the Tesla OAuth browser flow and store fresh tokens
   vehicles list       --user-id <id>                 List vehicles owned by the user
   fleet-config show                                  Print DefaultFieldConfig as JSON
   fleet-config push   --vin <vin> --user-id <id>     Push DefaultFieldConfig to Tesla for this VIN
