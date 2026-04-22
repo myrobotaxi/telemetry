@@ -82,6 +82,17 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 		slog.Int("metrics_port", cfg.Server().MetricsPort),
 	)
 
+	// --- Debug-fields gate ---
+	// Either --dev or a non-empty DEBUG_FIELDS_TOKEN turns on the
+	// RawVehicleTelemetryEvent pipeline and mounts /api/debug/fields.
+	// In non-dev mode the token must be at least 32 chars so `ops fields
+	// watch` can stream real-Tesla data against production behind a
+	// real secret.
+	debugGate, err := resolveDebugFieldsGate(*devMode, os.Getenv("DEBUG_FIELDS_TOKEN"))
+	if err != nil {
+		return fmt.Errorf("invalid debug-fields configuration: %w", err)
+	}
+
 	// --- Prometheus registry ---
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(collectors.NewGoCollector())
@@ -108,10 +119,11 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 		telemetry.ReceiverConfig{
 			MaxVehicles:       cfg.Telemetry().MaxVehicles,
 			MaxMessagesPerSec: 10,
-			// Dev mode publishes raw field events so the /api/debug/fields
-			// endpoint and cmd/ops fields watch can inspect every decoded
-			// proto field. Production leaves this off to avoid extra work.
-			PublishRawFields: *devMode,
+			// Raw field publication feeds /api/debug/fields. Enabled
+			// whenever the debug-fields gate is open (dev mode OR
+			// DEBUG_FIELDS_TOKEN set) so operators can tail real-Tesla
+			// frames against production without extra deploys.
+			PublishRawFields: debugGate.Enabled,
 		},
 	)
 
@@ -196,18 +208,27 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	// --- Fleet config push endpoint (optional — requires proxy config) ---
 	setupFleetConfigEndpoint(cfg, srv, authenticator, vehicleRepo, accountRepo, logger)
 
-	// --- Dev-only debug fields endpoint (guarded by --dev flag) ---
-	if *devMode {
+	// --- Debug fields endpoint ---
+	// Mounted when resolveDebugFieldsGate says so — either because the
+	// server is running with --dev (token optional) or because an operator
+	// has set DEBUG_FIELDS_TOKEN on a production instance to let
+	// `ops fields watch` stream real-Tesla frames. Auth is enforced by
+	// DebugFieldsHandler via the X-Debug-Token header / ?token= query param
+	// when APIKey is non-empty.
+	if debugGate.Enabled {
 		debugHandler := telemetry.NewDebugFieldsHandler(
 			bus,
 			logger.With(slog.String("component", "debug-fields")),
 			telemetry.DebugFieldsConfig{
-				APIKey:         os.Getenv("DEBUG_FIELDS_TOKEN"),
+				APIKey:         debugGate.Token,
 				OriginPatterns: originPatterns,
 			},
 		)
 		srv.HandleFunc("GET /api/debug/fields", debugHandler.ServeHTTP)
-		logger.Warn("dev mode: /api/debug/fields endpoint enabled — do not run in production")
+		logger.Info("/api/debug/fields endpoint enabled",
+			slog.String("gate", debugGate.Reason),
+			slog.Bool("token_required", debugGate.Token != ""),
+		)
 	}
 
 	// Configure mTLS on Tesla port. TLS is required for vehicle connections —
