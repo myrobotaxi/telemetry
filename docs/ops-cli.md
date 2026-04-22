@@ -23,7 +23,7 @@ go build -o ./bin/ops ./cmd/ops
 | `FLEET_TELEMETRY_HOSTNAME` | `fleet-config push` | Hostname vehicles connect to after config (e.g. `telemetry.myrobotaxi.app`). |
 | `FLEET_TELEMETRY_PORT` | `fleet-config push` | Default `443`. |
 | `FLEET_TELEMETRY_CA` | `fleet-config push` (prod) | PEM-encoded CA cert served with the telemetry endpoint. |
-| `DEBUG_FIELDS_TOKEN` | `fields watch` (when server requires it) | Shared secret for `/api/debug/fields`. Set identically on the server. |
+| `DEBUG_FIELDS_TOKEN` | `fields watch` | Shared secret for `/api/debug/fields`. Set identically on the server. In non-dev mode the server requires ≥32 chars and clients must present the token; under `--dev` it is optional. |
 
 `.env.local` from the sibling Next.js app (`../my-robo-taxi/.env.local`) contains every secret you need except `DEBUG_FIELDS_TOKEN`. The fastest local setup:
 
@@ -165,46 +165,83 @@ ops fields watch --vin 5YJ3E7EB2NF000001 --server ws://localhost:8080 | jq
 
 - `--server` accepts `ws://`, `wss://`, `http://`, or `https://`. `http*` is auto-upgraded to `ws*`.
 - Omit `--vin` to stream all vehicles (useful when inspecting a fleet).
-- Auth: if `DEBUG_FIELDS_TOKEN` is set on the server, pass it via `--token` or the env var. The CLI always uses the `X-Debug-Token` header (query-param form exists for browsers but shows up in access logs).
+- Auth: if the server has `DEBUG_FIELDS_TOKEN` set, pass the same value via `--token` or the env var. The CLI always uses the `X-Debug-Token` header (query-param form exists for browsers but shows up in access logs).
 
-#### Starting the server so this endpoint exists
+#### How the endpoint gets mounted
 
-`/api/debug/fields` is mounted **only** when the server runs with `--dev`:
+`/api/debug/fields` is mounted under **either** gate:
+
+| Gate | How to enable | Token required from client? | Intended use |
+|---|---|---|---|
+| **`--dev`** | `go run ./cmd/telemetry-server --dev --config configs/dev-notls.json` | No (but honored if set) | Local laptop server + simulator |
+| **`DEBUG_FIELDS_TOKEN`** | Set on the server (any mode). **In non-dev mode the token must be ≥32 chars** or startup fails. | Yes — client must present the same token | Production server, tailing real-Tesla frames |
+
+Startup logs print which gate is active and whether the token is required. If neither gate is satisfied, the endpoint is not mounted and raw field publication is off (zero cost).
+
+#### Streaming against production (the headline workflow)
+
+Real Teslas only dial the production server, so that's where `ops fields watch` has to connect for actual field verification. Enable the endpoint on Fly once:
 
 ```bash
-DEBUG_FIELDS_TOKEN=dev-secret \
-  go run ./cmd/telemetry-server --dev --config configs/dev.json
+flyctl secrets set DEBUG_FIELDS_TOKEN="$(openssl rand -base64 32)" -a myrobotaxi-telemetry
+# Fly redeploys. Save the token locally — you cannot read it back from Fly.
 ```
 
-The server logs a `WARN` at startup confirming the endpoint is enabled — do not run `--dev` in production.
+Then from your laptop:
+
+```bash
+export DEBUG_FIELDS_TOKEN='<the value you just generated>'
+ops fields watch --vin 7SAYGDET7TA613795 --server wss://telemetry.myrobotaxi.app
+```
+
+Drive the car (or wake it up) and frames stream into your terminal in real time. Rotate the secret by re-running `flyctl secrets set` with a new value.
+
+#### Streaming against a local server
+
+For the simulator or local development, use `--dev` so no token dance is needed:
+
+```bash
+go run ./cmd/telemetry-server --dev --config configs/dev-notls.json
+ops fields watch --vin <vin> --server ws://localhost:8080
+```
+
+`configs/dev-notls.json` leaves TLS empty so you don't need to generate local certs just to boot the server.
 
 ## End-to-end recipe: verifying a Tesla field empirically (MYR-25 style)
 
 The workflow that motivated this tool. Example: confirm the units of `TimeToFullCharge`.
 
+One-time setup — set the debug token on the production server:
+
 ```bash
-# Terminal 1 — start the dev server with raw field publication.
-DEBUG_FIELDS_TOKEN=dev-secret \
-  go run ./cmd/telemetry-server --dev --config configs/dev.json
+flyctl secrets set DEBUG_FIELDS_TOKEN="$(openssl rand -base64 32)" -a myrobotaxi-telemetry
+# Copy the value into a secret manager / password manager for reuse.
+```
 
-# Terminal 2 — make sure the fleet is asking Tesla to send the field.
+Then per verification session:
+
+```bash
+# 1. Confirm the fleet is asking Tesla to send the field at a reasonable interval.
 ops fleet-config show | jq '.TimeToFullCharge'
-ops fleet-config push --vin 5YJ3... --user-id clxy...
+ops fleet-config push --vin 5YJ3... --user-id clxy...   # only if the interval changed
 
-# Terminal 3 — connect your real Tesla to a charger, then watch the stream
-# and grep for the field under test. Raw values are pre-conversion.
-DEBUG_FIELDS_TOKEN=dev-secret \
-  ops fields watch --vin 5YJ3... --server ws://localhost:8080 \
+# 2. Tail the live stream from production while the car is awake/driving/charging.
+export DEBUG_FIELDS_TOKEN='<the value from the Fly secret>'
+ops fields watch --vin 5YJ3... --server wss://telemetry.myrobotaxi.app \
   | jq -c 'select(.fields.TimeToFullCharge) | {t: .timestamp, v: .fields.TimeToFullCharge}'
 ```
 
-Watch a few frames, compare against the in-car display, and you can conclude whether the field arrives in hours, minutes, seconds, etc. — without redeploying or tailing Fly logs.
+Watch a few frames, compare against the in-car display, and you can conclude whether the field arrives in hours, minutes, seconds, etc. — no redeploy, no Fly log tail.
+
+> **Why production, not local?** Real Teslas only dial the server hostname pinned in their on-board `fleet_telemetry_config`. That pointer only ever resolves to the Fly-deployed prod server. A local `--dev` server is for the simulator; it will never receive a frame from a real car.
 
 ## Troubleshooting
 
 - **`DATABASE_URL is required`** — source `../my-robo-taxi/.env.local` (or set the var directly).
 - **`vehicle owner mismatch`** on `fleet-config push` — the `userId` you passed does not own the VIN. Run `ops vehicles list --user-id <id>` to confirm.
-- **Empty output from `fields watch`** — the vehicle isn't connected. Check the server logs for a `vehicle connected` line, or confirm with `ops fields snapshot --vin <vin>` that `lastUpdated` is recent.
+- **Empty output from `fields watch`** — the vehicle isn't streaming to the server you connected to. Remember real Teslas only dial production; pointing `--server` at a local `--dev` server with no simulator running will always be silent. Check the server logs for a `vehicle connected` line, or confirm with `ops fields snapshot --vin <vin>` that `lastUpdated` is recent.
+- **`/api/debug/fields` endpoint not found (404)** — the server was started without either gate. Pass `--dev` locally, or set `DEBUG_FIELDS_TOKEN` (≥32 chars) on the deployed server.
+- **Server refuses to start with `DEBUG_FIELDS_TOKEN must be at least 32 chars`** — non-dev mode enforces a length floor so weak tokens can't reach prod. Generate a proper one: `openssl rand -base64 32`.
 - **`unexpected client frame` debug logs on the server** — safe to ignore. The debug endpoint is server→client only; any frame the client sends is logged and discarded.
 - **`unauthorized` on `fields watch`** — `DEBUG_FIELDS_TOKEN` on the server does not match `--token`/the env var. Both sides must agree (or both be empty).
 - **`401 login_required` on `ops auth token`** — the stored `refresh_token` is dead. Run `ops auth link --user-id <id>` to refresh via the browser OAuth flow, then retry.

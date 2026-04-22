@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -51,6 +53,49 @@ func TestProxyHTTPClient(t *testing.T) {
 			}
 			if !tr.TLSClientConfig.InsecureSkipVerify {
 				t.Error("expected InsecureSkipVerify to be true")
+			}
+		})
+	}
+}
+
+func TestResolveDebugFieldsGate(t *testing.T) {
+	longToken := strings.Repeat("a", debugFieldsMinTokenLen)
+
+	tests := []struct {
+		name        string
+		devMode     bool
+		token       string
+		wantEnabled bool
+		wantToken   string
+		wantErr     error
+	}{
+		{name: "off by default", devMode: false, token: "", wantEnabled: false},
+		{name: "dev, no token — open for dev", devMode: true, token: "", wantEnabled: true, wantToken: ""},
+		{name: "dev + token — enforced in dev too", devMode: true, token: "short", wantEnabled: true, wantToken: "short"},
+		{name: "prod + valid token — enabled", devMode: false, token: longToken, wantEnabled: true, wantToken: longToken},
+		{name: "prod + short token — rejected", devMode: false, token: "short", wantErr: errDebugFieldsTokenTooShort},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveDebugFieldsGate(tt.devMode, tt.token)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("err: got %v, want %v", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if got.Enabled != tt.wantEnabled {
+				t.Errorf("enabled: got %v, want %v", got.Enabled, tt.wantEnabled)
+			}
+			if got.Token != tt.wantToken {
+				t.Errorf("token: got %q, want %q", got.Token, tt.wantToken)
+			}
+			if tt.wantEnabled && got.Reason == "" {
+				t.Error("expected Reason to be set when Enabled")
 			}
 		})
 	}
