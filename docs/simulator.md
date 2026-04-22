@@ -11,6 +11,13 @@ The simulator requires mTLS certificates. Generate them once:
 ```bash
 mkdir -p certs
 
+# Homebrew openssl@3 ≥ 3.6 ships without /opt/homebrew/etc/openssl@3/openssl.cnf
+# and every `openssl req` call fails looking for it. Pointing OPENSSL_CONF at
+# /dev/null tells openssl to use compiled-in defaults, which is all this
+# recipe needs. macOS LibreSSL at /usr/bin/openssl isn't a drop-in
+# replacement because it lacks `-copy_extensions`.
+export OPENSSL_CONF=/dev/null
+
 # CA
 openssl ecparam -name prime256v1 -genkey -noout -out certs/ca.key
 openssl req -new -x509 -key certs/ca.key -out certs/ca.crt -days 365 -subj "/CN=MyRoboTaxi Dev CA"
@@ -31,6 +38,7 @@ openssl x509 -req -in certs/client.csr -CA certs/ca.crt -CAkey certs/ca.key \
 # Cleanup
 chmod 600 certs/*.key
 rm -f certs/*.csr certs/*.srl
+unset OPENSSL_CONF
 ```
 
 The client certificate's Common Name (CN) is the VIN that the server will extract via mTLS — this is how Tesla vehicles identify themselves.
