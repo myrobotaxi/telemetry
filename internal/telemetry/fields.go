@@ -20,7 +20,6 @@ const (
 	FieldSOC                  FieldName = "soc"
 	FieldEstBatteryRange      FieldName = "estimatedRange"
 	FieldChargeState          FieldName = "chargeState"
-	FieldDetailedChargeState  FieldName = "detailedChargeState"
 	FieldTimeToFull           FieldName = "timeToFull"
 	FieldOdometer             FieldName = "odometer"
 	FieldInsideTemp           FieldName = "insideTemp"
@@ -66,8 +65,14 @@ var fieldMap = map[tpb.Field]FieldName{
 	tpb.Field_Gear:                        FieldGear,
 	tpb.Field_Soc:                         FieldSOC,
 	tpb.Field_EstBatteryRange:             FieldEstBatteryRange,
-	tpb.Field_ChargeState:                 FieldChargeState,
-	tpb.Field_DetailedChargeState:         FieldDetailedChargeState,
+	// MYR-42 (2026-04-23): chargeState sources from proto 179 DetailedChargeState,
+	// NOT proto 2 ChargeState. Empirical capture showed Tesla's recent firmware
+	// (≥ 2024.44.25) accepts proto 2 in fleet_telemetry_config (synced: true)
+	// but never actually emits it, even across plug/unplug transitions. Proto
+	// 179 fires on the same transitions with identical enum string values, so
+	// routing it to the FieldChargeState internal name keeps the wire contract
+	// unchanged. Field_ChargeState (proto 2) is intentionally NOT in fieldMap.
+	tpb.Field_DetailedChargeState:         FieldChargeState,
 	tpb.Field_TimeToFullCharge:            FieldTimeToFull,
 	tpb.Field_Odometer:                    FieldOdometer,
 	tpb.Field_InsideTemp:                  FieldInsideTemp,

@@ -462,7 +462,23 @@ func TestDecoder_DecodePayload_ShiftState(t *testing.T) {
 	}
 }
 
-func TestDecoder_DecodePayload_ChargeState(t *testing.T) {
+// TestDecoder_DecodePayload_ChargeState was superseded by
+// TestDecoder_DecodePayload_ChargeState_FromProto179 in MYR-42. The
+// "detailedChargeState" internal field name no longer exists — proto
+// 179 now populates the "chargeState" internal field directly.
+
+// TestDecoder_DecodePayload_ChargeState_FromProto179 covers the
+// `chargeState` wire field that sources from proto 179
+// (Field_DetailedChargeState) as of MYR-42. Tesla emits it via the
+// Value_DetailedChargeStateValue oneof on firmware ≥ 2024.44.25, with a
+// fallback to Value_ChargingValue for older firmware. Every enum value
+// in the contract's wire table must round-trip to its string form.
+//
+// The earlier MYR-40 shape of this test routed through Field_ChargeState
+// (proto 2), but empirical capture on 2026-04-23 showed Tesla does not
+// populate proto 2 anymore — see MYR-42 and websocket-protocol.md §10
+// DV-19.
+func TestDecoder_DecodePayload_ChargeState_FromProto179(t *testing.T) {
 	t.Parallel()
 	dec := NewDecoder()
 
@@ -471,75 +487,22 @@ func TestDecoder_DecodePayload_ChargeState(t *testing.T) {
 		value      *tpb.Value
 		wantString string
 	}{
-		{
-			name:       "detailed charging",
-			value:      detailedChargeStateVal(tpb.DetailedChargeStateValue_DetailedChargeStateCharging),
-			wantString: "Charging",
-		},
-		{
-			name:       "detailed complete",
-			value:      detailedChargeStateVal(tpb.DetailedChargeStateValue_DetailedChargeStateComplete),
-			wantString: "Complete",
-		},
-		{
-			name:       "deprecated charging state",
-			value:      chargingVal(tpb.ChargingState_ChargeStateCharging),
-			wantString: "Charging",
-		},
-		{
-			name:       "string fallback",
-			value:      stringVal("Charging"),
-			wantString: "Charging",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			payload := makePayload([]*tpb.Datum{
-				makeDatum(tpb.Field_DetailedChargeState, tt.value),
-			})
-
-			evt, _, err := dec.DecodePayload(payload)
-			if err != nil {
-				t.Fatalf("DecodePayload() error = %v", err)
-			}
-
-			cs := evt.Fields["detailedChargeState"]
-			if cs.StringVal == nil || *cs.StringVal != tt.wantString {
-				t.Errorf("detailedChargeState = %v, want %q", cs, tt.wantString)
-			}
-		})
-	}
-}
-
-// TestDecoder_DecodePayload_ChargeState_Proto2 covers proto field 2
-// (Field_ChargeState) — the v1 charge atomic group member. Tesla emits
-// it via the ChargingValue oneof variant wrapping the deprecated
-// ChargingState enum. Every enum value in the contract's wire table
-// must round-trip to its string form.
-func TestDecoder_DecodePayload_ChargeState_Proto2(t *testing.T) {
-	t.Parallel()
-	dec := NewDecoder()
-
-	tests := []struct {
-		name       string
-		value      *tpb.Value
-		wantString string
-	}{
-		{"disconnected", chargingVal(tpb.ChargingState_ChargeStateDisconnected), "Disconnected"},
-		{"no power", chargingVal(tpb.ChargingState_ChargeStateNoPower), "NoPower"},
-		{"starting", chargingVal(tpb.ChargingState_ChargeStateStarting), "Starting"},
-		{"charging", chargingVal(tpb.ChargingState_ChargeStateCharging), "Charging"},
-		{"complete", chargingVal(tpb.ChargingState_ChargeStateComplete), "Complete"},
-		{"stopped", chargingVal(tpb.ChargingState_ChargeStateStopped), "Stopped"},
-		// Lock the default branch of chargingStateString: any ChargingState
-		// enum value not recognized by our switch (e.g. a future Tesla
-		// firmware value, or the zero value if Tesla deprecates one) MUST
-		// surface as "Unknown" rather than panic or empty string. Uses a
-		// large out-of-range int cast so the test does not break when new
-		// enum values are added at the end of the list.
-		{"unknown fallback (unrecognized enum value)", chargingVal(tpb.ChargingState(9999)), "Unknown"},
+		// Primary path: modern firmware emits Value_DetailedChargeStateValue.
+		{"detailed disconnected", detailedChargeStateVal(tpb.DetailedChargeStateValue_DetailedChargeStateDisconnected), "Disconnected"},
+		{"detailed no power", detailedChargeStateVal(tpb.DetailedChargeStateValue_DetailedChargeStateNoPower), "NoPower"},
+		{"detailed starting", detailedChargeStateVal(tpb.DetailedChargeStateValue_DetailedChargeStateStarting), "Starting"},
+		{"detailed charging", detailedChargeStateVal(tpb.DetailedChargeStateValue_DetailedChargeStateCharging), "Charging"},
+		{"detailed complete", detailedChargeStateVal(tpb.DetailedChargeStateValue_DetailedChargeStateComplete), "Complete"},
+		{"detailed stopped", detailedChargeStateVal(tpb.DetailedChargeStateValue_DetailedChargeStateStopped), "Stopped"},
+		// Fallback path: pre-2024.44.25 firmware emits Value_ChargingValue.
+		{"legacy disconnected", chargingVal(tpb.ChargingState_ChargeStateDisconnected), "Disconnected"},
+		{"legacy charging", chargingVal(tpb.ChargingState_ChargeStateCharging), "Charging"},
+		{"legacy stopped", chargingVal(tpb.ChargingState_ChargeStateStopped), "Stopped"},
+		// Defensive Unknown fallback: out-of-range enum values must surface
+		// as "Unknown" rather than panic or empty string.
+		{"unknown fallback (unrecognized detailed enum)", detailedChargeStateVal(tpb.DetailedChargeStateValue(9999)), "Unknown"},
+		{"unknown fallback (unrecognized legacy enum)", chargingVal(tpb.ChargingState(9999)), "Unknown"},
+		// String fallback path (rare).
 		{"string fallback charging", stringVal("Charging"), "Charging"},
 		{"string fallback disconnected", stringVal("Disconnected"), "Disconnected"},
 	}
@@ -548,7 +511,7 @@ func TestDecoder_DecodePayload_ChargeState_Proto2(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			payload := makePayload([]*tpb.Datum{
-				makeDatum(tpb.Field_ChargeState, tt.value),
+				makeDatum(tpb.Field_DetailedChargeState, tt.value),
 			})
 
 			evt, _, err := dec.DecodePayload(payload)
@@ -634,10 +597,10 @@ func TestDecoder_DecodePayload_ChargeAtomicGroup4Field(t *testing.T) {
 	dec := NewDecoder()
 
 	payload := makePayload([]*tpb.Datum{
-		makeDatum(tpb.Field_Soc, stringVal("68.2")),                                                           // chargeLevel
-		makeDatum(tpb.Field_EstBatteryRange, stringVal("172")),                                                // estimatedRange
-		makeDatum(tpb.Field_ChargeState, chargingVal(tpb.ChargingState_ChargeStateCharging)),                  // chargeState
-		makeDatum(tpb.Field_TimeToFullCharge, &tpb.Value{Value: &tpb.Value_DoubleValue{DoubleValue: 1.0667}}), // timeToFull
+		makeDatum(tpb.Field_Soc, stringVal("68.2")),                                                                                  // chargeLevel
+		makeDatum(tpb.Field_EstBatteryRange, stringVal("172")),                                                                       // estimatedRange
+		makeDatum(tpb.Field_DetailedChargeState, detailedChargeStateVal(tpb.DetailedChargeStateValue_DetailedChargeStateCharging)),   // chargeState (MYR-42: sources from proto 179)
+		makeDatum(tpb.Field_TimeToFullCharge, &tpb.Value{Value: &tpb.Value_DoubleValue{DoubleValue: 1.0667}}),                        // timeToFull
 	})
 
 	evt, fieldErrs, err := dec.DecodePayload(payload)

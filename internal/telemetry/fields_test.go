@@ -6,60 +6,34 @@ import (
 	tpb "github.com/tnando/my-robo-taxi-telemetry/internal/telemetry/proto/tesla"
 )
 
-func TestFieldMap_ChargeStateConstants(t *testing.T) {
+func TestFieldMap_ChargeStateSourcedFromProto179(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name      string
-		protoEnum tpb.Field
-		wantField FieldName
-	}{
-		{
-			name:      "ChargeState proto 2 maps to FieldChargeState",
-			protoEnum: tpb.Field_ChargeState,
-			wantField: FieldChargeState,
-		},
-		{
-			name:      "DetailedChargeState proto 179 maps to FieldDetailedChargeState",
-			protoEnum: tpb.Field_DetailedChargeState,
-			wantField: FieldDetailedChargeState,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			got, ok := fieldMap[tt.protoEnum]
-			if !ok {
-				t.Fatalf("fieldMap[%v] not found; expected %q", tt.protoEnum, tt.wantField)
-			}
-			if got != tt.wantField {
-				t.Errorf("fieldMap[%v] = %q, want %q", tt.protoEnum, got, tt.wantField)
-			}
-		})
-	}
-}
-
-func TestFieldMap_ChargeStateAndDetailedChargeStateAreDistinct(t *testing.T) {
-	t.Parallel()
-
-	if FieldChargeState == FieldDetailedChargeState {
-		t.Fatal("FieldChargeState and FieldDetailedChargeState must have different values")
-	}
-
-	chargeField, ok := fieldMap[tpb.Field_ChargeState]
-	if !ok {
-		t.Fatal("fieldMap missing entry for Field_ChargeState (proto 2)")
-	}
-
-	detailedField, ok := fieldMap[tpb.Field_DetailedChargeState]
+	// MYR-42 (2026-04-23): chargeState sources from proto 179
+	// DetailedChargeState, NOT proto 2 ChargeState. Tesla firmware ≥ 2024.44.25
+	// accepts proto 2 in fleet_telemetry_config but never emits it; proto 179
+	// fires on the same transitions with identical enum string values.
+	got, ok := fieldMap[tpb.Field_DetailedChargeState]
 	if !ok {
 		t.Fatal("fieldMap missing entry for Field_DetailedChargeState (proto 179)")
 	}
+	if got != FieldChargeState {
+		t.Errorf("fieldMap[Field_DetailedChargeState] = %q, want %q (the chargeState wire field)", got, FieldChargeState)
+	}
+	if FieldChargeState != "chargeState" {
+		t.Errorf("FieldChargeState internal name = %q, want %q (contract wire name)", FieldChargeState, "chargeState")
+	}
+}
 
-	if chargeField == detailedField {
-		t.Errorf("fieldMap entries for ChargeState and DetailedChargeState must differ; both are %q", chargeField)
+func TestFieldMap_ChargeStateProto2HeldOut(t *testing.T) {
+	t.Parallel()
+
+	// MYR-42 §10 DV-19: proto 2 ChargeState is deprecated on recent Tesla
+	// firmware and MUST NOT be in fieldMap. If a future firmware re-
+	// populates it this test will fail and the decision should be
+	// reconsidered.
+	if _, ok := fieldMap[tpb.Field_ChargeState]; ok {
+		t.Error("fieldMap must not include Field_ChargeState (proto 2) — Tesla firmware ≥ 2024.44.25 does not populate it; source from Field_DetailedChargeState (proto 179) instead; see MYR-42 and websocket-protocol.md §10 DV-19")
 	}
 }
 

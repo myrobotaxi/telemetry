@@ -131,11 +131,11 @@
     },
     "chargeState": {
       "type": ["string", "null"],
-      "description": "Charge state enum from Tesla proto field 2 (ChargeState). Added as a v1 charge atomic group member by MYR-11; live WS wiring completed by MYR-40 on 2026-04-22 (see websocket-protocol.md §4.1.4 and §10 DV-03). Non-nullable on live vehicle_update WS frames post-MYR-40; still transitional-nullable on REST /snapshot responses until the cross-repo Prisma DB-persistence follow-up lands (Vehicle table in ../my-robo-taxi). SDK consumers MUST continue to tolerate null on /snapshot responses and render a neutral placeholder (not a spinner) during the transitional window. Nullability is expressed via the union `type: [\"string\", \"null\"]`; the `enum` list includes `null` explicitly alongside the string values for maximum validator compatibility (some Go and Python JSON Schema libraries require `null` in the enum to accept null values even when `type` includes `null`).",
+      "description": "Charge state enum sourced from Tesla proto field 179 (DetailedChargeState) as of MYR-42 (2026-04-23). Added as a v1 charge atomic group member by MYR-11; live WS wiring completed by MYR-40 on 2026-04-22 using proto 2 (ChargeState); re-sourced to proto 179 by MYR-42 after empirical capture showed Tesla firmware ≥ 2024.44.25 accepts proto 2 in fleet_telemetry_config but never actually emits it. Proto 179 fires on the same transitions with identical enum string values (see websocket-protocol.md §4.1.4 and §10 DV-03 + DV-19). Non-nullable on live vehicle_update WS frames post-MYR-40; still transitional-nullable on REST /snapshot responses until the cross-repo Prisma DB-persistence follow-up (MYR-41) lands. SDK consumers MUST continue to tolerate null on /snapshot responses and render a neutral placeholder (not a spinner) during the transitional window. Nullability is expressed via the union `type: [\"string\", \"null\"]`; the `enum` list includes `null` explicitly alongside the string values for maximum validator compatibility (some Go and Python JSON Schema libraries require `null` in the enum to accept null values even when `type` includes `null`).",
       "enum": ["Unknown", "Disconnected", "NoPower", "Starting", "Charging", "Complete", "Stopped", null],
       "x-classification": "P0",
       "x-atomic-group": "charge",
-      "x-tesla-proto-field": 2
+      "x-tesla-proto-field": 179
     },
     "estimatedRange": {
       "type": "integer",

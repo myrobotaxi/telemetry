@@ -43,7 +43,9 @@ const (
 	FleetFieldEnergyRemaining                   = "EnergyRemaining"
 	FleetFieldPackVoltage                       = "PackVoltage"
 	FleetFieldPackCurrent                       = "PackCurrent"
-	FleetFieldChargeState                       = "ChargeState"
+	// MYR-42: FleetFieldChargeState (proto 2) removed from DefaultFieldConfig
+	// because Tesla firmware no longer populates it. chargeState wire field
+	// now sources from DetailedChargeState (proto 179).
 	FleetFieldDetailedChargeState               = "DetailedChargeState"
 	FleetFieldTimeToFullCharge                  = "TimeToFullCharge"
 	FleetFieldEstimatedHoursToChargeTermination = "EstimatedHoursToChargeTermination"
@@ -129,8 +131,7 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		FleetFieldEnergyRemaining:                   {IntervalSeconds: 30},
 		FleetFieldPackVoltage:                       {IntervalSeconds: 30},
 		FleetFieldPackCurrent:                       {IntervalSeconds: 30},
-		FleetFieldChargeState:                       {IntervalSeconds: 30}, // proto 2, ChargingState enum — v1 charge atomic group member
-		FleetFieldDetailedChargeState:               {IntervalSeconds: 30}, // maps to FieldDetailedChargeState (proto 179)
+		FleetFieldDetailedChargeState:               {IntervalSeconds: 30}, // proto 179 — sources the `chargeState` wire field as of MYR-42 (2026-04-23)
 		FleetFieldTimeToFullCharge:                  {IntervalSeconds: 30}, // proto 43, hours (decimal double) — v1 charge atomic group member
 		FleetFieldEstimatedHoursToChargeTermination: {IntervalSeconds: 30}, // MYR-25 observation: proto 190, MYR-28 flip-condition guard
 

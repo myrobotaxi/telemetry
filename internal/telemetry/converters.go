@@ -18,10 +18,10 @@ func convertValue(field tpb.Field, v *tpb.Value) (events.TelemetryValue, error) 
 		return convertLocation(v)
 	case tpb.Field_Gear:
 		return convertShiftState(v)
-	case tpb.Field_ChargeState:
-		return convertChargeState(v)
+	// MYR-42: chargeState sources from proto 179 DetailedChargeState only.
+	// Proto 2 ChargeState is not in fieldMap and therefore not dispatched.
 	case tpb.Field_DetailedChargeState:
-		return convertDetailedChargeState(v)
+		return convertChargeState(v)
 	case tpb.Field_CarType:
 		return convertCarType(v)
 	case tpb.Field_SentryMode:

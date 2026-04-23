@@ -76,7 +76,7 @@ Every column in every persisted table is listed below. The **Tier** column is th
 | `color` | `String` | P0 | No | Yes | Vehicle color |
 | `licensePlate` | `String` | P1 | No | No | Can be used to look up registered owner — PII |
 | `chargeLevel` | `Int` | P0 | No | Yes | Battery percentage — not identifying |
-| `chargeState` | `String` (enum) | P0 | No | Yes | Charge state enum (`Disconnected`, `Charging`, `Complete`, …) — not identifying. Tesla proto field 2. Added by MYR-11 (v1 charge atomic group). |
+| `chargeState` | `String` (enum) | P0 | No | Yes | Charge state enum (`Disconnected`, `Charging`, `Complete`, …) — not identifying. Sourced from Tesla proto field **179** (`DetailedChargeState`) as of [MYR-42](https://linear.app/myrobotaxi/issue/MYR-42) (2026-04-23); MYR-40 initially sourced from proto 2 but empirical capture showed Tesla firmware ≥ 2024.44.25 does not emit proto 2, so the switch to proto 179 was non-behavioral (same 7 enum strings). Added by MYR-11 (v1 charge atomic group); source proto corrected by MYR-42. |
 | `estimatedRange` | `Int` | P0 | No | Yes | Range in miles — not identifying |
 | `timeToFull` | `Float` | P0 | No | Yes | **Hours (decimal)** to full charge at current rate — not identifying. Tesla proto field 43 (`TimeToFullCharge`, double). Unit per `tesla-fleet-telemetry-sme` skill + legacy Tesla REST API; empirical verification tracked as `websocket-protocol.md` §10 DV-17. Added by MYR-11 (v1 charge atomic group). |
 | `status` | `VehicleStatus` | P0 | No | Yes | Enum: driving/parked/charging/offline/in_service |
@@ -403,7 +403,7 @@ The `contract-guard` agent/CI check enforces the following rules derived from th
 | P1 | 26 | Sensitive — GPS coordinates, location names/addresses, OAuth tokens, PII, route data |
 | P2 | 0 | Access-logged — reserved for future use |
 
-> **Count audit trail.** The P0 count was bumped from 83 → 85 by [MYR-11](https://linear.app/myrobotaxi/issue/MYR-11) when it added `Vehicle.chargeState` (Tesla proto field 2, enum) and `Vehicle.timeToFull` (Tesla proto field 43, `Float` **hours (decimal)**) to the v1 charge atomic group. Both fields are P0 because they describe charge state, not identity or location. See §1.3 Vehicle table and `vehicle-state-schema.md` §2.2 for the wire contract. The `timeToFull` unit is tracked for empirical verification as `websocket-protocol.md` §10 DV-17 ([MYR-25](https://linear.app/myrobotaxi/issue/MYR-25)). Future count changes MUST add a one-line entry here so the total is auditable without `git blame`.
+> **Count audit trail.** The P0 count was bumped from 83 → 85 by [MYR-11](https://linear.app/myrobotaxi/issue/MYR-11) when it added `Vehicle.chargeState` (Tesla proto field **179** `DetailedChargeState`, enum — see DV-19 for the 2026-04-23 empirical finding that switched the source from proto 2 to proto 179) and `Vehicle.timeToFull` (Tesla proto field 43, `Float` **hours (decimal)**) to the v1 charge atomic group. Both fields are P0 because they describe charge state, not identity or location. See §1.3 Vehicle table and `vehicle-state-schema.md` §2.2 for the wire contract. The `timeToFull` unit was empirically verified as hours (1.0667h capture) on 2026-04-22 — [DV-17 RESOLVED](https://linear.app/myrobotaxi/issue/MYR-25#comment-4f1dcee9-ab10-4039-acc5-9e7ef25c3762). Future count changes MUST add a one-line entry here so the total is auditable without `git blame`.
 
 ### P1 fields requiring AES-256-GCM encryption (11 columns)
 

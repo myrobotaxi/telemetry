@@ -30,35 +30,26 @@ func convertShiftState(v *tpb.Value) (events.TelemetryValue, error) {
 	}
 }
 
-// convertChargeState extracts Tesla's proto 2 ChargeState enum (emitted
-// via the `charging_value` oneof variant, which wraps the ChargingState
-// enum) and returns it as a string. Produced values match the v1 charge
-// atomic group contract: Unknown, Disconnected, NoPower, Starting,
-// Charging, Complete, Stopped.
+// convertChargeState extracts the live `chargeState` value. As of MYR-42
+// (2026-04-23) this is sourced from Tesla proto field 179
+// (`DetailedChargeState`, emitted via the `Value_DetailedChargeStateValue`
+// oneof variant). Older firmware still emits via the deprecated
+// `Value_ChargingValue` variant; both paths produce the same 7 contract
+// enum strings: Unknown, Disconnected, NoPower, Starting, Charging,
+// Complete, Stopped. The string fallback covers the rare case where
+// Tesla sends the value as a plain string.
+//
+// Tesla firmware ≥ 2024.44.25 does NOT populate proto 2 `ChargeState`
+// even when configured, so that dispatch path is deliberately removed.
+// See MYR-42 and `websocket-protocol.md` §10 DV-19.
 func convertChargeState(v *tpb.Value) (events.TelemetryValue, error) {
-	switch val := v.Value.(type) {
-	case *tpb.Value_ChargingValue:
-		s := chargingStateString(val.ChargingValue)
-		return events.TelemetryValue{StringVal: &s}, nil
-	case *tpb.Value_StringValue:
-		s := val.StringValue
-		return events.TelemetryValue{StringVal: &s}, nil
-	default:
-		return events.TelemetryValue{}, fmt.Errorf(
-			"%w: expected chargingState or string, got %T", ErrUnexpectedValueType, v.Value,
-		)
-	}
-}
-
-// convertDetailedChargeState extracts a DetailedChargeStateValue enum and
-// returns it as a string.
-func convertDetailedChargeState(v *tpb.Value) (events.TelemetryValue, error) {
 	switch val := v.Value.(type) {
 	case *tpb.Value_DetailedChargeStateValue:
 		s := detailedChargeStateString(val.DetailedChargeStateValue)
 		return events.TelemetryValue{StringVal: &s}, nil
 	case *tpb.Value_ChargingValue:
-		// Older firmware uses the deprecated ChargingState enum.
+		// Pre-2024.44.25 firmware emits the deprecated ChargingState enum
+		// instead. Same string values, narrower enum range.
 		s := chargingStateString(val.ChargingValue)
 		return events.TelemetryValue{StringVal: &s}, nil
 	case *tpb.Value_StringValue:
