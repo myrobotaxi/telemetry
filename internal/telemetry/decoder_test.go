@@ -533,6 +533,13 @@ func TestDecoder_DecodePayload_ChargeState_Proto2(t *testing.T) {
 		{"charging", chargingVal(tpb.ChargingState_ChargeStateCharging), "Charging"},
 		{"complete", chargingVal(tpb.ChargingState_ChargeStateComplete), "Complete"},
 		{"stopped", chargingVal(tpb.ChargingState_ChargeStateStopped), "Stopped"},
+		// Lock the default branch of chargingStateString: any ChargingState
+		// enum value not recognized by our switch (e.g. a future Tesla
+		// firmware value, or the zero value if Tesla deprecates one) MUST
+		// surface as "Unknown" rather than panic or empty string. Uses a
+		// large out-of-range int cast so the test does not break when new
+		// enum values are added at the end of the list.
+		{"unknown fallback (unrecognized enum value)", chargingVal(tpb.ChargingState(9999)), "Unknown"},
 		{"string fallback charging", stringVal("Charging"), "Charging"},
 		{"string fallback disconnected", stringVal("Disconnected"), "Disconnected"},
 	}
