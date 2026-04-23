@@ -124,11 +124,16 @@ func buildDebugURL(server, vin string) (string, error) {
 
 // vehicleSnapshot is the JSON shape printed by `ops fields snapshot`. We
 // stay close to store.Vehicle but flatten the pointer fields for easier
-// reading.
+// reading. The field order + JSON tags mirror the canonical VehicleState
+// contract at docs/contracts/vehicle-state-schema.md §1.1, so this command
+// doubles as a spot-check for the REST /snapshot wire shape.
 type vehicleSnapshot struct {
 	ID                   string   `json:"id"`
 	VIN                  string   `json:"vin"`
 	Name                 string   `json:"name"`
+	Model                string   `json:"model"`
+	Year                 int      `json:"year"`
+	Color                string   `json:"color"`
 	Status               string   `json:"status"`
 	ChargeLevel          int      `json:"chargeLevel"`
 	EstimatedRange       int      `json:"estimatedRange"`
@@ -137,10 +142,14 @@ type vehicleSnapshot struct {
 	Heading              int      `json:"heading"`
 	Latitude             float64  `json:"latitude"`
 	Longitude            float64  `json:"longitude"`
+	LocationName         string   `json:"locationName"`
+	LocationAddress      string   `json:"locationAddress"`
 	InteriorTemp         int      `json:"interiorTemp"`
 	ExteriorTemp         int      `json:"exteriorTemp"`
 	OdometerMiles        int      `json:"odometerMiles"`
+	FsdMilesSinceReset   float64  `json:"fsdMilesSinceReset"`
 	DestinationName      *string  `json:"destinationName,omitempty"`
+	DestinationAddress   *string  `json:"destinationAddress,omitempty"`
 	DestinationLatitude  *float64 `json:"destinationLatitude,omitempty"`
 	DestinationLongitude *float64 `json:"destinationLongitude,omitempty"`
 	OriginLatitude       *float64 `json:"originLatitude,omitempty"`
@@ -178,6 +187,9 @@ func runFieldsSnapshot(ctx context.Context, args []string) error {
 		ID:                   v.ID,
 		VIN:                  v.VIN,
 		Name:                 v.Name,
+		Model:                v.Model,
+		Year:                 v.Year,
+		Color:                v.Color,
 		Status:               string(v.Status),
 		ChargeLevel:          v.ChargeLevel,
 		EstimatedRange:       v.EstimatedRange,
@@ -186,10 +198,14 @@ func runFieldsSnapshot(ctx context.Context, args []string) error {
 		Heading:              v.Heading,
 		Latitude:             v.Latitude,
 		Longitude:            v.Longitude,
+		LocationName:         v.LocationName,
+		LocationAddress:      v.LocationAddress,
 		InteriorTemp:         v.InteriorTemp,
 		ExteriorTemp:         v.ExteriorTemp,
 		OdometerMiles:        v.OdometerMiles,
+		FsdMilesSinceReset:   v.FsdMilesToday,
 		DestinationName:      v.DestinationName,
+		DestinationAddress:   v.DestinationAddress,
 		DestinationLatitude:  v.DestinationLatitude,
 		DestinationLongitude: v.DestinationLongitude,
 		OriginLatitude:       v.OriginLatitude,
