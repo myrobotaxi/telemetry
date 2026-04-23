@@ -513,6 +513,159 @@ func TestDecoder_DecodePayload_ChargeState(t *testing.T) {
 	}
 }
 
+// TestDecoder_DecodePayload_ChargeState_Proto2 covers proto field 2
+// (Field_ChargeState) — the v1 charge atomic group member. Tesla emits
+// it via the ChargingValue oneof variant wrapping the deprecated
+// ChargingState enum. Every enum value in the contract's wire table
+// must round-trip to its string form.
+func TestDecoder_DecodePayload_ChargeState_Proto2(t *testing.T) {
+	t.Parallel()
+	dec := NewDecoder()
+
+	tests := []struct {
+		name       string
+		value      *tpb.Value
+		wantString string
+	}{
+		{"disconnected", chargingVal(tpb.ChargingState_ChargeStateDisconnected), "Disconnected"},
+		{"no power", chargingVal(tpb.ChargingState_ChargeStateNoPower), "NoPower"},
+		{"starting", chargingVal(tpb.ChargingState_ChargeStateStarting), "Starting"},
+		{"charging", chargingVal(tpb.ChargingState_ChargeStateCharging), "Charging"},
+		{"complete", chargingVal(tpb.ChargingState_ChargeStateComplete), "Complete"},
+		{"stopped", chargingVal(tpb.ChargingState_ChargeStateStopped), "Stopped"},
+		{"string fallback charging", stringVal("Charging"), "Charging"},
+		{"string fallback disconnected", stringVal("Disconnected"), "Disconnected"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			payload := makePayload([]*tpb.Datum{
+				makeDatum(tpb.Field_ChargeState, tt.value),
+			})
+
+			evt, _, err := dec.DecodePayload(payload)
+			if err != nil {
+				t.Fatalf("DecodePayload() error = %v", err)
+			}
+
+			cs := evt.Fields["chargeState"]
+			if cs.StringVal == nil {
+				t.Fatalf("chargeState StringVal is nil; got %+v", cs)
+			}
+			if *cs.StringVal != tt.wantString {
+				t.Errorf("chargeState = %q, want %q", *cs.StringVal, tt.wantString)
+			}
+		})
+	}
+}
+
+// TestDecoder_DecodePayload_TimeToFull covers proto field 43
+// (Field_TimeToFullCharge) — the v1 charge atomic group member. Tesla
+// emits it as a `double` in hours; empirically verified 1.0667h during
+// a home-charging session against the prod server on 2026-04-22 (see
+// MYR-25 comment on the DV-17 empirical capture). Fractional hours
+// must round-trip as float64, not be truncated to integer.
+func TestDecoder_DecodePayload_TimeToFull(t *testing.T) {
+	t.Parallel()
+	dec := NewDecoder()
+
+	doubleVal := func(f float64) *tpb.Value {
+		return &tpb.Value{Value: &tpb.Value_DoubleValue{DoubleValue: f}}
+	}
+	floatVal := func(f float32) *tpb.Value {
+		return &tpb.Value{Value: &tpb.Value_FloatValue{FloatValue: f}}
+	}
+
+	tests := []struct {
+		name      string
+		value     *tpb.Value
+		wantFloat float64
+	}{
+		{"double fractional hours (empirical 1.0667h)", doubleVal(1.066666841506958), 1.066666841506958},
+		{"double 1.5 (90 minutes)", doubleVal(1.5), 1.5},
+		{"double zero (not charging)", doubleVal(0), 0},
+		{"float fallback", floatVal(2.25), 2.25},
+		{"string fallback", stringVal("3.75"), 3.75},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			payload := makePayload([]*tpb.Datum{
+				makeDatum(tpb.Field_TimeToFullCharge, tt.value),
+			})
+
+			evt, _, err := dec.DecodePayload(payload)
+			if err != nil {
+				t.Fatalf("DecodePayload() error = %v", err)
+			}
+
+			ttf, ok := evt.Fields["timeToFull"]
+			if !ok {
+				t.Fatalf("timeToFull missing from decoded fields; got %v", evt.Fields)
+			}
+			if ttf.FloatVal == nil {
+				t.Fatalf("timeToFull FloatVal is nil; got %+v (expected unit=hours, decimal double)", ttf)
+			}
+			const epsilon = 1e-9
+			diff := *ttf.FloatVal - tt.wantFloat
+			if diff < -epsilon || diff > epsilon {
+				t.Errorf("timeToFull = %v, want %v (unit: hours, decimal)", *ttf.FloatVal, tt.wantFloat)
+			}
+		})
+	}
+}
+
+// TestDecoder_DecodePayload_ChargeAtomicGroup4Field verifies that when
+// Tesla batches all four v1 charge-group members in a single Payload
+// (which happens at the shared 30s cadence once DV-03/DV-04 wire in
+// MYR-40), the decoder emits one VehicleTelemetryEvent containing all
+// four, satisfying NFR-3.1 atomic-group delivery.
+func TestDecoder_DecodePayload_ChargeAtomicGroup4Field(t *testing.T) {
+	t.Parallel()
+	dec := NewDecoder()
+
+	payload := makePayload([]*tpb.Datum{
+		makeDatum(tpb.Field_Soc, stringVal("68.2")),                                                           // chargeLevel
+		makeDatum(tpb.Field_EstBatteryRange, stringVal("172")),                                                // estimatedRange
+		makeDatum(tpb.Field_ChargeState, chargingVal(tpb.ChargingState_ChargeStateCharging)),                  // chargeState
+		makeDatum(tpb.Field_TimeToFullCharge, &tpb.Value{Value: &tpb.Value_DoubleValue{DoubleValue: 1.0667}}), // timeToFull
+	})
+
+	evt, fieldErrs, err := dec.DecodePayload(payload)
+	if err != nil {
+		t.Fatalf("DecodePayload() error = %v", err)
+	}
+	if len(fieldErrs) != 0 {
+		t.Errorf("unexpected field errors: %v", fieldErrs)
+	}
+
+	// All four v1 charge atomic group members must be present per
+	// websocket-protocol.md §4.1.4 and vehicle-state-schema.md §2.2.
+	want := []string{"soc", "estimatedRange", "chargeState", "timeToFull"}
+	for _, name := range want {
+		if _, ok := evt.Fields[name]; !ok {
+			t.Errorf("charge atomic group missing field %q; got fields: %v", name, keysOf(evt.Fields))
+		}
+	}
+
+	if evt.Fields["chargeState"].StringVal == nil || *evt.Fields["chargeState"].StringVal != "Charging" {
+		t.Errorf("chargeState = %+v, want StringVal=\"Charging\"", evt.Fields["chargeState"])
+	}
+	if evt.Fields["timeToFull"].FloatVal == nil || *evt.Fields["timeToFull"].FloatVal != 1.0667 {
+		t.Errorf("timeToFull = %+v, want FloatVal=1.0667", evt.Fields["timeToFull"])
+	}
+}
+
+func keysOf(m map[string]events.TelemetryValue) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 func TestDecoder_DecodePayload_CarType(t *testing.T) {
 	t.Parallel()
 	dec := NewDecoder()
