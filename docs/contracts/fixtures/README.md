@@ -147,7 +147,6 @@ let cleaned = try JSONSerialization.data(withJSONObject: dict)
 | `vehicle_update.nav_clear.json` | `ws-messages.schema.json#/$defs/VehicleUpdatePayload` | edge-case | Atomic nav clear (tests SDK amplification rule) |
 | `vehicle_update.zero_position.json` | `ws-messages.schema.json#/$defs/VehicleUpdatePayload` | edge-case | 0,0 GPS sentinel (no fix, not Gulf of Guinea) |
 | `vehicle_update.gear_null.json` | `ws-messages.schema.json#/$defs/VehicleUpdatePayload` | edge-case | null gearPosition with status offline |
-| `snapshot.spec_only_nulls.json` | `vehicle-state.schema.json` (VehicleState) | edge-case | All spec-only + transitional fields null |
 | `snapshot.charging.json` | `vehicle-state.schema.json` (VehicleState) | edge-case | Active charging: chargeState Charging, timeToFull non-null |
 | `drive_ended.micro_drive.json` | `ws-messages.schema.json#/$defs/DriveEndedPayload` | edge-case | Minimal drive that passed micro-drive filter |
 | `error.rate_limited_device_cap.json` | `ws-messages.schema.json#/$defs/ErrorPayload` | edge-case | rate_limited with subCode device_cap |
