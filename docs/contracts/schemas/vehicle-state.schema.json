@@ -135,8 +135,7 @@
       "enum": ["Unknown", "Disconnected", "NoPower", "Starting", "Charging", "Complete", "Stopped", null],
       "x-classification": "P0",
       "x-atomic-group": "charge",
-      "x-tesla-proto-field": 2,
-      "x-spec-only": true
+      "x-tesla-proto-field": 2
     },
     "estimatedRange": {
       "type": "integer",
@@ -153,8 +152,7 @@
       "x-classification": "P0",
       "minimum": 0,
       "x-atomic-group": "charge",
-      "x-tesla-proto-field": 43,
-      "x-spec-only": true
+      "x-tesla-proto-field": 43
     },
     "interiorTemp": {
       "type": "integer",
