@@ -242,13 +242,13 @@ A single `vehicle_update` frame's `payload.fields` map MUST contain members of *
 
 | Group | Members (wire field names) | Classification summary |
 |-------|----------------------------|------------------------|
-| `navigation` | `destinationName`, `destinationAddress`\*, `destinationLatitude`, `destinationLongitude`, `originLatitude`, `originLongitude`, `etaMinutes`, `tripDistanceRemaining`, `navRouteCoordinates` | Mixed -- see §4.1.2 |
+| `navigation` | `destinationName`, `destinationAddress`, `destinationLatitude`, `destinationLongitude`, `originLatitude`, `originLongitude`, `etaMinutes`, `tripDistanceRemaining`, `navRouteCoordinates` | Mixed -- see §4.1.2 |
 | `charge` | `chargeLevel`, `chargeState`, `estimatedRange`, `timeToFull` | All **P0** |
 | `gps` | `latitude`, `longitude`, `heading` | `lat`/`lng` **P1** (encrypted at rest), `heading` **P0** |
 | `gear` | `gearPosition`, `status` | All **P0** |
 | `drive` | `startedAt` (carried via `drive_started.payload.startedAt`) | **P0**. This is the v1 home of `tripStartTime` per DV-13. The drive group is not a `vehicle_update.fields` group; it is delivered via the `drive_started` lifecycle message (§4.2) and is never interleaved with telemetry frames. |
 
-\* `destinationAddress` is a **spec-only** member pending MYR-24 (see [`vehicle-state-schema.md`](vehicle-state-schema.md) §1.1). Until MYR-24 lands, this field is always `null` regardless of nav state and is exempt from the active-navigation predicate.
+`destinationAddress` is nullable on the wire (Prisma `String?`). It is a full member of the navigation atomic group and participates in the active-navigation predicate as of MYR-24 (2026-04-23); the prior spec-only exemption in [`vehicle-state-schema.md`](vehicle-state-schema.md) §3.1 has been retired.
 
 Ungrouped fields (delivered individually, no group membership): `speed`, `odometerMiles`, `interiorTemp`, `exteriorTemp`, `fsdMilesSinceReset`, `locationName`, `locationAddress`, `lastUpdated`, and the drive-only `routeCoordinates` field (§4.1.6). Their classification tiers are defined in [`vehicle-state-schema.md`](vehicle-state-schema.md) §1.1.
 
