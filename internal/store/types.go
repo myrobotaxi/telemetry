@@ -27,6 +27,9 @@ type Vehicle struct {
 	UserID               string
 	VIN                  string
 	Name                 string
+	Model                string
+	Year                 int
+	Color                string
 	Status               VehicleStatus
 	ChargeLevel          int
 	EstimatedRange       int
@@ -35,10 +38,14 @@ type Vehicle struct {
 	Heading              int
 	Latitude             float64
 	Longitude            float64
+	LocationName         string
+	LocationAddress      string
 	InteriorTemp         int
 	ExteriorTemp         int
 	OdometerMiles        int
+	FsdMilesToday        float64 // DB column "fsdMilesToday"; wire name is "fsdMilesSinceReset" (MYR-27).
 	DestinationName      *string  // nullable
+	DestinationAddress   *string  // nullable
 	DestinationLatitude  *float64 // nullable
 	DestinationLongitude *float64 // nullable
 	OriginLatitude       *float64 // nullable

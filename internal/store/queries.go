@@ -9,10 +9,13 @@ import (
 // Vehicle queries. All column names use double-quoted camelCase to match
 // the Prisma-generated PostgreSQL schema.
 
-const vehicleSelectColumns = `"id", "userId", "vin", "name", "status",
+const vehicleSelectColumns = `"id", "userId", "vin", "name",
+	"model", "year", "color", "status",
 	"chargeLevel", "estimatedRange", "speed", "gearPosition", "heading",
-	"latitude", "longitude", "interiorTemp", "exteriorTemp",
-	"odometerMiles", "destinationName", "destinationLatitude",
+	"latitude", "longitude", "locationName", "locationAddress",
+	"interiorTemp", "exteriorTemp",
+	"odometerMiles", "fsdMilesToday",
+	"destinationName", "destinationAddress", "destinationLatitude",
 	"destinationLongitude", "originLatitude", "originLongitude",
 	"etaMinutes", "tripDistanceRemaining",
 	"navRouteCoordinates", "lastUpdated"`
