@@ -62,3 +62,29 @@ func TestFieldMap_ChargeStateAndDetailedChargeStateAreDistinct(t *testing.T) {
 		t.Errorf("fieldMap entries for ChargeState and DetailedChargeState must differ; both are %q", chargeField)
 	}
 }
+
+func TestFieldMap_TimeToFullCharge(t *testing.T) {
+	t.Parallel()
+
+	got, ok := fieldMap[tpb.Field_TimeToFullCharge]
+	if !ok {
+		t.Fatal("fieldMap missing entry for Field_TimeToFullCharge (proto 43)")
+	}
+	if got != FieldTimeToFull {
+		t.Errorf("fieldMap[Field_TimeToFullCharge] = %q, want %q", got, FieldTimeToFull)
+	}
+	if FieldTimeToFull != "timeToFull" {
+		t.Errorf("FieldTimeToFull internal name = %q, want %q (contract wire name)", FieldTimeToFull, "timeToFull")
+	}
+}
+
+func TestFieldMap_EstimatedHoursToChargeTerminationHeldOut(t *testing.T) {
+	t.Parallel()
+
+	// MYR-28 §7.1 flip condition: proto 190 stays out of fieldMap until the
+	// Trip Planner Supercharger capture (MYR-25) confirms MYR-28's decision
+	// to source timeToFull from proto 43 does NOT flip to proto 190.
+	if _, ok := fieldMap[tpb.Field_EstimatedHoursToChargeTermination]; ok {
+		t.Error("fieldMap must not include Field_EstimatedHoursToChargeTermination (proto 190) until MYR-25 closes; see MYR-28 §7.1 flip condition")
+	}
+}

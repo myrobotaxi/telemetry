@@ -132,7 +132,9 @@ func (d *Decoder) DecodePayload(payload *tpb.Payload) (events.VehicleTelemetryEv
 			continue
 		}
 
-		// MYR-25/28/29: observation-only log for untracked charge fields.
+		// MYR-25: observation-only log for untracked EstimatedHoursToChargeTermination
+		// (proto 190). Required until MYR-28's flip-condition Trip Planner capture
+		// confirms proto 43 remains the correct source for timeToFull.
 		logVerificationField(datum, payload.GetVin())
 
 		name, ok := InternalFieldName(datum.GetKey())
@@ -222,20 +224,23 @@ func extractValue(datum *tpb.Datum) (events.TelemetryValue, error) {
 	return convertValue(datum.GetKey(), v)
 }
 
-// logVerificationField logs raw values for Tesla fields under empirical unit
-// verification (MYR-25/28/29). These fields are NOT in fieldMap — they are
-// observation-only. Remove after verification is complete.
+// logVerificationField logs raw values for Tesla fields under empirical
+// verification. The only remaining observation-only field is
+// EstimatedHoursToChargeTermination (proto 190), held out of fieldMap
+// pending MYR-25's Trip Planner Supercharger capture (see MYR-28 §7.1
+// flip condition). TimeToFullCharge (proto 43) graduated to fieldMap
+// once MYR-28 merged; MilesToArrival / MilesSinceReset observation is
+// handled inline in DecodePayload.
 func logVerificationField(datum *tpb.Datum, vin string) {
-	switch datum.GetKey() {
-	case tpb.Field_TimeToFullCharge, tpb.Field_EstimatedHoursToChargeTermination:
+	if datum.GetKey() == tpb.Field_EstimatedHoursToChargeTermination {
 		if tv, err := extractValue(datum); err == nil {
 			logFieldVerification(datum.GetKey().String(), vin, tv)
 		}
 	}
 }
 
-// logFieldVerification emits a structured log line for MYR-25/28/29 field unit
-// verification. Remove after empirical verification is complete.
+// logFieldVerification emits a structured log line for MYR-25/29 field
+// unit verification. Remove after empirical verification is complete.
 func logFieldVerification(field, vin string, tv events.TelemetryValue) {
 	vinSuffix := vin
 	if len(vin) > 4 {

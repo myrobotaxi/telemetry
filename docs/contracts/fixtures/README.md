@@ -104,7 +104,7 @@ let cleaned = try JSONSerialization.data(withJSONObject: dict)
 | `auth.json` | `ws-messages.schema.json#/$defs/AuthPayload` | happy-path | Client->server auth frame with opaque token |
 | `auth_ok.json` | `ws-messages.schema.json#/$defs/AuthOkPayload` | happy-path | Server->client auth acknowledgement (triggers C-3) |
 | `vehicle_update.charge.json` | `ws-messages.schema.json#/$defs/VehicleUpdatePayload` | happy-path | Charge atomic group -- all 4 members |
-| `vehicle_update.charge_partial.json` | `ws-messages.schema.json#/$defs/VehicleUpdatePayload` | transitional | Charge group with chargeState/timeToFull null (pre-DV-03/DV-04) |
+| `vehicle_update.charge_partial.json` | `ws-messages.schema.json#/$defs/VehicleUpdatePayload` | transitional | Historical pre-MYR-40 WS shape with chargeState/timeToFull null; retained as reference for REST /snapshot while DB persistence is pending |
 | `vehicle_update.gps.json` | `ws-messages.schema.json#/$defs/VehicleUpdatePayload` | happy-path | GPS atomic group -- latitude, longitude, heading |
 | `vehicle_update.gear.json` | `ws-messages.schema.json#/$defs/VehicleUpdatePayload` | happy-path | Gear atomic group -- gearPosition D, status driving |
 | `vehicle_update.nav_active.json` | `ws-messages.schema.json#/$defs/VehicleUpdatePayload` | happy-path | Navigation group with active route (all 9 members) |

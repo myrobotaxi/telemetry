@@ -625,6 +625,54 @@ func TestFieldMapping_AllNineFields(t *testing.T) {
 	}
 }
 
+// TestFieldMapping_ChargeAtomicGroup4Field verifies the v1 charge atomic
+// group (MYR-40 / DV-03 + DV-04) is delivered as a 4-field batch on the
+// wire: chargeLevel + chargeState + estimatedRange + timeToFull.
+// chargeState remains a plain string, timeToFull remains a decimal
+// float (hours) — neither is rounded to integer. Matches the frozen
+// contract in websocket-protocol.md §4.1.4 and vehicle-state-schema.md
+// §2.2.
+func TestFieldMapping_ChargeAtomicGroup4Field(t *testing.T) {
+	fields := map[string]events.TelemetryValue{
+		"soc":            {IntVal: ptrInt64(68)},
+		"estimatedRange": {FloatVal: ptrFloat64(172.4)},
+		"chargeState":    {StringVal: ptrString("Charging")},
+		"timeToFull":     {FloatVal: ptrFloat64(1.066666841506958)},
+	}
+
+	result := mapFieldsForClient(fields)
+
+	wantKeys := []string{"chargeLevel", "estimatedRange", "chargeState", "timeToFull"}
+	for _, key := range wantKeys {
+		if _, ok := result[key]; !ok {
+			t.Errorf("charge atomic group missing wire field %q: %v", key, result)
+		}
+	}
+	if len(result) != len(wantKeys) {
+		t.Errorf("expected exactly %d wire fields (the 4-field charge group), got %d: %v", len(wantKeys), len(result), result)
+	}
+
+	if got, ok := result["chargeState"].(string); !ok || got != "Charging" {
+		t.Errorf("chargeState = %v (%T), want string \"Charging\"", result["chargeState"], result["chargeState"])
+	}
+	if got, ok := result["timeToFull"].(float64); !ok {
+		t.Errorf("timeToFull = %v (%T), want float64 (hours, decimal)", result["timeToFull"], result["timeToFull"])
+	} else {
+		const epsilon = 1e-9
+		if diff := got - 1.066666841506958; diff < -epsilon || diff > epsilon {
+			t.Errorf("timeToFull = %v, want 1.066666841506958 (hours, not rounded)", got)
+		}
+	}
+
+	// chargeLevel IS rounded to int (per integerFields); estimatedRange is too.
+	if got, ok := result["chargeLevel"].(int64); !ok || got != 68 {
+		t.Errorf("chargeLevel = %v (%T), want int64 68", result["chargeLevel"], result["chargeLevel"])
+	}
+	if got, ok := result["estimatedRange"].(int); !ok || got != 172 {
+		t.Errorf("estimatedRange = %v (%T), want int 172 (rounded from 172.4)", result["estimatedRange"], result["estimatedRange"])
+	}
+}
+
 func TestMarshalWSMessage(t *testing.T) {
 	tests := []struct {
 		name    string

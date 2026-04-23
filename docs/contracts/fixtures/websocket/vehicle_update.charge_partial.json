@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "description": "Transitional charge group update before DV-03/DV-04 wiring ships. chargeState and timeToFull are null because the server does not yet emit them. SDK consumers MUST tolerate null for both fields and render a neutral placeholder (not a spinner).",
+    "description": "Historical (pre-MYR-40) transitional charge group shape. Retained for regression testing and as a reference for the REST /snapshot shape that still returns null for chargeState / timeToFull until the cross-repo Prisma DB-persistence follow-up lands. Post-MYR-40 WS vehicle_update frames no longer produce this shape — the server now emits both fields on the wire. SDK consumers MUST continue to tolerate null for both fields on /snapshot responses during the transitional window and render a neutral placeholder (not a spinner).",
     "anchoredFRs": ["FR-1.2", "NFR-3.1"],
     "scenario": "transitional"
   },

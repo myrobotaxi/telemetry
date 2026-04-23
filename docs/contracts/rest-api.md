@@ -484,7 +484,7 @@ Example:
 }
 ```
 
-Spec-only fields (MYR-24) are returned as `null` per [`vehicle-state-schema.md`](vehicle-state-schema.md) §1.1. The charge-group fields `chargeState` and `timeToFull` are returned as `null` until the DV-03/DV-04 wiring ships (see `websocket-protocol.md` §4.1.4).
+Spec-only fields (MYR-24) are returned as `null` per [`vehicle-state-schema.md`](vehicle-state-schema.md) §1.1. The charge-group fields `chargeState` and `timeToFull` may be returned as `null` until the cross-repo Prisma DB-persistence follow-up to [MYR-40](https://linear.app/myrobotaxi/issue/MYR-40) lands (the Prisma-owned `Vehicle` table does not yet have these columns). MYR-40 shipped the live WS wire path for both fields on 2026-04-22, so `vehicle_update` WebSocket frames carry real values even while this snapshot remains transitional-null. See `websocket-protocol.md` §4.1.4 and §10 DV-03 / DV-04.
 
 #### Response -- error
 

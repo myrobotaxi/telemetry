@@ -21,6 +21,7 @@ const (
 	FieldEstBatteryRange      FieldName = "estimatedRange"
 	FieldChargeState          FieldName = "chargeState"
 	FieldDetailedChargeState  FieldName = "detailedChargeState"
+	FieldTimeToFull           FieldName = "timeToFull"
 	FieldOdometer             FieldName = "odometer"
 	FieldInsideTemp           FieldName = "insideTemp"
 	FieldOutsideTemp          FieldName = "outsideTemp"
@@ -67,6 +68,7 @@ var fieldMap = map[tpb.Field]FieldName{
 	tpb.Field_EstBatteryRange:             FieldEstBatteryRange,
 	tpb.Field_ChargeState:                 FieldChargeState,
 	tpb.Field_DetailedChargeState:         FieldDetailedChargeState,
+	tpb.Field_TimeToFullCharge:            FieldTimeToFull,
 	tpb.Field_Odometer:                    FieldOdometer,
 	tpb.Field_InsideTemp:                  FieldInsideTemp,
 	tpb.Field_OutsideTemp:                 FieldOutsideTemp,
@@ -99,10 +101,12 @@ var fieldMap = map[tpb.Field]FieldName{
 	tpb.Field_LateralAcceleration:         FieldLatAccel,
 	tpb.Field_LongitudinalAcceleration:    FieldLongAccel,
 	tpb.Field_MilesSinceReset:             FieldMilesSinceReset,
-	// Field_TimeToFullCharge (43) and Field_EstimatedHoursToChargeTermination (190)
-	// are intentionally NOT in fieldMap — they are observation-only via the MYR-25
-	// debug log in decoder.go. Adding them here would leak uncontracted fields to
-	// WS clients via the event bus. They will be added after empirical verification.
+	// Field_EstimatedHoursToChargeTermination (190) is intentionally NOT in fieldMap
+	// — it remains observation-only via the MYR-25 debug log in decoder.go pending
+	// the Trip Planner Supercharger capture that MYR-28's §7.1 flip condition
+	// requires. Adding it here would leak an uncontracted field to WS clients via
+	// the event bus. Promote once the MYR-25 capture confirms MYR-28's proto-43
+	// decision does not flip.
 	// Field_RouteLastUpdated omitted — Tesla docs state this field is broken.
 }
 
