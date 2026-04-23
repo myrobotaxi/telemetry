@@ -3,7 +3,7 @@
 **Status:** Draft — v1
 **Target artifact:** Lifecycle policy doc + AuditLog schema + pruning job spec
 **Owner:** `sdk-architect` agent
-**Last updated:** 2026-04-11
+**Last updated:** 2026-04-23
 
 ## Purpose
 
@@ -480,7 +480,7 @@ Per NFR-3.3 and `vehicle-state-schema.md` Section 3, the following fields form a
 | `tripDistanceRemaining` | Yes | Yes |
 | `navRouteCoordinates` | Yes | Yes |
 
-> \*`destinationAddress` is currently spec-only (MYR-24). Until MYR-24 lands, this field is exempt from the active-navigation completeness predicate and will be null regardless of nav state. See `vehicle-state-schema.md` §3.1 predicate 3.
+> `destinationAddress` is loaded by the Go `Vehicle` struct as of MYR-24 (2026-04-23); the prior spec-only exemption from the active-navigation completeness predicate no longer applies. The field remains nullable on the wire because the underlying Prisma column is `String?`. See `vehicle-state-schema.md` §3.1 predicate 3.
 
 ### 6.2 Coordinate pair atomicity
 

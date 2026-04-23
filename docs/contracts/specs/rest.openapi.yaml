@@ -103,16 +103,16 @@ paths:
                   value:
                     vehicleId: clxyz1234567890abcdef
                     name: Stumpy
-                    model: null
-                    year: null
-                    color: null
+                    model: Model 3
+                    year: 2024
+                    color: Midnight Silver Metallic
                     status: parked
                     speed: 0
                     heading: 180
                     latitude: 10.0
                     longitude: 20.0
-                    locationName: null
-                    locationAddress: null
+                    locationName: Home
+                    locationAddress: 123 Market St, San Francisco, CA
                     gearPosition: P
                     chargeLevel: 78
                     chargeState: Disconnected
@@ -121,7 +121,7 @@ paths:
                     interiorTemp: 68
                     exteriorTemp: 55
                     odometerMiles: 12458
-                    fsdMilesSinceReset: null
+                    fsdMilesSinceReset: 412.7
                     destinationName: null
                     destinationAddress: null
                     destinationLatitude: null

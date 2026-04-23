@@ -379,7 +379,7 @@ Members (per [`vehicle-state-schema.md`](vehicle-state-schema.md) §2.1): `desti
 | Field | Classification | Encrypted at rest (AES-256-GCM) |
 |-------|----------------|----------------------------------|
 | `destinationName` | **P1** | No (disk encryption only) |
-| `destinationAddress` | **P1** (spec-only, MYR-24) | No |
+| `destinationAddress` | **P1** | No |
 | `destinationLatitude` | **P1** | Yes |
 | `destinationLongitude` | **P1** | Yes |
 | `originLatitude` | **P1** | Yes |

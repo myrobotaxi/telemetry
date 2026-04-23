@@ -452,16 +452,16 @@ Example:
 {
   "vehicleId": "clxyz1234567890abcdef",
   "name": "Stumpy",
-  "model": null,
-  "year": null,
-  "color": null,
+  "model": "Model 3",
+  "year": 2024,
+  "color": "Midnight Silver Metallic",
   "status": "parked",
   "speed": 0,
   "heading": 180,
   "latitude": 10.0,
   "longitude": 20.0,
-  "locationName": null,
-  "locationAddress": null,
+  "locationName": "Home",
+  "locationAddress": "123 Market St, San Francisco, CA",
   "gearPosition": "P",
   "chargeLevel": 78,
   "chargeState": "Disconnected",
@@ -470,7 +470,7 @@ Example:
   "interiorTemp": 68,
   "exteriorTemp": 55,
   "odometerMiles": 12458,
-  "fsdMilesSinceReset": null,
+  "fsdMilesSinceReset": 412.7,
   "destinationName": null,
   "destinationAddress": null,
   "destinationLatitude": null,
@@ -484,7 +484,7 @@ Example:
 }
 ```
 
-Spec-only fields (MYR-24) are returned as `null` per [`vehicle-state-schema.md`](vehicle-state-schema.md) §1.1. The charge-group fields `chargeState` and `timeToFull` may be returned as `null` until the cross-repo Prisma DB-persistence follow-up to [MYR-40](https://linear.app/myrobotaxi/issue/MYR-40) lands (the Prisma-owned `Vehicle` table does not yet have these columns). MYR-40 shipped the live WS wire path for both fields on 2026-04-22, so `vehicle_update` WebSocket frames carry real values even while this snapshot remains transitional-null. See `websocket-protocol.md` §4.1.4 and §10 DV-03 / DV-04.
+The seven former spec-only catalog fields (`model`, `year`, `color`, `fsdMilesSinceReset`, `locationName`, `locationAddress`, `destinationAddress`) were promoted out of spec-only status by [MYR-24](https://linear.app/myrobotaxi/issue/MYR-24) on 2026-04-23 — the Go `internal/store.Vehicle` read path now loads them from the Prisma-owned `Vehicle` table. Six are non-nullable on snapshot (`model`, `year`, `color`, `fsdMilesSinceReset`, `locationName`, `locationAddress`); `destinationAddress` remains nullable because the Prisma column is `String?`. The charge-group fields `chargeState` and `timeToFull` may still be returned as `null` until the cross-repo Prisma DB-persistence follow-up to [MYR-40](https://linear.app/myrobotaxi/issue/MYR-40) lands (the Prisma-owned `Vehicle` table does not yet have these columns). MYR-40 shipped the live WS wire path for both fields on 2026-04-22, so `vehicle_update` WebSocket frames carry real values even while this snapshot remains transitional-null. See `websocket-protocol.md` §4.1.4 and §10 DV-03 / DV-04.
 
 #### Response -- error
 

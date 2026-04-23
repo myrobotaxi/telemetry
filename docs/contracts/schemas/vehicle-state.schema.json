@@ -7,6 +7,9 @@
   "required": [
     "vehicleId",
     "name",
+    "model",
+    "year",
+    "color",
     "status",
     "chargeLevel",
     "estimatedRange",
@@ -14,9 +17,12 @@
     "heading",
     "latitude",
     "longitude",
+    "locationName",
+    "locationAddress",
     "interiorTemp",
     "exteriorTemp",
     "odometerMiles",
+    "fsdMilesSinceReset",
     "lastUpdated"
   ],
   "properties": {
@@ -33,27 +39,21 @@
       "examples": ["Optimus"]
     },
     "model": {
-      "type": ["string", "null"],
-      "description": "Vehicle model (e.g., 'Model 3', 'Model Y'). SPEC-ONLY until MYR-24: not currently loaded by the Go Vehicle struct in internal/store/types.go. Will be nullable until MYR-24 lands; consumers MUST tolerate null.",
+      "type": "string",
+      "description": "Vehicle model (e.g., 'Model 3', 'Model Y'). Sourced from DB Vehicle.model (Prisma NOT NULL). Loaded by the Go Vehicle struct and populated on snapshot as of MYR-24 (2026-04-23).",
       "x-classification": "P0",
-      "x-spec-only": true,
-      "x-spec-only-issue": "MYR-24",
       "examples": ["Model 3"]
     },
     "year": {
-      "type": ["integer", "null"],
-      "description": "Model year. SPEC-ONLY until MYR-24: not currently loaded by the Go Vehicle struct in internal/store/types.go. Will be nullable until MYR-24 lands; consumers MUST tolerate null.",
+      "type": "integer",
+      "description": "Model year. Sourced from DB Vehicle.year (Prisma NOT NULL). Loaded by the Go Vehicle struct and populated on snapshot as of MYR-24 (2026-04-23).",
       "x-classification": "P0",
-      "x-spec-only": true,
-      "x-spec-only-issue": "MYR-24",
       "examples": [2024]
     },
     "color": {
-      "type": ["string", "null"],
-      "description": "Vehicle exterior color. SPEC-ONLY until MYR-24: not currently loaded by the Go Vehicle struct in internal/store/types.go. Will be nullable until MYR-24 lands; consumers MUST tolerate null.",
+      "type": "string",
+      "description": "Vehicle exterior color. Sourced from DB Vehicle.color (Prisma NOT NULL). Loaded by the Go Vehicle struct and populated on snapshot as of MYR-24 (2026-04-23).",
       "x-classification": "P0",
-      "x-spec-only": true,
-      "x-spec-only-issue": "MYR-24",
       "examples": ["Midnight Silver Metallic"]
     },
     "status": {
@@ -100,18 +100,14 @@
       "x-atomic-group": "gps"
     },
     "locationName": {
-      "type": ["string", "null"],
-      "description": "Reverse-geocoded place name for current location (e.g., 'Home', 'Whole Foods Market'). Derived from GPS coordinates server-side. SPEC-ONLY until MYR-24: not currently loaded by the Go Vehicle struct in internal/store/types.go. Will be nullable until MYR-24 lands; consumers MUST tolerate null.",
-      "x-classification": "P1",
-      "x-spec-only": true,
-      "x-spec-only-issue": "MYR-24"
+      "type": "string",
+      "description": "Reverse-geocoded place name for current location (e.g., 'Home', 'Whole Foods Market'). Derived from GPS coordinates server-side. Non-nullable per DB Vehicle.locationName (NOT NULL DEFAULT ''); an empty string means no geocode is yet available. Loaded by the Go Vehicle struct and populated on snapshot as of MYR-24 (2026-04-23).",
+      "x-classification": "P1"
     },
     "locationAddress": {
-      "type": ["string", "null"],
-      "description": "Reverse-geocoded street address for current location. Derived from GPS coordinates server-side. SPEC-ONLY until MYR-24: not currently loaded by the Go Vehicle struct in internal/store/types.go. Will be nullable until MYR-24 lands; consumers MUST tolerate null.",
-      "x-classification": "P1",
-      "x-spec-only": true,
-      "x-spec-only-issue": "MYR-24"
+      "type": "string",
+      "description": "Reverse-geocoded street address for current location. Derived from GPS coordinates server-side. Non-nullable per DB Vehicle.locationAddress (NOT NULL DEFAULT ''); an empty string means no geocode is yet available. Loaded by the Go Vehicle struct and populated on snapshot as of MYR-24 (2026-04-23).",
+      "x-classification": "P1"
     },
     "gearPosition": {
       "type": ["string", "null"],
@@ -174,12 +170,10 @@
       "minimum": 0
     },
     "fsdMilesSinceReset": {
-      "type": ["number", "null"],
-      "description": "Miles driven using Full Self-Driving since last reset. The counter resets on OTA updates and factory resets, NOT daily. Maps from Tesla SelfDrivingMilesSinceReset. SPEC-ONLY until MYR-24: not currently loaded by the Go Vehicle struct in internal/store/types.go. Will be nullable until MYR-24 lands; consumers MUST tolerate null.",
+      "type": "number",
+      "description": "Miles driven using Full Self-Driving since last reset. The counter resets on OTA updates and factory resets, NOT daily. Maps from Tesla SelfDrivingMilesSinceReset. Non-nullable per DB Vehicle.fsdMilesToday (NOT NULL DEFAULT 0). The DB column name is the legacy `fsdMilesToday`; the wire rename to `fsdMilesSinceReset` landed in MYR-27 (see §7.1 resolved decisions). Loaded by the Go Vehicle struct and populated on snapshot as of MYR-24 (2026-04-23).",
       "x-unit": "miles",
       "x-classification": "P0",
-      "x-spec-only": true,
-      "x-spec-only-issue": "MYR-24",
       "minimum": 0
     },
     "destinationName": {
@@ -191,11 +185,9 @@
     },
     "destinationAddress": {
       "type": ["string", "null"],
-      "description": "Street address of the active navigation destination. Null when no navigation is active. SPEC-ONLY until MYR-24: not currently loaded by the Go Vehicle struct in internal/store/types.go; will always be null in snapshots until MYR-24 lands.",
+      "description": "Street address of the active navigation destination. Null when no navigation is active. Sourced from DB Vehicle.destinationAddress (Prisma String?, nullable). Loaded by the Go Vehicle struct and populated on snapshot as of MYR-24 (2026-04-23).",
       "x-classification": "P1",
-      "x-atomic-group": "navigation",
-      "x-spec-only": true,
-      "x-spec-only-issue": "MYR-24"
+      "x-atomic-group": "navigation"
     },
     "destinationLatitude": {
       "type": ["number", "null"],
