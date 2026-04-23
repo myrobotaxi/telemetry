@@ -54,12 +54,16 @@ func (r *VehicleRepo) ListByUser(ctx context.Context, userID string) ([]Vehicle,
 		var v Vehicle
 		var status string
 		if err := rows.Scan(
-			&v.ID, &v.UserID, &v.VIN, &v.Name, &status,
+			&v.ID, &v.UserID, &v.VIN, &v.Name,
+			&v.Model, &v.Year, &v.Color, &status,
 			&v.ChargeLevel, &v.EstimatedRange, &v.Speed, &v.GearPosition,
 			&v.Heading, &v.Latitude, &v.Longitude,
-			&v.InteriorTemp, &v.ExteriorTemp, &v.OdometerMiles,
-			&v.DestinationName, &v.DestinationLatitude,
-			&v.DestinationLongitude, &v.OriginLatitude, &v.OriginLongitude,
+			&v.LocationName, &v.LocationAddress,
+			&v.InteriorTemp, &v.ExteriorTemp,
+			&v.OdometerMiles, &v.FsdMilesToday,
+			&v.DestinationName, &v.DestinationAddress,
+			&v.DestinationLatitude, &v.DestinationLongitude,
+			&v.OriginLatitude, &v.OriginLongitude,
 			&v.EtaMinutes, &v.TripDistRemaining,
 			&v.NavRouteCoordinates, &v.LastUpdated,
 		); err != nil {
@@ -133,12 +137,16 @@ func (r *VehicleRepo) scanVehicle(ctx context.Context, query string, arg any) (V
 	var v Vehicle
 	var status string
 	err := row.Scan(
-		&v.ID, &v.UserID, &v.VIN, &v.Name, &status,
+		&v.ID, &v.UserID, &v.VIN, &v.Name,
+		&v.Model, &v.Year, &v.Color, &status,
 		&v.ChargeLevel, &v.EstimatedRange, &v.Speed, &v.GearPosition,
 		&v.Heading, &v.Latitude, &v.Longitude,
-		&v.InteriorTemp, &v.ExteriorTemp, &v.OdometerMiles,
-		&v.DestinationName, &v.DestinationLatitude,
-		&v.DestinationLongitude, &v.OriginLatitude, &v.OriginLongitude,
+		&v.LocationName, &v.LocationAddress,
+		&v.InteriorTemp, &v.ExteriorTemp,
+		&v.OdometerMiles, &v.FsdMilesToday,
+		&v.DestinationName, &v.DestinationAddress,
+		&v.DestinationLatitude, &v.DestinationLongitude,
+		&v.OriginLatitude, &v.OriginLongitude,
 		&v.EtaMinutes, &v.TripDistRemaining,
 		&v.NavRouteCoordinates, &v.LastUpdated,
 	)
