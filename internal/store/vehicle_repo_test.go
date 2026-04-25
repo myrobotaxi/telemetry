@@ -116,6 +116,55 @@ func TestVehicleRepo_GetByID(t *testing.T) {
 	}
 }
 
+func TestVehicleRepo_GetIDsByVIN(t *testing.T) {
+	cleanTables(t, testPool)
+	seedVehicle(t, testPool, "veh_ids_001", "5YJ3E1EA1NF000IDS")
+
+	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+	ctx := context.Background()
+
+	tests := []struct {
+		name       string
+		vin        string
+		wantID     string
+		wantUserID string
+		wantErr    error
+	}{
+		{
+			name:       "existing vehicle returns id and userId",
+			vin:        "5YJ3E1EA1NF000IDS",
+			wantID:     "veh_ids_001",
+			wantUserID: "user_001", // seedVehicle hardcodes this owner
+		},
+		{
+			name:    "missing vehicle returns ErrVehicleNotFound",
+			vin:     "NONEXISTENT",
+			wantErr: store.ErrVehicleNotFound,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			id, userID, err := repo.GetIDsByVIN(ctx, tt.vin)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("expected %v, got %v", tt.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if id != tt.wantID {
+				t.Errorf("id = %q, want %q", id, tt.wantID)
+			}
+			if userID != tt.wantUserID {
+				t.Errorf("userID = %q, want %q", userID, tt.wantUserID)
+			}
+		})
+	}
+}
+
 func TestVehicleRepo_UpdateTelemetry(t *testing.T) {
 	cleanTables(t, testPool)
 	seedVehicle(t, testPool, "veh_003", "5YJ3E1EA1NF000003")

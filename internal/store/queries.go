@@ -33,6 +33,12 @@ FROM "Vehicle"
 WHERE "userId" = $1
 ORDER BY "name", "vin"`
 
+// queryVehicleIDsByVIN is the slim companion of queryVehicleByVIN. It
+// returns only the immutable identifiers (id, userId) so hot paths that
+// need to map VIN → vehicleID/userID don't pull the heavy navRouteCoordinates
+// JSON and other telemetry columns on every call.
+const queryVehicleIDsByVIN = `SELECT "id", "userId" FROM "Vehicle" WHERE "vin" = $1`
+
 const queryUpdateVehicleStatus = `UPDATE "Vehicle"
 SET "status" = $1::"VehicleStatus", "lastUpdated" = NOW()
 WHERE "vin" = $2`

@@ -160,7 +160,15 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	hub := ws.NewHub(logger.With(slog.String("component", "ws")), ws.NoopHubMetrics{})
 	defer hub.Stop()
 
-	vinResolver := &vinResolverAdapter{repo: vehicleRepo}
+	// Shared VIN → (vehicleID, userID) cache backing the broadcaster and
+	// the HTTP handlers below. Both identifiers are immutable for the
+	// lifetime of a vehicle row, so the cache lives forever and a single
+	// slim two-column query runs per VIN for the lifetime of the process.
+	// This replaces ~660k full-row fetches per billing cycle that were
+	// pulling the heavy navRouteCoordinates JSON on every telemetry frame.
+	vinCache := store.NewVINCache(vehicleRepo, logger.With(slog.String("component", "vin-cache")))
+
+	vinResolver := &vinResolverAdapter{cache: vinCache}
 	broadcaster := ws.NewBroadcaster(hub, bus, vinResolver, logger.With(slog.String("component", "broadcaster")))
 	if err := broadcaster.Start(ctx); err != nil {
 		return fmt.Errorf("starting broadcaster: %w", err)
@@ -199,14 +207,14 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	// --- Vehicle status endpoint (always available) ---
 	statusHandler := telemetry.NewVehicleStatusHandler(
 		authenticator,
-		&vehicleOwnerAdapter{repo: vehicleRepo},
+		&vehicleOwnerAdapter{cache: vinCache},
 		recv,
 		logger.With(slog.String("component", "vehicle-status")),
 	)
 	srv.HandleFunc("GET /api/vehicle-status/{vin}", statusHandler.ServeHTTP)
 
 	// --- Fleet config push endpoint (optional — requires proxy config) ---
-	setupFleetConfigEndpoint(cfg, srv, authenticator, vehicleRepo, accountRepo, logger)
+	setupFleetConfigEndpoint(cfg, srv, authenticator, vinCache, accountRepo, logger)
 
 	// --- Debug fields endpoint ---
 	// Mounted when resolveDebugFieldsGate says so — either because the
@@ -267,7 +275,7 @@ func setupFleetConfigEndpoint(
 	cfg *config.Config,
 	srv *server.Server,
 	authenticator ws.Authenticator,
-	vehicleRepo *store.VehicleRepo,
+	vinCache *store.VINCache,
 	accountRepo *store.AccountRepo,
 	logger *slog.Logger,
 ) {
@@ -301,7 +309,7 @@ func setupFleetConfigEndpoint(
 
 	fleetHandler := telemetry.NewFleetConfigHandler(
 		authenticator,
-		&vehicleOwnerAdapter{repo: vehicleRepo},
+		&vehicleOwnerAdapter{cache: vinCache},
 		&teslaTokenAdapter{repo: accountRepo},
 		fleetClient,
 		telemetry.EndpointConfig{

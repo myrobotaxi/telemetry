@@ -62,32 +62,37 @@ func resolveDebugFieldsGate(devMode bool, token string) (debugFieldsGate, error)
 	}
 }
 
-// vinResolverAdapter adapts store.VehicleRepo (returns Vehicle) to the
-// ws.VINResolver interface (returns vehicleID string).
+// vinResolverAdapter adapts store.VINCache to the ws.VINResolver interface
+// (returns vehicleID string). Backing the WS broadcaster path with the cache
+// avoids fetching the full Vehicle row (including the heavy navRouteCoordinates
+// JSON) on every telemetry frame — the slim two-column query runs once per VIN
+// for the lifetime of the process.
 type vinResolverAdapter struct {
-	repo *store.VehicleRepo
+	cache *store.VINCache
 }
 
 func (a *vinResolverAdapter) GetByVIN(ctx context.Context, vin string) (string, error) {
-	v, err := a.repo.GetByVIN(ctx, vin)
+	id, err := a.cache.ResolveID(ctx, vin)
 	if err != nil {
 		return "", fmt.Errorf("resolve VIN: %w", err)
 	}
-	return v.ID, nil
+	return id, nil
 }
 
-// vehicleOwnerAdapter adapts store.VehicleRepo to the
-// telemetry.VehicleOwnerLookup interface (returns owning user ID).
+// vehicleOwnerAdapter adapts store.VINCache to the
+// telemetry.VehicleOwnerLookup interface (returns owning user ID). Shares
+// the same cache instance as vinResolverAdapter, so a single DB lookup per
+// VIN serves both ID and owner resolution for the lifetime of the process.
 type vehicleOwnerAdapter struct {
-	repo *store.VehicleRepo
+	cache *store.VINCache
 }
 
 func (a *vehicleOwnerAdapter) GetVehicleOwner(ctx context.Context, vin string) (string, error) {
-	v, err := a.repo.GetByVIN(ctx, vin)
+	userID, err := a.cache.ResolveOwner(ctx, vin)
 	if err != nil {
 		return "", fmt.Errorf("resolve vehicle owner: %w", err)
 	}
-	return v.UserID, nil
+	return userID, nil
 }
 
 // teslaTokenAdapter adapts store.AccountRepo to the

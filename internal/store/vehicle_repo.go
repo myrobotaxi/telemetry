@@ -36,6 +36,27 @@ func (r *VehicleRepo) GetByVIN(ctx context.Context, vin string) (Vehicle, error)
 	return v, nil
 }
 
+// GetIDsByVIN returns just the (vehicleID, userID) pair for the given VIN.
+// Both values are immutable for the lifetime of a vehicle row, which makes
+// this safe to cache indefinitely. Use this in hot paths that only need
+// to map a VIN to its identifiers — it avoids pulling the heavy
+// navRouteCoordinates JSON and other telemetry columns that GetByVIN reads.
+// Returns ErrVehicleNotFound if no vehicle has that VIN.
+func (r *VehicleRepo) GetIDsByVIN(ctx context.Context, vin string) (id, userID string, err error) {
+	start := time.Now()
+	row := r.pool.QueryRow(ctx, queryVehicleIDsByVIN, vin)
+	scanErr := row.Scan(&id, &userID)
+	r.metrics.ObserveQueryDuration("vehicle.get_ids_by_vin", time.Since(start).Seconds())
+	if errors.Is(scanErr, pgx.ErrNoRows) {
+		return "", "", fmt.Errorf("VehicleRepo.GetIDsByVIN(%s): %w", redactVIN(vin), ErrVehicleNotFound)
+	}
+	if scanErr != nil {
+		r.metrics.IncQueryError("vehicle.get_ids_by_vin")
+		return "", "", fmt.Errorf("VehicleRepo.GetIDsByVIN(%s): %w", redactVIN(vin), scanErr)
+	}
+	return id, userID, nil
+}
+
 // ListByUser returns every vehicle owned by the given user, ordered by
 // name and VIN. Returns an empty slice (and nil error) when the user has
 // no linked vehicles.

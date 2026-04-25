@@ -8,32 +8,32 @@ import (
 	"testing"
 )
 
-// stubVINLookup is a test double for vinLookup that returns configurable
-// results and counts calls.
-type stubVINLookup struct {
-	vehicles map[string]Vehicle // VIN → Vehicle
-	err      error              // returned for all lookups if set
-	calls    atomic.Int64
+// stubIDLookup is a test double for vinIDLookup that returns configurable
+// (id, userID) pairs and counts calls.
+type stubIDLookup struct {
+	pairs map[string]struct{ id, userID string }
+	err   error
+	calls atomic.Int64
 }
 
-func (s *stubVINLookup) GetByVIN(_ context.Context, vin string) (Vehicle, error) {
+func (s *stubIDLookup) GetIDsByVIN(_ context.Context, vin string) (string, string, error) {
 	s.calls.Add(1)
 	if s.err != nil {
-		return Vehicle{}, s.err
+		return "", "", s.err
 	}
-	v, ok := s.vehicles[vin]
+	p, ok := s.pairs[vin]
 	if !ok {
-		return Vehicle{}, ErrVehicleNotFound
+		return "", "", ErrVehicleNotFound
 	}
-	return v, nil
+	return p.id, p.userID, nil
 }
 
-func TestVINCache_Resolve(t *testing.T) {
+func TestVINCache_ResolveID(t *testing.T) {
 	logger := slog.Default()
 
 	tests := []struct {
 		name      string
-		vehicles  map[string]Vehicle
+		pairs     map[string]struct{ id, userID string }
 		lookupErr error
 		vin       string
 		wantID    string
@@ -41,21 +41,21 @@ func TestVINCache_Resolve(t *testing.T) {
 	}{
 		{
 			name: "cache miss then hit",
-			vehicles: map[string]Vehicle{
-				"5YJ3E1EA1NF000001": {ID: "veh_001", VIN: "5YJ3E1EA1NF000001"},
+			pairs: map[string]struct{ id, userID string }{
+				"5YJ3E1EA1NF000001": {id: "veh_001", userID: "user_001"},
 			},
 			vin:    "5YJ3E1EA1NF000001",
 			wantID: "veh_001",
 		},
 		{
-			name:     "vehicle not found cached",
-			vehicles: map[string]Vehicle{},
-			vin:      "UNKNOWN",
-			wantErr:  ErrVehicleNotFound,
+			name:    "vehicle not found cached",
+			pairs:   map[string]struct{ id, userID string }{},
+			vin:     "UNKNOWN",
+			wantErr: ErrVehicleNotFound,
 		},
 		{
 			name:      "transient error not cached",
-			vehicles:  map[string]Vehicle{},
+			pairs:     map[string]struct{ id, userID string }{},
 			lookupErr: errors.New("connection refused"),
 			vin:       "5YJ3E1EA1NF000001",
 			wantErr:   errors.New("connection refused"),
@@ -64,11 +64,11 @@ func TestVINCache_Resolve(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			lookup := &stubVINLookup{vehicles: tt.vehicles, err: tt.lookupErr}
-			cache := newVINCache(lookup, logger)
+			lookup := &stubIDLookup{pairs: tt.pairs, err: tt.lookupErr}
+			cache := NewVINCache(lookup, logger)
 			ctx := context.Background()
 
-			id, err := cache.resolve(ctx, tt.vin)
+			id, err := cache.ResolveID(ctx, tt.vin)
 			if tt.wantErr != nil {
 				if err == nil {
 					t.Fatalf("expected error, got nil")
@@ -88,23 +88,53 @@ func TestVINCache_Resolve(t *testing.T) {
 	}
 }
 
-func TestVINCache_CacheHitAvoidsDuplicateLookup(t *testing.T) {
-	lookup := &stubVINLookup{
-		vehicles: map[string]Vehicle{
-			"5YJ3E1EA1NF000001": {ID: "veh_001", VIN: "5YJ3E1EA1NF000001"},
+func TestVINCache_ResolveOwnerReusesSameEntry(t *testing.T) {
+	lookup := &stubIDLookup{
+		pairs: map[string]struct{ id, userID string }{
+			"5YJ3E1EA1NF000001": {id: "veh_001", userID: "user_owner"},
 		},
 	}
-	cache := newVINCache(lookup, slog.Default())
+	cache := NewVINCache(lookup, slog.Default())
 	ctx := context.Background()
 
-	// First call: cache miss → DB lookup.
-	id1, err := cache.resolve(ctx, "5YJ3E1EA1NF000001")
+	// Resolve the ID first (one DB lookup).
+	id, err := cache.ResolveID(ctx, "5YJ3E1EA1NF000001")
+	if err != nil {
+		t.Fatalf("ResolveID: %v", err)
+	}
+	if id != "veh_001" {
+		t.Errorf("id = %q, want veh_001", id)
+	}
+
+	// Then resolve the owner — should hit the same cached entry, no new DB call.
+	owner, err := cache.ResolveOwner(ctx, "5YJ3E1EA1NF000001")
+	if err != nil {
+		t.Fatalf("ResolveOwner: %v", err)
+	}
+	if owner != "user_owner" {
+		t.Errorf("owner = %q, want user_owner", owner)
+	}
+
+	if calls := lookup.calls.Load(); calls != 1 {
+		t.Errorf("DB lookups = %d, want 1 (single cache entry serves both methods)", calls)
+	}
+}
+
+func TestVINCache_CacheHitAvoidsDuplicateLookup(t *testing.T) {
+	lookup := &stubIDLookup{
+		pairs: map[string]struct{ id, userID string }{
+			"5YJ3E1EA1NF000001": {id: "veh_001", userID: "user_001"},
+		},
+	}
+	cache := NewVINCache(lookup, slog.Default())
+	ctx := context.Background()
+
+	id1, err := cache.ResolveID(ctx, "5YJ3E1EA1NF000001")
 	if err != nil {
 		t.Fatalf("first resolve: %v", err)
 	}
 
-	// Second call: cache hit → no DB lookup.
-	id2, err := cache.resolve(ctx, "5YJ3E1EA1NF000001")
+	id2, err := cache.ResolveID(ctx, "5YJ3E1EA1NF000001")
 	if err != nil {
 		t.Fatalf("second resolve: %v", err)
 	}
@@ -118,37 +148,36 @@ func TestVINCache_CacheHitAvoidsDuplicateLookup(t *testing.T) {
 }
 
 func TestVINCache_MissCachedPreventsRepeatedLookup(t *testing.T) {
-	lookup := &stubVINLookup{vehicles: map[string]Vehicle{}}
-	cache := newVINCache(lookup, slog.Default())
+	lookup := &stubIDLookup{pairs: map[string]struct{ id, userID string }{}}
+	cache := NewVINCache(lookup, slog.Default())
 	ctx := context.Background()
 
-	// First call: miss → DB lookup → ErrVehicleNotFound → cached.
-	_, err := cache.resolve(ctx, "UNKNOWN")
+	_, err := cache.ResolveID(ctx, "UNKNOWN")
 	if !errors.Is(err, ErrVehicleNotFound) {
 		t.Fatalf("expected ErrVehicleNotFound, got: %v", err)
 	}
 
-	// Second call: cached miss → no DB lookup.
-	_, err = cache.resolve(ctx, "UNKNOWN")
+	// Owner lookup should also see the cached miss without a DB hit.
+	_, err = cache.ResolveOwner(ctx, "UNKNOWN")
 	if !errors.Is(err, ErrVehicleNotFound) {
 		t.Fatalf("expected ErrVehicleNotFound, got: %v", err)
 	}
 
 	if calls := lookup.calls.Load(); calls != 1 {
-		t.Errorf("DB lookups = %d, want 1 (miss should be cached)", calls)
+		t.Errorf("DB lookups = %d, want 1 (miss should be cached and shared across methods)", calls)
 	}
 }
 
 func TestVINCache_TransientErrorNotCached(t *testing.T) {
-	lookup := &stubVINLookup{
-		vehicles: map[string]Vehicle{},
-		err:      errors.New("connection refused"),
+	lookup := &stubIDLookup{
+		pairs: map[string]struct{ id, userID string }{},
+		err:   errors.New("connection refused"),
 	}
-	cache := newVINCache(lookup, slog.Default())
+	cache := NewVINCache(lookup, slog.Default())
 	ctx := context.Background()
 
-	_, _ = cache.resolve(ctx, "5YJ3E1EA1NF000001")
-	_, _ = cache.resolve(ctx, "5YJ3E1EA1NF000001")
+	_, _ = cache.ResolveID(ctx, "5YJ3E1EA1NF000001")
+	_, _ = cache.ResolveID(ctx, "5YJ3E1EA1NF000001")
 
 	if calls := lookup.calls.Load(); calls != 2 {
 		t.Errorf("DB lookups = %d, want 2 (transient errors should not be cached)", calls)

@@ -49,7 +49,7 @@ type Writer struct {
 	vehicles vehicleUpdater
 	drives   drivePersister
 	bus      events.Bus
-	vinCache *vinCache
+	vinCache *VINCache
 	geocoder geocode.Geocoder
 	logger   *slog.Logger
 	cfg      WriterConfig
@@ -73,7 +73,7 @@ type Writer struct {
 func NewWriter(
 	vehicles vehicleUpdater,
 	drives drivePersister,
-	vinLookup vinLookup,
+	vinLookup vinIDLookup,
 	bus events.Bus,
 	geocoder geocode.Geocoder,
 	logger *slog.Logger,
@@ -89,7 +89,7 @@ func NewWriter(
 		vehicles:  vehicles,
 		drives:    drives,
 		bus:       bus,
-		vinCache:  newVINCache(vinLookup, logger),
+		vinCache:  NewVINCache(vinLookup, logger),
 		geocoder:  geocoder,
 		logger:    logger,
 		cfg:       cfg,
