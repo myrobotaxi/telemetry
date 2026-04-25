@@ -183,7 +183,14 @@ func runFieldsSnapshot(ctx context.Context, args []string) error {
 		return fmt.Errorf("lookup vehicle: %w", err)
 	}
 
-	snap := vehicleSnapshot{
+	return writeJSON(os.Stdout, newVehicleSnapshot(v))
+}
+
+// newVehicleSnapshot flattens a store.Vehicle into the vehicleSnapshot
+// JSON shape printed by `ops fields snapshot`. Shared with
+// fields_snapshot_test.go so the two paths cannot drift on field add/rename.
+func newVehicleSnapshot(v store.Vehicle) vehicleSnapshot {
+	return vehicleSnapshot{
 		ID:                   v.ID,
 		VIN:                  v.VIN,
 		Name:                 v.Name,
@@ -215,5 +222,4 @@ func runFieldsSnapshot(ctx context.Context, args []string) error {
 		NavRouteCoordinates:  v.NavRouteCoordinates,
 		LastUpdated:          v.LastUpdated.UTC().Format("2006-01-02T15:04:05Z07:00"),
 	}
-	return writeJSON(os.Stdout, snap)
 }

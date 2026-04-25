@@ -16,7 +16,7 @@ import (
 //     rename, DB column renamed in MYR-24 cross-repo Prisma migration)
 //   - destinationAddress stays nullable (omitempty) when the DB column is NULL
 //   - locationName / locationAddress serialize as empty strings (non-nullable
-//     per Prisma NOT NULL DEFAULT '') when no reverse geocode is available
+//     per Prisma NOT NULL DEFAULT ”) when no reverse geocode is available
 func TestVehicleSnapshot_JSONShape(t *testing.T) {
 	destAddr := "2001 Market St, San Francisco, CA 94114"
 	populated := store.Vehicle{
@@ -29,12 +29,12 @@ func TestVehicleSnapshot_JSONShape(t *testing.T) {
 		Status:             store.VehicleStatusParked,
 		LocationName:       "Home",
 		LocationAddress:    "123 Market St, San Francisco, CA",
-		FsdMilesSinceReset:      412.7,
+		FsdMilesSinceReset: 412.7,
 		DestinationAddress: &destAddr,
 		LastUpdated:        time.Date(2026, 4, 23, 12, 0, 0, 0, time.UTC),
 	}
 
-	snap := toSnapshot(populated)
+	snap := newVehicleSnapshot(populated)
 	raw, err := json.Marshal(snap)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -64,7 +64,7 @@ func TestVehicleSnapshot_JSONShape(t *testing.T) {
 		Status:      store.VehicleStatusOffline,
 		LastUpdated: time.Date(2026, 4, 23, 12, 0, 0, 0, time.UTC),
 	}
-	raw, err = json.Marshal(toSnapshot(minimal))
+	raw, err = json.Marshal(newVehicleSnapshot(minimal))
 	if err != nil {
 		t.Fatalf("marshal minimal: %v", err)
 	}
@@ -77,44 +77,6 @@ func TestVehicleSnapshot_JSONShape(t *testing.T) {
 	assertField(t, gotMin, "fsdMilesSinceReset", float64(0))
 	if _, present := gotMin["destinationAddress"]; present {
 		t.Errorf("nil destinationAddress should be omitted, got %v", gotMin["destinationAddress"])
-	}
-}
-
-// toSnapshot mirrors the assignment block in runFieldsSnapshot without the
-// DB lookup, so the test can exercise the JSON mapping in isolation. Keep
-// the field list here in sync with fields.go.
-func toSnapshot(v store.Vehicle) vehicleSnapshot {
-	return vehicleSnapshot{
-		ID:                   v.ID,
-		VIN:                  v.VIN,
-		Name:                 v.Name,
-		Model:                v.Model,
-		Year:                 v.Year,
-		Color:                v.Color,
-		Status:               string(v.Status),
-		ChargeLevel:          v.ChargeLevel,
-		EstimatedRange:       v.EstimatedRange,
-		Speed:                v.Speed,
-		GearPosition:         v.GearPosition,
-		Heading:              v.Heading,
-		Latitude:             v.Latitude,
-		Longitude:            v.Longitude,
-		LocationName:         v.LocationName,
-		LocationAddress:      v.LocationAddress,
-		InteriorTemp:         v.InteriorTemp,
-		ExteriorTemp:         v.ExteriorTemp,
-		OdometerMiles:        v.OdometerMiles,
-		FsdMilesSinceReset:   v.FsdMilesSinceReset,
-		DestinationName:      v.DestinationName,
-		DestinationAddress:   v.DestinationAddress,
-		DestinationLatitude:  v.DestinationLatitude,
-		DestinationLongitude: v.DestinationLongitude,
-		OriginLatitude:       v.OriginLatitude,
-		OriginLongitude:      v.OriginLongitude,
-		EtaMinutes:           v.EtaMinutes,
-		TripDistRemaining:    v.TripDistRemaining,
-		NavRouteCoordinates:  v.NavRouteCoordinates,
-		LastUpdated:          v.LastUpdated.UTC().Format("2006-01-02T15:04:05Z07:00"),
 	}
 }
 
