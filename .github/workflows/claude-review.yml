@@ -59,7 +59,13 @@ jobs:
           echo "Linked issue: ${ISSUE_NUM:-none}"
 
       - name: Run Claude review
-        uses: anthropics/claude-code-action@v1
+        # Pinned to v1.0.104. v1.0.105 (Apr 23 23:24) bumped the underlying
+        # Agent SDK to 0.2.119 and broke the action with an internal
+        # "directory mismatch for tsconfig.json" error that aborts Claude's
+        # session before it can post a review. Symptom: workflow exits
+        # successfully but the sticky comment is left at "I'll analyze this
+        # and get back to you." Bump cautiously and re-test on a real PR.
+        uses: anthropics/claude-code-action@0766301cba8671db92e3025984e2fd038ad48ff7 # v1.0.104
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GH_PAT }}
@@ -145,7 +151,13 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GH_PAT }}
 
-      - uses: anthropics/claude-code-action@v1
+      # Pinned to v1.0.104. v1.0.105 (Apr 23 23:24) bumped the underlying
+      # Agent SDK to 0.2.119 and broke the action with an internal
+      # "directory mismatch for tsconfig.json" error that aborts Claude's
+      # session before it can post a review. Symptom: workflow exits
+      # successfully but the sticky comment is left at "I'll analyze this
+      # and get back to you." Bump cautiously and re-test on a real PR.
+      - uses: anthropics/claude-code-action@0766301cba8671db92e3025984e2fd038ad48ff7 # v1.0.104
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GH_PAT }}
