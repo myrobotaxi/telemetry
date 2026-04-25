@@ -28,7 +28,7 @@ func (w *Writer) handleDriveStarted() events.Handler {
 		opCtx, cancel := context.WithTimeout(context.Background(), driveOpTimeout)
 		defer cancel()
 
-		vehicleID, err := w.vinCache.resolve(opCtx, evt.VIN)
+		vehicleID, err := w.vinCache.ResolveID(opCtx, evt.VIN)
 		if err != nil {
 			w.logger.Warn("cannot persist drive start: VIN lookup failed",
 				slog.String("vin", redactVIN(evt.VIN)),

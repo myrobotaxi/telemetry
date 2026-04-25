@@ -140,7 +140,7 @@ func newTestBus(t *testing.T) *events.ChannelBus {
 	return bus
 }
 
-func newTestWriter(t *testing.T, bus events.Bus, vehicles vehicleUpdater, drives drivePersister, lookup vinLookup) *Writer {
+func newTestWriter(t *testing.T, bus events.Bus, vehicles vehicleUpdater, drives drivePersister, lookup vinIDLookup) *Writer {
 	t.Helper()
 	w := NewWriter(vehicles, drives, lookup, bus, geocode.NoopGeocoder{}, slog.Default(), WriterConfig{
 		FlushInterval: 50 * time.Millisecond,
@@ -185,7 +185,7 @@ func TestWriter_TelemetryFlush(t *testing.T) {
 	bus := newTestBus(t)
 	vehicles := &mockVehicleUpdater{}
 	drives := &mockDrivePersister{}
-	lookup := &stubVINLookup{vehicles: map[string]Vehicle{}}
+	lookup := &stubIDLookup{pairs: map[string]struct{ id, userID string }{}}
 
 	w := newTestWriter(t, bus, vehicles, drives, lookup)
 	if err := w.Start(context.Background()); err != nil {
@@ -216,7 +216,7 @@ func TestWriter_Coalescing(t *testing.T) {
 	bus := newTestBus(t)
 	vehicles := &mockVehicleUpdater{}
 	drives := &mockDrivePersister{}
-	lookup := &stubVINLookup{vehicles: map[string]Vehicle{}}
+	lookup := &stubIDLookup{pairs: map[string]struct{ id, userID string }{}}
 
 	w := newTestWriter(t, bus, vehicles, drives, lookup)
 	if err := w.Start(context.Background()); err != nil {
@@ -262,7 +262,7 @@ func TestWriter_MultipleVehicles(t *testing.T) {
 	bus := newTestBus(t)
 	vehicles := &mockVehicleUpdater{}
 	drives := &mockDrivePersister{}
-	lookup := &stubVINLookup{vehicles: map[string]Vehicle{}}
+	lookup := &stubIDLookup{pairs: map[string]struct{ id, userID string }{}}
 
 	w := newTestWriter(t, bus, vehicles, drives, lookup)
 	if err := w.Start(context.Background()); err != nil {
@@ -298,9 +298,9 @@ func TestWriter_DriveStarted(t *testing.T) {
 	bus := newTestBus(t)
 	vehicles := &mockVehicleUpdater{}
 	drives := &mockDrivePersister{}
-	lookup := &stubVINLookup{
-		vehicles: map[string]Vehicle{
-			"5YJ3E1EA1NF000001": {ID: "veh_001", VIN: "5YJ3E1EA1NF000001"},
+	lookup := &stubIDLookup{
+		pairs: map[string]struct{ id, userID string }{
+			"5YJ3E1EA1NF000001": {id: "veh_001", userID: "user_001"},
 		},
 	}
 
@@ -340,7 +340,7 @@ func TestWriter_DriveEnded(t *testing.T) {
 	bus := newTestBus(t)
 	vehicles := &mockVehicleUpdater{}
 	drives := &mockDrivePersister{}
-	lookup := &stubVINLookup{vehicles: map[string]Vehicle{}}
+	lookup := &stubIDLookup{pairs: map[string]struct{ id, userID string }{}}
 
 	w := newTestWriter(t, bus, vehicles, drives, lookup)
 	if err := w.Start(context.Background()); err != nil {
@@ -429,7 +429,7 @@ func TestWriter_BatchSizeTriggersFlush(t *testing.T) {
 	bus := newTestBus(t)
 	vehicles := &mockVehicleUpdater{}
 	drives := &mockDrivePersister{}
-	lookup := &stubVINLookup{vehicles: map[string]Vehicle{}}
+	lookup := &stubIDLookup{pairs: map[string]struct{ id, userID string }{}}
 
 	// Set batch size very low so it triggers before the timer.
 	w := NewWriter(vehicles, drives, lookup, bus, geocode.NoopGeocoder{}, slog.Default(), WriterConfig{
@@ -460,7 +460,7 @@ func TestWriter_DriveUpdated_FlushOnSize(t *testing.T) {
 	bus := newTestBus(t)
 	vehicles := &mockVehicleUpdater{}
 	drives := &mockDrivePersister{}
-	lookup := &stubVINLookup{vehicles: map[string]Vehicle{}}
+	lookup := &stubIDLookup{pairs: map[string]struct{ id, userID string }{}}
 
 	w := NewWriter(vehicles, drives, lookup, bus, geocode.NoopGeocoder{}, slog.Default(), WriterConfig{
 		FlushInterval: 50 * time.Millisecond,
@@ -510,7 +510,7 @@ func TestWriter_DriveUpdated_FlushOnTimer(t *testing.T) {
 	bus := newTestBus(t)
 	vehicles := &mockVehicleUpdater{}
 	drives := &mockDrivePersister{}
-	lookup := &stubVINLookup{vehicles: map[string]Vehicle{}}
+	lookup := &stubIDLookup{pairs: map[string]struct{ id, userID string }{}}
 
 	w := NewWriter(vehicles, drives, lookup, bus, geocode.NoopGeocoder{}, slog.Default(), WriterConfig{
 		FlushInterval: 50 * time.Millisecond,
@@ -558,7 +558,7 @@ func TestWriter_DriveEnded_FlushesRemainingBufferedPoints(t *testing.T) {
 	bus := newTestBus(t)
 	vehicles := &mockVehicleUpdater{}
 	drives := &mockDrivePersister{}
-	lookup := &stubVINLookup{vehicles: map[string]Vehicle{}}
+	lookup := &stubIDLookup{pairs: map[string]struct{ id, userID string }{}}
 
 	w := NewWriter(vehicles, drives, lookup, bus, geocode.NoopGeocoder{}, slog.Default(), WriterConfig{
 		FlushInterval: 50 * time.Millisecond,
@@ -644,7 +644,7 @@ func TestWriter_DriveUpdated_MultipleDrivers(t *testing.T) {
 	bus := newTestBus(t)
 	vehicles := &mockVehicleUpdater{}
 	drives := &mockDrivePersister{}
-	lookup := &stubVINLookup{vehicles: map[string]Vehicle{}}
+	lookup := &stubIDLookup{pairs: map[string]struct{ id, userID string }{}}
 
 	w := NewWriter(vehicles, drives, lookup, bus, geocode.NoopGeocoder{}, slog.Default(), WriterConfig{
 		FlushInterval: 50 * time.Millisecond,
