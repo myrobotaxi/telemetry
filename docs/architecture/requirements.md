@@ -213,24 +213,38 @@ Every persisted field MUST be labeled with a classification tier in the contract
 
 ### 3.12 Platform support
 
-**TypeScript SDK** — supports:
-- React (hooks layer, separate entry point)
+The SDK split is two implementations, each owning its native platform set. There is **no React Native** in v1 — Apple platforms consume the Swift SDK directly.
+
+**TypeScript SDK (`@myrobotaxi/sdk`)** — web/Next.js consumers only. Supports:
+- React (hooks layer, separate entry point — primary consumer is the MyRoboTaxi Next.js app)
 - Vanilla TypeScript (core client, no React dependency)
 - Node.js (SSR, scheduled tasks, server-side usage — no browser globals in core)
-- React Native (shared code with web, no `window`/`document` in core)
 
-**NFR-3.33** Core SDK uses a WebSocket abstraction that runs on browser `WebSocket`, Node `ws`, and React Native.
+**NFR-3.33** The core TypeScript SDK uses a WebSocket abstraction that runs on browser `WebSocket` and Node `ws` only. Apple platforms (iOS / iPadOS / macOS / watchOS / visionOS) MUST consume the Swift SDK directly (NFR-3.34) and MUST NOT consume the TypeScript SDK via React Native bridging.
 
-**Swift SDK** — supports:
+**Swift SDK (`MyRoboTaxiSDK`)** — Apple platforms only. Supports:
 - iOS 26+
 - iPadOS 26+
-- macOS (latest)
-- watchOS
-- visionOS
+- macOS 26+
+- watchOS 26+
+- visionOS 26+
 
-**NFR-3.34** Baseline: Swift 6, async/await, Observable state model, URLSession WebSocketTask (cross-platform).
-**NFR-3.35** No UIKit dependencies (UI-layer-agnostic).
-**NFR-3.36** watchOS constraint: aggressive lifecycle handling (background suspension, short-lived launches, incremental state hydration).
+**NFR-3.34** Baseline: Swift 6 with strict concurrency (`-strict-concurrency=complete`), async/await, structured concurrency with parent-child Task hierarchies, actor isolation for shared mutable state, `@Observable` (Swift 5.9+ Observation framework) for state exposure, `URLSessionWebSocketTask` for WebSocket transport. Distribution: Swift Package Manager only — no CocoaPods, no Carthage. The Swift SDK MUST NOT depend on:
+
+- third-party WebSocket libraries (no SocketRocket, no Starscream),
+- Combine for net-new code (Combine is in maintenance — use `AsyncSequence` / `AsyncStream`),
+- `@Published` / `ObservableObject` / `Combine.Publisher` on the public API (legacy state-exposure pattern),
+- `DispatchQueue.sync` or `NSLock` for shared state (use actor isolation).
+
+**NFR-3.35** No UIKit / AppKit / SwiftUI dependencies. The Swift SDK is UI-layer-agnostic — SwiftUI, UIKit, and AppKit consumers all compose state themselves.
+
+**NFR-3.36** Apple platform lifecycle handling: the Swift SDK MUST tolerate aggressive OS-driven app suspension (especially watchOS) and resume cleanly. Lifecycle bindings are specified in [`docs/contracts/swift-lifecycle.md`](../contracts/swift-lifecycle.md). Summary requirements:
+
+- **NFR-3.36a** Consumer-driven foreground reconnect: on receipt of an `handleForegroundTransition()` call from the consumer (forwarded from `ScenePhase.active`, `UIScene.willEnterForegroundNotification`, `WKApplicationDidBecomeActiveNotification`, or `NSApplication.didBecomeActiveNotification` — whichever matches the consumer's UI framework), the Swift SDK MUST bypass the reconnect backoff timer for the first attempt and reset the retry counter to 0. Backoff resumes only if the foreground reconnect attempt fails. The SDK is UI-framework-agnostic (NFR-3.35) and MUST NOT observe scene transitions itself.
+- **NFR-3.36b** The Swift SDK MUST expose `performBackgroundSnapshotRefresh()` and `performBackgroundDriveRoutePrefetch(maxDrives:)` async methods so consumers can invoke them from `BGAppRefreshTask` / `BGProcessingTask` handlers (iOS / iPadOS / macOS / visionOS) or `WKApplicationRefreshBackgroundTask` handlers (watchOS). The SDK MUST observe `Task.checkCancellation()` so consumer-supplied expiration handlers can cancel in-flight work. The SDK MUST NOT register or schedule background tasks itself — that is consumer responsibility.
+- **NFR-3.36c** watchOS sessions MUST tolerate `WKExtendedRuntimeSession` termination and consumer-signalled background transitions (`handleBackgroundTransition()`). On watchOS only, the SDK proactively closes the WebSocket on background and treats the close as `disconnected` (not `error`); on the next `handleForegroundTransition()` call the SDK rehydrates from the REST snapshot and applies the §7.2 reconnect sequence from `websocket-protocol.md`.
+
+**NFR-3.36d** Test framework: Swift Testing (`import Testing`, `@Test` macros) for all net-new tests. XCTest is acceptable only for legacy harnesses or APIs Swift Testing does not yet cover. All test fixtures `Sendable`; concurrency-safe by construction.
 
 ### 3.13 Versioning policy
 

@@ -151,7 +151,7 @@ Issues carry one or more `Agent/<name>` labels in Linear that map directly to `.
 | Linear Label | Agent File | When to Use |
 |-------|-----------|-------------|
 | `Agent/sdk-architect` | `sdk-architect.md` | **Supervisor** — owns requirements + contract docs, reviews every PR for contract adherence, coordinates SDK work. Auto-invoked on contract-relevant paths. |
-| `Agent/sdk-typescript` | `sdk-typescript.md` | TypeScript SDK implementation (core, React, RN, Node) |
+| `Agent/sdk-typescript` | `sdk-typescript.md` | TypeScript SDK implementation (core, React, Node — web/Next.js consumers only; **no React Native**) |
 | `Agent/sdk-swift` | `sdk-swift.md` | Swift SDK implementation (iOS, iPadOS, macOS, watchOS, visionOS) |
 | `Agent/contract-tester` | `contract-tester.md` | Contract conformance, FR/NFR, chaos test scenarios |
 | `Agent/contract-guard` | `contract-guard.md` | Automated PR gate — blocks contract drift (session + CI) |
@@ -252,8 +252,8 @@ Work is organized into Linear Projects anchored to `docs/architecture/requiremen
 |---------|-------|
 | P1 — Contract foundation | AsyncAPI/OpenAPI specs, JSON Schema, fixtures, data classification |
 | P2 — Backend SDK v1 | Go server: atomicity, 1s nav intervals, AES-256-GCM encryption, RBAC, audit |
-| P3 — TypeScript SDK v1 | Isomorphic SDK: core + React + RN adapters, <75KB bundle |
-| P4 — Swift SDK v1 | iOS 26+/iPadOS/macOS/watchOS/visionOS |
+| P3 — TypeScript SDK v1 | Web/Next.js SDK: core (browser + Node) + React, <75KB bundle. **No React Native** — Apple platforms covered by P4. |
+| P4 — Swift SDK v1 | iOS 26+ / iPadOS 26+ / macOS 26+ / watchOS 26+ / visionOS 26+. iOS clients consume the Swift SDK directly, not via React Native bridging. |
 | P5 — Observability & Scale | OTel, Prometheus/Grafana, 5K-client load tests, SLOs |
 | P6 — Web test bench | Contract/FR/NFR/chaos validation UI |
 | P7 — Frontend integration | Next.js consumes TS SDK (depends on P3) |
