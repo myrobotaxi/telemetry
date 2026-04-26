@@ -243,7 +243,7 @@ Authentication and authorization for client WebSocket connections.
 
 ### 7. SDK (`pkg/sdk/`)
 
-Abstract interfaces that define the client contract. Both the Go WebSocket server implementation and future mobile SDK implementations conform to these interfaces.
+Abstract interfaces that define the client contract. Both the Go WebSocket server implementation and the Swift SDK (Apple platforms — iOS / iPadOS / macOS / watchOS / visionOS) conform to these interfaces. The TypeScript SDK (web + Next.js + Node) consumes the same wire protocol but is implemented in its own repo, not via this Go interface package. There is no React Native implementation in v1 — Apple platforms are covered by the Swift SDK directly.
 
 **Key types:**
 ```go

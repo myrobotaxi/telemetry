@@ -25,6 +25,7 @@ The SDK never collapses these dimensions into a single enum (FR-8.2). The UI com
 | **NFR-3.11** | On reconnect, SDK MUST re-fetch DB snapshot and resume live stream without user intervention | Defines the snapshot-resume sequence |
 | **NFR-3.12** | SDK MUST gracefully tolerate offline: cached state from DB visible, connection state signals to UI, no forced reloads | Constrains offline behavior |
 | **NFR-3.13** | Offline tolerance: no maximum — cached data visible indefinitely | No expiry on cached data |
+| **NFR-3.36a** | Consumer-driven foreground reconnect (Swift SDK only): bypass backoff timer for first attempt on `handleForegroundTransition()`, reset retry counter to 0 | §5.3 consumer-driven foreground reconnect; detailed bindings in [`swift-lifecycle.md`](swift-lifecycle.md) |
 
 ---
 
@@ -80,7 +81,7 @@ stateDiagram-v2
 | C-9 | `disconnected` | `RECONNECT_TIMER_FIRED` | -- | `connecting` | Open WebSocket connection to server |
 | C-10 | `disconnected` | `USER_STOPPED` | User explicitly stops the SDK | `error` | Cancel reconnect timer; emit `connectionState` change |
 | C-11 | `error` | `USER_RETRY` | -- | `connecting` | Reset retry counter to 0; open WebSocket connection |
-| C-12 | `error` | `USER_DESTROYED` | -- | (terminal) | Release all resources; unsubscribe all listeners |
+| C-12 | `error` | `USER_DESTROYED` | -- | (terminal) | Release all resources; cancel observers (TS SDK: detach state-change subscribers; Swift SDK: cancel all `Task` handles and terminate any active `AsyncStream` continuations) |
 
 ### 1.3.1 C-3 trigger: `auth_ok` receipt
 
@@ -392,6 +393,27 @@ sequenceDiagram
 4. **Ordering guarantee.** The SDK MUST NOT apply live WebSocket updates for a group until the snapshot for that group has been applied. If live updates arrive before the snapshot fetch completes, they are queued and applied after the snapshot.
 
 5. **Idempotent reconnect.** Multiple rapid disconnect/reconnect cycles MUST NOT cause duplicate snapshot fetches or event deliveries. The SDK cancels any in-flight snapshot fetch when a new reconnect begins.
+
+### 5.3 Consumer-driven foreground reconnect (Swift SDK only)
+
+In addition to the transport-level triggers above (`WS_CLOSED`, `WS_ERROR`, backoff-timer fire), the Swift SDK on Apple platforms MUST also reconnect on **consumer-signalled foreground transitions**, bypassing the backoff timer for the first attempt (NFR-3.36a). The SDK is UI-framework-agnostic per NFR-3.35 — it does NOT observe scene transitions itself. Consumers forward them by calling `MyRoboTaxiClient.handleForegroundTransition()` from their app's lifecycle observer.
+
+Per-platform consumer wiring (the consumer's hook → SDK method `handleForegroundTransition`):
+
+| Platform | UI framework | Hook the consumer wires |
+|---|---|---|
+| iOS / iPadOS / visionOS | SwiftUI | `.onChange(of: scenePhase) { _, p in if p == .active { Task { await sdk.handleForegroundTransition() } } }` |
+| iOS / iPadOS / visionOS | UIKit | Observe `UIScene.willEnterForegroundNotification` |
+| watchOS | SwiftUI | `.onChange(of: scenePhase) { ... case .active: ... }` |
+| watchOS | WatchKit | Observe `WKApplicationDidBecomeActiveNotification` (or `WKApplicationDelegate.applicationDidBecomeActive()`) |
+| macOS | SwiftUI | `.onChange(of: scenePhase) { ... case .active: ... }` |
+| macOS | AppKit | Observe `NSApplication.didBecomeActiveNotification` |
+
+On invocation, the SDK MUST reset its retry counter to 0 and immediately attempt a reconnect using the §5.1 sequence; if that single attempt fails, normal §1.4 backoff resumes from attempt 1. This is paired with REST-snapshot rehydration per NFR-3.11 — the foreground reconnect is meaningless without restoring the per-group `dataState` from the snapshot before applying live frames.
+
+The TypeScript SDK has no equivalent. `document.visibilitychange` is consumer-controlled and explicitly OUT of v1 SDK scope — the TS SDK's only reconnect triggers are the transport-level events above. This delineation is intentional: the JS event loop never suspends mid-task, so silent socket death is rare; the Apple OS *will* suspend mid-task, so consumer-forwarded foreground signalling is required.
+
+Detailed Apple-platform bindings (the SDK's `handleForegroundTransition()` / `handleBackgroundTransition()` / `performBackgroundSnapshotRefresh()` / `performBackgroundDriveRoutePrefetch(maxDrives:)` API, and the consumer-side `BGAppRefreshTask` / `BGProcessingTask` / `WKApplicationRefreshBackgroundTask` registration patterns) are specified in [`swift-lifecycle.md`](swift-lifecycle.md).
 
 ---
 

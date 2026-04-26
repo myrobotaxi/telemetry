@@ -123,7 +123,7 @@ Authorization: Bearer <token>
 
 The token is the **same opaque session token** that the SDK passes in the WebSocket `auth` frame (see [`websocket-protocol.md`](websocket-protocol.md) §2.2). Both transports resolve the token from the consumer's `getToken()` callback (FR-6.1), so the SDK maintains a single credential surface and never stores the token itself.
 
-> **Why an HTTP header for REST but an in-band frame for WebSocket?** Browsers cannot set arbitrary headers on a WebSocket upgrade request, so the WS path pushes the token into the first WebSocket frame for portability (`websocket-protocol.md` §2.3 rationale). REST has no such constraint -- the standard `Authorization: Bearer <token>` header is universally supported by every HTTP client (browser `fetch`, Node `undici`, Swift `URLSession`, React Native `fetch`) and is the least-surprising choice.
+> **Why an HTTP header for REST but an in-band frame for WebSocket?** Browsers cannot set arbitrary headers on a WebSocket upgrade request, so the WS path pushes the token into the first WebSocket frame for portability (`websocket-protocol.md` §2.3 rationale). REST has no such constraint -- the standard `Authorization: Bearer <token>` header is universally supported by every HTTP client in the v1 client matrix (browser `fetch`, Node `undici`, Swift `URLSession` — including watchOS and visionOS variants) and is the least-surprising choice.
 
 ### 3.2 Server-side validation
 
@@ -716,8 +716,8 @@ A 60-minute drive captured at 1 Hz is approximately 3,600 points, which serializ
 The lazy-fetch guidance below is **about cellular bandwidth and perceived latency, not heap pressure**:
 
 - The SDK SHOULD fetch this endpoint lazily (on user tap of a drive's detail view), not eagerly for every drive in the list.
-- Eager pre-fetching of every drive's route would waste cellular bandwidth on every drive-list render, which is particularly bad on watchOS per NFR-3.36 (aggressive lifecycle handling, short-lived launches, incremental state hydration).
-- The SDK MAY fetch the route for the top 1-3 drives as an optimistic prefetch when the drive list is cold-loaded on WiFi, and MUST NOT prefetch on cellular.
+- Eager pre-fetching of every drive's route would waste cellular bandwidth on every drive-list render, which is particularly bad on watchOS per NFR-3.36c (aggressive lifecycle handling: extended-runtime sessions, short-lived launches, REST-snapshot rehydration).
+- The SDK MAY fetch the route for the top 1-3 drives as an optimistic prefetch when the drive list is cold-loaded on WiFi, and MUST NOT prefetch on cellular. On Apple platforms the Swift SDK MUST honor `URLSessionConfiguration.allowsExpensiveNetworkAccess = false` and `allowsConstrainedNetworkAccess = false` for prefetch requests, satisfying this rule against Low Data Mode and metered cellular without ad-hoc reachability checks.
 
 This is explicitly NOT an OOM concern -- a single drive's polyline fits in any v1 target runtime. The recommendation exists purely to protect data plans and perceived latency on low-bandwidth networks.
 
