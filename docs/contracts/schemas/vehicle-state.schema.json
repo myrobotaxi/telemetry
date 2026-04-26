@@ -127,7 +127,7 @@
     },
     "chargeState": {
       "type": ["string", "null"],
-      "description": "Charge state enum sourced from Tesla proto field 179 (DetailedChargeState) as of MYR-42 (2026-04-23). Added as a v1 charge atomic group member by MYR-11; live WS wiring completed by MYR-40 on 2026-04-22 using proto 2 (ChargeState); re-sourced to proto 179 by MYR-42 after empirical capture showed Tesla firmware ≥ 2024.44.25 accepts proto 2 in fleet_telemetry_config but never actually emits it. Proto 179 fires on the same transitions with identical enum string values (see websocket-protocol.md §4.1.4 and §10 DV-03 + DV-19). Non-nullable on live vehicle_update WS frames post-MYR-40; still transitional-nullable on REST /snapshot responses until the cross-repo Prisma DB-persistence follow-up (MYR-41) lands. SDK consumers MUST continue to tolerate null on /snapshot responses and render a neutral placeholder (not a spinner) during the transitional window. Nullability is expressed via the union `type: [\"string\", \"null\"]`; the `enum` list includes `null` explicitly alongside the string values for maximum validator compatibility (some Go and Python JSON Schema libraries require `null` in the enum to accept null values even when `type` includes `null`).",
+      "description": "Charge state enum sourced from Tesla proto field 179 (DetailedChargeState) as of MYR-42 (2026-04-23). Added as a v1 charge atomic group member by MYR-11; live WS wiring completed by MYR-40 on 2026-04-22 using proto 2 (ChargeState); re-sourced to proto 179 by MYR-42 after empirical capture showed Tesla firmware ≥ 2024.44.25 accepts proto 2 in fleet_telemetry_config but never actually emits it. Proto 179 fires on the same transitions with identical enum string values (see websocket-protocol.md §4.1.4 and §10 DV-03 + DV-19). DB persistence on the Prisma-owned Vehicle table landed in MYR-41 on 2026-04-25 (Vehicle.chargeState String? + Go writer pipeline applier + store SELECT/UPDATE wiring). Nullable in steady state — a vehicle that has never charged surfaces null on both wire and REST /snapshot. SDK consumers MUST tolerate null and render a neutral placeholder (not a spinner). Nullability is expressed via the union `type: [\"string\", \"null\"]`; the `enum` list includes `null` explicitly alongside the string values for maximum validator compatibility (some Go and Python JSON Schema libraries require `null` in the enum to accept null values even when `type` includes `null`).",
       "enum": ["Unknown", "Disconnected", "NoPower", "Starting", "Charging", "Complete", "Stopped", null],
       "x-classification": "P0",
       "x-atomic-group": "charge",
@@ -143,7 +143,7 @@
     },
     "timeToFull": {
       "type": ["number", "null"],
-      "description": "Estimated time to full charge at the current charging rate. Added as a v1 charge atomic group member by MYR-11; live WS wiring completed by MYR-40 on 2026-04-22 (see websocket-protocol.md §4.1.4 and §10 DV-04). Tesla proto field 43 (TimeToFullCharge, double). Unit is HOURS (decimal, fractional values supported — e.g. 1.5 for 90 minutes) per the tesla-fleet-telemetry-sme skill and the legacy Tesla REST API; empirically verified as 1.066666841506958 hours during a home charging session on 2026-04-22 (DV-17 resolved — see MYR-25 comment and TestDecoder_DecodePayload_TimeToFull). Non-nullable on live vehicle_update WS frames post-MYR-40; still transitional-nullable on REST /snapshot responses until the cross-repo Prisma DB-persistence follow-up lands. SDK consumers MUST continue to tolerate null on /snapshot responses and render a neutral placeholder (not a spinner) during the transitional window. 0 (or null when disconnected) means no active charging session.",
+      "description": "Estimated time to full charge at the current charging rate. Added as a v1 charge atomic group member by MYR-11; live WS wiring completed by MYR-40 on 2026-04-22 (see websocket-protocol.md §4.1.4 and §10 DV-04). Tesla proto field 43 (TimeToFullCharge, double). Unit is HOURS (decimal, fractional values supported — e.g. 1.5 for 90 minutes) per the tesla-fleet-telemetry-sme skill and the legacy Tesla REST API; empirically verified as 1.066666841506958 hours during a home charging session on 2026-04-22 (DV-17 resolved — see MYR-25 comment and TestDecoder_DecodePayload_TimeToFull). DB persistence on the Prisma-owned Vehicle table landed in MYR-41 on 2026-04-25 (Vehicle.timeToFull Float? + Go writer pipeline applier + store SELECT/UPDATE wiring). Nullable in steady state — null means no active charging session or no charge frame has arrived yet. SDK consumers MUST tolerate null and render a neutral placeholder (not a spinner). 0 (or null when disconnected) means no active charging session.",
       "x-unit": "hours",
       "x-classification": "P0",
       "minimum": 0,
@@ -292,7 +292,7 @@
       "nullability": "All fields nullable. Null = no active navigation."
     },
     "charge": {
-      "description": "Battery and charge state delivered together. When any charge field changes within the same Tesla 500ms vehicle-side bucket, sibling fields are included in the same vehicle_update message. v1 expands this group to four fields per MYR-11; live WS wiring for chargeState and timeToFull completed by MYR-40 on 2026-04-22. Those two fields remain transitional-nullable on REST /snapshot responses until the cross-repo Prisma DB-persistence follow-up lands.",
+      "description": "Battery and charge state delivered together. When any charge field changes within the same Tesla 500ms vehicle-side bucket, sibling fields are included in the same vehicle_update message. v1 expands this group to four fields per MYR-11; live WS wiring for chargeState and timeToFull completed by MYR-40 on 2026-04-22; DB persistence for both completed by MYR-41 on 2026-04-25 (Prisma columns + Go writer applier + SELECT/UPDATE wiring).",
       "fields": [
         "chargeLevel",
         "chargeState",
@@ -301,10 +301,10 @@
       ],
       "consistency-predicates": [
         "chargeLevel and estimatedRange MUST both be present in the DB snapshot (NFR-3.5). They are non-nullable with default 0.",
-        "chargeState and timeToFull are non-nullable on live vehicle_update WS frames post-MYR-40, but remain transitional-nullable on REST /snapshot responses until DB persistence ships. Consumers MUST tolerate null on /snapshot responses during the transitional window.",
+        "chargeState and timeToFull are nullable in steady state — null surfaces when the vehicle has never charged or when no charge frame has arrived yet. Consumers MUST tolerate null on both wire and REST /snapshot responses.",
         "chargeLevel: 0 is context-dependent. With status == 'offline', the UI SHOULD interpret chargeLevel: 0 as 'unknown' (no telemetry received yet, DB default). With status == 'driving' or 'parked' (i.e., the vehicle is online), chargeLevel: 0 SHOULD be interpreted as 'critical' or 'empty battery'. See §2.2 of vehicle-state-schema.md."
       ],
-      "nullability": "chargeLevel and estimatedRange are non-nullable (default 0 on initial vehicle creation). chargeState and timeToFull are non-nullable on live WS frames (post-MYR-40) and transitional-nullable on REST /snapshot responses until DB persistence follow-up lands."
+      "nullability": "chargeLevel and estimatedRange are non-nullable (default 0 on initial vehicle creation). chargeState and timeToFull are nullable on both wire and REST /snapshot — the Prisma-owned Vehicle columns are String?/Float? (post-MYR-41) and steady-state null is the expected shape for vehicles that have never charged."
     },
     "gps": {
       "description": "GPS position and orientation delivered together. On initial connect before the first GPS fix, latitude and longitude may be 0 (DB default).",
