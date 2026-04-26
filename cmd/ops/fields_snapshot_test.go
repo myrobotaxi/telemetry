@@ -19,6 +19,8 @@ import (
 //     per Prisma NOT NULL DEFAULT ”) when no reverse geocode is available
 func TestVehicleSnapshot_JSONShape(t *testing.T) {
 	destAddr := "2001 Market St, San Francisco, CA 94114"
+	chargeState := "Charging"
+	timeToFull := 1.5
 	populated := store.Vehicle{
 		ID:                 "clxyz1234567890abcdef",
 		VIN:                "5YJ3E1EA1NF000001",
@@ -31,6 +33,8 @@ func TestVehicleSnapshot_JSONShape(t *testing.T) {
 		LocationAddress:    "123 Market St, San Francisco, CA",
 		FsdMilesSinceReset: 412.7,
 		DestinationAddress: &destAddr,
+		ChargeState:        &chargeState,
+		TimeToFull:         &timeToFull,
 		LastUpdated:        time.Date(2026, 4, 23, 12, 0, 0, 0, time.UTC),
 	}
 
@@ -52,6 +56,8 @@ func TestVehicleSnapshot_JSONShape(t *testing.T) {
 	assertField(t, got, "locationAddress", "123 Market St, San Francisco, CA")
 	assertField(t, got, "fsdMilesSinceReset", 412.7)
 	assertField(t, got, "destinationAddress", destAddr)
+	assertField(t, got, "chargeState", "Charging")
+	assertField(t, got, "timeToFull", 1.5)
 
 	// Empty-strings / nil branches: nullable destinationAddress must omit.
 	minimal := store.Vehicle{
@@ -77,6 +83,14 @@ func TestVehicleSnapshot_JSONShape(t *testing.T) {
 	assertField(t, gotMin, "fsdMilesSinceReset", float64(0))
 	if _, present := gotMin["destinationAddress"]; present {
 		t.Errorf("nil destinationAddress should be omitted, got %v", gotMin["destinationAddress"])
+	}
+	// chargeState + timeToFull MUST be present even when nil — emitted as
+	// JSON null so SDK consumers see a uniform shape (post-MYR-41 contract).
+	if v, present := gotMin["chargeState"]; !present || v != nil {
+		t.Errorf("nil chargeState should serialize as null, got present=%v value=%v", present, v)
+	}
+	if v, present := gotMin["timeToFull"]; !present || v != nil {
+		t.Errorf("nil timeToFull should serialize as null, got present=%v value=%v", present, v)
 	}
 }
 
