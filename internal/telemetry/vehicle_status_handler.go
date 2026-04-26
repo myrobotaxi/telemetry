@@ -31,24 +31,32 @@ type ConnInfo struct {
 type VehicleStatusHandler struct {
 	auth     tokenValidator
 	vehicles VehicleOwnerLookup
+	roles    roleResolver    // optional: nil disables mask plumbing
+	idLookup vehicleIDLookup // optional: nil disables mask plumbing
 	presence VehiclePresence
 	logger   *slog.Logger
 }
 
 // NewVehicleStatusHandler creates a handler that returns real-time vehicle
 // connection status. The presence provider is typically the telemetry Receiver.
+// Pass WithRoleResolver to enable field-mask projection of the response.
 func NewVehicleStatusHandler(
-	auth tokenValidator,
+	tokens tokenValidator,
 	vehicles VehicleOwnerLookup,
 	presence VehiclePresence,
 	logger *slog.Logger,
+	opts ...VehicleStatusOption,
 ) *VehicleStatusHandler {
-	return &VehicleStatusHandler{
-		auth:     auth,
+	h := &VehicleStatusHandler{
+		auth:     tokens,
 		vehicles: vehicles,
 		presence: presence,
 		logger:   logger,
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 // vehicleStatusResponse is the JSON body returned by the vehicle status endpoint.
@@ -96,7 +104,7 @@ func (h *VehicleStatusHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	}
 
 	resp := h.buildStatusResponse(vin)
-	h.writeJSON(w, http.StatusOK, resp)
+	h.writeMaskedResponse(ctx, w, vin, userID, resp)
 }
 
 // verifyOwnership checks that userID owns the vehicle identified by vin.
