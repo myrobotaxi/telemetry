@@ -161,7 +161,8 @@ func (r *VehicleRepo) scanVehicle(ctx context.Context, query string, arg any) (V
 	err := row.Scan(
 		&v.ID, &v.UserID, &v.VIN, &v.Name,
 		&v.Model, &v.Year, &v.Color, &status,
-		&v.ChargeLevel, &v.EstimatedRange, &v.Speed, &v.GearPosition,
+		&v.ChargeLevel, &v.EstimatedRange, &v.ChargeState, &v.TimeToFull,
+		&v.Speed, &v.GearPosition,
 		&v.Heading, &v.Latitude, &v.Longitude,
 		&v.LocationName, &v.LocationAddress,
 		&v.InteriorTemp, &v.ExteriorTemp,
