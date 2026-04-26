@@ -399,6 +399,55 @@ func assertCatalog(t *testing.T, v store.Vehicle, want catalogFields) {
 
 func strPtr(s string) *string { return &s }
 
+// TestVehicleRepo_ChargeFieldsRoundTrip exercises the DB-persistence path
+// for the v1 charge atomic group members chargeState (proto 179, enum) and
+// timeToFull (proto 43, hours decimal) added by MYR-41. Confirms a vehicle
+// seeded without charge fields starts as null on both, an UpdateTelemetry
+// writes them, and a subsequent GetByVIN reads them back exactly.
+func TestVehicleRepo_ChargeFieldsRoundTrip(t *testing.T) {
+	cleanTables(t, testPool)
+	seedVehicle(t, testPool, "veh_charge_001", "5YJ3E1EA1NF00CR01")
+
+	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+	ctx := context.Background()
+
+	// Initial state: both columns NULL (seedVehicle does not populate them).
+	v, err := repo.GetByVIN(ctx, "5YJ3E1EA1NF00CR01")
+	if err != nil {
+		t.Fatalf("GetByVIN initial: %v", err)
+	}
+	if v.ChargeState != nil {
+		t.Errorf("initial ChargeState = %q, want nil", *v.ChargeState)
+	}
+	if v.TimeToFull != nil {
+		t.Errorf("initial TimeToFull = %v, want nil", *v.TimeToFull)
+	}
+
+	// UpdateTelemetry with both charge fields.
+	chargeState := "Charging"
+	timeToFull := 1.5
+	err = repo.UpdateTelemetry(ctx, "5YJ3E1EA1NF00CR01", store.VehicleUpdate{
+		ChargeState: &chargeState,
+		TimeToFull:  &timeToFull,
+		LastUpdated: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("UpdateTelemetry: %v", err)
+	}
+
+	// GetByVIN reads the persisted values.
+	v, err = repo.GetByVIN(ctx, "5YJ3E1EA1NF00CR01")
+	if err != nil {
+		t.Fatalf("GetByVIN after update: %v", err)
+	}
+	if v.ChargeState == nil || *v.ChargeState != "Charging" {
+		t.Errorf("ChargeState = %v, want Charging", v.ChargeState)
+	}
+	if v.TimeToFull == nil || *v.TimeToFull != 1.5 {
+		t.Errorf("TimeToFull = %v, want 1.5", v.TimeToFull)
+	}
+}
+
 func TestVehicleRepo_UpdateStatus(t *testing.T) {
 	cleanTables(t, testPool)
 	seedVehicle(t, testPool, "veh_004", "5YJ3E1EA1NF000004")

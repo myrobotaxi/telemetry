@@ -182,6 +182,34 @@ func TestMapTelemetryToUpdate(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "chargeState mapped from string",
+			fields: map[string]events.TelemetryValue{
+				string(telemetry.FieldChargeState): {StringVal: strPtr("Charging")},
+			},
+			check: func(t *testing.T, u *VehicleUpdate) {
+				if u == nil {
+					t.Fatal("expected non-nil update")
+				}
+				if u.ChargeState == nil || *u.ChargeState != "Charging" {
+					t.Errorf("ChargeState = %v, want Charging", ptrVal(u.ChargeState))
+				}
+			},
+		},
+		{
+			name: "timeToFull mapped from float (hours decimal)",
+			fields: map[string]events.TelemetryValue{
+				string(telemetry.FieldTimeToFull): {FloatVal: floatPtr(1.0667)},
+			},
+			check: func(t *testing.T, u *VehicleUpdate) {
+				if u == nil {
+					t.Fatal("expected non-nil update")
+				}
+				if u.TimeToFull == nil || *u.TimeToFull != 1.0667 {
+					t.Errorf("TimeToFull = %v, want 1.0667", ptrVal(u.TimeToFull))
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {

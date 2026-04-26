@@ -137,6 +137,8 @@ type vehicleSnapshot struct {
 	Status               string   `json:"status"`
 	ChargeLevel          int      `json:"chargeLevel"`
 	EstimatedRange       int      `json:"estimatedRange"`
+	ChargeState          *string  `json:"chargeState"`
+	TimeToFull           *float64 `json:"timeToFull"`
 	Speed                int      `json:"speed"`
 	GearPosition         *string  `json:"gearPosition,omitempty"`
 	Heading              int      `json:"heading"`
@@ -200,6 +202,8 @@ func newVehicleSnapshot(v store.Vehicle) vehicleSnapshot {
 		Status:               string(v.Status),
 		ChargeLevel:          v.ChargeLevel,
 		EstimatedRange:       v.EstimatedRange,
+		ChargeState:          v.ChargeState,
+		TimeToFull:           v.TimeToFull,
 		Speed:                v.Speed,
 		GearPosition:         v.GearPosition,
 		Heading:              v.Heading,

@@ -3,7 +3,7 @@
 **Status:** Draft — v1
 **Target artifact:** Lifecycle policy doc + AuditLog schema + pruning job spec
 **Owner:** `sdk-architect` agent
-**Last updated:** 2026-04-23
+**Last updated:** 2026-04-25
 
 ## Purpose
 
@@ -47,8 +47,10 @@ The Vehicle table is a **live snapshot**: the DB row is overwritten on each tele
 | `year` | DB | -- | Prisma (setup) | Static vehicle metadata |
 | `color` | DB | -- | Prisma (setup) | Static vehicle metadata |
 | `licensePlate` | DB | -- | Prisma (user edit) | User-assigned |
-| `chargeLevel` | DB | WebSocket | Go store (overwrite) | Telemetry-driven |
-| `estimatedRange` | DB | WebSocket | Go store (overwrite) | Telemetry-driven |
+| `chargeLevel` | DB | WebSocket | Go store (overwrite) | Telemetry-driven, charge group |
+| `estimatedRange` | DB | WebSocket | Go store (overwrite) | Telemetry-driven, charge group |
+| `chargeState` | DB | WebSocket | Go store (overwrite) | Telemetry-driven, charge group |
+| `timeToFull` | DB | WebSocket | Go store (overwrite) | Telemetry-driven, charge group |
 | `status` | DB | WebSocket | Go store (overwrite) | Telemetry-driven |
 | `speed` | DB | WebSocket | Go store (overwrite) | Telemetry-driven |
 | `gearPosition` | DB | WebSocket | Go store (overwrite) | Telemetry-driven |

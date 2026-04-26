@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "description": "Charge atomic group -- all 4 v1 members. chargeLevel and estimatedRange are non-nullable (default 0). chargeState and timeToFull are transitional-nullable until DV-03/DV-04 wiring ships. This fixture shows the target four-field shape. All fields are P0 (log-safe, no encryption at rest).",
+    "description": "Charge atomic group -- all 4 v1 members. chargeLevel and estimatedRange are non-nullable (default 0). chargeState and timeToFull are nullable in steady state on both wire and REST snapshot — null surfaces when the vehicle has never charged or no active charging session is in progress. Live WS wiring landed in MYR-40 (2026-04-22); DB persistence on the Prisma-owned Vehicle table landed in MYR-41 (2026-04-25), closing DV-03 and DV-04. This fixture shows the four-field shape. All fields are P0 (log-safe, no encryption at rest).",
     "anchoredFRs": ["FR-1.2", "NFR-3.1"],
     "scenario": "happy-path"
   },

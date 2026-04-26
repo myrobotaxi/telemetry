@@ -110,6 +110,8 @@ func createSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"licensePlate"     TEXT NOT NULL DEFAULT '',
 		"chargeLevel"      INT NOT NULL DEFAULT 0,
 		"estimatedRange"   INT NOT NULL DEFAULT 0,
+		"chargeState"      TEXT,
+		"timeToFull"       DOUBLE PRECISION,
 		"status"           "VehicleStatus" NOT NULL DEFAULT 'offline',
 		"speed"            INT NOT NULL DEFAULT 0,
 		"gearPosition"     TEXT,

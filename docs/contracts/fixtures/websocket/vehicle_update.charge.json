@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "description": "Charge atomic group update with all four v1 members. Represents the live wire shape as of MYR-40 (2026-04-22) wire wiring. chargeState is non-null; timeToFull is null (expected when chargeState is Disconnected — not charging). See vehicle_update.charge_partial.json for the pre-MYR-40 transitional form where both were null on every frame, and edge-cases/snapshot.charging.json for a scenario with non-null timeToFull.",
+    "description": "Charge atomic group update with all four v1 members. Represents the live wire shape as of MYR-40 (2026-04-22) wire wiring + MYR-41 (2026-04-25) DB persistence. chargeState is non-null; timeToFull is null (expected when chargeState is Disconnected — not charging). See edge-cases/snapshot.charging.json for a scenario with non-null timeToFull.",
     "anchoredFRs": ["FR-1.2", "NFR-3.1"],
     "scenario": "happy-path"
   },

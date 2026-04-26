@@ -31,6 +31,8 @@ func mergeUpdate(dst, src *VehicleUpdate) {
 	dst.Speed = mergePtr(dst.Speed, src.Speed)
 	dst.ChargeLevel = mergePtr(dst.ChargeLevel, src.ChargeLevel)
 	dst.EstimatedRange = mergePtr(dst.EstimatedRange, src.EstimatedRange)
+	dst.ChargeState = mergePtr(dst.ChargeState, src.ChargeState)
+	dst.TimeToFull = mergePtr(dst.TimeToFull, src.TimeToFull)
 	dst.GearPosition = mergePtr(dst.GearPosition, src.GearPosition)
 	dst.Heading = mergePtr(dst.Heading, src.Heading)
 	dst.Latitude = mergePtr(dst.Latitude, src.Latitude)

@@ -212,6 +212,44 @@ func TestWriter_TelemetryFlush(t *testing.T) {
 	}
 }
 
+// TestWriter_ChargeAtomicGroupFlush verifies that a VehicleTelemetryEvent
+// carrying the v1 charge atomic group members (chargeState string + timeToFull
+// hours decimal) reaches UpdateTelemetry with both fields populated. Pinned
+// by MYR-41 to prove the writer end of the DB-persistence path closes the
+// REST /snapshot gap that MYR-40 left open.
+func TestWriter_ChargeAtomicGroupFlush(t *testing.T) {
+	bus := newTestBus(t)
+	vehicles := &mockVehicleUpdater{}
+	drives := &mockDrivePersister{}
+	lookup := &stubIDLookup{pairs: map[string]struct{ id, userID string }{}}
+
+	w := newTestWriter(t, bus, vehicles, drives, lookup)
+	if err := w.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = w.Stop() }()
+
+	chargeState := "Charging"
+	timeToFull := 1.5 // hours, decimal — see vehicle-state-schema.md §1.1
+
+	publishTelemetry(t, bus, "5YJ3E1EA1NF000041", map[string]events.TelemetryValue{
+		string(telemetry.FieldChargeState): {StringVal: &chargeState},
+		string(telemetry.FieldTimeToFull):  {FloatVal: &timeToFull},
+	})
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		return len(vehicles.getTelemetryWrites()) > 0
+	})
+
+	writes := vehicles.getTelemetryWrites()
+	if writes[0].Update.ChargeState == nil || *writes[0].Update.ChargeState != "Charging" {
+		t.Errorf("ChargeState = %v, want Charging", ptrVal(writes[0].Update.ChargeState))
+	}
+	if writes[0].Update.TimeToFull == nil || *writes[0].Update.TimeToFull != 1.5 {
+		t.Errorf("TimeToFull = %v, want 1.5", ptrVal(writes[0].Update.TimeToFull))
+	}
+}
+
 func TestWriter_Coalescing(t *testing.T) {
 	bus := newTestBus(t)
 	vehicles := &mockVehicleUpdater{}
@@ -844,6 +882,145 @@ func TestMergeUpdate_NavFields(t *testing.T) {
 	}
 	if dst.Speed == nil || *dst.Speed != 45 {
 		t.Errorf("Speed = %v, want 45 (preserved from dst)", ptrVal(dst.Speed))
+	}
+}
+
+// TestMergeUpdate_ChargeFields covers MYR-41 — the v1 charge atomic group
+// members chargeState (proto 179, enum) and timeToFull (proto 43, hours)
+// must survive coalescing when sibling fields arrive in separate events
+// inside the same flush window. Without explicit mergePtr calls in
+// mergeUpdate, a {chargeLevel-only} → {chargeState+timeToFull-only}
+// sequence drops the second event's writes.
+func TestMergeUpdate_ChargeFields(t *testing.T) {
+	t1 := time.Date(2026, 3, 17, 14, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 3, 17, 14, 0, 5, 0, time.UTC)
+
+	tests := []struct {
+		name           string
+		dst            *VehicleUpdate
+		src            *VehicleUpdate
+		wantState      *string
+		wantTimeToFull *float64
+	}{
+		{
+			name: "chargeLevel-only then chargeState+timeToFull-only — both survive",
+			dst: &VehicleUpdate{
+				ChargeLevel: intPtr(51),
+				LastUpdated: t1,
+			},
+			src: &VehicleUpdate{
+				ChargeState: strPtr("Charging"),
+				TimeToFull:  floatPtr(1.5),
+				LastUpdated: t2,
+			},
+			wantState:      strPtr("Charging"),
+			wantTimeToFull: floatPtr(1.5),
+		},
+		{
+			name: "chargeState in dst preserved when src has no charge fields",
+			dst: &VehicleUpdate{
+				ChargeState: strPtr("Disconnected"),
+				LastUpdated: t1,
+			},
+			src: &VehicleUpdate{
+				Speed:       intPtr(72),
+				LastUpdated: t2,
+			},
+			wantState:      strPtr("Disconnected"),
+			wantTimeToFull: nil,
+		},
+		{
+			name: "src chargeState overwrites dst chargeState (last-write-wins)",
+			dst: &VehicleUpdate{
+				ChargeState: strPtr("Starting"),
+				TimeToFull:  floatPtr(2.0),
+				LastUpdated: t1,
+			},
+			src: &VehicleUpdate{
+				ChargeState: strPtr("Charging"),
+				TimeToFull:  floatPtr(1.0667),
+				LastUpdated: t2,
+			},
+			wantState:      strPtr("Charging"),
+			wantTimeToFull: floatPtr(1.0667),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mergeUpdate(tt.dst, tt.src)
+
+			switch {
+			case tt.wantState == nil && tt.dst.ChargeState != nil:
+				t.Errorf("ChargeState = %q, want nil", *tt.dst.ChargeState)
+			case tt.wantState != nil && tt.dst.ChargeState == nil:
+				t.Errorf("ChargeState = nil, want %q", *tt.wantState)
+			case tt.wantState != nil && *tt.dst.ChargeState != *tt.wantState:
+				t.Errorf("ChargeState = %q, want %q", *tt.dst.ChargeState, *tt.wantState)
+			}
+
+			switch {
+			case tt.wantTimeToFull == nil && tt.dst.TimeToFull != nil:
+				t.Errorf("TimeToFull = %v, want nil", *tt.dst.TimeToFull)
+			case tt.wantTimeToFull != nil && tt.dst.TimeToFull == nil:
+				t.Errorf("TimeToFull = nil, want %v", *tt.wantTimeToFull)
+			case tt.wantTimeToFull != nil && *tt.dst.TimeToFull != *tt.wantTimeToFull:
+				t.Errorf("TimeToFull = %v, want %v", *tt.dst.TimeToFull, *tt.wantTimeToFull)
+			}
+		})
+	}
+}
+
+// TestWriter_ChargeAtomicGroupCoalesceOrdering is the writer-pipeline-level
+// regression guard for MYR-41: publishing chargeLevel alone, then
+// chargeState+timeToFull alone within the same flush window must result
+// in a single coalesced UpdateTelemetry that carries all three values.
+func TestWriter_ChargeAtomicGroupCoalesceOrdering(t *testing.T) {
+	bus := newTestBus(t)
+	vehicles := &mockVehicleUpdater{}
+	drives := &mockDrivePersister{}
+	lookup := &stubIDLookup{pairs: map[string]struct{ id, userID string }{}}
+
+	w := NewWriter(vehicles, drives, lookup, bus, geocode.NoopGeocoder{}, slog.Default(), WriterConfig{
+		FlushInterval: 100 * time.Millisecond,
+		BatchSize:     1000, // large enough that coalescing dominates
+	})
+	if err := w.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = w.Stop() }()
+
+	soc := 51.0
+	chargeState := "Charging"
+	timeToFull := 1.5
+
+	// Event 1 — chargeLevel only.
+	publishTelemetry(t, bus, "5YJ3E1EA1NF000041", map[string]events.TelemetryValue{
+		string(telemetry.FieldSOC): {FloatVal: &soc},
+	})
+	// Event 2 — chargeState + timeToFull only (siblings arriving separately).
+	publishTelemetry(t, bus, "5YJ3E1EA1NF000041", map[string]events.TelemetryValue{
+		string(telemetry.FieldChargeState): {StringVal: &chargeState},
+		string(telemetry.FieldTimeToFull):  {FloatVal: &timeToFull},
+	})
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		return len(vehicles.getTelemetryWrites()) > 0
+	})
+
+	writes := vehicles.getTelemetryWrites()
+	if len(writes) != 1 {
+		t.Fatalf("got %d writes, want 1 (events should coalesce)", len(writes))
+	}
+	u := writes[0].Update
+	if u.ChargeLevel == nil || *u.ChargeLevel != 51 {
+		t.Errorf("ChargeLevel = %v, want 51", ptrVal(u.ChargeLevel))
+	}
+	if u.ChargeState == nil || *u.ChargeState != "Charging" {
+		t.Errorf("ChargeState = %v, want Charging", ptrVal(u.ChargeState))
+	}
+	if u.TimeToFull == nil || *u.TimeToFull != 1.5 {
+		t.Errorf("TimeToFull = %v, want 1.5", ptrVal(u.TimeToFull))
 	}
 }
 

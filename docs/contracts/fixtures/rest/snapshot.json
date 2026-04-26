@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "description": "Full VehicleState snapshot from GET /api/vehicles/{vehicleId}/snapshot. Cold-load response used on initial page render and on every reconnect (NFR-3.11). Contains enough data to render the full UI without per-field loading spinners (NFR-3.5). As of MYR-24 (2026-04-23) the seven former spec-only catalog fields are populated from DB columns; only chargeState and timeToFull remain transitional-nullable on REST snapshots (pre-DV-03/DV-04 DB persistence).",
+    "description": "Full VehicleState snapshot from GET /api/vehicles/{vehicleId}/snapshot. Cold-load response used on initial page render and on every reconnect (NFR-3.11). Contains enough data to render the full UI without per-field loading spinners (NFR-3.5). As of MYR-24 (2026-04-23) the seven former spec-only catalog fields are populated from DB columns; as of MYR-41 (2026-04-25) chargeState and timeToFull are persisted to the Prisma Vehicle table (Vehicle.chargeState String? + Vehicle.timeToFull Float?) closing DV-03 and DV-04. Both columns remain nullable in steady state — a vehicle that has never charged surfaces null on snapshot.",
     "anchoredFRs": ["FR-1.1", "FR-1.2", "FR-2.1", "NFR-3.5", "NFR-3.11"],
     "scenario": "happy-path"
   },
