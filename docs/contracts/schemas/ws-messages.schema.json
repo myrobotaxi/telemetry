@@ -270,7 +270,7 @@
     },
     "PingPayload": {
       "type": "object",
-      "description": "PLANNED — NOT accepted by the server today. Client->server ping. Today, browser clients rely on the server's outbound `heartbeat` frames (§7.4) and the underlying WebSocket protocol's PING/PONG control frames (handled transparently by coder/websocket) to detect liveness. An app-level `ping` is reserved for platforms where the WebSocket library does not expose RFC 6455 PING/PONG (some React Native runtimes, watchOS background sessions — NFR-3.36). Tracked as divergence DV-07 in websocket-protocol.md §10. Note: `auth_ok` has been pulled out of DV-07 and is v1-required (see AuthOkPayload); the rest of DV-07 remains deferred.",
+      "description": "PLANNED — NOT accepted by the server today. Client->server ping. Today, browser clients rely on the server's outbound `heartbeat` frames (§7.4) and the underlying WebSocket protocol's PING/PONG control frames (handled transparently by coder/websocket) to detect liveness. An app-level `ping` is reserved for platforms where the WebSocket library does not expose RFC 6455 PING/PONG — specifically watchOS extended-runtime sessions and iOS background sockets, per NFR-3.36 / NFR-3.36a-d. The TypeScript SDK runs on browser `WebSocket` and Node `ws`, both of which expose transport-level PING/PONG, so this is a Swift-SDK forward-compatibility concern only. Tracked as divergence DV-07 in websocket-protocol.md §10. Note: `auth_ok` has been pulled out of DV-07 and is v1-required (see AuthOkPayload); the rest of DV-07 remains deferred.",
       "additionalProperties": false,
       "properties": {
         "nonce": {

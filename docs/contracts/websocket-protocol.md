@@ -47,6 +47,7 @@ Every FR/NFR listed here is anchored in at least one section of this doc. The ta
 | **NFR-3.13** | Offline tolerance: no maximum on cached visibility | §7.2 reconnect invariants #3 |
 | **NFR-3.21** | Vehicle ownership enforced on every subscription | §2.2 vehicle resolution; §4.5 ownership filtering (+ DV-09 mid-connection drift) |
 | **NFR-3.22** | TLS in transit (WSS for browsers/apps) | §1.1 transport; §1.2 origin enforcement |
+| **NFR-3.36** + **NFR-3.36a-d** | Apple platform lifecycle (Swift SDK only): consumer-driven foreground reconnect, suspended-socket close semantics, background-task entry points | §7.5 Apple platform suspend/resume; detailed bindings in [`swift-lifecycle.md`](swift-lifecycle.md) |
 
 ---
 
@@ -715,7 +716,7 @@ NOT yet implemented. Today, application-level ping is unnecessary because:
 1. The [`coder/websocket`](https://github.com/coder/websocket) library handles RFC 6455 PING/PONG control frames transparently in both directions.
 2. The server emits `heartbeat` frames on a 15-second cadence (§7.4), giving the SDK a frequent positive liveness signal.
 
-A future application-level `ping` is reserved for platforms where the WebSocket library does not expose RFC 6455 PING/PONG (some React Native runtimes, watchOS background sessions per NFR-3.36).
+A future application-level `ping` is reserved for platforms where the WebSocket library does not expose RFC 6455 PING/PONG -- specifically watchOS extended-runtime sessions and iOS background sockets per NFR-3.36 / NFR-3.36a-d. The TypeScript SDK runs on browser `WebSocket` and Node `ws`, both of which expose transport-level PING/PONG, so the application-level `ping` is a Swift-SDK forward-compatibility concern only.
 
 ```jsonc
 {
@@ -922,6 +923,20 @@ Per NFR-3.7, freshness is event-driven and not time-based. The SDK MUST NOT:
 - Use heartbeat cadence to derive any `dataState` transition.
 
 The only legitimate uses of heartbeat in the SDK are: (a) reset the liveness watchdog, (b) update an internal "last frame received" timestamp for debug telemetry.
+
+### 7.5 Apple platform suspend/resume (Swift SDK only)
+
+> **Anchored:** NFR-3.36, NFR-3.36a-d. Detailed bindings in [`swift-lifecycle.md`](swift-lifecycle.md).
+
+When the iOS / iPadOS / watchOS / visionOS / macOS process is suspended by the OS, `URLSessionWebSocketTask` does not deliver a close frame; the socket falls silent. The Swift SDK MUST detect liveness via the heartbeat-watchdog timeout in §7.4.1 and transition `connected -> disconnected` with a typed reason of `heartbeat_timeout` -- NOT `transport_close`. This is the only path by which a suspended-then-resumed app reaches `disconnected`.
+
+The SDK is UI-framework-agnostic per NFR-3.35 and MUST NOT observe scene transitions itself. Consumers forward foreground transitions by calling `MyRoboTaxiClient.handleForegroundTransition()` from their app's lifecycle observer (SwiftUI `@Environment(\.scenePhase)`, UIKit `UIScene.willEnterForegroundNotification`, WatchKit `WKApplicationDidBecomeActiveNotification`, or AppKit `NSApplication.didBecomeActiveNotification`). On receiving that call the SDK MUST execute the §7.2 reconnect sequence with a **first-attempt backoff bypass** (NFR-3.36a): reset retry counter to 0 and immediately attempt reconnect; if it fails, normal §7.1 backoff resumes from attempt 1.
+
+Per-platform consumer wiring (notifications → SDK method) is enumerated in [`swift-lifecycle.md`](swift-lifecycle.md) §2 and §3.2.
+
+For background-driven snapshot refresh (no foreground transition required), the Swift SDK MUST expose `performBackgroundSnapshotRefresh()` and `performBackgroundDriveRoutePrefetch(maxDrives:)` async methods per NFR-3.36b. Consumers register the platform-specific background-task identifiers (`BGAppRefreshTask` / `BGProcessingTask` on iOS / iPadOS / macOS / visionOS; `WKApplicationRefreshBackgroundTask` on watchOS) themselves and call those SDK methods from inside the registered handler. The SDK observes `Task.checkCancellation()` so consumer-supplied expiration handlers can cancel in-flight work cleanly.
+
+Browser and Node consumers (TypeScript SDK) have no analogous lifecycle: `document.visibilitychange` is consumer-controlled and explicitly OUT of v1 SDK scope, and the Node event loop never suspends mid-task. This section binds Apple platforms only.
 
 ---
 
