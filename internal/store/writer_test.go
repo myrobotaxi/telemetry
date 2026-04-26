@@ -212,6 +212,44 @@ func TestWriter_TelemetryFlush(t *testing.T) {
 	}
 }
 
+// TestWriter_ChargeAtomicGroupFlush verifies that a VehicleTelemetryEvent
+// carrying the v1 charge atomic group members (chargeState string + timeToFull
+// hours decimal) reaches UpdateTelemetry with both fields populated. Pinned
+// by MYR-41 to prove the writer end of the DB-persistence path closes the
+// REST /snapshot gap that MYR-40 left open.
+func TestWriter_ChargeAtomicGroupFlush(t *testing.T) {
+	bus := newTestBus(t)
+	vehicles := &mockVehicleUpdater{}
+	drives := &mockDrivePersister{}
+	lookup := &stubIDLookup{pairs: map[string]struct{ id, userID string }{}}
+
+	w := newTestWriter(t, bus, vehicles, drives, lookup)
+	if err := w.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = w.Stop() }()
+
+	chargeState := "Charging"
+	timeToFull := 1.5 // hours, decimal — see vehicle-state-schema.md §1.1
+
+	publishTelemetry(t, bus, "5YJ3E1EA1NF000041", map[string]events.TelemetryValue{
+		string(telemetry.FieldChargeState): {StringVal: &chargeState},
+		string(telemetry.FieldTimeToFull):  {FloatVal: &timeToFull},
+	})
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		return len(vehicles.getTelemetryWrites()) > 0
+	})
+
+	writes := vehicles.getTelemetryWrites()
+	if writes[0].Update.ChargeState == nil || *writes[0].Update.ChargeState != "Charging" {
+		t.Errorf("ChargeState = %v, want Charging", ptrVal(writes[0].Update.ChargeState))
+	}
+	if writes[0].Update.TimeToFull == nil || *writes[0].Update.TimeToFull != 1.5 {
+		t.Errorf("TimeToFull = %v, want 1.5", ptrVal(writes[0].Update.TimeToFull))
+	}
+}
+
 func TestWriter_Coalescing(t *testing.T) {
 	bus := newTestBus(t)
 	vehicles := &mockVehicleUpdater{}

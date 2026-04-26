@@ -21,6 +21,8 @@ var fieldAppliers = map[telemetry.FieldName]fieldApplier{
 	telemetry.FieldSOC:             applyFloatAsInt(func(u *VehicleUpdate) **int { return &u.ChargeLevel }),
 	telemetry.FieldBatteryLevel:    applyFloatAsInt(func(u *VehicleUpdate) **int { return &u.ChargeLevel }),
 	telemetry.FieldEstBatteryRange: applyFloatAsInt(func(u *VehicleUpdate) **int { return &u.EstimatedRange }),
+	telemetry.FieldChargeState:     applyString(func(u *VehicleUpdate) **string { return &u.ChargeState }),
+	telemetry.FieldTimeToFull:      applyFloat(func(u *VehicleUpdate) **float64 { return &u.TimeToFull }),
 	telemetry.FieldInsideTemp:      applyFloatAsInt(func(u *VehicleUpdate) **int { return &u.InteriorTemp }),
 	telemetry.FieldOutsideTemp:     applyFloatAsInt(func(u *VehicleUpdate) **int { return &u.ExteriorTemp }),
 	telemetry.FieldOdometer:        applyFloatAsInt(func(u *VehicleUpdate) **int { return &u.OdometerMiles }),
