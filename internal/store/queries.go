@@ -11,7 +11,8 @@ import (
 
 const vehicleSelectColumns = `"id", "userId", "vin", "name",
 	"model", "year", "color", "status",
-	"chargeLevel", "estimatedRange", "speed", "gearPosition", "heading",
+	"chargeLevel", "estimatedRange", "chargeState", "timeToFull",
+	"speed", "gearPosition", "heading",
 	"latitude", "longitude", "locationName", "locationAddress",
 	"interiorTemp", "exteriorTemp",
 	"odometerMiles", "fsdMilesSinceReset",
@@ -106,6 +107,8 @@ func updateColumns(u VehicleUpdate) []updateColumn {
 		{"speed", derefInt(u.Speed), ""},
 		{"chargeLevel", derefInt(u.ChargeLevel), ""},
 		{"estimatedRange", derefInt(u.EstimatedRange), ""},
+		{"chargeState", derefString(u.ChargeState), ""},
+		{"timeToFull", derefFloat(u.TimeToFull), ""},
 		{"gearPosition", derefString(u.GearPosition), ""},
 		{"heading", derefInt(u.Heading), ""},
 		{"latitude", derefFloat(u.Latitude), ""},

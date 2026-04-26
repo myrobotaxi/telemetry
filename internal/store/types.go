@@ -33,6 +33,8 @@ type Vehicle struct {
 	Status               VehicleStatus
 	ChargeLevel          int
 	EstimatedRange       int
+	ChargeState          *string  // nullable; Tesla proto 179 enum string
+	TimeToFull           *float64 // nullable; Tesla proto 43, hours (decimal)
 	Speed                int
 	GearPosition         *string // nullable
 	Heading              int
@@ -63,6 +65,8 @@ type VehicleUpdate struct {
 	Speed                *int
 	ChargeLevel          *int
 	EstimatedRange       *int
+	ChargeState          *string  // Tesla proto 179 enum string
+	TimeToFull           *float64 // Tesla proto 43, hours (decimal)
 	GearPosition         *string
 	Heading              *int
 	Latitude             *float64

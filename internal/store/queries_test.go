@@ -130,6 +130,16 @@ func TestBuildTelemetryUpdate_NewNavFields(t *testing.T) {
 			update:  VehicleUpdate{TripDistRemaining: floatPtr(8.3), LastUpdated: time.Now()},
 			wantCol: "tripDistanceRemaining",
 		},
+		{
+			name:    "chargeState included in SET clause",
+			update:  VehicleUpdate{ChargeState: strPtr("Charging"), LastUpdated: time.Now()},
+			wantCol: "chargeState",
+		},
+		{
+			name:    "timeToFull included in SET clause",
+			update:  VehicleUpdate{TimeToFull: floatPtr(1.0667), LastUpdated: time.Now()},
+			wantCol: "timeToFull",
+		},
 	}
 
 	for _, tt := range tests {
