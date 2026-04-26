@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/mask"
 )
 
 // handleDriveUpdated accumulates GPS route points and periodically
@@ -44,22 +45,20 @@ func (b *Broadcaster) broadcastRoutePoints(ctx context.Context, eventID, vin str
 		return
 	}
 
+	// The live drive-route stream uses the wire field name
+	// "routeCoordinates" (preserved from MYR-117 to avoid a
+	// frontend-breaking rename). The canonical schema name in
+	// vehicle-state.schema.json is "navRouteCoordinates"; both names
+	// must be allow-listed in the mask for owners and viewers — see
+	// internal/mask/tables.go.
 	fields := map[string]any{
 		"routeCoordinates": coordsToMapbox(points),
 	}
 
-	msg, err := marshalWSMessage(msgTypeVehicleUpdate, vehicleUpdatePayload{
-		VehicleID: vehicleID,
-		Fields:    fields,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-	})
-	if err != nil {
-		b.logger.Error("broadcaster.broadcastRoutePoints: marshal failed",
-			slog.String("event_id", eventID),
-			slog.Any("error", err),
-		)
-		return
-	}
-
-	b.hub.Broadcast(vehicleID, msg)
+	b.hub.BroadcastMasked(
+		vehicleID,
+		mask.ResourceVehicleState,
+		time.Now().UTC().Format(time.RFC3339),
+		fields,
+	)
 }

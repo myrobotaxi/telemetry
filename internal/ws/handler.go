@@ -167,6 +167,26 @@ func (h *Hub) authenticateClient(ctx context.Context, client *Client, auth Authe
 
 	client.userID = userID
 	client.vehicleIDs = vehicleIDs
+
+	// Per websocket-protocol.md §4.6 / rest-api.md §5, resolve the
+	// caller's role for each authorized vehicle so the hub can
+	// pre-project frames with the right field mask. Failures are
+	// fail-closed: a vehicle without a role entry maps to the empty
+	// Role("") sentinel at broadcast time, which yields a deny-all
+	// projection — the client connects but receives no payload for
+	// that vehicle until a successful re-handshake.
+	for _, vid := range vehicleIDs {
+		role, roleErr := auth.ResolveRole(authCtx, userID, vid)
+		if roleErr != nil {
+			h.logger.Warn("ResolveRole failed; vehicle will be deny-all masked",
+				slog.String("vehicle_id", vid),
+				slog.String("user_id", userID),
+				slog.Any("error", roleErr),
+			)
+			continue
+		}
+		client.vehicleRoles[vid] = role
+	}
 	return nil
 }
 

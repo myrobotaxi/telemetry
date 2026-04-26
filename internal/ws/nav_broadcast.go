@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/mask"
 )
 
 // handleTelemetry transforms a VehicleTelemetryEvent into a vehicle_update
@@ -61,19 +62,15 @@ func (b *Broadcaster) handleTelemetry(ctx context.Context, event events.Event) {
 		fields["status"] = deriveVehicleStatus(fields)
 	}
 
-	msg, err := marshalWSMessage(msgTypeVehicleUpdate, vehicleUpdatePayload{
-		VehicleID: vehicleID,
-		Fields:    fields,
-		Timestamp: payload.CreatedAt.Format(time.RFC3339),
-	})
-	if err != nil {
-		b.logger.Error("broadcaster.handleTelemetry: marshal failed",
-			slog.String("event_id", event.ID),
-			slog.Any("error", err),
-		)
-		return
-	}
-	b.hub.Broadcast(vehicleID, msg)
+	// Per-role projection per websocket-protocol.md §4.6 — the hub
+	// pre-marshals one frame per role using the v1 vehicle_state mask
+	// matrix and fans out the role-appropriate bytes.
+	b.hub.BroadcastMasked(
+		vehicleID,
+		mask.ResourceVehicleState,
+		payload.CreatedAt.Format(time.RFC3339),
+		fields,
+	)
 }
 
 // flushNav is the callback invoked by the navAccumulator when a VIN's
@@ -98,17 +95,10 @@ func (b *Broadcaster) flushNav(vin string, fields map[string]events.TelemetryVal
 	now := time.Now().UTC().Format(time.RFC3339)
 	clientFields["lastUpdated"] = now
 
-	msg, err := marshalWSMessage(msgTypeVehicleUpdate, vehicleUpdatePayload{
-		VehicleID: vehicleID,
-		Fields:    clientFields,
-		Timestamp: now,
-	})
-	if err != nil {
-		b.logger.Error("broadcaster.flushNav: marshal failed",
-			slog.Any("error", err),
-		)
-		return
-	}
-
-	b.hub.Broadcast(vehicleID, msg)
+	b.hub.BroadcastMasked(
+		vehicleID,
+		mask.ResourceVehicleState,
+		now,
+		clientFields,
+	)
 }
