@@ -45,6 +45,7 @@ Every FR/NFR listed here is anchored in at least one section of this doc. The ta
 | **NFR-3.11** | Reconnect re-fetches DB snapshot, resumes live stream | §7.2 reconnect sequence; §7.3 snapshot-resume semantics |
 | **NFR-3.12** | Graceful offline: cached state visible, no forced reloads | §7.2 reconnect invariants #2, #3 |
 | **NFR-3.13** | Offline tolerance: no maximum on cached visibility | §7.2 reconnect invariants #3 |
+| **NFR-3.19** | Every WS broadcast projected through recipient's role mask; no raw fan-out | §4.6 per-role projection at broadcast (matrix in [`rest-api.md`](rest-api.md) §5.2) |
 | **NFR-3.21** | Vehicle ownership enforced on every subscription | §2.2 vehicle resolution; §4.5 ownership filtering (+ DV-09 mid-connection drift) |
 | **NFR-3.22** | TLS in transit (WSS for browsers/apps) | §1.1 transport; §1.2 origin enforcement |
 | **NFR-3.36** + **NFR-3.36a-d** | Apple platform lifecycle (Swift SDK only): consumer-driven foreground reconnect, suspended-socket close semantics, background-task entry points | §7.5 Apple platform suspend/resume; detailed bindings in [`swift-lifecycle.md`](swift-lifecycle.md) |
@@ -624,9 +625,33 @@ Per [`state-machine.md`](state-machine.md) §4.2, `connectivity` does NOT direct
 
 The SDK can rely on the following contract: **an authenticated production client will NEVER receive a `vehicle_update`, `drive_started`, `drive_ended`, or `connectivity` frame for a vehicle it does not own at handshake time.**
 
-> **Divergence (DV-09):** Ownership changes after the handshake (e.g., invite revoked) take effect only on the next reconnection -- the in-memory `vehicleIDs` snapshot is not refreshed mid-connection. Tracked in §10.
+> **Divergence (DV-09):** Ownership AND role changes after the handshake take effect only on the next reconnection -- both the `vehicleIDs` snapshot and the per-vehicle role snapshot used by §4.6 are captured at handshake time and are not refreshed mid-connection. Tracked in §10.
 
 `heartbeat` frames are broadcast to ALL clients regardless of vehicle ownership via [`Hub.BroadcastAll`](../../internal/ws/hub.go) line 90 -- they carry no vehicle-scoped data.
+
+### 4.6 Per-role projection at broadcast (NFR-3.19)
+
+> **Anchored:** NFR-3.19, NFR-3.20, FR-5.4. Per-resource mask matrix is canonical in [`rest-api.md`](rest-api.md) §5.2; the same matrix governs both transports.
+
+NFR-3.19 requires every WebSocket broadcast to be projected through the recipient's role mask before sending. To satisfy this without per-client marshaling cost, the hub MUST pre-marshal **once per role per frame**, then fan out the role-appropriate bytes to each subscribed client based on that client's per-vehicle role:
+
+```
+EventBus -> Hub.Broadcast(vehicleId, plaintext)
+  framesByRole := { for each role in v1Roles:
+      role -> marshal(mask.Apply(plaintext, mask.For(resourceType, role)))
+  }
+  for each client subscribed to vehicleId:
+      role := client.vehicleRoles[vehicleId]   // resolved at handshake (§2.2)
+      client.enqueue(framesByRole[role])
+```
+
+Marshal cost is `O(|roles|)` per frame, fan-out is `O(|clients|)`. With v1's two-role matrix (`owner`, `viewer`) this is essentially free; FR-5.5's future `limited_viewer` makes it `O(3)`.
+
+The mask matrix is the **same matrix used by the REST handler layer** (`rest-api.md` §5.2) — a single source-of-truth per resource type. The Go implementation lives in `internal/mask/` and is consumed by both the WS hub and the REST handlers (`rest-api.md` §5.1 handler-layer rule). This keeps owner/viewer behavior identical across transports and gives `contract-guard` a single set of mask tables to validate against the schema.
+
+`Client.vehicleRoles map[VehicleID]Role` is populated at handshake time alongside `Client.vehicleIDs`. The `Authenticator.ResolveRole(ctx, userId, vehicleId)` interface method returns the role for each owned vehicle. Like `vehicleIDs`, `vehicleRoles` is a snapshot — see DV-09 below for the mid-connection refresh gap, which extends to role downgrade (e.g., a viewer being upgraded to owner mid-connection does not reflect until reconnection).
+
+**Empty-payload suppression.** If a role's mask projection yields a payload with no remaining fields (every field in the original frame was masked away), the hub MUST omit the frame for that role rather than send an empty `vehicle_update`. Sending an empty broadcast would leak "something happened on this vehicle" to a viewer who shouldn't even know the field existed.
 
 ---
 
@@ -1003,7 +1028,7 @@ Read this legend before scanning the catalogue. A row's **Status** column classi
 | **DV-06** | Open | `auth_timeout` close code conflated with `auth_failed` | Both errors close with `websocket.StatusPolicyViolation` (1008). SDK has to read the `error.code` to decide retry policy; fragile if the error frame races the close. | Map `auth_timeout` to a dedicated close code (proposed: `4001` Auth Token Expired) so SDKs can branch on the close code alone. Requires updating `handler.go:handleUpgrade` error path + SDK close-code switch. | FR-7.1, FR-7.3, §6.2 | `MYR-XX Emit distinct close code for auth_timeout vs auth_failed` |
 | **DV-07** | Open (reduced) | Client control frames (`subscribe`/`unsubscribe`/`ping`/`pong`) and typed `permission_denied` | `readPump` ignores all post-auth client frames. Per-vehicle routing is implicit at handshake time. No typed error frame for `permission_denied`/`vehicle_not_owned`. | Implement `subscribe`/`unsubscribe` for per-vehicle routing, `sinceSeq` resume (depends on DV-02), and typed `permission_denied` / `vehicle_not_owned` error frames with corresponding close code 4002. **Note: `auth_ok` has been pulled OUT of DV-07 and is v1-required** -- see the new §2.3 / §4 catalog entry and the RESOLVED divergence is not tracked separately (the wire contract is the trigger for the implementation issue). | FR-8.1, NFR-3.21, §5 | `MYR-XX Implement per-vehicle subscribe/unsubscribe + permission_denied error frame` |
 | **DV-08** | **RESOLVED (target documented; wiring still pending)** | Per-IP and per-user connection caps | `HandlerConfig.MaxConnectionsPerIP` exists in [`handler.go`](../../internal/ws/handler.go) line 33 and `handleUpgrade` checks it, but [`cmd/telemetry-server/main.go`](../../cmd/telemetry-server/main.go) line 178 constructs `HandlerConfig` without populating it. `WebSocketConfig.MaxConnectionsPerUser` (default **5**, [`internal/config/defaults.go`](../../internal/config/defaults.go) line 67) exists but is not threaded into the handler either. | **Ship both caps:** per-IP **64** (pre-auth, breach -> HTTP 429, no WS handshake), per-user **5** (post-auth, breach -> `error` frame `code="rate_limited"` + close **4003 Server Overload**). See §1.3 for enforcement points and rationale and §6.1.1 for the `rate_limited` reconnect policy. The wiring change is a follow-up implementation issue. | NFR-3.6, §1.3, §6.1.1, §6.2 | `MYR-XX Wire MaxConnectionsPerIP (64) + MaxConnectionsPerUser (5) into HandlerConfig with asymmetric enforcement` |
-| **DV-09** | Open | Vehicle ownership snapshot stale mid-connection | `Client.vehicleIDs` is captured at handshake time. Revoking an invite while a viewer is connected does not stop that viewer's stream until reconnection. | Add a hub-side ownership refresh hook (server-pushed) OR force-disconnect affected clients with close code `4002`. Needs a mechanism for the sharing service to notify the hub. | NFR-3.21, FR-5.3, §4.5 | `MYR-XX Refresh WebSocket client vehicle scope on invite revocation` |
+| **DV-09** | Open | Vehicle ownership AND role snapshot stale mid-connection | `Client.vehicleIDs` and `Client.vehicleRoles` are both captured at handshake time. Revoking an invite while a viewer is connected does not stop that viewer's stream; promoting a viewer to owner (or vice versa) does not change the per-frame role projection (§4.6) until reconnection. | Add a hub-side ownership/role refresh hook (server-pushed) OR force-disconnect affected clients with close code `4002`. Needs a mechanism for the sharing service to notify the hub. | NFR-3.19, NFR-3.21, FR-5.3, §4.5, §4.6 | `MYR-XX Refresh WebSocket client vehicle scope and role on share-state change` |
 | **DV-10** | Open | `speed` not in GPS atomic group | `requirements.md` NFR-3.1 lists `speed` in the GPS group. [`vehicle-state-schema.md`](vehicle-state-schema.md) §7.1 resolves `speed` as ungrouped (2 s cadence vs. 10 m GPS delta filter). Server delivers `speed` independently. | Amend NFR-3.1 in `requirements.md` to reflect the resolved decision. No wire change needed. | NFR-3.1, §4.1.7 | `MYR-XX Amend NFR-3.1 to remove speed from GPS atomic group` |
 | **DV-11** | **RESOLVED** | `drive_ended` wire payload is summary-only (FR-3.4 scope split) | Server emits summary fields only; full FR-3.4 fields are persisted in `Drive` and fetched via REST `GET /drives/{id}`. | **v1 ships the summary on the wire + an explicit `fetchDrive(driveId)` SDK helper** (unanimous recommendation from sdk-typescript and sdk-swift). Target SDK API: `client.onDriveEnded(cb)` + `await client.fetchDrive(id)` + TS `useDrive(id)` React hook + Swift `client.fetchDrive(_:)` async method. REST endpoint is `GET /drives/{id}` -- authoritative reference is [`rest-api.md`](rest-api.md) (placeholder until that doc is authored; see README index). No wire change; documented in §4.3 and [`state-machine.md`](state-machine.md) §3.3 / §4.1. | FR-3.1, FR-3.4, §4.3 | (No implementation issue needed for server; TS/Swift SDK issues implement `fetchDrive`.) |
 | **DV-12** | **RESOLVED** | `drive_ended.duration` string format dropped | **Resolved by [MYR-32](https://linear.app/myrobotaxi/issue/MYR-32).** Server now emits `durationSeconds` (float64, `DriveStats.Duration.Seconds()`) on the `drive_ended` wire frame. The Go `time.Duration.String()` format is no longer emitted. `messages.go` struct field renamed from `Duration string` to `DurationSeconds float64` with JSON tag `"durationSeconds"`. `broadcaster.go:handleDriveEnded` calls `.Seconds()` instead of `.String()`. Tests verify the JSON key name and float64 roundtrip. | (Resolved.) | FR-3.4 ergonomics, §4.3 | [`MYR-32`](https://linear.app/myrobotaxi/issue/MYR-32) — Emit drive_ended.durationSeconds (replace duration string) |

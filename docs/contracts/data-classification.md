@@ -391,6 +391,20 @@ The `contract-guard` agent/CI check enforces the following rules derived from th
 
 **Fix:** Implement AES-256-GCM encrypt/decrypt in the store layer and add a round-trip test.
 
+### Rule CG-DC-5: Role-mask coverage for SDK-exposed fields
+
+**Anchored:** NFR-3.19, NFR-3.20, FR-5.4, FR-5.5.
+
+**Trigger:** Any PR that adds a field to a payload schema (`docs/contracts/schemas/vehicle-state.schema.json`, drive-detail / drive-route response shapes in `docs/contracts/rest-api.md` §7), OR any PR that adds a column to a `Vehicle` / `Drive` / `DriveRoutePoint` / `Invite` row that is then exposed over REST or WebSocket.
+
+**Check:** Every persisted column listed in this document's §1 that is exposed over a REST endpoint or WebSocket frame MUST appear in [`rest-api.md`](rest-api.md) §5.2's per-resource mask matrix — under at least one role's "Visible fields" set, OR explicitly enumerated as "not exposed in v1" with rationale. The mask matrix is the single source-of-truth consumed by both the WebSocket per-role projection (`websocket-protocol.md` §4.6) and the REST handler-layer mask (`rest-api.md` §5.1); a field that lands in a payload schema without a §5.2 mask entry would default to "owner-only via fail-closed allow-list" and silently disappear from viewer payloads, hiding the gap from review.
+
+**Why it matters:** without this gate, a field can be added to a wire schema (e.g., a new `Vehicle.someField`) and merged before the §5.2 matrix decides whether viewers should see it. The runtime fail-closed default keeps viewers safe from leaks but creates silent UX regressions ("why is the viewer's app missing the new field?") that surface only at runtime.
+
+**Fix:** Update [`rest-api.md`](rest-api.md) §5.2 in the same PR. Either add the field to the appropriate role's "Visible fields" list, or document explicitly that it is not exposed in v1.
+
+**Rule does NOT apply to:** Prisma-owned columns that are never surfaced over REST or WS (e.g., `User.id`, `Account.refresh_token`). These are documented in §1 for completeness but are out of the SDK contract surface.
+
 ---
 
 ## 6. Classification summary

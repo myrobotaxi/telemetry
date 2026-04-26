@@ -45,7 +45,7 @@ Every FR/NFR listed here is anchored in at least one section of this doc. The ta
 | **NFR-3.5** | Snapshot must contain enough data to render the full UI (no per-field spinners) | §7.1 `GET /vehicles/{vehicleId}/snapshot` |
 | **NFR-3.11** | Reconnect re-fetches DB snapshot before resuming live stream | §7.1 + cross-ref to `websocket-protocol.md` §7.2 reconnect sequence |
 | **NFR-3.19** | Every WS broadcast projected through recipient's role mask; no raw fan-out | §5 RBAC field masks (applied to REST too) |
-| **NFR-3.20** | Persisted DB reads respect viewer's role-based field visibility | §5 RBAC field masks |
+| **NFR-3.20** | REST responses are projected through the caller's role mask before encoding (handler-layer mask; the underlying DB read returns plaintext and is role-agnostic) | §5 RBAC field masks |
 | **NFR-3.21** | Vehicle ownership enforced on every API call | §3 Authentication + §5 RBAC |
 | **NFR-3.22** | TLS in transit for all external connections | §2.1 Transport |
 | **NFR-3.23** | AES-256-GCM application-level encryption for P1 fields | §7.4 drive route transport note; §8 resource schemas |
@@ -334,11 +334,19 @@ v1 defines two roles:
 | `owner` | Full | Full (create/delete invites, delete account) | FR-5.4 |
 | `viewer` | Full read of the vehicle's live state, drive history, and route playback | None | FR-5.4 |
 
-The third architectural slot `limited_viewer` is NOT a v1 role but is kept available as an extension seam per FR-5.5. The masking machinery below is defined as a static per-role projection applied at the store layer, so adding a third role is a one-file change (a new mask entry) rather than an architectural change.
+The third architectural slot `limited_viewer` is NOT a v1 role but is kept available as an extension seam per FR-5.5. The masking machinery below is defined as a static per-role projection applied at the handler layer (see §5.1) via `internal/mask/`, so adding a third role is a one-file change (a new mask entry) rather than an architectural change.
 
 ### 5.1 Masking rule
 
-Every REST response MUST be projected through the caller's role mask **server-side** before being written to the response body. No raw fan-out to callers (NFR-3.19 is about the WS path; NFR-3.20 extends the same rule to REST). The mask is applied in the store layer -- the REST handler receives an already-masked object from the repository.
+Every REST response MUST be projected through the caller's role mask **server-side** before being written to the response body. No raw fan-out to callers (NFR-3.19 is about the WS path; NFR-3.20 extends the same rule to REST).
+
+The mask is applied at the **handler layer**: the store returns plaintext, fully-decrypted objects, and each REST handler invokes `mask.Apply(obj, role)` from `internal/mask/` before encoding. Three reasons the store stays role-agnostic:
+
+1. **Store reuse.** The same `VehicleRepo.Get` is called from cron jobs (drive pruning per `data-lifecycle.md` §5), audit-log writers, and admin / ops tooling that have no role concept. Making the store role-aware would force every non-handler caller to fabricate a fake role.
+2. **Test isolation.** Store tests don't need to set up role plumbing; they exercise the persistence layer in isolation.
+3. **Single point of consistency with the WS path.** The WebSocket broadcaster reads from the event bus, not the store. If the mask were attached to the store layer, the WS path would bypass it entirely. Anchoring the mask at the handler layer keeps it adjacent to the WS hub's per-role pre-projection (`websocket-protocol.md` §4.6) — both paths consume the same `internal/mask/` matrix.
+
+**Output shape: absent, not nulled.** The mask MUST remove denied fields from the JSON entirely (no key emitted) rather than emit them with a `null` value. Emitting `null` would leak the existence of the field to the viewer, which is itself information. The Go implementation projects through `map[string]any` rather than relying on `omitempty` (which only suppresses zero values, not access-control denials).
 
 ### 5.2 Per-resource masks
 
@@ -348,7 +356,7 @@ Every REST response MUST be projected through the caller's role mask **server-si
 |------|----------------|-------|
 | `owner` | All fields in [`schemas/vehicle-state.schema.json`](schemas/vehicle-state.schema.json) | Including GPS, nav, charge, gear -- the full v1 `VehicleState` shape. |
 | `viewer` | All fields EXCEPT `licensePlate` | **Note:** `licensePlate` is a Prisma-owned column per [`data-classification.md`](data-classification.md) §1.3 and is NOT currently a member of `vehicle-state.schema.json`, so this mask rule is **forward-looking**: it codifies the behavior the first time `licensePlate` is surfaced over the SDK. Viewers retain full GPS, nav, and charge visibility because the whole point of sharing is to watch the vehicle in real time (FR-5.1, FR-5.4). |
-| `limited_viewer` (FR-5.5 future slot) | All fields EXCEPT `licensePlate`, `navRouteCoordinates`, `destinationName`, `destinationAddress`, `destinationLatitude`, `destinationLongitude`, `originLatitude`, `originLongitude`; `latitude`/`longitude` reduced to a coarse-grained hash (city-block resolution) | Documented here as the extension seam for FR-5.5. NOT implemented in v1. The mask is a static per-role projection; adding the `limited_viewer` row is a one-file store-layer change. |
+| `limited_viewer` (FR-5.5 future slot) | All fields EXCEPT `licensePlate`, `navRouteCoordinates`, `destinationName`, `destinationAddress`, `destinationLatitude`, `destinationLongitude`, `originLatitude`, `originLongitude`; `latitude`/`longitude` reduced to a coarse-grained hash (city-block resolution) | Documented here as the extension seam for FR-5.5. NOT implemented in v1. The mask is a static per-role projection; adding the `limited_viewer` row is a one-file handler-layer change in `internal/mask/`. |
 
 #### 5.2.2 Drive list (`GET /api/vehicles/{vehicleId}/drives`)
 
@@ -390,11 +398,42 @@ Note on the Invite response shape: `email` is **P1** per `data-classification.md
 |----------|-------------|-------|
 | `DELETE /api/users/me` | Self only | The authenticated user can delete only their own account. There is no admin deletion, no cross-user deletion, no "delete all viewers of my vehicle" operation. |
 
-### 5.3 Extension seam for a third role (FR-5.5)
+### 5.3 Audit log sampling for masked responses
 
-The RBAC masking machinery is implemented as a static lookup table keyed by `(resourceType, role)` at the store layer. Adding a new role is a three-step change:
+> **Anchored:** NFR-3.20, FR-10 (audit infrastructure), `data-lifecycle.md` §4.
 
-1. Add the role name to the `Role` enum in the store layer.
+Every REST response and every WebSocket frame whose mask projection removed at least one field MUST be audit-logged at a **1% sampling rate**, computed deterministically by hash. The hash inputs differ per channel because the WS audit emit is per-`(vehicleId, role, frame)` at the hub (not per-client), while the REST audit emit is per-request:
+
+```
+REST: shouldAudit := hash(userId || requestId || resourceId) mod 100 == 0
+WS:   shouldAudit := hash(vehicleId || role || frameSeq)    mod 100 == 0
+```
+
+`requestId` is the `X-Request-ID` echoed per §4.4. `frameSeq` is the envelope sequence number once DV-02 lands; until then, the hub uses an in-process monotonic per-vehicle counter.
+
+Hash-based sampling rather than a counter avoids concentrating samples on bursty vehicles (a counter samples every 100th regardless of source; hash-based sampling distributes uniformly across the active vehicle set, which is essential for incident triage).
+
+Audit entries land in the existing `AuditLog` table per `data-lifecycle.md` §4 with:
+
+| Column | Value |
+|---|---|
+| `action` | `mask_applied` (NEW enum value — see `data-lifecycle.md` §4.2) |
+| `targetType` | `rest_response` for REST, `ws_broadcast` for WebSocket |
+| `targetId` | The `vehicleId` or `driveId` whose response was masked |
+| `initiator` | `user` (the consumer's request triggered the response) |
+| `metadata` | `{ "role": "viewer", "channel": "rest" \| "ws", "fieldsMasked": ["licensePlate", ...], "endpoint": "/api/vehicles/{id}/snapshot" }` |
+
+`metadata.fieldsMasked` is a list of column names. Column names are P0 (they appear in this contract and in `data-classification.md` §1) — the audit log MUST NOT contain any actual masked field values, only their names.
+
+Audit-log entries for masked responses are themselves P0 (per `data-classification.md` §2.3 already-classified rules) and follow the same indefinite retention as all other audit entries (NFR-3.29).
+
+For WebSocket broadcasts, the audit emit happens **once per (vehicleId, role, frame)** at the hub layer, not per client — keeping the audit volume proportional to vehicle activity, not to viewer count.
+
+### 5.4 Extension seam for a third role (FR-5.5)
+
+The RBAC masking machinery is implemented as a static lookup table keyed by `(resourceType, role)` in `internal/mask/`, consumed by both the REST handler layer (§5.1) and the WebSocket hub's per-role pre-projection (`websocket-protocol.md` §4.6). Adding a new role is a three-step change:
+
+1. Add the role name to the `Role` enum in `internal/auth/`.
 2. Add mask entries for each resource type that the new role should see (or inherit from `viewer` with a diff).
 3. Wire the role into the `Authenticator.ResolveRole(userId, vehicleId)` call site.
 

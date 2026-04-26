@@ -294,6 +294,7 @@ CREATE INDEX "AuditLog_timestamp_idx" ON "AuditLog" ("timestamp");
 | `drive_deleted` | Single drive record deleted | User |
 | `invite_revoked` | Sharing invite revoked | User |
 | `tokens_refreshed` | OAuth tokens rotated | System (token refresh) |
+| `mask_applied` | Role-based field mask removed at least one field from a REST response or WebSocket broadcast (sampled at 1%) | System (broadcast / handler layer); see [`rest-api.md`](rest-api.md) §5.3 |
 
 **`targetType` values:**
 
@@ -304,6 +305,8 @@ CREATE INDEX "AuditLog_timestamp_idx" ON "AuditLog" ("timestamp");
 | `drive` | A Drive record (or batch of drives) |
 | `invite` | An Invite record |
 | `account` | An Account (OAuth) record |
+| `rest_response` | A REST API response that was mask-projected (paired with `action: mask_applied`) |
+| `ws_broadcast` | A WebSocket frame that was mask-projected (paired with `action: mask_applied`) |
 
 **`initiator` values:**
 
