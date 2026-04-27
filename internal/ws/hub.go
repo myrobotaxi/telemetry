@@ -97,20 +97,29 @@ func (h *Hub) Broadcast(vehicleID string, msg []byte) {
 }
 
 // BroadcastMasked is the per-role projection broadcast path required
-// by websocket-protocol.md §4.6. It pre-marshals one frame per v1 role
-// using the field mask from internal/mask, then fans out the
-// role-appropriate bytes to each authorized client based on that
-// client's per-vehicle role (populated at handshake time).
+// by websocket-protocol.md §4.6. It pre-marshals one frame per
+// active role for this vehicle (the set of distinct roles held by
+// currently-subscribed clients), then fans out the role-appropriate
+// bytes to each authorized client based on that client's per-vehicle
+// role (populated at handshake time).
 //
-// Marshal cost is O(|roles|) per call; fan-out is O(|clients|). Per
-// §4.6 "empty-payload suppression": if a role's mask projects the
-// payload down to zero fields, no frame is emitted for clients holding
-// that role — a viewer who shouldn't even know an event happened on
-// the vehicle MUST NOT see an empty vehicle_update.
+// Marshal cost is O(|active roles for this vehicle|), bounded above by
+// O(|v1 roles|). Fan-out is O(|clients|). Per §4.6 "empty-payload
+// suppression": if a role's mask projects the payload down to zero
+// fields, no frame is emitted for clients holding that role — a viewer
+// who shouldn't even know an event happened on the vehicle MUST NOT
+// see an empty vehicle_update.
 //
 // Clients whose roleFor(vehicleID) returns the empty Role("") sentinel
 // (e.g., handshake-time ResolveRole failed) receive nothing — the
 // fail-closed behavior described in rest-api.md §5.
+//
+// Active-role pre-pass: we walk h.clients ONCE under RLock to collect
+// the distinct roles actually subscribed for this vehicleID, then only
+// marshal frames for those roles. Skipping unused roles matters in
+// practice today (every connection in v1 is owner — viewers via the
+// Invite flow haven't shipped yet) and the savings grow with FR-5.5's
+// third role. PR #195 review suggestion #1.
 func (h *Hub) BroadcastMasked(
 	vehicleID string,
 	resource mask.ResourceType,
@@ -121,14 +130,30 @@ func (h *Hub) BroadcastMasked(
 		return
 	}
 
-	framesByRole := buildRoleFrames(vehicleID, resource, timestamp, payload)
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	// Pass 1: collect the distinct set of roles held by clients
+	// subscribed to this vehicle. O(|clients|).
+	activeRoles := make(map[auth.Role]struct{}, len(v1Roles))
+	for client := range h.clients {
+		if !client.hasVehicle(vehicleID) {
+			continue
+		}
+		activeRoles[client.roleFor(vehicleID)] = struct{}{}
+	}
+	if len(activeRoles) == 0 {
+		return
+	}
+
+	// Pass 2: marshal only the frames we will actually use.
+	framesByRole := buildRoleFrames(vehicleID, resource, timestamp, payload, activeRoles)
 	if len(framesByRole) == 0 {
 		return
 	}
 
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-
+	// Pass 3: fan out under the same RLock so the client set we marshaled
+	// for is the same client set we deliver to (no torn snapshot).
 	for client := range h.clients {
 		if !client.hasVehicle(vehicleID) {
 			continue
@@ -156,11 +181,13 @@ func (h *Hub) BroadcastMasked(
 var v1Roles = []auth.Role{auth.RoleOwner, auth.RoleViewer}
 
 // buildRoleFrames produces the per-role pre-marshaled vehicle_update
-// frames for a single broadcast. Returns a map[role]frame; an entry
-// with a nil value indicates empty-payload suppression for that role.
-// Marshal failures fall back to "no frame for that role" rather than
-// an error return — a single role's marshal failure must not poison
-// the broadcast for other roles.
+// frames for a single broadcast. Iterates ONLY the activeRoles set
+// (distinct roles held by clients subscribed to this vehicle) to avoid
+// wasting marshal cost on roles no one is listening with. Returns a
+// map[role]frame; an entry with a nil value indicates empty-payload
+// suppression for that role. Marshal failures fall back to "no frame
+// for that role" rather than an error return — a single role's marshal
+// failure must not poison the broadcast for other roles.
 //
 // TODO(MYR-XX audit-log): when AuditLog table exists, for each role
 // where len(fieldsMasked) > 0 AND mask.ShouldAuditWS(vehicleID, role,
@@ -174,9 +201,10 @@ func buildRoleFrames(
 	resource mask.ResourceType,
 	timestamp string,
 	payload map[string]any,
+	activeRoles map[auth.Role]struct{},
 ) map[auth.Role][]byte {
-	frames := make(map[auth.Role][]byte, len(v1Roles))
-	for _, role := range v1Roles {
+	frames := make(map[auth.Role][]byte, len(activeRoles))
+	for role := range activeRoles {
 		m := mask.For(resource, role)
 		projected, fieldsMasked := mask.Apply(payload, m)
 		_ = fieldsMasked // see TODO above

@@ -3,6 +3,7 @@ package mask
 import (
 	"encoding/binary"
 	"hash/fnv"
+	"io"
 	"strconv"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/auth"
@@ -55,10 +56,10 @@ func ShouldAuditWS(vehicleID string, role auth.Role, frameSeq uint64) bool {
 // writeField writes a length-prefixed string into the hash. The length
 // prefix prevents ambiguity between (e.g.) {"abc", "def"} and
 // {"ab", "cdef"} which would otherwise hash to the same byte sequence
-// when concatenated.
-func writeField(h interface {
-	Write([]byte) (int, error)
-}, s string) {
+// when concatenated. `hash.Hash64` already implements `io.Writer`, so
+// the hasher is passed in directly without an inline anonymous
+// interface (PR #195 review suggestion #2).
+func writeField(h io.Writer, s string) {
 	_, _ = h.Write([]byte(strconv.Itoa(len(s))))
 	_, _ = h.Write([]byte(":"))
 	_, _ = h.Write([]byte(s))
