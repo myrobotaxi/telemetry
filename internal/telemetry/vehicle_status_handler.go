@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/tnando/my-robo-taxi-telemetry/internal/mask"
 	"github.com/tnando/my-robo-taxi-telemetry/pkg/sdk"
 )
 
@@ -29,17 +30,18 @@ type ConnInfo struct {
 // vehicle's current connection status. The frontend polls this endpoint
 // during onboarding to detect when a vehicle connects.
 type VehicleStatusHandler struct {
-	auth     tokenValidator
-	vehicles VehicleOwnerLookup
-	roles    roleResolver    // optional: nil disables mask plumbing
-	idLookup vehicleIDLookup // optional: nil disables mask plumbing
-	presence VehiclePresence
-	logger   *slog.Logger
+	auth         tokenValidator
+	vehicles     VehicleOwnerLookup
+	roles        roleResolver      // optional: nil disables mask plumbing
+	idLookup     vehicleIDLookup   // optional: nil disables mask plumbing
+	maskResource mask.ResourceType // populated by WithMask alongside roles/idLookup
+	presence     VehiclePresence
+	logger       *slog.Logger
 }
 
 // NewVehicleStatusHandler creates a handler that returns real-time vehicle
 // connection status. The presence provider is typically the telemetry Receiver.
-// Pass WithRoleResolver to enable field-mask projection of the response.
+// Pass WithMask to enable field-mask projection of the response.
 func NewVehicleStatusHandler(
 	tokens tokenValidator,
 	vehicles VehicleOwnerLookup,

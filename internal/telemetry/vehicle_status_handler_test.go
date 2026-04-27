@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/auth"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/mask"
 	"github.com/tnando/my-robo-taxi-telemetry/pkg/sdk"
 )
 
@@ -312,7 +313,8 @@ func TestVehicleStatusHandler_MaskedResponse_RoleResolverError(t *testing.T) {
 		&stubVehicleOwner{ownerID: "user-1"},
 		&stubVehiclePresence{},
 		discardLogger(),
-		WithRoleResolver(
+		WithMask(
+			mask.ResourceVehicleState,
 			&stubRoleResolver{err: errors.New("DB down")},
 			&stubVehicleIDLookup{id: "veh-1"},
 		),
@@ -338,10 +340,10 @@ func TestVehicleStatusHandler_MaskedResponse_RoleResolverError(t *testing.T) {
 }
 
 // TestVehicleStatusHandler_NoMaskOption_RawResponse verifies the
-// backward-compatible path: when WithRoleResolver is NOT supplied, the
-// handler emits the unmasked response (the response shape is a
-// connectivity probe, NOT a canonical VehicleState — see the comment
-// on writeMaskedResponse for why mask plumbing is opt-in here).
+// backward-compatible path: when WithMask is NOT supplied, the handler
+// emits the unmasked response (the response shape is a connectivity
+// probe, NOT a canonical VehicleState — see the comment on
+// writeMaskedResponse for why mask plumbing is opt-in here).
 func TestVehicleStatusHandler_NoMaskOption_RawResponse(t *testing.T) {
 	handler := NewVehicleStatusHandler(
 		&stubTokenValidator{userID: "user-1"},

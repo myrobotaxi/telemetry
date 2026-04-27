@@ -29,17 +29,33 @@ type vehicleIDLookup interface {
 
 // VehicleStatusOption configures optional dependencies on
 // VehicleStatusHandler. The mask-plumbing dependencies (roleResolver,
-// vehicleIDLookup) are optional because not every wiring path has them
-// yet — when nil, the handler emits the response without role-based
-// projection (equivalent to RoleOwner allow-all for v1 callers).
+// vehicleIDLookup, maskResource) are optional because not every wiring
+// path has them yet — when nil, the handler emits the response without
+// role-based projection (equivalent to RoleOwner allow-all for v1
+// callers).
 type VehicleStatusOption func(*VehicleStatusHandler)
 
-// WithRoleResolver enables role-based field masking. Both the
-// roleResolver and vehicleIDLookup MUST be supplied together — the
-// resolver needs a vehicleID, and the only way to derive it from the
-// path-parameter VIN is via the lookup.
-func WithRoleResolver(roles roleResolver, idLookup vehicleIDLookup) VehicleStatusOption {
+// WithMask enables role-based field masking on the handler. The caller
+// MUST pass an explicit `mask.ResourceType` so the choice of allow-list
+// is conscious — the response struct's wire-shape must match the named
+// resource's allow-list in `internal/mask/tables.go` or fields will be
+// silently stripped.
+//
+// Today this handler emits a connectivity-probe response (`vin`,
+// `connected`, `last_message_at`, ...) whose shape does NOT match
+// `mask.ResourceVehicleState` (the canonical VehicleState shape).
+// Wiring this option for the connectivity probe would silently deny
+// almost every field even for owners. The option exists for the future
+// `/api/vehicles/{vehicleID}/snapshot` endpoint (rest-api.md §5.2.1)
+// which will reuse this handler's plumbing — `cmd/telemetry-server/
+// main.go` deliberately does NOT pass this option in v1.
+//
+// Both the `roleResolver` and `vehicleIDLookup` MUST be supplied
+// together — the resolver needs a vehicleID, and the only way to
+// derive it from the path-parameter VIN is via the lookup.
+func WithMask(resource mask.ResourceType, roles roleResolver, idLookup vehicleIDLookup) VehicleStatusOption {
 	return func(h *VehicleStatusHandler) {
+		h.maskResource = resource
 		h.roles = roles
 		h.idLookup = idLookup
 	}
@@ -106,7 +122,7 @@ func (h *VehicleStatusHandler) writeMaskedResponse(
 		return
 	}
 
-	projected, fieldsMasked := mask.Apply(asMap, mask.For(mask.ResourceVehicleState, role))
+	projected, fieldsMasked := mask.Apply(asMap, mask.For(h.maskResource, role))
 	_ = fieldsMasked // see TODO(MYR-XX audit-log) above
 
 	h.writeJSON(w, http.StatusOK, projected)

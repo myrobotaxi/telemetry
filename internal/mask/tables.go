@@ -220,9 +220,10 @@ func setFromFields(fields []string) ResourceMask {
 	return ResourceMask{Allowed: allowed}
 }
 
-// removeField returns a copy of fields with the first occurrence of
-// name removed. Used to derive viewer allow-lists from owner
-// allow-lists by exclusion (e.g., owner minus licensePlate).
+// removeField returns a copy of fields with all occurrences of name
+// removed. Used to derive viewer allow-lists from owner allow-lists by
+// exclusion (e.g., owner minus licensePlate). The loop never breaks on
+// match — every input element that equals name is filtered out.
 func removeField(fields []string, name string) []string {
 	out := make([]string, 0, len(fields))
 	for _, f := range fields {
