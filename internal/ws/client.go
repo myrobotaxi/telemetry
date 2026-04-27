@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/tnando/my-robo-taxi-telemetry/internal/auth"
 )
 
 const (
@@ -25,21 +27,42 @@ type Client struct {
 	conn       *websocket.Conn
 	userID     string
 	vehicleIDs []string // vehicles this user is authorized to see
-	remoteAddr string
-	send       chan []byte
-	hub        *Hub
-	logger     *slog.Logger
+	// vehicleRoles maps vehicleID -> role for this client. Populated at
+	// handshake time alongside vehicleIDs (handler.go authenticateClient).
+	// Per websocket-protocol.md §4.6, the hub looks up the role here to
+	// pick the role-appropriate pre-marshaled frame to enqueue. A
+	// missing entry resolves to the empty Role("") sentinel and the
+	// hub treats it as deny-all (fail-closed). See DV-09 for the
+	// known mid-connection refresh gap (role downgrade requires
+	// reconnect).
+	vehicleRoles map[string]auth.Role
+	remoteAddr   string
+	send         chan []byte
+	hub          *Hub
+	logger       *slog.Logger
 }
 
 // newClient creates a Client that is not yet authenticated. The userID and
 // vehicleIDs are populated after the auth handshake completes.
 func newClient(conn *websocket.Conn, hub *Hub, logger *slog.Logger) *Client {
 	return &Client{
-		conn:   conn,
-		send:   make(chan []byte, sendBufSize),
-		hub:    hub,
-		logger: logger,
+		conn:         conn,
+		send:         make(chan []byte, sendBufSize),
+		vehicleRoles: make(map[string]auth.Role),
+		hub:          hub,
+		logger:       logger,
 	}
+}
+
+// roleFor returns the role this client holds against vehicleID, or the
+// empty Role("") sentinel if no role was resolved at handshake time.
+// The empty sentinel is the fail-closed "unknown" value the mask layer
+// in internal/mask interprets as deny-all.
+func (c *Client) roleFor(vehicleID string) auth.Role {
+	if c == nil {
+		return auth.Role("")
+	}
+	return c.vehicleRoles[vehicleID]
 }
 
 // writePump reads messages from the send channel and writes them to the

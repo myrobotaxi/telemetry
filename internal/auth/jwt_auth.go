@@ -26,14 +26,21 @@ var (
 // the Prisma-owned "Vehicle" table.
 const queryUserVehicleIDs = `SELECT "id" FROM "Vehicle" WHERE "userId" = $1`
 
+// queryVehicleOwnerByID fetches the owning user ID for a vehicle. Used
+// by ResolveRole to determine whether the caller is the owner of the
+// vehicle or a viewer (post-MYR-Invite, after the FR-5.4 invite path
+// lands; today the only path to the viewer branch is a stale cache).
+const queryVehicleOwnerByID = `SELECT "userId" FROM "Vehicle" WHERE "id" = $1`
+
 // JWTAuthenticator validates HS256 JWTs and resolves the authenticated
 // user's vehicle IDs from the database. It caches vehicle lookups to
 // avoid hitting the DB on every WebSocket reconnect.
 type JWTAuthenticator struct {
-	secret   []byte
-	issuer   string
-	audience string
-	cache    *vehicleCache
+	secret      []byte
+	issuer      string
+	audience    string
+	cache       *vehicleCache
+	ownerLookup vehicleOwnerLookup
 }
 
 // Compile-time interface check.
@@ -45,6 +52,14 @@ var _ wsAuthenticator = (*JWTAuthenticator)(nil)
 type wsAuthenticator interface {
 	ValidateToken(ctx context.Context, token string) (string, error)
 	GetUserVehicles(ctx context.Context, userID string) ([]string, error)
+	ResolveRole(ctx context.Context, userID, vehicleID string) (Role, error)
+}
+
+// vehicleOwnerLookup is the consumer-site interface used by ResolveRole
+// to fetch a vehicle's owning user ID. Defined here so tests can swap
+// the DB-backed implementation for a stub.
+type vehicleOwnerLookup interface {
+	GetVehicleOwnerByID(ctx context.Context, vehicleID string) (ownerID string, err error)
 }
 
 // NewJWTAuthenticator creates an authenticator that verifies HS256 JWTs
@@ -53,10 +68,11 @@ type wsAuthenticator interface {
 func NewJWTAuthenticator(secret, issuer, audience string, pool *pgxpool.Pool) *JWTAuthenticator {
 	querier := &pgVehicleQuerier{pool: pool}
 	return &JWTAuthenticator{
-		secret:   []byte(secret),
-		issuer:   issuer,
-		audience: audience,
-		cache:    newVehicleCache(querier, vehicleCacheTTL),
+		secret:      []byte(secret),
+		issuer:      issuer,
+		audience:    audience,
+		cache:       newVehicleCache(querier, vehicleCacheTTL),
+		ownerLookup: querier,
 	}
 }
 
@@ -104,6 +120,33 @@ func (a *JWTAuthenticator) GetUserVehicles(ctx context.Context, userID string) (
 	return ids, nil
 }
 
+// ResolveRole returns the caller's role (owner | viewer) for the given
+// vehicle. Used by both the WebSocket per-role projection
+// (websocket-protocol.md §4.6) and the REST handler-layer mask
+// (rest-api.md §5.1).
+//
+// The query reads "Vehicle"."userId" by primary key. If the row's
+// userId matches the caller, the caller is the owner. Otherwise the
+// caller is treated as a viewer. Vehicle-not-found is surfaced as an
+// error so the caller can convert it to 404 / fail-closed at the
+// handler layer; an unknown vehicle MUST NOT be silently downgraded to
+// "viewer" because that would leak the vehicle's existence.
+func (a *JWTAuthenticator) ResolveRole(ctx context.Context, userID, vehicleID string) (Role, error) {
+	ownerID, err := a.ownerLookup.GetVehicleOwnerByID(ctx, vehicleID)
+	if err != nil {
+		return Role(""), fmt.Errorf("ResolveRole: vehicle %s not found: %w", vehicleID, err)
+	}
+	if ownerID == userID {
+		return RoleOwner, nil
+	}
+	// TODO: when Invite-based viewer access lands, query the Invite table
+	// (Prisma-owned, see data-classification.md §1.6) to verify this user has
+	// an accepted invite granting viewer access to vehicleID. Until then,
+	// returning RoleViewer is forward-looking — the only path to reach this
+	// branch today is a stale GetUserVehicles cache or a test fixture.
+	return RoleViewer, nil
+}
+
 // pgVehicleQuerier queries PostgreSQL for a user's vehicle IDs.
 type pgVehicleQuerier struct {
 	pool *pgxpool.Pool
@@ -132,4 +175,15 @@ func (q *pgVehicleQuerier) GetUserVehicleIDs(ctx context.Context, userID string)
 	}
 
 	return ids, nil
+}
+
+// GetVehicleOwnerByID returns the owning user ID for a single vehicle
+// row, looked up by primary key. The query targets the Prisma-owned
+// "Vehicle" table.
+func (q *pgVehicleQuerier) GetVehicleOwnerByID(ctx context.Context, vehicleID string) (string, error) {
+	var ownerID string
+	if err := q.pool.QueryRow(ctx, queryVehicleOwnerByID, vehicleID).Scan(&ownerID); err != nil {
+		return "", fmt.Errorf("pgVehicleQuerier.GetVehicleOwnerByID(%s): %w", vehicleID, err)
+	}
+	return ownerID, nil
 }

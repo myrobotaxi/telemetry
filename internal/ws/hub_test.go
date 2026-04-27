@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,9 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/tnando/my-robo-taxi-telemetry/internal/auth"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/mask"
 )
 
 // testAuth is an Authenticator for tests with configurable behavior.
@@ -19,6 +23,14 @@ type testAuth struct {
 	userID     string
 	vehicleIDs []string
 	err        error
+
+	// roleByVehicle controls per-vehicle role resolution. When nil,
+	// every vehicle resolves to RoleOwner — matching the v1 default
+	// for the user the testAuth represents.
+	roleByVehicle map[string]auth.Role
+	// roleErr is returned by ResolveRole when set, simulating a DB
+	// lookup failure during handshake.
+	roleErr error
 }
 
 func (a *testAuth) ValidateToken(_ context.Context, token string) (string, error) {
@@ -33,6 +45,16 @@ func (a *testAuth) ValidateToken(_ context.Context, token string) (string, error
 
 func (a *testAuth) GetUserVehicles(_ context.Context, _ string) ([]string, error) {
 	return a.vehicleIDs, nil
+}
+
+func (a *testAuth) ResolveRole(_ context.Context, _, vehicleID string) (auth.Role, error) {
+	if a.roleErr != nil {
+		return auth.Role(""), a.roleErr
+	}
+	if role, ok := a.roleByVehicle[vehicleID]; ok {
+		return role, nil
+	}
+	return auth.RoleOwner, nil
 }
 
 // waitForClients polls until the hub reaches the desired client count or
@@ -680,5 +702,260 @@ func TestHub_AuthOk_NotEmittedOnFailure(t *testing.T) {
 				t.Fatalf("error code = %q, want %q", errPl.Code, tt.wantCode)
 			}
 		})
+	}
+}
+
+// TestHub_Handshake_PopulatesVehicleRoles verifies that the auth
+// handshake calls Authenticator.ResolveRole for every vehicleID
+// returned by GetUserVehicles and stores the resolved roles in the
+// Client's vehicleRoles map. This is the input the per-role
+// projection in BroadcastMasked depends on (websocket-protocol.md
+// §4.6).
+func TestHub_Handshake_PopulatesVehicleRoles(t *testing.T) {
+	hub := newTestHub(t)
+	t.Cleanup(hub.Stop)
+
+	a := &testAuth{
+		userID:     "user-1",
+		vehicleIDs: []string{"v-owner", "v-viewer"},
+		roleByVehicle: map[string]auth.Role{
+			"v-owner":  auth.RoleOwner,
+			"v-viewer": auth.RoleViewer,
+		},
+	}
+	srv := newTestServer(t, hub, a)
+	t.Cleanup(srv.Close)
+
+	conn := dialAndAuth(t, srv.URL, "valid-token")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	waitForClients(t, hub, 1)
+
+	// Inspect the registered Client.
+	hub.mu.RLock()
+	defer hub.mu.RUnlock()
+	if len(hub.clients) != 1 {
+		t.Fatalf("expected 1 client, got %d", len(hub.clients))
+	}
+	for c := range hub.clients {
+		if got := c.roleFor("v-owner"); got != auth.RoleOwner {
+			t.Errorf("v-owner role = %q, want %q", got, auth.RoleOwner)
+		}
+		if got := c.roleFor("v-viewer"); got != auth.RoleViewer {
+			t.Errorf("v-viewer role = %q, want %q", got, auth.RoleViewer)
+		}
+		// A vehicle the user does NOT have access to has no entry —
+		// roleFor returns the empty Role("") sentinel (deny-all).
+		if got := c.roleFor("v-other"); got != auth.Role("") {
+			t.Errorf("v-other role = %q, want empty sentinel", got)
+		}
+	}
+}
+
+// TestHub_Handshake_ResolveRoleError_FailsClosed verifies that a
+// ResolveRole error during handshake does NOT fail the auth handshake
+// — the client connects, but the affected vehicle has no role entry
+// and is treated as deny-all by BroadcastMasked.
+func TestHub_Handshake_ResolveRoleError_FailsClosed(t *testing.T) {
+	hub := newTestHub(t)
+	t.Cleanup(hub.Stop)
+
+	a := &testAuth{
+		userID:     "user-1",
+		vehicleIDs: []string{"v-1"},
+		roleErr:    errors.New("simulated DB failure"),
+	}
+	srv := newTestServer(t, hub, a)
+	t.Cleanup(srv.Close)
+
+	conn := dialAndAuth(t, srv.URL, "valid-token")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	waitForClients(t, hub, 1)
+
+	hub.mu.RLock()
+	defer hub.mu.RUnlock()
+	for c := range hub.clients {
+		if got := c.roleFor("v-1"); got != auth.Role("") {
+			t.Errorf("v-1 role after ResolveRole error = %q, want empty sentinel", got)
+		}
+	}
+}
+
+// TestHub_BroadcastMasked_ViewerStripsLicensePlate verifies the
+// per-role projection contract from websocket-protocol.md §4.6: a
+// viewer-role client receives a vehicle_update with the licensePlate
+// field stripped (rest-api.md §5.2.1 viewer mask).
+func TestHub_BroadcastMasked_ViewerStripsLicensePlate(t *testing.T) {
+	hub := newTestHub(t)
+	t.Cleanup(hub.Stop)
+
+	a := &testAuth{
+		userID:     "user-1",
+		vehicleIDs: []string{"v-1"},
+		roleByVehicle: map[string]auth.Role{
+			"v-1": auth.RoleViewer,
+		},
+	}
+	srv := newTestServer(t, hub, a)
+	t.Cleanup(srv.Close)
+
+	conn := dialAndAuth(t, srv.URL, "valid-token")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	waitForClients(t, hub, 1)
+
+	hub.BroadcastMasked(
+		"v-1",
+		mask.ResourceVehicleState,
+		time.Now().UTC().Format(time.RFC3339),
+		map[string]any{
+			"speed":        65,
+			"chargeLevel":  82,
+			"licensePlate": "ABC-123",
+		},
+	)
+
+	got := readMessage(t, conn)
+	if got.Type != msgTypeVehicleUpdate {
+		t.Fatalf("expected %q, got %q", msgTypeVehicleUpdate, got.Type)
+	}
+	var pl vehicleUpdatePayload
+	if err := json.Unmarshal(got.Payload, &pl); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if _, present := pl.Fields["licensePlate"]; present {
+		t.Errorf("viewer received licensePlate; mask did not strip it: %v", pl.Fields)
+	}
+	if pl.Fields["speed"] != float64(65) {
+		t.Errorf("speed missing or wrong: %v", pl.Fields["speed"])
+	}
+}
+
+// TestHub_BroadcastMasked_OwnerKeepsAllFields verifies an owner-role
+// client receives the full payload (no stripping).
+func TestHub_BroadcastMasked_OwnerKeepsAllFields(t *testing.T) {
+	hub := newTestHub(t)
+	t.Cleanup(hub.Stop)
+
+	a := &testAuth{
+		userID:     "user-1",
+		vehicleIDs: []string{"v-1"},
+		roleByVehicle: map[string]auth.Role{
+			"v-1": auth.RoleOwner,
+		},
+	}
+	srv := newTestServer(t, hub, a)
+	t.Cleanup(srv.Close)
+
+	conn := dialAndAuth(t, srv.URL, "valid-token")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	waitForClients(t, hub, 1)
+
+	hub.BroadcastMasked(
+		"v-1",
+		mask.ResourceVehicleState,
+		time.Now().UTC().Format(time.RFC3339),
+		map[string]any{
+			"speed":        65,
+			"licensePlate": "ABC-123",
+		},
+	)
+
+	got := readMessage(t, conn)
+	var pl vehicleUpdatePayload
+	if err := json.Unmarshal(got.Payload, &pl); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if pl.Fields["licensePlate"] != "ABC-123" {
+		t.Errorf("owner missing licensePlate: %v", pl.Fields)
+	}
+	if pl.Fields["speed"] != float64(65) {
+		t.Errorf("owner missing speed: %v", pl.Fields)
+	}
+}
+
+// TestHub_BroadcastMasked_EmptyPayloadSuppression verifies that when a
+// role's mask projects the payload to zero fields, NO frame is emitted
+// to clients holding that role (websocket-protocol.md §4.6 empty-
+// payload suppression rule). Sending an empty vehicle_update would
+// leak "something happened on this vehicle" to a viewer.
+func TestHub_BroadcastMasked_EmptyPayloadSuppression(t *testing.T) {
+	hub := newTestHub(t)
+	t.Cleanup(hub.Stop)
+
+	// The Invite resource has no viewer entry, so a viewer-role
+	// client receives the deny-all mask. A payload containing only
+	// fields not in any allow-list will produce an empty projected
+	// payload for the viewer.
+	a := &testAuth{
+		userID:     "user-1",
+		vehicleIDs: []string{"v-1"},
+		roleByVehicle: map[string]auth.Role{
+			"v-1": auth.RoleViewer,
+		},
+	}
+	srv := newTestServer(t, hub, a)
+	t.Cleanup(srv.Close)
+
+	conn := dialAndAuth(t, srv.URL, "valid-token")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	waitForClients(t, hub, 1)
+
+	// Use the Invite resource to force deny-all for viewer.
+	hub.BroadcastMasked(
+		"v-1",
+		mask.ResourceInvite,
+		time.Now().UTC().Format(time.RFC3339),
+		map[string]any{
+			"id":    "inv-1",
+			"email": "viewer@example.com",
+		},
+	)
+
+	// Client should receive nothing within the read timeout — empty
+	// payload suppression.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if _, _, err := conn.Read(ctx); err == nil {
+		t.Fatal("viewer received a frame on a deny-all mask; empty-payload suppression failed")
+	}
+}
+
+// TestHub_BroadcastMasked_UnknownRole_FailsClosed verifies a client
+// whose vehicleRoles map has no entry for the broadcast vehicle (the
+// empty Role("") sentinel) receives no frame.
+func TestHub_BroadcastMasked_UnknownRole_FailsClosed(t *testing.T) {
+	hub := newTestHub(t)
+	t.Cleanup(hub.Stop)
+
+	// roleErr causes ResolveRole to fail, so vehicleRoles stays empty
+	// for v-1 — handshake-level fail-closed.
+	a := &testAuth{
+		userID:     "user-1",
+		vehicleIDs: []string{"v-1"},
+		roleErr:    errors.New("simulated DB failure"),
+	}
+	srv := newTestServer(t, hub, a)
+	t.Cleanup(srv.Close)
+
+	conn := dialAndAuth(t, srv.URL, "valid-token")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	waitForClients(t, hub, 1)
+
+	hub.BroadcastMasked(
+		"v-1",
+		mask.ResourceVehicleState,
+		time.Now().UTC().Format(time.RFC3339),
+		map[string]any{"speed": 65},
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if _, _, err := conn.Read(ctx); err == nil {
+		t.Fatal("client with unresolved role received a frame; deny-all fail-closed failed")
 	}
 }

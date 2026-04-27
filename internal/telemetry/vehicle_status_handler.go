@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/tnando/my-robo-taxi-telemetry/internal/mask"
 	"github.com/tnando/my-robo-taxi-telemetry/pkg/sdk"
 )
 
@@ -29,26 +30,35 @@ type ConnInfo struct {
 // vehicle's current connection status. The frontend polls this endpoint
 // during onboarding to detect when a vehicle connects.
 type VehicleStatusHandler struct {
-	auth     tokenValidator
-	vehicles VehicleOwnerLookup
-	presence VehiclePresence
-	logger   *slog.Logger
+	auth         tokenValidator
+	vehicles     VehicleOwnerLookup
+	roles        roleResolver      // optional: nil disables mask plumbing
+	idLookup     vehicleIDLookup   // optional: nil disables mask plumbing
+	maskResource mask.ResourceType // populated by WithMask alongside roles/idLookup
+	presence     VehiclePresence
+	logger       *slog.Logger
 }
 
 // NewVehicleStatusHandler creates a handler that returns real-time vehicle
 // connection status. The presence provider is typically the telemetry Receiver.
+// Pass WithMask to enable field-mask projection of the response.
 func NewVehicleStatusHandler(
-	auth tokenValidator,
+	tokens tokenValidator,
 	vehicles VehicleOwnerLookup,
 	presence VehiclePresence,
 	logger *slog.Logger,
+	opts ...VehicleStatusOption,
 ) *VehicleStatusHandler {
-	return &VehicleStatusHandler{
-		auth:     auth,
+	h := &VehicleStatusHandler{
+		auth:     tokens,
 		vehicles: vehicles,
 		presence: presence,
 		logger:   logger,
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 // vehicleStatusResponse is the JSON body returned by the vehicle status endpoint.
@@ -96,7 +106,7 @@ func (h *VehicleStatusHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	}
 
 	resp := h.buildStatusResponse(vin)
-	h.writeJSON(w, http.StatusOK, resp)
+	h.writeMaskedResponse(ctx, w, vin, userID, resp)
 }
 
 // verifyOwnership checks that userID owns the vehicle identified by vin.

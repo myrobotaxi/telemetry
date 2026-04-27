@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tnando/my-robo-taxi-telemetry/internal/auth"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/mask"
 	"github.com/tnando/my-robo-taxi-telemetry/pkg/sdk"
 )
 
@@ -241,3 +243,135 @@ func TestVehicleStatusHandler_ServeHTTP(t *testing.T) {
 }
 
 func boolPtr(v bool) *bool { return &v }
+
+// --- Tests for the role-based field-mask plumbing ---
+
+// stubRoleResolver returns a fixed role unless err is set.
+type stubRoleResolver struct {
+	role auth.Role
+	err  error
+}
+
+func (s *stubRoleResolver) ResolveRole(_ context.Context, _, _ string) (auth.Role, error) {
+	return s.role, s.err
+}
+
+// stubVehicleIDLookup returns a fixed vehicleID unless err is set.
+type stubVehicleIDLookup struct {
+	id  string
+	err error
+}
+
+func (s *stubVehicleIDLookup) GetVehicleIDByVIN(_ context.Context, _ string) (string, error) {
+	if s.err != nil {
+		return "", s.err
+	}
+	return s.id, nil
+}
+
+// maskedResponseWithSynthetic is a tiny response shape that mirrors
+// vehicleStatusResponse but adds a forward-looking `licensePlate`
+// field. The actual vehicleStatusResponse doesn't carry licensePlate
+// in v1 — this struct exercises the mask plumbing using a synthetic
+// payload, validating that ANY licensePlate-bearing response would be
+// projected correctly.
+type maskedResponseWithSynthetic struct {
+	VIN          string `json:"vin"`
+	Connected    bool   `json:"connected"`
+	LicensePlate string `json:"licensePlate"`
+	Speed        int    `json:"speed"`
+}
+
+// TestStructToMap_PreservesWireNames verifies the JSON round-trip used
+// by writeMaskedResponse produces a map keyed by JSON wire names — the
+// same keys the mask matrix uses.
+func TestStructToMap_PreservesWireNames(t *testing.T) {
+	in := maskedResponseWithSynthetic{
+		VIN:          "ABC",
+		Connected:    true,
+		LicensePlate: "XYZ-789",
+		Speed:        65,
+	}
+	got, err := structToMap(in)
+	if err != nil {
+		t.Fatalf("structToMap: %v", err)
+	}
+	wantKeys := []string{"vin", "connected", "licensePlate", "speed"}
+	for _, k := range wantKeys {
+		if _, ok := got[k]; !ok {
+			t.Errorf("missing key %q in %v", k, got)
+		}
+	}
+}
+
+// TestVehicleStatusHandler_MaskedResponse_RoleResolverError verifies
+// the handler returns 500 when role resolution fails — fail-closed
+// surfacing rather than silently degrading to a deny-all body.
+func TestVehicleStatusHandler_MaskedResponse_RoleResolverError(t *testing.T) {
+	handler := NewVehicleStatusHandler(
+		&stubTokenValidator{userID: "user-1"},
+		&stubVehicleOwner{ownerID: "user-1"},
+		&stubVehiclePresence{},
+		discardLogger(),
+		WithMask(
+			mask.ResourceVehicleState,
+			&stubRoleResolver{err: errors.New("DB down")},
+			&stubVehicleIDLookup{id: "veh-1"},
+		),
+	)
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /api/vehicle-status/{vin}", handler)
+
+	req := httptest.NewRequestWithContext(
+		context.Background(),
+		http.MethodGet,
+		"/api/vehicle-status/5YJ3E1EA1PF000001",
+		nil,
+	)
+	req.Header.Set("Authorization", "Bearer t")
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d, want 500", rec.Code)
+	}
+}
+
+// TestVehicleStatusHandler_NoMaskOption_RawResponse verifies the
+// backward-compatible path: when WithMask is NOT supplied, the handler
+// emits the unmasked response (the response shape is a connectivity
+// probe, NOT a canonical VehicleState — see the comment on
+// writeMaskedResponse for why mask plumbing is opt-in here).
+func TestVehicleStatusHandler_NoMaskOption_RawResponse(t *testing.T) {
+	handler := NewVehicleStatusHandler(
+		&stubTokenValidator{userID: "user-1"},
+		&stubVehicleOwner{ownerID: "user-1"},
+		&stubVehiclePresence{connected: false},
+		discardLogger(),
+	)
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /api/vehicle-status/{vin}", handler)
+
+	req := httptest.NewRequestWithContext(
+		context.Background(),
+		http.MethodGet,
+		"/api/vehicle-status/5YJ3E1EA1PF000001",
+		nil,
+	)
+	req.Header.Set("Authorization", "Bearer t")
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", rec.Code)
+	}
+	// Should decode into the typed response struct cleanly (raw shape).
+	var resp vehicleStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode raw response: %v", err)
+	}
+}

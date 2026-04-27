@@ -260,6 +260,13 @@ type stubQuerier struct {
 	ids       []string
 	err       error
 	callCount atomic.Int32
+
+	// Owner-lookup state — used by ResolveRole tests. ownerByID maps
+	// vehicleID -> userId, mirroring the "Vehicle" row. ownerErr is
+	// returned by GetVehicleOwnerByID when set; takes precedence over
+	// the map.
+	ownerByID map[string]string
+	ownerErr  error
 }
 
 func (s *stubQuerier) GetUserVehicleIDs(_ context.Context, _ string) ([]string, error) {
@@ -268,4 +275,88 @@ func (s *stubQuerier) GetUserVehicleIDs(_ context.Context, _ string) ([]string, 
 		return nil, s.err
 	}
 	return s.ids, nil
+}
+
+func (s *stubQuerier) GetVehicleOwnerByID(_ context.Context, vehicleID string) (string, error) {
+	if s.ownerErr != nil {
+		return "", s.ownerErr
+	}
+	owner, ok := s.ownerByID[vehicleID]
+	if !ok {
+		return "", errors.New("vehicle not found")
+	}
+	return owner, nil
+}
+
+func TestJWTAuthenticator_ResolveRole(t *testing.T) {
+	const callerUserID = "cmmgr4b1p0005l104ifpctlg8"
+	const vehicleID = "cmvehicle000000000000abcd"
+
+	tests := []struct {
+		name      string
+		ownerByID map[string]string
+		ownerErr  error
+		userID    string
+		vehicleID string
+		wantRole  Role
+		wantErr   bool
+	}{
+		{
+			name:      "caller is owner",
+			ownerByID: map[string]string{vehicleID: callerUserID},
+			userID:    callerUserID,
+			vehicleID: vehicleID,
+			wantRole:  RoleOwner,
+		},
+		{
+			name:      "caller is non-owner -> viewer (forward-looking)",
+			ownerByID: map[string]string{vehicleID: "other-user"},
+			userID:    callerUserID,
+			vehicleID: vehicleID,
+			wantRole:  RoleViewer,
+		},
+		{
+			name:      "vehicle not found -> error (no role leak)",
+			ownerByID: map[string]string{},
+			userID:    callerUserID,
+			vehicleID: vehicleID,
+			wantErr:   true,
+		},
+		{
+			name:      "underlying DB error propagates",
+			ownerByID: nil,
+			ownerErr:  errors.New("connection refused"),
+			userID:    callerUserID,
+			vehicleID: vehicleID,
+			wantErr:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			querier := &stubQuerier{ownerByID: tt.ownerByID, ownerErr: tt.ownerErr}
+			a := &JWTAuthenticator{
+				secret:      []byte(testSecret),
+				cache:       newVehicleCache(querier, vehicleCacheTTL),
+				ownerLookup: querier,
+			}
+
+			role, err := a.ResolveRole(context.Background(), tt.userID, tt.vehicleID)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (role=%q)", role)
+				}
+				if role != Role("") {
+					t.Errorf("expected zero-value Role on error, got %q", role)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if role != tt.wantRole {
+				t.Errorf("role = %q, want %q", role, tt.wantRole)
+			}
+		})
+	}
 }
