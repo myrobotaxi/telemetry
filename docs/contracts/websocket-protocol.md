@@ -345,7 +345,7 @@ The primary telemetry payload. One frame carries field updates for one vehicle, 
 |-------|------|----------------|-------|
 | `payload.vehicleId` | `string` (cuid) | **P0** | Opaque DB ID, never VIN (FR-4.2, `data-classification.md` §1.3 `Vehicle.id`). |
 | `payload.fields` | `object` | mixed per-field | See [`vehicle-state-schema.md`](vehicle-state-schema.md) §1.1. Atomic-group membership enforced per §3.2. |
-| `payload.timestamp` | `string` (ISO 8601 UTC) | **P0** | Server's `time.Now().UTC()` at broadcast (for nav flushes) or telemetry event `CreatedAt` (for non-nav broadcasts). See [`nav_broadcast.go:handleTelemetry`](../../internal/ws/nav_broadcast.go) line 67 and [`flushNav`](../../internal/ws/nav_broadcast.go) line 98. |
+| `payload.timestamp` | `string` (ISO 8601 UTC) | **P0** | Server's `time.Now().UTC()` at broadcast (for nav flushes) or telemetry event `CreatedAt` (for non-nav broadcasts). See [`nav_broadcast.go:handleTelemetry`](../../internal/ws/nav_broadcast.go) and [`flushGroup`](../../internal/ws/nav_broadcast.go). |
 
 #### 4.1.1 Wire field names vs. internal names
 
@@ -506,7 +506,7 @@ Per [`state-machine.md`](state-machine.md) §4.1, `drive_updated` is **NOT a dis
 
 Other ungrouped fields: `odometerMiles`, `interiorTemp`, `exteriorTemp`, `fsdMilesSinceReset`, `locationName`, `locationAddress`, `lastUpdated`. None of these transition a `dataState` group on receipt (per [`state-machine.md`](state-machine.md) §4.3 footnote). Their freshness is implied by `connectionState`.
 
-`lastUpdated` is set by the server on every outbound `vehicle_update` (`nav_broadcast.go` lines 59 and 99) to the event's `CreatedAt` for non-nav broadcasts or `time.Now().UTC()` for nav flushes. SDKs SHOULD surface this to consumers as the "most recent telemetry timestamp" for the vehicle.
+`lastUpdated` is set by the server on every outbound `vehicle_update` (in `nav_broadcast.go`'s `handleTelemetry` and `flushGroup`) to the event's `CreatedAt` for non-nav broadcasts or `time.Now().UTC()` for nav flushes. SDKs SHOULD surface this to consumers as the "most recent telemetry timestamp" for the vehicle.
 
 ### 4.2 `drive_started`
 
