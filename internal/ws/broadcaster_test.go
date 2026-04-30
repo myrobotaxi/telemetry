@@ -1361,7 +1361,7 @@ func TestBroadcaster_DriveEndedClearsNavAccumulator(t *testing.T) {
 
 	b := NewBroadcaster(hub, bus, resolver, slog.Default())
 	// Use a long flush interval so nav fields stay pending.
-	b.nav = newNavAccumulator(10*time.Second, b.flushNav)
+	b.groups = newGroupAccumulator(10*time.Second, b.flushGroup)
 
 	ctx := context.Background()
 	if err := b.Start(ctx); err != nil {
@@ -1407,7 +1407,7 @@ func TestBroadcaster_DriveEndedClearsNavAccumulator(t *testing.T) {
 	})
 
 	// Nav accumulator should be cleared.
-	remaining := b.nav.Flush("5YJ3E1EA1NF000001")
+	remaining := b.groups.Flush(groupNavigation, "5YJ3E1EA1NF000001")
 	if remaining != nil {
 		t.Fatalf("expected nil nav fields after drive ended, got %v", remaining)
 	}

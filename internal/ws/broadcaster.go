@@ -20,7 +20,7 @@ type Broadcaster struct {
 	logger   *slog.Logger
 	subs     []events.Subscription
 	routes   *routeAccumulator
-	nav      *navAccumulator
+	groups   *groupAccumulator
 }
 
 // NewBroadcaster creates a Broadcaster ready to start. Call Start to begin
@@ -33,7 +33,7 @@ func NewBroadcaster(hub *Hub, bus events.Bus, resolver VINResolver, logger *slog
 		logger:   logger,
 		routes:   newRouteAccumulator(defaultRouteBatchSize, defaultRouteFlushInterval),
 	}
-	b.nav = newNavAccumulator(defaultNavFlushInterval, b.flushNav)
+	b.groups = newGroupAccumulator(defaultGroupFlushInterval, b.flushGroup)
 	return b
 }
 
@@ -70,11 +70,11 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 }
 
 // Stop unsubscribes from all event bus topics and cancels any pending
-// nav accumulator timers. After Stop returns, no further events will
-// be processed and no timer callbacks will fire.
+// atomic-group accumulator timers. After Stop returns, no further events
+// will be processed and no timer callbacks will fire.
 func (b *Broadcaster) Stop() error {
 	b.unsubscribeAll()
-	b.nav.Stop()
+	b.groups.Stop()
 	b.logger.Info("broadcaster stopped")
 	return nil
 }
@@ -163,8 +163,8 @@ func (b *Broadcaster) handleDriveEnded(ctx context.Context, event events.Event) 
 
 	// Flush any pending nav fields for this VIN. Flush cancels the timer
 	// and clears state, so a separate Clear call is unnecessary.
-	if navFields := b.nav.Flush(payload.VIN); len(navFields) > 0 {
-		b.flushNav(payload.VIN, navFields)
+	if navFields := b.groups.Flush(groupNavigation, payload.VIN); len(navFields) > 0 {
+		b.flushGroup(groupNavigation, payload.VIN, navFields)
 	}
 
 	msg, err := marshalWSMessage(msgTypeDriveEnded, driveEndedPayload{
@@ -225,7 +225,7 @@ func (b *Broadcaster) handleConnectivity(ctx context.Context, event events.Event
 	// Clear pending nav fields when vehicle disconnects to avoid
 	// broadcasting stale navigation data on reconnect.
 	if payload.Status == events.StatusDisconnected {
-		b.nav.Clear(payload.VIN)
+		b.groups.Clear(groupNavigation, payload.VIN)
 	}
 }
 

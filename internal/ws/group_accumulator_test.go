@@ -38,24 +38,25 @@ func TestIsNavField(t *testing.T) {
 	}
 }
 
-func TestNavAccumulator_SingleFieldFlushesAfterInterval(t *testing.T) {
+func TestGroupAccumulator_SingleFieldFlushesAfterInterval(t *testing.T) {
 	var mu sync.Mutex
 	var flushed map[string]events.TelemetryValue
 	var flushedVIN string
+	var flushedGroup atomicGroupID
 
-	acc := newNavAccumulator(50*time.Millisecond, func(vin string, fields map[string]events.TelemetryValue) {
+	acc := newGroupAccumulator(50*time.Millisecond, func(group atomicGroupID, vin string, fields map[string]events.TelemetryValue) {
 		mu.Lock()
 		defer mu.Unlock()
+		flushedGroup = group
 		flushedVIN = vin
 		flushed = fields
 	})
 
 	vin := "5YJ3E1EA1NF000001"
-	acc.Add(vin, map[string]events.TelemetryValue{
+	acc.Add(groupNavigation, vin, map[string]events.TelemetryValue{
 		"destinationName": {StringVal: ptrString("Home")},
 	})
 
-	// Wait for timer to fire.
 	waitForCondition(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
@@ -65,6 +66,9 @@ func TestNavAccumulator_SingleFieldFlushesAfterInterval(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 
+	if flushedGroup != groupNavigation {
+		t.Fatalf("expected group %q, got %q", groupNavigation, flushedGroup)
+	}
 	if flushedVIN != vin {
 		t.Fatalf("expected VIN %q, got %q", vin, flushedVIN)
 	}
@@ -76,12 +80,12 @@ func TestNavAccumulator_SingleFieldFlushesAfterInterval(t *testing.T) {
 	}
 }
 
-func TestNavAccumulator_MultipleFieldsMergedIntoOneFlush(t *testing.T) {
+func TestGroupAccumulator_MultipleFieldsMergedIntoOneFlush(t *testing.T) {
 	var mu sync.Mutex
 	var flushed map[string]events.TelemetryValue
 	flushCount := 0
 
-	acc := newNavAccumulator(100*time.Millisecond, func(_ string, fields map[string]events.TelemetryValue) {
+	acc := newGroupAccumulator(100*time.Millisecond, func(_ atomicGroupID, _ string, fields map[string]events.TelemetryValue) {
 		mu.Lock()
 		defer mu.Unlock()
 		flushed = fields
@@ -90,11 +94,10 @@ func TestNavAccumulator_MultipleFieldsMergedIntoOneFlush(t *testing.T) {
 
 	vin := "5YJ3E1EA1NF000001"
 
-	// Add fields in two separate calls within the window.
-	acc.Add(vin, map[string]events.TelemetryValue{
+	acc.Add(groupNavigation, vin, map[string]events.TelemetryValue{
 		"destinationName": {StringVal: ptrString("Work")},
 	})
-	acc.Add(vin, map[string]events.TelemetryValue{
+	acc.Add(groupNavigation, vin, map[string]events.TelemetryValue{
 		"minutesToArrival": {FloatVal: ptrFloat64(15)},
 		"milesToArrival":   {FloatVal: ptrFloat64(8.5)},
 	})
@@ -122,11 +125,11 @@ func TestNavAccumulator_MultipleFieldsMergedIntoOneFlush(t *testing.T) {
 	}
 }
 
-func TestNavAccumulator_LastWriteWins(t *testing.T) {
+func TestGroupAccumulator_LastWriteWins(t *testing.T) {
 	var mu sync.Mutex
 	var flushed map[string]events.TelemetryValue
 
-	acc := newNavAccumulator(100*time.Millisecond, func(_ string, fields map[string]events.TelemetryValue) {
+	acc := newGroupAccumulator(100*time.Millisecond, func(_ atomicGroupID, _ string, fields map[string]events.TelemetryValue) {
 		mu.Lock()
 		defer mu.Unlock()
 		flushed = fields
@@ -134,10 +137,10 @@ func TestNavAccumulator_LastWriteWins(t *testing.T) {
 
 	vin := "5YJ3E1EA1NF000001"
 
-	acc.Add(vin, map[string]events.TelemetryValue{
+	acc.Add(groupNavigation, vin, map[string]events.TelemetryValue{
 		"destinationName": {StringVal: ptrString("Old Place")},
 	})
-	acc.Add(vin, map[string]events.TelemetryValue{
+	acc.Add(groupNavigation, vin, map[string]events.TelemetryValue{
 		"destinationName": {StringVal: ptrString("New Place")},
 	})
 
@@ -156,18 +159,18 @@ func TestNavAccumulator_LastWriteWins(t *testing.T) {
 	}
 }
 
-func TestNavAccumulator_InvalidFieldsAccumulated(t *testing.T) {
+func TestGroupAccumulator_InvalidFieldsAccumulated(t *testing.T) {
 	var mu sync.Mutex
 	var flushed map[string]events.TelemetryValue
 
-	acc := newNavAccumulator(50*time.Millisecond, func(_ string, fields map[string]events.TelemetryValue) {
+	acc := newGroupAccumulator(50*time.Millisecond, func(_ atomicGroupID, _ string, fields map[string]events.TelemetryValue) {
 		mu.Lock()
 		defer mu.Unlock()
 		flushed = fields
 	})
 
 	vin := "5YJ3E1EA1NF000001"
-	acc.Add(vin, map[string]events.TelemetryValue{
+	acc.Add(groupNavigation, vin, map[string]events.TelemetryValue{
 		"destinationName": {Invalid: true},
 		"routeLine":       {Invalid: true},
 	})
@@ -192,19 +195,19 @@ func TestNavAccumulator_InvalidFieldsAccumulated(t *testing.T) {
 	}
 }
 
-func TestNavAccumulator_FlushForceReturns(t *testing.T) {
+func TestGroupAccumulator_FlushForceReturns(t *testing.T) {
 	flushCount := 0
-	acc := newNavAccumulator(10*time.Second, func(_ string, _ map[string]events.TelemetryValue) {
+	acc := newGroupAccumulator(10*time.Second, func(_ atomicGroupID, _ string, _ map[string]events.TelemetryValue) {
 		flushCount++
 	})
 
 	vin := "5YJ3E1EA1NF000001"
-	acc.Add(vin, map[string]events.TelemetryValue{
+	acc.Add(groupNavigation, vin, map[string]events.TelemetryValue{
 		"destinationName": {StringVal: ptrString("Airport")},
 		"milesToArrival":  {FloatVal: ptrFloat64(25)},
 	})
 
-	fields := acc.Flush(vin)
+	fields := acc.Flush(groupNavigation, vin)
 	if len(fields) != 2 {
 		t.Fatalf("expected 2 fields, got %d", len(fields))
 	}
@@ -213,7 +216,7 @@ func TestNavAccumulator_FlushForceReturns(t *testing.T) {
 	}
 
 	// Second flush returns nil (already consumed).
-	fields = acc.Flush(vin)
+	fields = acc.Flush(groupNavigation, vin)
 	if fields != nil {
 		t.Fatalf("expected nil on second flush, got %v", fields)
 	}
@@ -224,34 +227,34 @@ func TestNavAccumulator_FlushForceReturns(t *testing.T) {
 	}
 }
 
-func TestNavAccumulator_FlushEmptyVIN(t *testing.T) {
-	acc := newNavAccumulator(500*time.Millisecond, func(_ string, _ map[string]events.TelemetryValue) {
+func TestGroupAccumulator_FlushEmptyVIN(t *testing.T) {
+	acc := newGroupAccumulator(500*time.Millisecond, func(_ atomicGroupID, _ string, _ map[string]events.TelemetryValue) {
 		t.Fatal("onFlush should not be called")
 	})
 
-	fields := acc.Flush("nonexistent")
+	fields := acc.Flush(groupNavigation, "nonexistent")
 	if fields != nil {
 		t.Fatalf("expected nil for unknown VIN, got %v", fields)
 	}
 }
 
-func TestNavAccumulator_ClearRemovesState(t *testing.T) {
+func TestGroupAccumulator_ClearRemovesState(t *testing.T) {
 	// Use a short interval so we can verify the timer was cancelled by
 	// waiting for it NOT to fire within a bounded duration.
 	callbackFired := make(chan struct{}, 1)
-	acc := newNavAccumulator(50*time.Millisecond, func(_ string, _ map[string]events.TelemetryValue) {
+	acc := newGroupAccumulator(50*time.Millisecond, func(_ atomicGroupID, _ string, _ map[string]events.TelemetryValue) {
 		callbackFired <- struct{}{}
 	})
 
 	vin := "5YJ3E1EA1NF000001"
-	acc.Add(vin, map[string]events.TelemetryValue{
+	acc.Add(groupNavigation, vin, map[string]events.TelemetryValue{
 		"destinationName": {StringVal: ptrString("Mall")},
 	})
 
-	acc.Clear(vin)
+	acc.Clear(groupNavigation, vin)
 
 	// Flush after clear returns nil.
-	fields := acc.Flush(vin)
+	fields := acc.Flush(groupNavigation, vin)
 	if fields != nil {
 		t.Fatal("expected nil after clear")
 	}
@@ -265,18 +268,18 @@ func TestNavAccumulator_ClearRemovesState(t *testing.T) {
 	}
 }
 
-func TestNavAccumulator_ClearUnknownVIN(t *testing.T) {
-	acc := newNavAccumulator(500*time.Millisecond, nil)
+func TestGroupAccumulator_ClearUnknownVIN(t *testing.T) {
+	acc := newGroupAccumulator(500*time.Millisecond, nil)
 
 	// Should not panic.
-	acc.Clear("nonexistent")
+	acc.Clear(groupNavigation, "nonexistent")
 }
 
-func TestNavAccumulator_MultipleVINsIndependent(t *testing.T) {
+func TestGroupAccumulator_MultipleVINsIndependent(t *testing.T) {
 	var mu sync.Mutex
 	flushedByVIN := make(map[string]map[string]events.TelemetryValue)
 
-	acc := newNavAccumulator(50*time.Millisecond, func(vin string, fields map[string]events.TelemetryValue) {
+	acc := newGroupAccumulator(50*time.Millisecond, func(_ atomicGroupID, vin string, fields map[string]events.TelemetryValue) {
 		mu.Lock()
 		defer mu.Unlock()
 		flushedByVIN[vin] = fields
@@ -285,10 +288,10 @@ func TestNavAccumulator_MultipleVINsIndependent(t *testing.T) {
 	vin1 := "5YJ3E1EA1NF000001"
 	vin2 := "5YJ3E1EA1NF000002"
 
-	acc.Add(vin1, map[string]events.TelemetryValue{
+	acc.Add(groupNavigation, vin1, map[string]events.TelemetryValue{
 		"destinationName": {StringVal: ptrString("Home")},
 	})
-	acc.Add(vin2, map[string]events.TelemetryValue{
+	acc.Add(groupNavigation, vin2, map[string]events.TelemetryValue{
 		"destinationName": {StringVal: ptrString("Work")},
 	})
 
@@ -309,16 +312,16 @@ func TestNavAccumulator_MultipleVINsIndependent(t *testing.T) {
 	}
 }
 
-func TestNavAccumulator_StopCancelsAllTimers(t *testing.T) {
+func TestGroupAccumulator_StopCancelsAllTimers(t *testing.T) {
 	callbackFired := make(chan struct{}, 2)
-	acc := newNavAccumulator(50*time.Millisecond, func(_ string, _ map[string]events.TelemetryValue) {
+	acc := newGroupAccumulator(50*time.Millisecond, func(_ atomicGroupID, _ string, _ map[string]events.TelemetryValue) {
 		callbackFired <- struct{}{}
 	})
 
-	acc.Add("VIN1", map[string]events.TelemetryValue{
+	acc.Add(groupNavigation, "VIN1", map[string]events.TelemetryValue{
 		"destinationName": {StringVal: ptrString("A")},
 	})
-	acc.Add("VIN2", map[string]events.TelemetryValue{
+	acc.Add(groupNavigation, "VIN2", map[string]events.TelemetryValue{
 		"destinationName": {StringVal: ptrString("B")},
 	})
 
@@ -333,14 +336,14 @@ func TestNavAccumulator_StopCancelsAllTimers(t *testing.T) {
 	}
 }
 
-func TestNavAccumulator_TimerFiresCallback(t *testing.T) {
+func TestGroupAccumulator_TimerFiresCallback(t *testing.T) {
 	callbackFired := make(chan struct{}, 1)
 
-	acc := newNavAccumulator(50*time.Millisecond, func(_ string, _ map[string]events.TelemetryValue) {
+	acc := newGroupAccumulator(50*time.Millisecond, func(_ atomicGroupID, _ string, _ map[string]events.TelemetryValue) {
 		callbackFired <- struct{}{}
 	})
 
-	acc.Add("5YJ3E1EA1NF000001", map[string]events.TelemetryValue{
+	acc.Add(groupNavigation, "5YJ3E1EA1NF000001", map[string]events.TelemetryValue{
 		"routeLine": {StringVal: ptrString("encoded-route-data")},
 	})
 
@@ -349,5 +352,55 @@ func TestNavAccumulator_TimerFiresCallback(t *testing.T) {
 		// Success.
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for timer callback")
+	}
+}
+
+// TestGroupAccumulator_DifferentGroupsIndependent verifies that two groups
+// for the same VIN accumulate into separate batches and flush
+// independently. Forward-compatible test for when a second group registers
+// an accumulator slot in a future MYR.
+func TestGroupAccumulator_DifferentGroupsIndependent(t *testing.T) {
+	var mu sync.Mutex
+	flushedByGroup := make(map[atomicGroupID]map[string]events.TelemetryValue)
+
+	acc := newGroupAccumulator(50*time.Millisecond, func(group atomicGroupID, _ string, fields map[string]events.TelemetryValue) {
+		mu.Lock()
+		defer mu.Unlock()
+		flushedByGroup[group] = fields
+	})
+
+	vin := "5YJ3E1EA1NF000001"
+
+	acc.Add(groupNavigation, vin, map[string]events.TelemetryValue{
+		"destinationName": {StringVal: ptrString("Nav-A")},
+	})
+	// Use a second group for the same VIN to confirm slot isolation.
+	acc.Add(groupCharge, vin, map[string]events.TelemetryValue{
+		"chargeState": {StringVal: ptrString("Charging")},
+	})
+
+	waitForCondition(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(flushedByGroup) == 2
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if got := *flushedByGroup[groupNavigation]["destinationName"].StringVal; got != "Nav-A" {
+		t.Fatalf("navigation slot leaked or lost data: got %q", got)
+	}
+	if got := *flushedByGroup[groupCharge]["chargeState"].StringVal; got != "Charging" {
+		t.Fatalf("charge slot leaked or lost data: got %q", got)
+	}
+
+	// Cross-group isolation: navigation batch must not contain chargeState
+	// and vice versa.
+	if _, leaked := flushedByGroup[groupNavigation]["chargeState"]; leaked {
+		t.Fatal("chargeState leaked into navigation batch")
+	}
+	if _, leaked := flushedByGroup[groupCharge]["destinationName"]; leaked {
+		t.Fatal("destinationName leaked into charge batch")
 	}
 }

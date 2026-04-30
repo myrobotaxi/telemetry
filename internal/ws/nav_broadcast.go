@@ -10,9 +10,13 @@ import (
 )
 
 // handleTelemetry transforms a VehicleTelemetryEvent into a vehicle_update
-// message and broadcasts it to authorized clients. Navigation fields are
-// routed through the navAccumulator for batched delivery; all other fields
-// are broadcast immediately.
+// message and broadcasts it to authorized clients. Fields are partitioned
+// by atomic group (vehicle-state-schema.md §1.1, §2): navigation-group
+// fields are routed through the groupAccumulator for batched delivery;
+// charge/gps/gear-group fields and individual fields are broadcast
+// immediately because their atomicity is guaranteed upstream (Tesla's
+// 500 ms bucket for charge; co-emission for lat/lng; synchronous derivation
+// for status).
 func (b *Broadcaster) handleTelemetry(ctx context.Context, event events.Event) {
 	payload, ok := event.Payload.(events.VehicleTelemetryEvent)
 	if !ok {
@@ -22,11 +26,12 @@ func (b *Broadcaster) handleTelemetry(ctx context.Context, event events.Event) {
 		return
 	}
 
-	// Split fields into nav and non-nav groups.
+	// Partition fields: navigation group accumulates; everything else is
+	// broadcast immediately.
 	navFields := make(map[string]events.TelemetryValue)
 	nonNavFields := make(map[string]events.TelemetryValue)
 	for name, val := range payload.Fields {
-		if isNavField(name) {
+		if g, inGroup := groupOf(name); inGroup && g == groupNavigation {
 			navFields[name] = val
 		} else {
 			nonNavFields[name] = val
@@ -35,7 +40,7 @@ func (b *Broadcaster) handleTelemetry(ctx context.Context, event events.Event) {
 
 	// Route nav fields through the accumulator (batched after 500ms window).
 	if len(navFields) > 0 {
-		b.nav.Add(payload.VIN, navFields)
+		b.groups.Add(groupNavigation, payload.VIN, navFields)
 	}
 
 	// Broadcast non-nav fields immediately (speed, gear, battery, etc.).
@@ -73,16 +78,19 @@ func (b *Broadcaster) handleTelemetry(ctx context.Context, event events.Event) {
 	)
 }
 
-// flushNav is the callback invoked by the navAccumulator when a VIN's
-// time window expires. It resolves the VIN to a vehicle ID, maps the
-// accumulated fields for the client, and broadcasts a vehicle_update.
-func (b *Broadcaster) flushNav(vin string, fields map[string]events.TelemetryValue) {
+// flushGroup is the callback invoked by the groupAccumulator when an
+// atomic group's time window expires for a VIN. It resolves the VIN to a
+// vehicle ID, maps the accumulated fields for the client, and broadcasts
+// a vehicle_update. In v1 only the navigation group flows through here;
+// future groups can dispatch on the group parameter.
+func (b *Broadcaster) flushGroup(group atomicGroupID, vin string, fields map[string]events.TelemetryValue) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	vehicleID, err := b.resolver.GetByVIN(ctx, vin)
 	if err != nil {
-		b.logger.Warn("broadcaster.flushNav: VIN resolution failed, dropping nav batch",
+		b.logger.Warn("broadcaster.flushGroup: VIN resolution failed, dropping batch",
+			slog.String("group", string(group)),
 			slog.Any("error", err),
 		)
 		return
