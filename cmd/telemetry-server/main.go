@@ -21,6 +21,7 @@ import (
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/auth"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/config"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/cryptox"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/drives"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/geocode"
@@ -97,6 +98,27 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(collectors.NewGoCollector())
 	reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+
+	// --- Column encryption foundation (NFR-3.23, NFR-3.24) ---
+	// Loads the AES-256-GCM key set so the binary fails-fast on missing
+	// or invalid ENCRYPTION_KEY at startup. The Encryptor is constructed
+	// but not yet wired into the store layer; per-table column rollouts
+	// are tracked by follow-on Linear issues that require coordinated
+	// Prisma schema changes in ../my-robo-taxi/. See
+	// docs/contracts/key-rotation.md and docs/contracts/data-classification.md
+	// §3.3 for the encryption contract.
+	keySet, err := cryptox.LoadKeySetFromEnv()
+	if err != nil {
+		return fmt.Errorf("loading encryption key set: %w", err)
+	}
+	encryptor, err := cryptox.NewEncryptor(keySet)
+	if err != nil {
+		return fmt.Errorf("constructing encryptor: %w", err)
+	}
+	_ = encryptor // foundation: column wiring lands in follow-on PRs (MYR-16 cross-repo rollout issues)
+	logger.Info("encryptor initialized",
+		slog.Int("write_version", int(keySet.WriteVersion())),
+	)
 
 	// --- Database connection ---
 	db, err := store.NewDB(ctx, cfg.Database(), logger.With(slog.String("component", "store")), store.NoopMetrics{})
