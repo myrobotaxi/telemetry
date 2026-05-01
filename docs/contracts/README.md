@@ -1,6 +1,6 @@
 # MyRoboTaxi SDK v1 — Contracts
 
-**Status:** Active — v1 contracts authored (eight markdown docs including [`swift-lifecycle.md`](swift-lifecycle.md) + four machine-readable specs + 35 canonical fixtures).
+**Status:** Active — v1 contracts authored (nine markdown docs including [`swift-lifecycle.md`](swift-lifecycle.md) and [`key-rotation.md`](key-rotation.md) + four machine-readable specs + 35 canonical fixtures).
 **Owner:** `sdk-architect` agent
 **Anchors:** All contracts in this directory trace back to [`docs/architecture/requirements.md`](../architecture/requirements.md).
 
@@ -23,6 +23,7 @@ These contracts are the single source of truth. If the code and the contract dis
 | [`vehicle-state-schema.md`](vehicle-state-schema.md) | Canonical JSON Schema for vehicle, nav, charge, GPS, and gear state. Declares atomic groups and per-field types, nullability, and units. | JSON Schema draft-2020-12 at [`schemas/vehicle-state.schema.json`](schemas/vehicle-state.schema.json) |
 | [`data-classification.md`](data-classification.md) | Labels every persisted field P0 (public), P1 (sensitive, encrypted at rest), or P2 (sensitive + access-logged). Drives logging redaction rules and encryption boundaries. | Reference table |
 | [`data-lifecycle.md`](data-lifecycle.md) | Retention windows, deletion semantics, audit log format, and the single-source-of-truth rule for every persisted field. | Policy doc + DB schema notes |
+| [`key-rotation.md`](key-rotation.md) | Encryption key rotation contract: ciphertext format, env-var schema (single-key shorthand + versioned shape), happy-path and emergency-retire procedures, observability counters, failure-mode table. Anchors NFR-3.26. | Operational runbook |
 | [`state-machine.md`](state-machine.md) | Connection state machine (`initializing | connecting | connected | disconnected | error`), drive lifecycle states, and per-group data freshness states (`loading | ready | stale | cleared | error`). | State diagrams + transition tables |
 | [`swift-lifecycle.md`](swift-lifecycle.md) | Apple platform lifecycle bindings for the Swift SDK only: `ScenePhase` wiring, `BGAppRefreshTask` / `BGProcessingTask` integration, `URLSessionConfiguration` requirements, watchOS extended-runtime semantics, visionOS scene transitions. Anchors NFR-3.36a-d. | Swift SDK contract supplement |
 | [`fixtures/README.md`](fixtures/README.md) | Index of canonical payload fixtures used for contract conformance testing across both SDKs and the server. | Fixture library |
