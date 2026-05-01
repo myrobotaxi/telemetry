@@ -1,5 +1,7 @@
 # Encryption key rotation
 
+> **Status (as of MYR-16, 2026-05-01): foundation only.** The `internal/cryptox` package and the startup wiring are landed and `ENCRYPTION_KEY` is required at boot, but **no P1 column is yet encrypted on disk**. Per-column rollouts require coordinated Prisma migrations in `../my-robo-taxi/` and are tracked as separate Linear issues. **Do NOT execute the rotation procedure in production until at least one column is encrypted AND the `cryptox_decrypt_total{version="N"}` counter is wired** (see §"Observability") — without the counter, step 6 of the procedure cannot be completed safely.
+
 ## Purpose
 
 Operational contract for rotating the AES-256-GCM keys that protect P1 columns at rest (NFR-3.23). Defines the env-var schema both shapes accept, the procedure for retiring a key, and the observability operators rely on to confirm rotation completed before a key is dropped.

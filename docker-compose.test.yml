@@ -26,6 +26,9 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:test@postgres-test:5432/telemetry_test
       AUTH_SECRET: test-secret-not-for-production
+      # 32 bytes of 0xAB base64-encoded — clearly not a real secret.
+      # See docs/contracts/key-rotation.md for the production env-var schema.
+      ENCRYPTION_KEY: q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s=
       LOG_FORMAT: json
     depends_on:
       postgres-test:
