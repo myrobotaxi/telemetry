@@ -97,6 +97,15 @@ func TestLoadKeySetFromEnv_Errors(t *testing.T) {
 			errSub: "ENCRYPTION_WRITE_VERSION",
 		},
 		{
+			name: "versioned with empty write_version",
+			setup: func(t *testing.T) {
+				t.Helper()
+				t.Setenv(envVersionedKeyPrefix+"1", b64Key(0x01))
+				t.Setenv(envWriteVersion, "")
+			},
+			errSub: "is required",
+		},
+		{
 			name: "write_version refers to missing key",
 			setup: func(t *testing.T) {
 				t.Helper()

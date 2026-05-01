@@ -3,6 +3,7 @@ package cryptox
 import (
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 )
 
 // Encryptor is the public surface for column-level encryption (NFR-3.23).
@@ -13,18 +14,31 @@ import (
 // P1 column today is a Postgres Text or JSON value — base64 keeps the
 // stored shape uniform. Raw byte ciphertext is intentionally NOT exposed
 // outside the package.
+//
+// # Empty-string sentinel
+//
+// The empty string round-trips through both methods unchanged: EncryptString("")
+// returns ("", nil) and DecryptString("") returns ("", nil). This sentinel
+// represents an absent value (NULL column, optional field) so the store
+// layer can keep the encrypt-on-write/decrypt-on-read code path uniform
+// for nullable P1 columns. Callers MUST NOT use the empty string to
+// encrypt genuine zero-length payloads — there is no signal distinguishing
+// "absent" from "encrypted empty". If a future column requires
+// authenticated empty payloads, add an explicit Encrypt(plaintext []byte)
+// method that bypasses the sentinel.
 type Encryptor interface {
 	// EncryptString seals s under the active write key and returns the
 	// base64-encoded ciphertext blob (version || nonce || ct || tag).
-	// Empty input returns the empty string by design — callers should
-	// not encrypt empty payloads.
+	// Empty input returns the empty string per the package sentinel
+	// contract above.
 	EncryptString(s string) (string, error)
 
 	// DecryptString opens a base64 ciphertext produced by EncryptString
 	// (or a compatible producer using the same KeySet). Returns
 	// ErrCiphertextTooShort, ErrInvalidVersion, or ErrUnknownKeyVersion
 	// for malformed input; returns a wrapped GCM auth-failure error for
-	// tampered/wrong-key input.
+	// tampered/wrong-key input. Empty input returns the empty string per
+	// the package sentinel contract above.
 	DecryptString(ciphertext string) (string, error)
 }
 
@@ -34,6 +48,14 @@ type Encryptor interface {
 // re-encrypting old ciphertexts up front (see docs/contracts/key-rotation.md).
 type keySetEncryptor struct {
 	ks *KeySet
+}
+
+// LogValue redacts the encryptor when a structured logger walks pointer
+// fields (e.g., slog.Any("enc", enc)). Defense-in-depth alongside
+// KeySet.String — even though the encryptor doesn't directly expose key
+// material, slog.Any can recurse into struct fields on some handlers.
+func (e *keySetEncryptor) LogValue() slog.Value {
+	return slog.StringValue("<Encryptor:redacted>")
 }
 
 // NewEncryptor wraps a KeySet in an Encryptor. Returns an error if ks is

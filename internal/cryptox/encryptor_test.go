@@ -226,3 +226,36 @@ func TestEncryptor_NonceUniquenessSamePlaintext(t *testing.T) {
 		t.Fatal("ciphertexts must differ across calls (nonce reuse risk)")
 	}
 }
+
+// FuzzDecryptString exercises DecryptString against arbitrary base64-ish
+// input to catch regressions in the version + length gating before AES is
+// invoked. Seeds cover the documented error paths (empty, too-short,
+// invalid version 0x00, unknown version, malformed base64) plus a real
+// roundtrip ciphertext. Run with `go test -fuzz=FuzzDecryptString` for
+// extended exploration; the seed corpus runs on every `go test`.
+func FuzzDecryptString(f *testing.F) {
+	enc, err := NewEncryptor(newTestKeySet(&testing.T{}, versionV1, versionV1))
+	if err != nil {
+		f.Fatalf("NewEncryptor: %v", err)
+	}
+
+	// Seed corpus: documented error paths + a valid ciphertext.
+	f.Add("")                                                    // empty sentinel
+	f.Add("!!!not-base64!!!")                                    // base64 decode failure
+	f.Add(base64.StdEncoding.EncodeToString([]byte{0x00}))       // too short, version 0x00
+	f.Add(base64.StdEncoding.EncodeToString(make([]byte, 28)))   // one short of MinCiphertextLen
+	f.Add(base64.StdEncoding.EncodeToString(make([]byte, 29)))   // exactly min, version 0x00 = invalid
+	tooLong := make([]byte, 29)
+	tooLong[0] = 0xFF
+	f.Add(base64.StdEncoding.EncodeToString(tooLong))            // unknown version
+	if ct, err := enc.EncryptString("seed"); err == nil {
+		f.Add(ct)
+	}
+
+	f.Fuzz(func(t *testing.T, in string) {
+		// Property: DecryptString must never panic on any input. Errors
+		// are expected for most inputs; only valid ciphertexts decrypt
+		// successfully.
+		_, _ = enc.DecryptString(in)
+	})
+}

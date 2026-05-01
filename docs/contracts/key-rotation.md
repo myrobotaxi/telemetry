@@ -28,6 +28,7 @@ Every value emitted by `internal/cryptox.Encryptor` is base64-encoded:
 
 - `version` routes the decrypt path to the matching key in the active `KeySet`. Reserved: `0x00` is INVALID — guards against zero-init buffers being silently accepted.
 - `nonce` is freshly random per call (NIST SP 800-38D §5.2.1.1). Catastrophic GCM failure mode is nonce reuse; never patch this constant or reuse a nonce.
+- **Nonce-space rotation guidance.** With 96-bit random nonces the birthday-collision probability hits 2⁻³² at roughly 2³² (~4 billion) encryptions per key. NIST's stated bound is also 2³². Plan to retire any single key before it reaches ~1 billion encryptions across all P1 columns combined to stay well below the bound. At telemetry rates (e.g., ~10 GPS frames/sec/vehicle × 1000 vehicles × 86400 sec/day ≈ 0.86B/day for the GPS columns alone), this implies an annual or sooner rotation cadence once the GPS rollout lands. Re-evaluate the cadence as part of the column-rollout PRs once production write rates per column are measured.
 - `ciphertext + tag` is the standard AES-GCM output. Tampering produces an authentication failure on `Decrypt` — never silently accepted.
 
 The minimum ciphertext length is `1 + 12 + 16 = 29` bytes pre-base64. `Decrypt` rejects shorter inputs with `ErrCiphertextTooShort` before invoking AES.
