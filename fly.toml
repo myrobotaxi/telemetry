@@ -8,7 +8,8 @@
 # Prometheus metrics (port 9090) is internal only — access via `fly proxy 9090`.
 #
 # Deploy: fly deploy
-# Secrets: fly secrets set DATABASE_URL=... AUTH_SECRET=... TESLA_KEY_FILE_B64=...
+# Secrets: fly secrets set DATABASE_URL=... AUTH_SECRET=... ENCRYPTION_KEY=... TESLA_KEY_FILE_B64=...
+# Generate ENCRYPTION_KEY with: openssl rand -base64 32 (see docs/contracts/key-rotation.md).
 
 app = 'my-robo-taxi-telemetry'
 primary_region = 'iad'

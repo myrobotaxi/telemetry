@@ -6,8 +6,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -19,7 +17,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/auth"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/config"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/drives"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
@@ -44,7 +41,7 @@ func main() {
 	}
 }
 
-func run() error { //nolint:funlen // composition root — sequential dependency wiring
+func run() error { //nolint:funlen // composition root — sequential dependency wiring; helpers extracted to wiring.go
 	// --- Flag parsing ---
 	var (
 		configPath = flag.String("config", "", "path to JSON configuration file")
@@ -97,6 +94,13 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(collectors.NewGoCollector())
 	reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+
+	// --- Column encryption foundation (NFR-3.23, NFR-3.24) ---
+	encryptor, err := setupEncryption(logger)
+	if err != nil {
+		return err
+	}
+	_ = encryptor // foundation: column wiring lands in follow-on PRs (MYR-16 cross-repo rollout issues)
 
 	// --- Database connection ---
 	db, err := store.NewDB(ctx, cfg.Database(), logger.With(slog.String("component", "store")), store.NoopMetrics{})
@@ -178,84 +182,31 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	go hub.RunHeartbeat(ctx, cfg.WebSocket().HeartbeatInterval)
 
 	// --- Client authenticator ---
-	var authenticator ws.Authenticator
-	if *devMode {
-		logger.Warn("dev mode enabled: WebSocket auth disabled, accepting any token")
-		authenticator = &ws.NoopAuthenticator{}
-	} else {
-		authenticator = auth.NewJWTAuthenticator(
-			cfg.Auth().Secret,
-			cfg.Auth().TokenIssuer,
-			cfg.Auth().TokenAudience,
-			db.Pool(),
-		)
-		logger.Info("JWT authentication enabled for WebSocket clients")
-	}
+	authenticator := setupAuthenticator(cfg, db.Pool(), *devMode, logger)
 
-	// --- HTTP servers ---
+	// --- HTTP server + route registration ---
 	srv := server.New(cfg.Server(), logger, db, reg, cfg.TeslaPublicKey())
-	srv.SetTeslaHandler(recv.Handler())
 	originPatterns := cfg.WebSocket().AllowedOrigins
 	if len(originPatterns) == 0 {
 		originPatterns = []string{"*"} // default: allow all (restrict in production config)
 	}
-	srv.SetClientHandler(hub.Handler(authenticator, ws.HandlerConfig{
-		WriteTimeout:   cfg.WebSocket().WriteTimeout,
-		OriginPatterns: originPatterns,
-	}))
+	setupHTTPHandlers(httpRouteDeps{
+		cfg:            cfg,
+		srv:            srv,
+		hub:            hub,
+		authenticator:  authenticator,
+		recv:           recv,
+		bus:            bus,
+		vinCache:       vinCache,
+		accountRepo:    accountRepo,
+		debugGate:      debugGate,
+		originPatterns: originPatterns,
+		logger:         logger,
+	})
 
-	// --- Vehicle status endpoint (always available) ---
-	statusHandler := telemetry.NewVehicleStatusHandler(
-		authenticator,
-		&vehicleOwnerAdapter{cache: vinCache},
-		recv,
-		logger.With(slog.String("component", "vehicle-status")),
-	)
-	srv.HandleFunc("GET /api/vehicle-status/{vin}", statusHandler.ServeHTTP)
-
-	// --- Fleet config push endpoint (optional — requires proxy config) ---
-	setupFleetConfigEndpoint(cfg, srv, authenticator, vinCache, accountRepo, logger)
-
-	// --- Debug fields endpoint ---
-	// Mounted when resolveDebugFieldsGate says so — either because the
-	// server is running with --dev (token optional) or because an operator
-	// has set DEBUG_FIELDS_TOKEN on a production instance to let
-	// `ops fields watch` stream real-Tesla frames. Auth is enforced by
-	// DebugFieldsHandler via the X-Debug-Token header / ?token= query param
-	// when APIKey is non-empty.
-	if debugGate.Enabled {
-		debugHandler := telemetry.NewDebugFieldsHandler(
-			bus,
-			logger.With(slog.String("component", "debug-fields")),
-			telemetry.DebugFieldsConfig{
-				APIKey:         debugGate.Token,
-				OriginPatterns: originPatterns,
-			},
-		)
-		srv.HandleFunc("GET /api/debug/fields", debugHandler.ServeHTTP)
-		logger.Info("/api/debug/fields endpoint enabled",
-			slog.String("gate", debugGate.Reason),
-			slog.Bool("token_required", debugGate.Token != ""),
-		)
-	}
-
-	// Configure mTLS on Tesla port. TLS is required for vehicle connections —
-	// without it, Tesla vehicles cannot complete the handshake and report EOF.
-	if cfg.TLS().CertFile == "" || cfg.TLS().KeyFile == "" {
-		logger.Warn("TLS cert/key not configured — Tesla mTLS port will serve plain TCP (dev only)",
-			slog.String("cert_file", cfg.TLS().CertFile),
-			slog.String("key_file", cfg.TLS().KeyFile),
-		)
-	} else {
-		teslaTLS, err := buildTeslaTLS(cfg.TLS())
-		if err != nil {
-			return fmt.Errorf("building Tesla mTLS config: %w", err)
-		}
-		srv.SetTeslaTLS(teslaTLS)
-		logger.Info("Tesla mTLS configured",
-			slog.String("cert_file", cfg.TLS().CertFile),
-			slog.Bool("client_ca_loaded", cfg.TLS().CAFile != ""),
-		)
+	// --- Tesla mTLS ---
+	if err := setupTeslaTLS(cfg, srv, logger); err != nil {
+		return err
 	}
 
 	logger.Info("starting HTTP servers")
@@ -265,66 +216,6 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 
 	logger.Info("telemetry-server stopped cleanly")
 	return nil
-}
-
-// setupFleetConfigEndpoint registers the POST /api/fleet-config/{vin}
-// handler if the proxy URL and fleet telemetry hostname are configured.
-// When Tesla OAuth credentials are available, it also enables automatic
-// token refresh.
-func setupFleetConfigEndpoint(
-	cfg *config.Config,
-	srv *server.Server,
-	authenticator ws.Authenticator,
-	vinCache *store.VINCache,
-	accountRepo *store.AccountRepo,
-	logger *slog.Logger,
-) {
-	if cfg.Proxy().URL == "" || cfg.Proxy().FleetTelemetryHostname == "" {
-		logger.Warn("fleet config push disabled: proxy URL or telemetry hostname not configured")
-		return
-	}
-
-	fleetClient := telemetry.NewFleetAPIClient(telemetry.FleetAPIConfig{
-		BaseURL:    cfg.Proxy().URL,
-		HTTPClient: proxyHTTPClient(cfg.Proxy().URL, logger),
-	}, logger.With(slog.String("component", "fleet")))
-
-	// Map config.ProxyConfig fields → telemetry.EndpointConfig.
-	// If new proxy fields are added to config, update this mapping.
-	var fleetOpts []telemetry.FleetConfigOption
-	if cfg.TeslaOAuth().ClientID != "" {
-		// Intentional mapping: config.TeslaOAuthConfig and telemetry.TeslaOAuthConfig
-		// have identical fields but live in separate dependency layers. Don't "DRY"
-		// them — config is infra, telemetry is domain. The copy keeps them decoupled.
-		refresher := telemetry.NewTokenRefresher(telemetry.TeslaOAuthConfig{
-			ClientID:     cfg.TeslaOAuth().ClientID,
-			ClientSecret: cfg.TeslaOAuth().ClientSecret,
-		}, logger.With(slog.String("component", "token-refresh")))
-		updater := &teslaTokenUpdaterAdapter{repo: accountRepo}
-		fleetOpts = append(fleetOpts, telemetry.WithTokenRefresher(refresher, updater))
-		logger.Info("Tesla token auto-refresh enabled")
-	} else {
-		logger.Warn("Tesla token auto-refresh disabled: AUTH_TESLA_ID not set")
-	}
-
-	fleetHandler := telemetry.NewFleetConfigHandler(
-		authenticator,
-		&vehicleOwnerAdapter{cache: vinCache},
-		&teslaTokenAdapter{repo: accountRepo},
-		fleetClient,
-		telemetry.EndpointConfig{
-			Hostname: cfg.Proxy().FleetTelemetryHostname,
-			Port:     cfg.Proxy().FleetTelemetryPort,
-			CA:       cfg.Proxy().FleetTelemetryCA,
-		},
-		logger.With(slog.String("component", "fleet-config")),
-		fleetOpts...,
-	)
-
-	srv.HandleFunc("POST /api/fleet-config/{vin}", fleetHandler.ServeHTTP)
-	logger.Info("fleet config push endpoint enabled",
-		slog.String("proxy_url", cfg.Proxy().URL),
-	)
 }
 
 func newLogger(level string) (*slog.Logger, error) {
@@ -343,38 +234,6 @@ func newLogger(level string) (*slog.Logger, error) {
 	}
 
 	return slog.New(handler), nil
-}
-
-// buildTeslaTLS creates a TLS config for the Tesla mTLS port.
-// It loads the server cert/key and optionally a CA for verifying client certs.
-// If no CA file is configured, client certs are requested but not verified
-// (suitable for local dev with self-signed certs).
-func buildTeslaTLS(cfg config.TLSConfig) (*tls.Config, error) {
-	cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
-	if err != nil {
-		return nil, fmt.Errorf("loading server cert: %w", err)
-	}
-
-	tlsCfg := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		ClientAuth:   tls.RequestClientCert,
-		MinVersion:   tls.VersionTLS12,
-	}
-
-	if cfg.CAFile != "" {
-		caPEM, err := os.ReadFile(cfg.CAFile) // #nosec G304 -- operator-configured cert path
-		if err != nil {
-			return nil, fmt.Errorf("reading CA file: %w", err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(caPEM) {
-			return nil, fmt.Errorf("no valid certs found in CA file %s", cfg.CAFile)
-		}
-		tlsCfg.ClientCAs = pool
-		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
-	}
-
-	return tlsCfg, nil
 }
 
 // newGeocoder creates a Geocoder based on whether a Mapbox token is
