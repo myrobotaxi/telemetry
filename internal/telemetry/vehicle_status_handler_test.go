@@ -269,39 +269,105 @@ func (s *stubVehicleIDLookup) GetVehicleIDByVIN(_ context.Context, _ string) (st
 	return s.id, nil
 }
 
-// maskedResponseWithSynthetic is a tiny response shape that mirrors
-// vehicleStatusResponse but adds a forward-looking `licensePlate`
-// field. The actual vehicleStatusResponse doesn't carry licensePlate
-// in v1 — this struct exercises the mask plumbing using a synthetic
-// payload, validating that ANY licensePlate-bearing response would be
-// projected correctly.
-type maskedResponseWithSynthetic struct {
-	VIN          string `json:"vin"`
-	Connected    bool   `json:"connected"`
-	LicensePlate string `json:"licensePlate"`
-	Speed        int    `json:"speed"`
-}
+// TestVehicleStatusResponse_ToMaskMap_PreservesWireNames verifies the
+// typed projection returns a map keyed by JSON wire names — the same
+// keys the mask matrix uses. Replaces the structToMap round-trip test
+// removed in MYR-58.
+func TestVehicleStatusResponse_ToMaskMap_PreservesWireNames(t *testing.T) {
+	lastMsg := "2026-04-30T12:00:00Z"
+	connSince := "2026-04-30T11:00:00Z"
+	in := vehicleStatusResponse{
+		VIN:            "5YJ3E1EA1PF000001",
+		Connected:      true,
+		LastMessageAt:  &lastMsg,
+		MessageCount:   42,
+		ConnectedSince: &connSince,
+	}
+	got := in.ToMaskMap()
 
-// TestStructToMap_PreservesWireNames verifies the JSON round-trip used
-// by writeMaskedResponse produces a map keyed by JSON wire names — the
-// same keys the mask matrix uses.
-func TestStructToMap_PreservesWireNames(t *testing.T) {
-	in := maskedResponseWithSynthetic{
-		VIN:          "ABC",
-		Connected:    true,
-		LicensePlate: "XYZ-789",
-		Speed:        65,
-	}
-	got, err := structToMap(in)
-	if err != nil {
-		t.Fatalf("structToMap: %v", err)
-	}
-	wantKeys := []string{"vin", "connected", "licensePlate", "speed"}
+	wantKeys := []string{"vin", "connected", "last_message_at", "message_count", "connected_since"}
 	for _, k := range wantKeys {
 		if _, ok := got[k]; !ok {
 			t.Errorf("missing key %q in %v", k, got)
 		}
 	}
+	if len(got) != len(wantKeys) {
+		t.Errorf("unexpected keys: got %v, want exactly %v", got, wantKeys)
+	}
+
+	// Pointer-typed fields flatten to their pointed-to value.
+	if got["last_message_at"] != lastMsg {
+		t.Errorf("last_message_at: got %v, want %q", got["last_message_at"], lastMsg)
+	}
+	if got["connected_since"] != connSince {
+		t.Errorf("connected_since: got %v, want %q", got["connected_since"], connSince)
+	}
+}
+
+// TestVehicleStatusResponse_ToMaskMap_NilPointersFlattenToNil verifies
+// that nil pointer fields produce a `nil` map value (not the absence
+// of the key) — this matches the post-Marshal/Unmarshal shape the old
+// structToMap helper produced, so the projected JSON output stays
+// byte-identical to the pre-MYR-58 implementation.
+func TestVehicleStatusResponse_ToMaskMap_NilPointersFlattenToNil(t *testing.T) {
+	in := vehicleStatusResponse{
+		VIN:       "5YJ3E1EA1PF000001",
+		Connected: false,
+	}
+	got := in.ToMaskMap()
+
+	if v, ok := got["last_message_at"]; !ok || v != nil {
+		t.Errorf("last_message_at: got (%v, ok=%v), want (nil, ok=true)", v, ok)
+	}
+	if v, ok := got["connected_since"]; !ok || v != nil {
+		t.Errorf("connected_since: got (%v, ok=%v), want (nil, ok=true)", v, ok)
+	}
+	if got["message_count"] != int64(0) {
+		t.Errorf("message_count zero: got %v (%T), want int64(0)", got["message_count"], got["message_count"])
+	}
+}
+
+// BenchmarkVehicleStatusResponse_ToMaskMap_VsJSONRoundTrip is the
+// MYR-58 baseline → post-fix comparison. The "JSONRoundTrip" sub-bench
+// reproduces the pre-MYR-58 structToMap implementation inline so the
+// regression target stays self-contained even after the helper is
+// removed. The "ToMaskMap" sub-bench measures the typed alternative.
+//
+// Acceptance criterion: ToMaskMap allocs ≤ 70% of JSONRoundTrip allocs.
+// Run with: go test ./internal/telemetry -run=^$ -bench=ToMaskMap_VsJSONRoundTrip -benchmem
+func BenchmarkVehicleStatusResponse_ToMaskMap_VsJSONRoundTrip(b *testing.B) {
+	lastMsg := "2026-04-30T12:00:00Z"
+	connSince := "2026-04-30T11:00:00Z"
+	in := vehicleStatusResponse{
+		VIN:            "5YJ3E1EA1PF000001",
+		Connected:      true,
+		LastMessageAt:  &lastMsg,
+		MessageCount:   42,
+		ConnectedSince: &connSince,
+	}
+
+	b.Run("JSONRoundTrip", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			encoded, err := json.Marshal(in)
+			if err != nil {
+				b.Fatal(err)
+			}
+			out := make(map[string]any)
+			if err := json.Unmarshal(encoded, &out); err != nil {
+				b.Fatal(err)
+			}
+			_ = out
+		}
+	})
+
+	b.Run("ToMaskMap", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			out := in.ToMaskMap()
+			_ = out
+		}
+	})
 }
 
 // TestVehicleStatusHandler_MaskedResponse_RoleResolverError verifies
