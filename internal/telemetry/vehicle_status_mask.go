@@ -2,7 +2,6 @@ package telemetry
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -67,13 +66,12 @@ func WithMask(resource mask.ResourceType, roles roleResolver, idLookup vehicleID
 // is encoded directly — equivalent to RoleOwner allow-all behavior for
 // v1 callers (the only non-owner path is 403'd by verifyOwnership).
 //
-// The map round-trip through json.Marshal/Unmarshal is intentional: the
-// mask matrix is keyed by JSON field name, so we materialize the
-// struct's wire shape as a map[string]any and project that map. The
-// trade-off is one extra allocation per request; the matrix-keyed
-// design is the same one used by the WebSocket per-role projection
-// (websocket-protocol.md §4.6) — keeping both transports on a single
-// source-of-truth is worth the marginal cost.
+// Each maskable response struct provides a typed ToMaskMap() method
+// that builds a wire-name-keyed map directly (no json.Marshal/Unmarshal
+// round-trip). The mask matrix is keyed by JSON field name, so the
+// helper hand-mirrors the struct's `json:"..."` tags — the same
+// matrix-keyed design used by the WebSocket per-role projection
+// (websocket-protocol.md §4.6).
 //
 // TODO(MYR-XX audit-log): when AuditLog table exists, if
 // len(fieldsMasked) > 0 AND mask.ShouldAuditREST(userID, requestID,
@@ -110,19 +108,7 @@ func (h *VehicleStatusHandler) writeMaskedResponse(
 		return
 	}
 
-	// Round-trip through JSON to materialize the response as a
-	// schema-less map[string]any keyed by wire field name. The mask
-	// matrix is keyed the same way — see internal/mask/tables.go.
-	asMap, err := structToMap(resp)
-	if err != nil {
-		h.logger.Error("vehicle status: encode-for-mask failed",
-			slog.String("error", err.Error()),
-		)
-		h.writeError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-
-	projected, fieldsMasked := mask.Apply(asMap, mask.For(h.maskResource, role))
+	projected, fieldsMasked := mask.Apply(resp.ToMaskMap(), mask.For(h.maskResource, role))
 	_ = fieldsMasked // see TODO(MYR-XX audit-log) above
 
 	h.writeJSON(w, http.StatusOK, projected)
@@ -141,19 +127,4 @@ func (h *VehicleStatusHandler) resolveCallerRole(ctx context.Context, vin, userI
 		return auth.Role(""), fmt.Errorf("resolveCallerRole: %w", err)
 	}
 	return role, nil
-}
-
-// structToMap encodes v as JSON and decodes it back into a
-// map[string]any, producing a wire-name-keyed map suitable for the
-// mask layer.
-func structToMap(v any) (map[string]any, error) {
-	encoded, err := json.Marshal(v)
-	if err != nil {
-		return nil, fmt.Errorf("structToMap: marshal: %w", err)
-	}
-	out := make(map[string]any)
-	if err := json.Unmarshal(encoded, &out); err != nil {
-		return nil, fmt.Errorf("structToMap: unmarshal: %w", err)
-	}
-	return out, nil
 }
