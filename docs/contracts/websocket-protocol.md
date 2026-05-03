@@ -284,7 +284,7 @@ The Linear AC for MYR-11 calls for a "type discriminator, sequence, timestamp" e
 
 Rationale for not shipping `seq`/`ts` in v1.0:
 
-1. The current server has no per-connection sequence counter ([`client.go:Client`](../../internal/ws/client.go) struct has `userID`, `vehicleIDs`, `send`, `remoteAddr`, `hub`, `logger` -- no `nextSeq`).
+1. The current server has no per-connection sequence counter — the [`client.go:Client`](../../internal/ws/client.go) struct does not carry a `nextSeq` field, and adding one would touch every broadcast hot-path.
 2. Reconnect-resume is currently implemented entirely client-side via REST snapshot fetch (see [`state-machine.md`](state-machine.md) §5), which establishes a consistent baseline without needing wire-level sequence numbers. The trade-off: clients cannot detect dropped frames within a single connection.
 3. Adding `seq` is a coordinated server + SDK + fixture change. It is a v1.x extension, not a v1.0 ship blocker.
 
@@ -621,7 +621,7 @@ Per [`state-machine.md`](state-machine.md) §4.2, `connectivity` does NOT direct
 
 > **Anchored:** NFR-3.21.
 
-`Hub.Broadcast(vehicleID, msg)` ([`internal/ws/hub.go`](../../internal/ws/hub.go) line 70) iterates every connected client and calls `client.hasVehicle(vehicleID)`. Only clients whose `vehicleIDs` slice (populated at handshake time from `Authenticator.GetUserVehicles`) contains the target vehicle ID receive the frame. Clients with an empty vehicle list (the `NoopAuthenticator` dev mode) receive **all** broadcasts -- this is explicit in [`client.go:hasVehicle`](../../internal/ws/client.go) line 120 and is intentional for local development.
+`Hub.Broadcast(vehicleID, msg)` ([`internal/ws/hub.go`](../../internal/ws/hub.go) line 70) iterates every connected client and calls `client.hasVehicle(vehicleID)`. Only clients whose `vehicleIDs` slice (populated at handshake time from `Authenticator.GetUserVehicles`) contains the target vehicle ID receive the frame. The dev-mode `NoopAuthenticator` returns the `WildcardVehicleID` sentinel ([`auth.go`](../../internal/ws/auth.go)) from `GetUserVehicles`; the handshake translates that into `Client.allVehicles = true` and `hasVehicle` short-circuits to `true` for those clients. Production `Authenticator` implementations MUST NOT emit the sentinel, so `allVehicles` is always `false` on production: an empty `vehicleIDs` slice means deny-all per NFR-3.21.
 
 The SDK can rely on the following contract: **an authenticated production client will NEVER receive a `vehicle_update`, `drive_started`, `drive_ended`, or `connectivity` frame for a vehicle it does not own at handshake time.**
 

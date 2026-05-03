@@ -6,6 +6,17 @@ import (
 	"github.com/tnando/my-robo-taxi-telemetry/internal/auth"
 )
 
+// WildcardVehicleID is the sentinel value the dev-mode NoopAuthenticator
+// returns from GetUserVehicles to convey "this client is authorized for
+// every vehicle" without overloading the empty-slice case (which a
+// production authenticator uses to mean deny-all per NFR-3.21).
+//
+// Production Authenticator implementations MUST NOT return this value.
+// The handshake (handler.go authenticateClient) intercepts it, sets
+// Client.allVehicles=true, and excludes it from Client.vehicleIDs and
+// the per-vehicle role-resolution loop.
+const WildcardVehicleID = "*"
+
 // Authenticator validates session tokens and retrieves the vehicles a user
 // is authorized to view. Defined at the consumer site (this package);
 // implemented by a real Supabase adapter or NoopAuthenticator for testing.
@@ -30,15 +41,18 @@ type Authenticator interface {
 	ResolveRole(ctx context.Context, userID, vehicleID string) (auth.Role, error)
 }
 
-// NoopAuthenticator accepts any non-empty token and returns a fixed user
-// with all-vehicle access. Use it for local development and testing only.
+// NoopAuthenticator accepts any non-empty token and returns a fixed user.
+// Use it for local development and testing only.
 type NoopAuthenticator struct {
 	// UserID is returned for every successful validation. Defaults to
 	// "test-user" if empty.
 	UserID string
 
-	// VehicleIDs is returned by GetUserVehicles. An empty slice means
-	// the user is not authorized for any vehicles.
+	// VehicleIDs is returned by GetUserVehicles. A nil or empty slice
+	// is interpreted as "dev-mode all-vehicle access" and is expanded to
+	// the WildcardVehicleID sentinel by GetUserVehicles. To restrict the
+	// dev user to a specific list of vehicles, populate VehicleIDs
+	// explicitly.
 	VehicleIDs []string
 }
 
@@ -56,8 +70,16 @@ func (a *NoopAuthenticator) ValidateToken(_ context.Context, token string) (stri
 	return "test-user", nil
 }
 
-// GetUserVehicles returns the configured VehicleIDs slice.
+// GetUserVehicles returns the configured VehicleIDs slice. If unset, it
+// returns the single-element WildcardVehicleID sentinel so the handshake
+// knows to grant dev-mode all-vehicle access. This is what makes empty
+// VehicleIDs unambiguously mean "all-access" for NoopAuthenticator while
+// still meaning deny-all for any production Authenticator (which never
+// emits the sentinel).
 func (a *NoopAuthenticator) GetUserVehicles(_ context.Context, _ string) ([]string, error) {
+	if len(a.VehicleIDs) == 0 {
+		return []string{WildcardVehicleID}, nil
+	}
 	return a.VehicleIDs, nil
 }
 

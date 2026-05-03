@@ -301,6 +301,110 @@ func TestHub_Broadcast_AuthorizedOnly(t *testing.T) {
 	}
 }
 
+// TestHub_ProductionClient_EmptyVehicleIDs_DenyAll covers the MYR-60
+// regression: pre-fix, a production Authenticator that returned an empty
+// vehicleIDs slice would leak every vehicle to the client because
+// hasVehicle treated empty as "all access". Post-fix, an empty slice
+// without the dev-mode WildcardVehicleID sentinel must deny-all on every
+// broadcast path. Exercises both Broadcast (raw fan-out) and
+// BroadcastMasked (per-role projection) to prove neither path leaks.
+func TestHub_ProductionClient_EmptyVehicleIDs_DenyAll(t *testing.T) {
+	hub := newTestHub(t)
+	t.Cleanup(hub.Stop)
+
+	// Real-world pattern: testAuth (stand-in for JWTAuthenticator) returns
+	// the empty slice when the user owns no vehicles.
+	auth := &testAuth{userID: "user-no-vehicles", vehicleIDs: []string{}}
+	srv := newTestServer(t, hub, auth)
+	t.Cleanup(srv.Close)
+
+	conn := dialAndAuth(t, srv.URL, "token")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	waitForClients(t, hub, 1)
+
+	// The hub sees the client; sanity-check the deny-all posture.
+	hub.mu.RLock()
+	var got *Client
+	for c := range hub.clients {
+		got = c
+	}
+	hub.mu.RUnlock()
+	if got == nil {
+		t.Fatal("expected a registered client")
+	}
+	if got.allVehicles {
+		t.Fatal("production client must not have allVehicles=true")
+	}
+	if len(got.vehicleIDs) != 0 {
+		t.Fatalf("expected empty vehicleIDs, got %v", got.vehicleIDs)
+	}
+
+	// Broadcast (raw) for some vehicle the user does NOT own. The user
+	// owns no vehicle, so this MUST NOT reach them.
+	rawMsg := mustMarshalTest(t, wsMessage{
+		Type: msgTypeDriveStarted,
+		Payload: mustMarshalRaw(t, map[string]any{
+			"vehicleId": "v-leaked",
+		}),
+	})
+	hub.Broadcast("v-leaked", rawMsg)
+
+	// BroadcastMasked path with a non-empty payload + valid resource.
+	hub.BroadcastMasked(
+		"v-leaked",
+		mask.ResourceVehicleState,
+		time.Now().Format(time.RFC3339),
+		map[string]any{"speed": 65},
+	)
+
+	// Confirm nothing was delivered. Read with a short deadline; the
+	// only acceptable outcome is timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if _, _, err := conn.Read(ctx); err == nil {
+		t.Fatal("client with empty vehicleIDs received a broadcast — deny-all violated")
+	}
+}
+
+// TestHub_NoopAuth_WildcardSetsAllVehicles verifies the dev-mode escape
+// hatch: NoopAuthenticator with no explicit VehicleIDs returns the
+// WildcardVehicleID sentinel from GetUserVehicles, which the handshake
+// translates to Client.allVehicles=true while stripping the sentinel out
+// of Client.vehicleIDs.
+func TestHub_NoopAuth_WildcardSetsAllVehicles(t *testing.T) {
+	hub := newTestHub(t)
+	t.Cleanup(hub.Stop)
+
+	auth := &NoopAuthenticator{} // VehicleIDs unset → wildcard expansion
+	srv := newTestServer(t, hub, auth)
+	t.Cleanup(srv.Close)
+
+	conn := dialAndAuth(t, srv.URL, "token")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	waitForClients(t, hub, 1)
+
+	hub.mu.RLock()
+	var got *Client
+	for c := range hub.clients {
+		got = c
+	}
+	hub.mu.RUnlock()
+	if got == nil {
+		t.Fatal("expected a registered client")
+	}
+	if !got.allVehicles {
+		t.Fatal("NoopAuthenticator handshake must set allVehicles=true")
+	}
+	if len(got.vehicleIDs) != 0 {
+		t.Fatalf("wildcard sentinel must be stripped from vehicleIDs, got %v", got.vehicleIDs)
+	}
+	if !got.hasVehicle("any-vehicle") {
+		t.Fatal("hasVehicle must return true for allVehicles=true client")
+	}
+}
+
 func TestHub_Heartbeat(t *testing.T) {
 	hub := newTestHub(t)
 	t.Cleanup(hub.Stop)
@@ -449,10 +553,11 @@ func TestHub_Handler_NonWSRequest(t *testing.T) {
 
 func TestClient_HasVehicle(t *testing.T) {
 	tests := []struct {
-		name       string
-		vehicleIDs []string
-		query      string
-		want       bool
+		name        string
+		vehicleIDs  []string
+		allVehicles bool
+		query       string
+		want        bool
 	}{
 		{
 			name:       "vehicle in list",
@@ -467,22 +572,41 @@ func TestClient_HasVehicle(t *testing.T) {
 			want:       false,
 		},
 		{
-			name:       "nil list grants all-vehicle access",
+			// Production posture: no vehicles authorized = deny-all.
+			// Pre-MYR-60 this was implicit "all access"; now it is
+			// explicit deny-all per NFR-3.21.
+			name:       "nil vehicleIDs without allVehicles -> deny",
 			vehicleIDs: nil,
 			query:      "v-1",
-			want:       true,
+			want:       false,
 		},
 		{
-			name:       "empty slice grants all-vehicle access",
+			name:       "empty vehicleIDs without allVehicles -> deny",
 			vehicleIDs: []string{},
 			query:      "v-1",
-			want:       true,
+			want:       false,
+		},
+		{
+			// Dev-mode escape hatch: allVehicles flag grants access
+			// to every vehicle regardless of vehicleIDs contents.
+			name:        "allVehicles=true grants access",
+			vehicleIDs:  nil,
+			allVehicles: true,
+			query:       "v-anything",
+			want:        true,
+		},
+		{
+			name:        "allVehicles=true with explicit list also grants access",
+			vehicleIDs:  []string{"v-1"},
+			allVehicles: true,
+			query:       "v-2",
+			want:        true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := &Client{vehicleIDs: tt.vehicleIDs}
+			c := &Client{vehicleIDs: tt.vehicleIDs, allVehicles: tt.allVehicles}
 			if got := c.hasVehicle(tt.query); got != tt.want {
 				t.Fatalf("hasVehicle(%q) = %v, want %v", tt.query, got, tt.want)
 			}
@@ -556,6 +680,28 @@ func TestNoopAuthenticator(t *testing.T) {
 		}
 		if len(ids) != 2 {
 			t.Fatalf("expected 2 vehicle IDs, got %d", len(ids))
+		}
+	})
+
+	t.Run("nil VehicleIDs returns wildcard sentinel", func(t *testing.T) {
+		auth := &NoopAuthenticator{}
+		ids, err := auth.GetUserVehicles(context.Background(), "any")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(ids) != 1 || ids[0] != WildcardVehicleID {
+			t.Fatalf("expected single-element wildcard, got %v", ids)
+		}
+	})
+
+	t.Run("empty VehicleIDs returns wildcard sentinel", func(t *testing.T) {
+		auth := &NoopAuthenticator{VehicleIDs: []string{}}
+		ids, err := auth.GetUserVehicles(context.Background(), "any")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(ids) != 1 || ids[0] != WildcardVehicleID {
+			t.Fatalf("expected single-element wildcard, got %v", ids)
 		}
 	})
 }

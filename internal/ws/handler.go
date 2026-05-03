@@ -165,8 +165,22 @@ func (h *Hub) authenticateClient(ctx context.Context, client *Client, auth Authe
 		return fmt.Errorf("hub.authenticateClient: get vehicles(user=%s): %w", userID, err)
 	}
 
+	// Strip the dev-mode WildcardVehicleID sentinel out of the slice and
+	// translate it to the explicit allVehicles flag so downstream code
+	// (hasVehicle, role resolution, auth_ok VehicleCount) only sees real
+	// vehicle IDs. Production Authenticator implementations never emit
+	// the sentinel, so on production this loop is a no-op.
+	concreteIDs := make([]string, 0, len(vehicleIDs))
+	for _, vid := range vehicleIDs {
+		if vid == WildcardVehicleID {
+			client.allVehicles = true
+			continue
+		}
+		concreteIDs = append(concreteIDs, vid)
+	}
+
 	client.userID = userID
-	client.vehicleIDs = vehicleIDs
+	client.vehicleIDs = concreteIDs
 
 	// Per websocket-protocol.md §4.6 / rest-api.md §5, resolve the
 	// caller's role for each authorized vehicle so the hub can
@@ -175,7 +189,7 @@ func (h *Hub) authenticateClient(ctx context.Context, client *Client, auth Authe
 	// Role("") sentinel at broadcast time, which yields a deny-all
 	// projection — the client connects but receives no payload for
 	// that vehicle until a successful re-handshake.
-	for _, vid := range vehicleIDs {
+	for _, vid := range concreteIDs {
 		role, roleErr := auth.ResolveRole(authCtx, userID, vid)
 		if roleErr != nil {
 			h.logger.Warn("ResolveRole failed; vehicle will be deny-all masked",

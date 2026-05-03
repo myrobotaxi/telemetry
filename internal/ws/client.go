@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/coder/websocket"
@@ -27,6 +28,13 @@ type Client struct {
 	conn       *websocket.Conn
 	userID     string
 	vehicleIDs []string // vehicles this user is authorized to see
+	// allVehicles is the explicit "this client is authorized for every
+	// vehicle" flag. It is set ONLY by the handshake when GetUserVehicles
+	// returns the WildcardVehicleID sentinel (dev-mode NoopAuthenticator).
+	// Production authenticators MUST NOT return that sentinel, so on
+	// production this field stays false and an empty vehicleIDs slice
+	// means deny-all per NFR-3.21.
+	allVehicles bool
 	// vehicleRoles maps vehicleID -> role for this client. Populated at
 	// handshake time alongside vehicleIDs (handler.go authenticateClient).
 	// Per websocket-protocol.md §4.6, the hub looks up the role here to
@@ -137,18 +145,15 @@ func (c *Client) enqueue(msg []byte) bool {
 }
 
 // hasVehicle reports whether this client is authorized to receive updates
-// for the given vehicle ID. A nil/empty vehicleIDs slice grants access to
-// all vehicles (used by NoopAuthenticator in dev mode).
+// for the given vehicle ID. allVehicles=true grants access to every
+// vehicle and is reserved for the dev-mode NoopAuthenticator; otherwise
+// the vehicleID must be present in vehicleIDs. An empty vehicleIDs slice
+// with allVehicles=false means deny-all (NFR-3.21).
 func (c *Client) hasVehicle(vehicleID string) bool {
-	if len(c.vehicleIDs) == 0 {
+	if c.allVehicles {
 		return true
 	}
-	for _, id := range c.vehicleIDs {
-		if id == vehicleID {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(c.vehicleIDs, vehicleID)
 }
 
 // writeMessage writes a single message to the WebSocket with a timeout.
