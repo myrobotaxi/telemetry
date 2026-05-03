@@ -1413,23 +1413,34 @@ func TestBroadcaster_DriveEndedClearsNavAccumulator(t *testing.T) {
 	}
 }
 
-func TestStatusDerivation_SpeedOnlyDoesNotInjectStatus(t *testing.T) {
+// TestEnsureGearGroupAtomic_ColdStart covers the no-cache case:
+// before the broadcaster has seen any gear frame for the VIN, a
+// speed-only frame must NOT inject `status` (because injecting status
+// without a companion gearPosition would be a worse atomic-group
+// violation than the under-refresh it tries to fix). Frames carrying
+// gearPosition emit status as before.
+//
+// Pre-MYR-61 this test verified the inline `if hasGear { ... }`
+// behavior; post-MYR-61 it pins the cold-start path of
+// ensureGearGroupAtomic where the gear cache is empty.
+func TestEnsureGearGroupAtomic_ColdStart(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name       string
 		fields     map[string]events.TelemetryValue
 		wantStatus bool // whether "status" key should exist
 		wantValue  string
+		wantGear   string // expected gearPosition value (empty = absent)
 	}{
 		{
-			name: "speed 0 without gear does not inject status",
+			name: "speed 0 without gear does not inject status (no cache)",
 			fields: map[string]events.TelemetryValue{
 				"speed": {FloatVal: ptrFloat64(0)},
 			},
 			wantStatus: false,
 		},
 		{
-			name: "speed 65 without gear does not inject status",
+			name: "speed 65 without gear does not inject status (no cache)",
 			fields: map[string]events.TelemetryValue{
 				"speed": {FloatVal: ptrFloat64(65)},
 			},
@@ -1443,6 +1454,7 @@ func TestStatusDerivation_SpeedOnlyDoesNotInjectStatus(t *testing.T) {
 			},
 			wantStatus: true,
 			wantValue:  "driving",
+			wantGear:   "D",
 		},
 		{
 			name: "gear P alone injects parked",
@@ -1451,18 +1463,16 @@ func TestStatusDerivation_SpeedOnlyDoesNotInjectStatus(t *testing.T) {
 			},
 			wantStatus: true,
 			wantValue:  "parked",
+			wantGear:   "P",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			b := &Broadcaster{} // empty cache, no bus/hub needed
 			clientFields := mapFieldsForClient(tt.fields)
-
-			// Simulate what handleTelemetry does.
-			if _, hasGear := clientFields["gearPosition"]; hasGear {
-				clientFields["status"] = deriveVehicleStatus(clientFields)
-			}
+			b.ensureGearGroupAtomic("vin-1", clientFields)
 
 			_, gotStatus := clientFields["status"]
 			if gotStatus != tt.wantStatus {
@@ -1472,8 +1482,142 @@ func TestStatusDerivation_SpeedOnlyDoesNotInjectStatus(t *testing.T) {
 				if clientFields["status"] != tt.wantValue {
 					t.Fatalf("status = %q, want %q", clientFields["status"], tt.wantValue)
 				}
+				gotGear, _ := clientFields["gearPosition"].(string)
+				if gotGear != tt.wantGear {
+					t.Fatalf("gearPosition = %q, want %q (atomic invariant: status without gear)", gotGear, tt.wantGear)
+				}
 			}
 		})
+	}
+}
+
+// TestEnsureGearGroupAtomic_SpeedOnlyAfterCachedGear is the MYR-61
+// fix proper: once the broadcaster has seen a gear frame, a subsequent
+// speed-only frame must recompute `status` AND carry the cached
+// `gearPosition` on the same wire frame. The atomic invariant from
+// vehicle-state-schema.md §2.4 (status never without gearPosition)
+// holds end-to-end.
+func TestEnsureGearGroupAtomic_SpeedOnlyAfterCachedGear(t *testing.T) {
+	tests := []struct {
+		name        string
+		seedGear    string
+		speedFields map[string]events.TelemetryValue
+		wantGear    string
+		wantStatus  string
+	}{
+		{
+			// AC #1: gear=P → speed=25 (no gear) → second frame
+			// carries both gearPosition AND status: driving (because
+			// speed > 0).
+			name:     "park then speed 25 -> gear P + status driving",
+			seedGear: "P",
+			speedFields: map[string]events.TelemetryValue{
+				"speed": {FloatVal: ptrFloat64(25)},
+			},
+			wantGear:   "P",
+			wantStatus: "driving",
+		},
+		{
+			// AC #2: gear=D speed=5 → speed=0 (no gear) → second
+			// frame still carries gearPosition: D and status: driving
+			// (gear is still D — the parked transition needs a real
+			// gear=P frame).
+			name:     "drive at 5 then speed 0 -> gear D + status driving",
+			seedGear: "D",
+			speedFields: map[string]events.TelemetryValue{
+				"speed": {FloatVal: ptrFloat64(0)},
+			},
+			wantGear:   "D",
+			wantStatus: "driving",
+		},
+		{
+			// Reverse: gear=R, speed=0 → driving (per
+			// deriveVehicleStatus rule "gear in {D,R}").
+			name:     "reverse at 0 -> gear R + status driving",
+			seedGear: "R",
+			speedFields: map[string]events.TelemetryValue{
+				"speed": {FloatVal: ptrFloat64(0)},
+			},
+			wantGear:   "R",
+			wantStatus: "driving",
+		},
+		{
+			// gear=P, speed=0 → parked (cache hit; status
+			// recomputed but stays at parked).
+			name:     "parked at 0 -> gear P + status parked",
+			seedGear: "P",
+			speedFields: map[string]events.TelemetryValue{
+				"speed": {FloatVal: ptrFloat64(0)},
+			},
+			wantGear:   "P",
+			wantStatus: "parked",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			vin := "5YJ3E1EA1NF000001"
+			b := &Broadcaster{}
+			b.gear.Store(vin, tt.seedGear)
+
+			clientFields := mapFieldsForClient(tt.speedFields)
+			if _, gearLeaked := clientFields["gearPosition"]; gearLeaked {
+				t.Fatalf("test setup error: speedFields should not produce gearPosition before ensureGearGroupAtomic, got %v", clientFields)
+			}
+
+			b.ensureGearGroupAtomic(vin, clientFields)
+
+			gotGear, _ := clientFields["gearPosition"].(string)
+			if gotGear != tt.wantGear {
+				t.Fatalf("gearPosition = %q, want %q", gotGear, tt.wantGear)
+			}
+			gotStatus, _ := clientFields["status"].(string)
+			if gotStatus != tt.wantStatus {
+				t.Fatalf("status = %q, want %q", gotStatus, tt.wantStatus)
+			}
+		})
+	}
+}
+
+// TestBroadcaster_ConnectivityDisconnect_ClearsGearCache verifies the
+// gear cache is wiped on disconnect so a subsequent speed-only frame
+// after reconnect does not derive status from pre-disconnect gear.
+func TestBroadcaster_ConnectivityDisconnect_ClearsGearCache(t *testing.T) {
+	bus := events.NewChannelBus(events.DefaultBusConfig(), events.NoopBusMetrics{}, slog.Default())
+	t.Cleanup(func() { _ = bus.Close(context.Background()) })
+
+	resolver := newStubVINResolver(map[string]string{
+		"5YJ3E1EA1NF000001": "vehicle-id-1",
+	})
+	hub := NewHub(slog.Default(), NoopHubMetrics{})
+	t.Cleanup(hub.Stop)
+
+	b := NewBroadcaster(hub, bus, resolver, slog.Default())
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+
+	vin := "5YJ3E1EA1NF000001"
+	b.gear.Store(vin, "D")
+
+	// Publish a disconnect for the VIN.
+	disconnect := events.NewEvent(events.ConnectivityEvent{
+		VIN:       vin,
+		Status:    events.StatusDisconnected,
+		Timestamp: time.Now().UTC(),
+	})
+	if err := bus.Publish(context.Background(), disconnect); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	waitForCondition(t, func() bool {
+		_, stillCached := b.gear.Load(vin)
+		return !stillCached
+	})
+
+	if _, stillCached := b.gear.Load(vin); stillCached {
+		t.Fatal("gear cache was not cleared on connectivity disconnect")
 	}
 }
 

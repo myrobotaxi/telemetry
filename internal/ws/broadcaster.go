@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
@@ -21,6 +22,14 @@ type Broadcaster struct {
 	subs     []events.Subscription
 	routes   *routeAccumulator
 	groups   *groupAccumulator
+	// gear caches the most recently seen gearPosition per VIN so a
+	// speed-only telemetry frame can recompute `status` and emit it
+	// atomically with `gearPosition` — preserving the gear group's
+	// "no partial group on the wire" invariant from
+	// vehicle-state-schema.md §2.4 (NFR-3.1, NFR-3.4). Cleared on
+	// connectivity disconnect to avoid leaking stale gear across a
+	// reconnect.
+	gear sync.Map // VIN string → gearPosition string
 }
 
 // NewBroadcaster creates a Broadcaster ready to start. Call Start to begin
@@ -222,10 +231,13 @@ func (b *Broadcaster) handleConnectivity(ctx context.Context, event events.Event
 
 	b.hub.Broadcast(vehicleID, msg)
 
-	// Clear pending nav fields when vehicle disconnects to avoid
-	// broadcasting stale navigation data on reconnect.
+	// Clear pending nav fields and the cached gearPosition when a
+	// vehicle disconnects to avoid broadcasting stale navigation data
+	// or recomputing `status` against pre-disconnect gear after the
+	// vehicle reconnects (vehicle-state-schema.md §2.4).
 	if payload.Status == events.StatusDisconnected {
 		b.groups.Clear(groupNavigation, payload.VIN)
+		b.gear.Delete(payload.VIN)
 	}
 }
 

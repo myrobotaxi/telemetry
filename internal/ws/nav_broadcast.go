@@ -63,9 +63,7 @@ func (b *Broadcaster) handleTelemetry(ctx context.Context, event events.Event) {
 	}
 
 	fields["lastUpdated"] = payload.CreatedAt.Format(time.RFC3339)
-	if _, hasGear := fields["gearPosition"]; hasGear {
-		fields["status"] = deriveVehicleStatus(fields)
-	}
+	b.ensureGearGroupAtomic(payload.VIN, fields)
 
 	// Per-role projection per websocket-protocol.md §4.6 — the hub
 	// pre-marshals one frame per role using the v1 vehicle_state mask
@@ -76,6 +74,41 @@ func (b *Broadcaster) handleTelemetry(ctx context.Context, event events.Event) {
 		payload.CreatedAt.Format(time.RFC3339),
 		fields,
 	)
+}
+
+// ensureGearGroupAtomic enforces the gear group's atomic-emission
+// invariant from vehicle-state-schema.md §2.4: `status` MUST never
+// appear on the wire without its companion `gearPosition`.
+//
+// Two paths reach `status`:
+//
+//   - Frame carries gearPosition: cache the new value and derive
+//     status from the current frame's fields.
+//
+//   - Frame is speed-only: pull cached gearPosition for this VIN,
+//     inject it into `fields`, and derive status. The companion
+//     gearPosition rides on the same wire frame, preserving the
+//     atomic-emission invariant.
+//
+// No cache hit on the speed-only path means the server has not yet
+// seen a gear frame for this VIN since startup or the last connectivity
+// drop — leave status off the frame so the SDK keeps its previous
+// value rather than receiving a partial group.
+func (b *Broadcaster) ensureGearGroupAtomic(vin string, fields map[string]any) {
+	if gear, hasGear := fields["gearPosition"].(string); hasGear {
+		b.gear.Store(vin, gear)
+		fields["status"] = deriveVehicleStatus(fields)
+		return
+	}
+	if _, hasSpeed := fields["speed"]; !hasSpeed {
+		return
+	}
+	cached, ok := b.gear.Load(vin)
+	if !ok {
+		return
+	}
+	fields["gearPosition"] = cached
+	fields["status"] = deriveVehicleStatus(fields)
 }
 
 // flushGroup is the callback invoked by the groupAccumulator when an
