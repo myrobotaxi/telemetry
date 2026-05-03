@@ -70,6 +70,38 @@ type vehicleStatusResponse struct {
 	ConnectedSince *string `json:"connected_since"`
 }
 
+// ToMaskMap returns a map[string]any keyed by JSON wire name, suitable
+// for projection through the role-based field mask in internal/mask.
+// Replaces the encoding/json round-trip previously used by
+// writeMaskedResponse, removing one Marshal/Unmarshal allocation pair
+// per masked REST response (MYR-58).
+//
+// Pointer-typed fields (LastMessageAt, ConnectedSince) are flattened to
+// their pointed-to value or nil — preserving the same key set the JSON
+// round-trip produced. The mask matrix only inspects keys, so value
+// type fidelity (int64 vs float64) is irrelevant; we use native Go
+// types here.
+func (r vehicleStatusResponse) ToMaskMap() map[string]any {
+	m := make(map[string]any, 5)
+	m["vin"] = r.VIN
+	m["connected"] = r.Connected
+	m["last_message_at"] = derefOrNil(r.LastMessageAt)
+	m["message_count"] = r.MessageCount
+	m["connected_since"] = derefOrNil(r.ConnectedSince)
+	return m
+}
+
+// derefOrNil returns *p as an any, or untyped nil if p is nil. The
+// untyped-nil return is what json.Marshal of a nil pointer produces
+// after the Unmarshal-to-map round-trip — keeping the post-mask JSON
+// output byte-identical to the pre-MYR-58 implementation.
+func derefOrNil[T any](p *T) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
 // vehicleStatusErrorResponse is the JSON body returned on errors.
 type vehicleStatusErrorResponse struct {
 	Error string `json:"error"`
