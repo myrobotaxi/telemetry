@@ -12,6 +12,8 @@ import (
 
 	"github.com/coder/websocket"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/tnando/my-robo-taxi-telemetry/internal/wserrors"
 )
 
 // HandlerConfig holds tuning parameters for the WebSocket handler.
@@ -51,13 +53,17 @@ func (h *Hub) Handler(auth Authenticator, cfg HandlerConfig) http.Handler {
 func (h *Hub) handleUpgrade(w http.ResponseWriter, r *http.Request, auth Authenticator, cfg HandlerConfig) {
 	clientIP := resolveClientIP(r)
 
-	// Per-IP connection limit.
+	// Per-IP connection limit. Pre-auth, no WebSocket established yet —
+	// emit the REST error envelope so SDK consumers branching on
+	// `error.code` get the same shape as a 429 from the REST surface.
+	// Per websocket-protocol.md §1.3 / §6.1.1 the SDK treats this as
+	// `rate_limited` regardless of the carrier.
 	if cfg.MaxConnectionsPerIP > 0 {
 		if h.ipConnectionCount(clientIP) >= cfg.MaxConnectionsPerIP {
 			h.logger.Warn("connection rate limited",
 				slog.String("remote_addr", clientIP),
 			)
-			http.Error(w, "too many connections", http.StatusTooManyRequests)
+			wserrors.WriteErrorEnvelope(w, h.logger, http.StatusTooManyRequests, wserrors.ErrCodeRateLimited, "too many connections")
 			return
 		}
 	}
@@ -83,9 +89,9 @@ func (h *Hub) handleUpgrade(w http.ResponseWriter, r *http.Request, auth Authent
 			slog.Any("error", err),
 			slog.String("remote_addr", clientIP),
 		)
-		errCode := errCodeAuthFailed
+		errCode := wserrors.ErrCodeAuthFailed
 		if errors.Is(err, ErrAuthTimeout) {
-			errCode = errCodeAuthTimeout
+			errCode = wserrors.ErrCodeAuthTimeout
 		}
 		errCtx, errCancel := context.WithTimeout(context.Background(), cfg.WriteTimeout)
 		_ = sendError(errCtx, conn, errCode, err.Error(), cfg.WriteTimeout)
@@ -155,13 +161,13 @@ func (h *Hub) authenticateClient(ctx context.Context, client *Client, auth Authe
 
 	userID, err := auth.ValidateToken(authCtx, payload.Token)
 	if err != nil {
-		_ = sendError(authCtx, client.conn, errCodeAuthFailed, "invalid token", cfg.WriteTimeout)
+		_ = sendError(authCtx, client.conn, wserrors.ErrCodeAuthFailed, "invalid token", cfg.WriteTimeout)
 		return fmt.Errorf("hub.authenticateClient: validate token: %w", err)
 	}
 
 	vehicleIDs, err := auth.GetUserVehicles(authCtx, userID)
 	if err != nil {
-		_ = sendError(authCtx, client.conn, errCodeAuthFailed, "failed to load vehicles", cfg.WriteTimeout)
+		_ = sendError(authCtx, client.conn, wserrors.ErrCodeAuthFailed, "failed to load vehicles", cfg.WriteTimeout)
 		return fmt.Errorf("hub.authenticateClient: get vehicles(user=%s): %w", userID, err)
 	}
 
@@ -231,8 +237,11 @@ func sendAuthOk(ctx context.Context, client *Client, writeTimeout time.Duration)
 	return nil
 }
 
-// sendError writes an error message to the WebSocket connection.
-func sendError(ctx context.Context, conn *websocket.Conn, code, message string, timeout time.Duration) error {
+// sendError writes a typed error frame to the WebSocket connection. The
+// `code` parameter is an ErrorCode (closed enum) so the compiler refuses
+// string literals at the call site — the typed-error contract from
+// FR-7.1 is enforced at the type system, not at runtime.
+func sendError(ctx context.Context, conn *websocket.Conn, code wserrors.ErrorCode, message string, timeout time.Duration) error {
 	writeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 

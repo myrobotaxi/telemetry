@@ -16,6 +16,7 @@ import (
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/auth"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/mask"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/wserrors"
 )
 
 // testAuth is an Authenticator for tests with configurable behavior.
@@ -224,8 +225,8 @@ func TestHub_AuthFailure_InvalidToken(t *testing.T) {
 	if err := json.Unmarshal(msg.Payload, &errPayload); err != nil {
 		t.Fatalf("unmarshal error payload: %v", err)
 	}
-	if errPayload.Code != errCodeAuthFailed {
-		t.Fatalf("expected code %q, got %q", errCodeAuthFailed, errPayload.Code)
+	if errPayload.Code != wserrors.ErrCodeAuthFailed {
+		t.Fatalf("expected code %q, got %q", wserrors.ErrCodeAuthFailed, errPayload.Code)
 	}
 }
 
@@ -780,19 +781,19 @@ func TestHub_AuthOk_NotEmittedOnFailure(t *testing.T) {
 		name     string
 		auth     *testAuth
 		sendAuth bool // false = trigger auth_timeout by not sending auth
-		wantCode string
+		wantCode wserrors.ErrorCode
 	}{
 		{
 			name:     "auth_failed on invalid token",
 			auth:     &testAuth{err: ErrInvalidToken},
 			sendAuth: true,
-			wantCode: errCodeAuthFailed,
+			wantCode: wserrors.ErrCodeAuthFailed,
 		},
 		{
 			name:     "auth_timeout on no auth frame",
 			auth:     &testAuth{userID: "user-1", vehicleIDs: []string{"v-1"}},
 			sendAuth: false,
-			wantCode: errCodeAuthTimeout,
+			wantCode: wserrors.ErrCodeAuthTimeout,
 		},
 	}
 

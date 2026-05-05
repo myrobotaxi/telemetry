@@ -3,7 +3,11 @@
 // telemetry updates to authorized users.
 package ws
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/tnando/my-robo-taxi-telemetry/internal/wserrors"
+)
 
 // Message type constants matching the frontend protocol.
 const (
@@ -50,9 +54,11 @@ type authOkPayload struct {
 }
 
 // errorPayload is the server-to-client payload for error messages.
+// Code is the typed enum from wserrors so the compiler refuses string
+// literals at every error-frame construction site.
 type errorPayload struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code    wserrors.ErrorCode `json:"code"`
+	Message string             `json:"message"`
 }
 
 // driveStartedPayload is the server-to-client payload sent when the drive
@@ -91,8 +97,3 @@ type connectivityPayload struct {
 	Timestamp string `json:"timestamp"`
 }
 
-// Error code constants returned to clients.
-const (
-	errCodeAuthFailed  = "auth_failed"
-	errCodeAuthTimeout = "auth_timeout"
-)
