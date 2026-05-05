@@ -607,7 +607,19 @@ func TestClient_HasVehicle(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := &Client{vehicleIDs: tt.vehicleIDs, allVehicles: tt.allVehicles}
+			// Mirror the handshake behavior: subscribed is seeded from
+			// vehicleIDs at handshake, so a hand-constructed Client
+			// must do the same to exercise the production hasVehicle
+			// code path (post-MYR-46).
+			subscribed := make(map[string]struct{}, len(tt.vehicleIDs))
+			for _, vid := range tt.vehicleIDs {
+				subscribed[vid] = struct{}{}
+			}
+			c := &Client{
+				vehicleIDs:  tt.vehicleIDs,
+				allVehicles: tt.allVehicles,
+				subscribed:  subscribed,
+			}
 			if got := c.hasVehicle(tt.query); got != tt.want {
 				t.Fatalf("hasVehicle(%q) = %v, want %v", tt.query, got, tt.want)
 			}
