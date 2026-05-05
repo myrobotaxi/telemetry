@@ -122,7 +122,7 @@ func (h *Hub) handleUpgrade(w http.ResponseWriter, r *http.Request, auth Authent
 		return nil
 	})
 	g.Go(func() error {
-		client.readPump(gctx)
+		client.readPump(gctx, cfg.WriteTimeout)
 		return nil
 	})
 
@@ -187,6 +187,17 @@ func (h *Hub) authenticateClient(ctx context.Context, client *Client, auth Authe
 
 	client.userID = userID
 	client.vehicleIDs = concreteIDs
+
+	// Seed the active subscription set from the owned vehicles so a
+	// client that never sends subscribe/unsubscribe (e.g., the v1
+	// Next.js consumer pre-MYR-46 SDK release) keeps receiving every
+	// owned vehicle. subscribe/unsubscribe (DV-07) narrow this set
+	// after handshake.
+	client.subMu.Lock()
+	for _, vid := range concreteIDs {
+		client.subscribed[vid] = struct{}{}
+	}
+	client.subMu.Unlock()
 
 	// Per websocket-protocol.md §4.6 / rest-api.md §5, resolve the
 	// caller's role for each authorized vehicle so the hub can

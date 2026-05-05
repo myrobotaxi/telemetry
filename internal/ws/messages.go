@@ -19,6 +19,15 @@ const (
 	msgTypeConnectivity  = "connectivity"
 	msgTypeHeartbeat     = "heartbeat"
 	msgTypeError         = "error"
+
+	// Client->server control frames added by MYR-46 (DV-07). The contract
+	// catalog lives in websocket-protocol.md §5; payload shapes are
+	// canonical in schemas/ws-messages.schema.json (Subscribe-, Unsubscribe-,
+	// PingPayload). The schema uses singular `vehicleId`, not `vehicleIds[]`.
+	msgTypeSubscribe   = "subscribe"
+	msgTypeUnsubscribe = "unsubscribe"
+	msgTypePing        = "ping"
+	msgTypePong        = "pong"
 )
 
 // wsMessage is the envelope for all WebSocket messages exchanged with
@@ -95,5 +104,34 @@ type connectivityPayload struct {
 	VehicleID string `json:"vehicleId"`
 	Online    bool   `json:"online"`
 	Timestamp string `json:"timestamp"`
+}
+
+// subscribePayload is the client-to-server request to (re)assert
+// streaming for a specific vehicle. Schema: SubscribePayload in
+// schemas/ws-messages.schema.json. SinceSeq is reserved for DV-02 and
+// is currently parsed but ignored.
+type subscribePayload struct {
+	VehicleID string `json:"vehicleId"`
+	SinceSeq  *int64 `json:"sinceSeq,omitempty"`
+}
+
+// unsubscribePayload is the client-to-server request to stop streaming
+// updates for a specific vehicle without closing the WebSocket.
+type unsubscribePayload struct {
+	VehicleID string `json:"vehicleId"`
+}
+
+// pingPayload is the client-to-server application-level liveness probe.
+// The server responds with msgTypePong echoing the same Nonce. Today
+// this is reserved for Apple-platform consumers (NFR-3.36 / NFR-3.36a-d);
+// browser/Node consumers rely on transport-level RFC 6455 PING/PONG.
+type pingPayload struct {
+	Nonce string `json:"nonce,omitempty"`
+}
+
+// pongPayload is the server-to-client response to a client-initiated
+// ping. Echoes the nonce so the client can compute round-trip latency.
+type pongPayload struct {
+	Nonce string `json:"nonce,omitempty"`
 }
 

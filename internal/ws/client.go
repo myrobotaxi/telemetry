@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -44,10 +45,20 @@ type Client struct {
 	// known mid-connection refresh gap (role downgrade requires
 	// reconnect).
 	vehicleRoles map[string]auth.Role
-	remoteAddr   string
-	send         chan []byte
-	hub          *Hub
-	logger       *slog.Logger
+	// subscribed tracks which of the client's owned vehicles are
+	// currently active subscriptions. Initialized at handshake from
+	// vehicleIDs (so a client that never sends subscribe/unsubscribe
+	// receives every owned vehicle, matching pre-MYR-46 behavior).
+	// subscribe ADDS to the set after an ownership check; unsubscribe
+	// REMOVES. Mutations are guarded by subMu, NOT by Hub.mu, so the
+	// per-VIN broadcast hot-path (Hub.RLock) does not contend with the
+	// readPump.
+	subscribed map[string]struct{}
+	subMu      sync.RWMutex
+	remoteAddr string
+	send       chan []byte
+	hub        *Hub
+	logger     *slog.Logger
 }
 
 // newClient creates a Client that is not yet authenticated. The userID and
@@ -57,6 +68,7 @@ func newClient(conn *websocket.Conn, hub *Hub, logger *slog.Logger) *Client {
 		conn:         conn,
 		send:         make(chan []byte, sendBufSize),
 		vehicleRoles: make(map[string]auth.Role),
+		subscribed:   make(map[string]struct{}),
 		hub:          hub,
 		logger:       logger,
 	}
@@ -99,13 +111,15 @@ func (c *Client) writePump(ctx context.Context, writeTimeout time.Duration) {
 	}
 }
 
-// readPump reads messages from the WebSocket. After authentication, we
-// only need to keep reading to detect client disconnect and respond to
-// pings. All client-sent messages after auth are ignored.
-func (c *Client) readPump(ctx context.Context) {
+// readPump reads messages from the WebSocket. After authentication,
+// it dispatches client->server control frames (subscribe, unsubscribe,
+// ping — DV-07) and ignores any other frame type so unknown messages
+// from a future SDK do not poison the connection. Returns when the
+// socket is closed or the context cancels.
+func (c *Client) readPump(ctx context.Context, writeTimeout time.Duration) {
 	c.conn.SetReadLimit(readLimit)
 	for {
-		_, _, err := c.conn.Read(ctx)
+		_, data, err := c.conn.Read(ctx)
 		if err != nil {
 			if !isNormalClose(err) {
 				c.logger.Debug("read error",
@@ -115,8 +129,12 @@ func (c *Client) readPump(ctx context.Context) {
 			}
 			return
 		}
-		// Post-auth messages are ignored; the read is only to detect
-		// disconnects and keep the connection alive.
+		if !c.handleClientFrame(ctx, data, writeTimeout) {
+			// Returning false signals a hard close (subscribe to a
+			// non-owned vehicle). The handler has already emitted the
+			// typed error frame and closed the socket; just exit.
+			return
+		}
 	}
 }
 
@@ -144,16 +162,52 @@ func (c *Client) enqueue(msg []byte) bool {
 	}
 }
 
-// hasVehicle reports whether this client is authorized to receive updates
-// for the given vehicle ID. allVehicles=true grants access to every
-// vehicle and is reserved for the dev-mode NoopAuthenticator; otherwise
-// the vehicleID must be present in vehicleIDs. An empty vehicleIDs slice
-// with allVehicles=false means deny-all (NFR-3.21).
+// hasVehicle reports whether this client is authorized AND currently
+// subscribed for the given vehicle ID. allVehicles=true (dev-mode
+// NoopAuthenticator) short-circuits to true. Otherwise the vehicleID
+// must be in the per-client subscription set, which is initialized
+// from vehicleIDs at handshake and modified by subscribe/unsubscribe
+// (DV-07 / MYR-46). An empty vehicleIDs slice with allVehicles=false
+// means deny-all (NFR-3.21).
 func (c *Client) hasVehicle(vehicleID string) bool {
 	if c.allVehicles {
 		return true
 	}
+	c.subMu.RLock()
+	_, ok := c.subscribed[vehicleID]
+	c.subMu.RUnlock()
+	return ok
+}
+
+// owns reports whether the client was authorized for vehicleID at
+// handshake time. Used by the subscribe handler to gate the
+// permission_denied path before mutating the subscription set, so the
+// ownership check is independent of the current subscription state.
+func (c *Client) owns(vehicleID string) bool {
+	if c.allVehicles {
+		return true
+	}
 	return slices.Contains(c.vehicleIDs, vehicleID)
+}
+
+// subscribe adds vehicleID to the active subscription set. Caller MUST
+// have verified ownership (Client.owns) first — the typed error frame
+// for vehicle_not_owned is emitted by the readPump dispatcher, not
+// here. Idempotent.
+func (c *Client) subscribe(vehicleID string) {
+	c.subMu.Lock()
+	c.subscribed[vehicleID] = struct{}{}
+	c.subMu.Unlock()
+}
+
+// unsubscribe removes vehicleID from the active subscription set.
+// Idempotent: removing an already-absent ID is a no-op. Does NOT
+// require ownership — a subscribed-but-since-revoked vehicle should
+// still be removable so the client can drain the set on logout.
+func (c *Client) unsubscribe(vehicleID string) {
+	c.subMu.Lock()
+	delete(c.subscribed, vehicleID)
+	c.subMu.Unlock()
 }
 
 // writeMessage writes a single message to the WebSocket with a timeout.
