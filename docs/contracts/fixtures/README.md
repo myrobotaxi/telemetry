@@ -108,7 +108,7 @@ let cleaned = try JSONSerialization.data(withJSONObject: dict)
 | `vehicle_update.gear.json` | `ws-messages.schema.json#/$defs/VehicleUpdatePayload` | happy-path | Gear atomic group -- gearPosition D, status driving |
 | `vehicle_update.nav_active.json` | `ws-messages.schema.json#/$defs/VehicleUpdatePayload` | happy-path | Navigation group with active route (all 9 members) |
 | `vehicle_update.nav_clear.json` | `ws-messages.schema.json#/$defs/VehicleUpdatePayload` | happy-path | Navigation cancelled -- all nav fields null (FR-2.3) |
-| `vehicle_update.route.json` | `ws-messages.schema.json#/$defs/VehicleUpdatePayload` | happy-path | Drive route accumulator flush (routeCoordinates) |
+| `vehicle_update.route.json` | `ws-messages.schema.json#/$defs/VehicleUpdatePayload` | happy-path | Drive route accumulator flush (driveTrailCoordinates) |
 | `vehicle_update.speed.json` | `ws-messages.schema.json#/$defs/VehicleUpdatePayload` | happy-path | Ungrouped individual field (speed only) |
 | `drive_started.json` | `ws-messages.schema.json#/$defs/DriveStartedPayload` | happy-path | Drive lifecycle start with startedAt (tripStartTime) |
 | `drive_ended.json` | `ws-messages.schema.json#/$defs/DriveEndedPayload` | happy-path | Drive lifecycle end with summary stats |
