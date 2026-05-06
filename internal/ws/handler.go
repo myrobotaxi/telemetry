@@ -13,6 +13,7 @@ import (
 	"github.com/coder/websocket"
 	"golang.org/x/sync/errgroup"
 
+	authpkg "github.com/tnando/my-robo-taxi-telemetry/internal/auth"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/wserrors"
 )
 
@@ -190,6 +191,17 @@ func (h *Hub) authenticateClient(ctx context.Context, client *Client, auth Authe
 			continue
 		}
 		concreteIDs = append(concreteIDs, vid)
+	}
+
+	// When the wildcard sentinel sets allVehicles=true, seed defaultRole so
+	// the broadcast-time roleFor lookup falls back to a sensible role for
+	// vehicles that have no entry in vehicleRoles. RoleOwner matches
+	// NoopAuthenticator.ResolveRole's unconditional return, which is the
+	// only Authenticator that emits the wildcard sentinel today. Without
+	// this fallback, dev-mode wildcard clients silently fail per-role
+	// projection in BroadcastMasked (MYR-66).
+	if client.allVehicles {
+		client.defaultRole = authpkg.RoleOwner
 	}
 
 	client.userID = userID
