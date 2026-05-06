@@ -144,6 +144,7 @@
       "atomicGroup": "",
       "synthetic": { "kind": "vehicleUpdate", "field": "FsdMilesSinceReset", "value": 412.7 },
       "nullableInSteadyState": false,
+      "linearIssue": "MYR-67",
       "comment": "DOCUMENTED GAP: schema declares fsdMilesSinceReset as a non-nullable telemetry field; ws/field_mapping.go passes it through to the WS broadcast (telemetry.FieldFSDMiles = \"fsdMilesSinceReset\"); but VehicleUpdate has NO FsdMilesSinceReset pointer and field_mapper.go has NO applier for telemetry.FieldFSDMiles. Result: WS clients see the value live, but the DB row keeps the seeded value forever. Cold page reload via REST /snapshot will not reflect FSD-miles-since-reset changes that occurred while the user was offline. Tracked in MYR-67 (https://linear.app/myrobotaxi/issue/MYR-67); category=expected_failure surfaces the gap as a t.Logf warning so the test stays green. The closing PR for MYR-67 re-categorizes this row to category=telemetry and the assertion becomes hard. The test seeds a non-zero baseline so the steady-state DB read returns it."
     },
     "destinationName": {
@@ -158,6 +159,7 @@
       "atomicGroup": "navigation",
       "synthetic": { "kind": "vehicleUpdate", "field": "DestinationAddress", "value": "2001 Market St, San Francisco, CA 94114" },
       "nullableInSteadyState": true,
+      "linearIssue": "MYR-68",
       "comment": "DOCUMENTED GAP: schema declares destinationAddress as a navigation atomic group member, but VehicleUpdate has NO DestinationAddress pointer and field_mapper.go has no applier — destinationAddress is currently only writable via direct INSERT/seeding (likely intended to be reverse-geocoded server-side from destinationLatitude/destinationLongitude, but no writer path exists). Tracked in MYR-68 (https://linear.app/myrobotaxi/issue/MYR-68); category=expected_failure surfaces the gap as a t.Logf warning so the test stays green. The closing PR for MYR-68 re-categorizes this row to category=telemetry|telemetry_alias and the assertion becomes hard. The synthetic uses kind=vehicleUpdate with the expected Go field name (DestinationAddress) so the missing-field reflect lookup surfaces a clear message."
     },
     "destinationLatitude": {

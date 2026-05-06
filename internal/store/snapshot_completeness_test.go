@@ -36,6 +36,19 @@ type fixtureRow struct {
 	Synthetic             *syntheticSpec `json:"synthetic,omitempty"`
 	NullableInSteadyState bool           `json:"nullableInSteadyState"`
 	Comment               string         `json:"comment"`
+	// LinearIssue is the issue identifier (e.g. "MYR-67") tracking the
+	// closing PR for an expected_failure row. Surfaced in test output
+	// so `go test -v` log lines name the gap directly.
+	LinearIssue string `json:"linearIssue,omitempty"`
+}
+
+// expectedGapTag formats the prefix that disambiguates documented
+// writer-pipeline gaps from real assertion failures in test output.
+func expectedGapTag(row fixtureRow) string {
+	if row.LinearIssue != "" {
+		return fmt.Sprintf("[EXPECTED-GAP %s]", row.LinearIssue)
+	}
+	return "[EXPECTED-GAP]"
 }
 
 // syntheticSpec describes how to drive a value into the writer pipeline
@@ -191,8 +204,9 @@ func TestSnapshotCompleteness(t *testing.T) {
 	for fxName := range fix.Fields {
 		if _, ok := schemaByName[fxName]; !ok {
 			t.Errorf(
-				"fixture row %q has no matching schema property — "+
-					"either rename the row or remove it from snapshot_completeness.json",
+				"fixture row %q has no matching schema property in "+
+					"docs/contracts/schemas/vehicle-state.schema.json — "+
+					"either rename the row to match a schema property or remove it from snapshot_completeness.json",
 				fxName,
 			)
 		}
@@ -325,7 +339,7 @@ func applySyntheticAndAssertNonNull(
 				p.name, p.atomicGroup, row.Category, row.Synthetic.Field, err,
 			)
 			if row.Category == "expected_failure" {
-				t.Logf("expected gap: %s", body)
+				t.Logf("%s %s", expectedGapTag(row), body)
 				return
 			}
 			t.Errorf("NFR-3.5 violation: %s", body)
@@ -371,6 +385,7 @@ func runActiveGroup(t *testing.T, group string, members []string, fix fixtureRoo
 		field      string
 		message    string
 		isExpected bool
+		row        fixtureRow
 	}
 	var buildErrs []buildErr
 
@@ -390,6 +405,7 @@ func runActiveGroup(t *testing.T, group string, members []string, fix fixtureRoo
 						name, group, row.Category, row.Synthetic.Field, err,
 					),
 					isExpected: row.Category == "expected_failure",
+					row:        row,
 				})
 			}
 		case "seed":
@@ -402,7 +418,7 @@ func runActiveGroup(t *testing.T, group string, members []string, fix fixtureRoo
 			"VehicleUpdate is missing the Go field needed to persist this schema column. "+
 			"See docs/contracts/vehicle-state-schema.md §1.1.", group, e.message)
 		if e.isExpected {
-			t.Logf("expected gap: %s", body)
+			t.Logf("%s %s", expectedGapTag(e.row), body)
 			continue
 		}
 		// One Errorf per failure; do not Fatal so all gaps surface in one run.
@@ -486,7 +502,8 @@ func runLastUpdatedAdvances(t *testing.T) {
 	if !after.LastUpdated.After(before.LastUpdated) {
 		t.Errorf(
 			"NFR-3.5 violation: field %q (writer_metadata) did not advance after UpdateTelemetry: "+
-				"before=%s after=%s — Writer.handleTelemetry is not setting VehicleUpdate.LastUpdated.",
+				"before=%s after=%s — Writer.handleTelemetry is not setting VehicleUpdate.LastUpdated. "+
+				"See docs/contracts/vehicle-state-schema.md §1.1.",
 			"lastUpdated", before.LastUpdated.Format(time.RFC3339Nano), after.LastUpdated.Format(time.RFC3339Nano),
 		)
 	}
@@ -514,7 +531,7 @@ func assertSchemaFieldNonNull(t *testing.T, p schemaProperty, row fixtureRow, v 
 			// Documented writer-pipeline gap. Track in Linear; do not
 			// fail CI today. See snapshot_completeness.json comment for
 			// the follow-up issue ID.
-			t.Logf("expected gap: %s", body)
+			t.Logf("%s %s", expectedGapTag(row), body)
 			return
 		}
 		t.Errorf("NFR-3.5 violation: %s — DB persistence missing in writer pipeline.", body)
