@@ -31,7 +31,11 @@
     "heartbeat_interval": "15s",
     "write_timeout": "10s",
     "max_connections_per_user": 5,
-    "read_limit": 4096
+    "read_limit": 4096,
+    "allowed_origins": [
+      "https://myrobotaxi.app",
+      "https://www.myrobotaxi.app"
+    ]
   },
   "auth": {
     "token_issuer": "myrobotaxi",
