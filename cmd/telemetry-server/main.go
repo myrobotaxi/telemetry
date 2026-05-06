@@ -186,10 +186,7 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 
 	// --- HTTP server + route registration ---
 	srv := server.New(cfg.Server(), logger, db, reg, cfg.TeslaPublicKey())
-	originPatterns := cfg.WebSocket().AllowedOrigins
-	if len(originPatterns) == 0 {
-		originPatterns = []string{"*"} // default: allow all (restrict in production config)
-	}
+	originPatterns := resolveWSOriginPatterns(cfg.WebSocket().AllowedOrigins, *devMode, logger)
 	setupHTTPHandlers(httpRouteDeps{
 		cfg:            cfg,
 		srv:            srv,

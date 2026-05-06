@@ -58,6 +58,67 @@ func TestProxyHTTPClient(t *testing.T) {
 	}
 }
 
+func TestResolveWSOriginPatterns(t *testing.T) {
+	tests := []struct {
+		name       string
+		configured []string
+		devMode    bool
+		want       []string
+	}{
+		{
+			name:       "configured wins in production",
+			configured: []string{"https://myrobotaxi.app", "https://www.myrobotaxi.app"},
+			devMode:    false,
+			want:       []string{"https://myrobotaxi.app", "https://www.myrobotaxi.app"},
+		},
+		{
+			name:       "configured wins under --dev",
+			configured: []string{"https://staging.myrobotaxi.app"},
+			devMode:    true,
+			want:       []string{"https://staging.myrobotaxi.app"},
+		},
+		{
+			name:       "empty config + production fails closed",
+			configured: nil,
+			devMode:    false,
+			want:       nil,
+		},
+		{
+			name:       "empty config + --dev admits localhost",
+			configured: []string{},
+			devMode:    true,
+			want:       devLocalhostOriginPatterns,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveWSOriginPatterns(tt.configured, tt.devMode, testLogger())
+			if len(got) != len(tt.want) {
+				t.Fatalf("len: got %d (%v), want %d (%v)", len(got), got, len(tt.want), tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("[%d]: got %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+
+	// The dev-mode fallback must not alias the package-level slice — a
+	// caller mutating it should not poison subsequent calls.
+	t.Run("dev fallback returns a defensive copy", func(t *testing.T) {
+		got := resolveWSOriginPatterns(nil, true, testLogger())
+		if len(got) == 0 {
+			t.Fatal("expected non-empty dev fallback")
+		}
+		got[0] = "evil.example.com"
+		if devLocalhostOriginPatterns[0] == "evil.example.com" {
+			t.Error("resolveWSOriginPatterns leaked the package-level slice; caller mutation poisoned the constant")
+		}
+	})
+}
+
 func TestResolveDebugFieldsGate(t *testing.T) {
 	longToken := strings.Repeat("a", debugFieldsMinTokenLen)
 

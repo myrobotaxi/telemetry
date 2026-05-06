@@ -62,6 +62,54 @@ func resolveDebugFieldsGate(devMode bool, token string) (debugFieldsGate, error)
 	}
 }
 
+// devLocalhostOriginPatterns is the localhost-friendly fallback used when
+// --dev is set and the operator has not configured an explicit origin
+// allow-list. Hostname-only patterns match any scheme (http/ws), and the
+// "localhost:*" / "127.0.0.1:*" forms admit any port (Next.js typically
+// dials from :3000 or :3001 during local development).
+var devLocalhostOriginPatterns = []string{
+	"localhost",
+	"localhost:*",
+	"127.0.0.1",
+	"127.0.0.1:*",
+	"[::1]",
+	"[::1]:*",
+}
+
+// resolveWSOriginPatterns folds the operator-configured allow-list and
+// the --dev flag into the final OriginPatterns slice passed to the
+// coder/websocket Accept call. Rules per NFR-3.22 / MYR-17:
+//
+//   - configured AllowedOrigins takes precedence in every mode.
+//   - empty config + --dev: localhost defaults so a dev workstation
+//     can dial without ceremony (still fails-closed for any other
+//     cross-origin host).
+//   - empty config + production: empty slice. coder/websocket's
+//     authenticateOrigin permits same-origin and empty-Origin requests
+//     and rejects all cross-origin dials with HTTP 403. A loud Warn
+//     reminds the operator to set websocket.allowed_origins or
+//     WEBSOCKET_ALLOWED_ORIGINS rather than rely on this fallback.
+func resolveWSOriginPatterns(configured []string, devMode bool, logger *slog.Logger) []string {
+	if len(configured) > 0 {
+		logger.Info("websocket allowed origins configured",
+			slog.Int("count", len(configured)),
+			slog.Any("patterns", configured),
+		)
+		return configured
+	}
+	if devMode {
+		logger.Warn("websocket allowed origins not configured; --dev fallback admits localhost only",
+			slog.Any("patterns", devLocalhostOriginPatterns),
+		)
+		// Return a copy so callers cannot mutate the package-level slice.
+		out := make([]string, len(devLocalhostOriginPatterns))
+		copy(out, devLocalhostOriginPatterns)
+		return out
+	}
+	logger.Warn("websocket allowed origins not configured in production mode — all cross-origin connections will be rejected with HTTP 403; set websocket.allowed_origins or WEBSOCKET_ALLOWED_ORIGINS to admit a browser app")
+	return nil
+}
+
 // vinResolverAdapter adapts store.VINCache to the ws.VINResolver interface
 // (returns vehicleID string). Backing the WS broadcaster path with the cache
 // avoids fetching the full Vehicle row (including the heavy navRouteCoordinates
