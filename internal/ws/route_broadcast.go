@@ -10,8 +10,9 @@ import (
 )
 
 // handleDriveUpdated accumulates GPS route points and periodically
-// broadcasts the batch as a vehicle_update with routeCoordinates. This
-// avoids flooding WebSocket clients with one message per GPS sample.
+// broadcasts the batch as a vehicle_update with driveTrailCoordinates.
+// This avoids flooding WebSocket clients with one message per GPS
+// sample.
 func (b *Broadcaster) handleDriveUpdated(ctx context.Context, event events.Event) {
 	payload, ok := event.Payload.(events.DriveUpdatedEvent)
 	if !ok {
@@ -45,14 +46,13 @@ func (b *Broadcaster) broadcastRoutePoints(ctx context.Context, eventID, vin str
 		return
 	}
 
-	// The live drive-route stream uses the wire field name
-	// "routeCoordinates" (preserved from MYR-117 to avoid a
-	// frontend-breaking rename). The canonical schema name in
-	// vehicle-state.schema.json is "navRouteCoordinates"; both names
-	// must be allow-listed in the mask for owners and viewers — see
-	// internal/mask/tables.go.
+	// driveTrailCoordinates carries the accumulated GPS trail of an
+	// active drive ("where the car has been"). It is distinct from the
+	// navigation atomic group's navRouteCoordinates, which carries
+	// Tesla's planned route polyline ("where the car is going"). See
+	// docs/contracts/websocket-protocol.md §4.1.6.
 	fields := map[string]any{
-		"routeCoordinates": coordsToMapbox(points),
+		"driveTrailCoordinates": coordsToMapbox(points),
 	}
 
 	b.hub.BroadcastMasked(

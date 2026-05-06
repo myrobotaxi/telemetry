@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "description": "Drive route accumulator flush carrying routeCoordinates. Emitted during an active drive when the routeAccumulator hits its batch threshold (5 points) or flush interval (3s). The array contains the COMPLETE driven path so far -- SDK replaces rather than appends. Coordinates in [lng, lat] GeoJSON order.",
+    "description": "Drive route accumulator flush carrying driveTrailCoordinates -- the accumulated GPS trail of an active drive (\"where the car has been\"). Distinct from the navigation atomic group's navRouteCoordinates (Tesla's planned polyline; \"where the car is going\"). Emitted during an active drive when the routeAccumulator hits its batch threshold (5 points) or flush interval (3s). The array contains the COMPLETE driven path so far -- SDK replaces rather than appends. Coordinates in [lng, lat] GeoJSON order.",
     "anchoredFRs": ["FR-3.1", "FR-3.3"],
     "scenario": "happy-path"
   },
@@ -8,7 +8,7 @@
   "payload": {
     "vehicleId": "clxyz1234567890abcdef",
     "fields": {
-      "routeCoordinates": [
+      "driveTrailCoordinates": [
         [-122.4194, 37.7749],
         [-122.4192, 37.7750],
         [-122.4189, 37.7752],

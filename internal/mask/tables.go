@@ -129,14 +129,13 @@ var vehicleStateOwnerFields = []string{
 	"navOriginLocation",
 	"navEtaMinutes",
 	"navTripDistanceRemaining",
-	// "routeCoordinates" is the wire-name used by the live route
-	// stream (internal/ws/route_broadcast.go, MYR-117). It is the same
-	// data as the schema-canonical "navRouteCoordinates" (see
-	// vehicle-state.schema.json) — both names are allow-listed so the
-	// mask permits the live stream's wire shape AND the schema shape
-	// without a rename. Document this drift via a follow-up issue if
-	// it persists past v1.
-	"routeCoordinates",
+	// driveTrailCoordinates is the per-drive accumulated GPS trail
+	// emitted by internal/ws/route_broadcast.go ("where the car has
+	// been"). Distinct from the navigation atomic group's
+	// navRouteCoordinates, which carries Tesla's planned route
+	// polyline ("where the car is going"). See
+	// docs/contracts/websocket-protocol.md §4.1.6.
+	"driveTrailCoordinates",
 	// Wire freshness marker.
 	"lastUpdated",
 }

@@ -241,7 +241,7 @@ components:
         AT MOST ONE atomic group (navigation, charge, gps, gear) plus
         individually-delivered fields (speed, odometerMiles, interiorTemp,
         exteriorTemp, fsdMilesSinceReset, locationName, locationAddress,
-        lastUpdated, routeCoordinates).
+        lastUpdated, driveTrailCoordinates).
 
         Per-field types, units, nullability, and classification are defined
         in vehicle-state.schema.json. This message intentionally references

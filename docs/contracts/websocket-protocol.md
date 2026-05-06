@@ -252,7 +252,7 @@ A single `vehicle_update` frame's `payload.fields` map MUST contain members of *
 
 `destinationAddress` is nullable on the wire (Prisma `String?`). It is a full member of the navigation atomic group and participates in the active-navigation predicate as of MYR-24 (2026-04-23); the prior spec-only exemption in [`vehicle-state-schema.md`](vehicle-state-schema.md) §3.1 has been retired.
 
-Ungrouped fields (delivered individually, no group membership): `speed`, `odometerMiles`, `interiorTemp`, `exteriorTemp`, `fsdMilesSinceReset`, `locationName`, `locationAddress`, `lastUpdated`, and the drive-only `routeCoordinates` field (§4.1.6). Their classification tiers are defined in [`vehicle-state-schema.md`](vehicle-state-schema.md) §1.1.
+Ungrouped fields (delivered individually, no group membership): `speed`, `odometerMiles`, `interiorTemp`, `exteriorTemp`, `fsdMilesSinceReset`, `locationName`, `locationAddress`, `lastUpdated`, and the drive-only `driveTrailCoordinates` field (§4.1.6). Their classification tiers are defined in [`vehicle-state-schema.md`](vehicle-state-schema.md) §1.1.
 
 **Server enforcement** ([`internal/ws/nav_broadcast.go:handleTelemetry`](../../internal/ws/nav_broadcast.go)):
 
@@ -474,9 +474,18 @@ Per [`vehicle-state-schema.md`](vehicle-state-schema.md) §3.4 predicate 1, the 
 > **Anchored:** FR-3.1.
 > **dataState target:** `dataState.gps`
 > **Drive lifecycle target:** `driving -> driving` (DR-2)
-> **Fixture:** `vehicle_update.route.json` (planned)
+> **Fixture:** [`vehicle_update.route.json`](fixtures/websocket/vehicle_update.route.json)
 
-Per [`state-machine.md`](state-machine.md) §4.1, `drive_updated` is **NOT a distinct wire message type**. During an active drive, the broadcaster's [`handleDriveUpdated`](../../internal/ws/route_broadcast.go) appends each GPS point to a per-VIN [`routeAccumulator`](../../internal/ws/route_accumulator.go). When the accumulator hits its batch threshold (`defaultRouteBatchSize = 5`) or its flush interval (`defaultRouteFlushInterval = 3*time.Second`), the broadcaster sends a `vehicle_update` whose `payload.fields` contains a **single key** `routeCoordinates`:
+**`driveTrailCoordinates` vs `navRouteCoordinates` -- two different polylines.** The wire carries two distinct route polylines and they MUST NOT be conflated:
+
+| Wire field | Source | Semantics | Atomic group? | Section |
+|---|---|---|---|---|
+| `driveTrailCoordinates` | [`routeAccumulator`](../../internal/ws/route_accumulator.go) (server-side, fed by `drive_updated` events) | **Where the car has been** -- the accumulated GPS trail of the active drive | No -- drive-only ungrouped field, routed to `dataState.gps` | This section (§4.1.6) |
+| `navRouteCoordinates` | Tesla `routeLine` protobuf decode ([`internal/ws/field_mapping.go`](../../internal/ws/field_mapping.go)) | **Where the car is going** -- Tesla's planned route polyline to the active destination | Yes -- member of the `navigation` atomic group | §4.1.2 |
+
+Renaming, atomic-group reassignment, or merging of these two fields is a contract change; both names are owned by [`docs/contracts/schemas/ws-messages.schema.json`](schemas/ws-messages.schema.json) and the v1 mask matrix in [`internal/mask/tables.go`](../../internal/mask/tables.go).
+
+**Wire shape.** Per [`state-machine.md`](state-machine.md) §4.1, `drive_updated` is **NOT a distinct wire message type**. During an active drive, the broadcaster's [`handleDriveUpdated`](../../internal/ws/route_broadcast.go) appends each GPS point to a per-VIN [`routeAccumulator`](../../internal/ws/route_accumulator.go). When the accumulator hits its batch threshold (`defaultRouteBatchSize = 5`) or its flush interval (`defaultRouteFlushInterval = 3*time.Second`), the broadcaster sends a `vehicle_update` whose `payload.fields` contains a **single key** `driveTrailCoordinates`:
 
 ```jsonc
 {
@@ -484,21 +493,21 @@ Per [`state-machine.md`](state-machine.md) §4.1, `drive_updated` is **NOT a dis
   "payload": {
     "vehicleId": "clxyz1234567890abcdef",
     "fields": {
-      "routeCoordinates": [[-122.4194, 37.7749], [-122.4193, 37.7750], ...]
+      "driveTrailCoordinates": [[-122.4194, 37.7749], [-122.4193, 37.7750], ...]
     },
     "timestamp": "2026-04-13T18:23:05Z"
   }
 }
 ```
 
-`routeCoordinates` is `[lng, lat]` order (GeoJSON / Mapbox), distinct from the navigation group's `navRouteCoordinates`. Each element is a per-point pair derived from [`routeCoordinate`](../../internal/ws/route_accumulator.go). The accumulator's buffer is **not cleared on flush** -- each batch contains the **complete driven path** so the SDK can render the full polyline by replacing rather than appending. The buffer is cleared only on `drive_ended` ([`broadcaster.go:handleDriveEnded`](../../internal/ws/broadcaster.go) line 162).
+Coordinates are `[lng, lat]` order (GeoJSON / Mapbox). Each element is a per-point pair derived from [`routeCoordinate`](../../internal/ws/route_accumulator.go). The accumulator's buffer is **not cleared on flush** -- each batch contains the **complete driven path** so the SDK can render the full polyline by replacing rather than appending. The buffer is cleared only on `drive_ended` ([`broadcaster.go:handleDriveEnded`](../../internal/ws/broadcaster.go) line 162).
 
 | Sub-field | Classification | Notes |
 |-----------|----------------|-------|
-| `routeCoordinates[i][0]` (lng) | **P1** | Same tier as `Vehicle.longitude` |
-| `routeCoordinates[i][1]` (lat) | **P1** | Same tier as `Vehicle.latitude` |
+| `driveTrailCoordinates[i][0]` (lng) | **P1** | Same tier as `Vehicle.longitude` |
+| `driveTrailCoordinates[i][1]` (lat) | **P1** | Same tier as `Vehicle.latitude` |
 
-**SDK requirement:** On receipt of a `vehicle_update` containing `routeCoordinates` during an active drive, the SDK MUST emit `drive_updated` as a logical event to consumers AND merge the array into its in-memory drive state. Per Rule CG-SM-6 in [`state-machine.md`](state-machine.md) §7, the SDK MUST NOT synthesize `drive_updated` from any other source (no gear-change heuristics, no speed thresholds). Drive detection is server-only.
+**SDK requirement:** On receipt of a `vehicle_update` containing `driveTrailCoordinates` during an active drive, the SDK MUST emit `drive_updated` as a logical event to consumers AND merge the array into its in-memory drive state. Per Rule CG-SM-6 in [`state-machine.md`](state-machine.md) §7, the SDK MUST NOT synthesize `drive_updated` from any other source (no gear-change heuristics, no speed thresholds). Drive detection is server-only.
 
 #### 4.1.7 Ungrouped fields
 
