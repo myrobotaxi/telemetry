@@ -272,6 +272,86 @@ func TestLoad_TLSEnvOverrides(t *testing.T) {
 	}
 }
 
+func TestLoad_WebSocketAllowedOriginsEnvOverride(t *testing.T) {
+	tests := []struct {
+		name     string
+		fileVal  []string
+		envValue string
+		envSet   bool
+		want     []string
+	}{
+		{
+			name:    "JSON value used when env unset",
+			fileVal: []string{"https://myrobotaxi.app"},
+			envSet:  false,
+			want:    []string{"https://myrobotaxi.app"},
+		},
+		{
+			name:     "env override replaces JSON allow-list",
+			fileVal:  []string{"https://myrobotaxi.app"},
+			envValue: "https://staging.myrobotaxi.app, https://www.myrobotaxi.app",
+			envSet:   true,
+			want:     []string{"https://staging.myrobotaxi.app", "https://www.myrobotaxi.app"},
+		},
+		{
+			name:     "env single entry, no comma",
+			envValue: "https://myrobotaxi.app",
+			envSet:   true,
+			want:     []string{"https://myrobotaxi.app"},
+		},
+		{
+			name:     "env empty signals fail-closed",
+			fileVal:  []string{"https://myrobotaxi.app"},
+			envValue: "",
+			envSet:   true,
+			want:     nil,
+		},
+		{
+			name:     "env whitespace-only signals fail-closed",
+			fileVal:  []string{"https://myrobotaxi.app"},
+			envValue: "  ,  ",
+			envSet:   true,
+			want:     nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			overrides := map[string]any{}
+			if tt.fileVal != nil {
+				overrides["websocket"] = map[string]any{
+					"heartbeat_interval":       "15s",
+					"write_timeout":            "10s",
+					"max_connections_per_user": 5,
+					"read_limit":               4096,
+					"allowed_origins":          tt.fileVal,
+				}
+			}
+			path := writeTestConfig(t, dir, overrides)
+			setRequiredEnv(t)
+			if tt.envSet {
+				t.Setenv("WEBSOCKET_ALLOWED_ORIGINS", tt.envValue)
+			}
+
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load(): %v", err)
+			}
+
+			got := cfg.WebSocket().AllowedOrigins
+			if len(got) != len(tt.want) {
+				t.Fatalf("AllowedOrigins len: got %d (%v), want %d (%v)", len(got), got, len(tt.want), tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("AllowedOrigins[%d]: got %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestLoad_MapboxTokenOptional(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTestConfig(t, dir, nil)

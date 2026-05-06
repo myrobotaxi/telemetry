@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 )
 
 // fileConfig mirrors the JSON structure for unmarshaling. All duration
@@ -147,10 +148,35 @@ func applyEnvOverrides(fc *fileConfig) error {
 		fc.TLS.CAFile = v
 	}
 
+	// WEBSOCKET_ALLOWED_ORIGINS overrides websocket.allowed_origins.
+	// Comma-separated list of origin patterns matched against the Origin
+	// header by coder/websocket — patterns containing "://" are matched
+	// against scheme+host, otherwise against host only. Each entry is
+	// trimmed of surrounding whitespace; empty entries are dropped. Set
+	// to a single space (or any string with no non-empty entries) to
+	// signal "explicitly empty" (fail-closed). Per NFR-3.22 and MYR-17.
+	if v, ok := os.LookupEnv("WEBSOCKET_ALLOWED_ORIGINS"); ok {
+		fc.WebSocket.AllowedOrigins = parseOriginList(v)
+	}
+
 	if len(missing) > 0 {
 		return fmt.Errorf("config.Load: %w: %v", ErrMissingRequired, missing)
 	}
 	return nil
+}
+
+// parseOriginList splits a comma-separated origin pattern list, trims
+// whitespace, and drops empty entries. A bare "*" is preserved (callers
+// decide whether to allow it).
+func parseOriginList(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // buildConfig converts the intermediate fileConfig into an immutable Config.
