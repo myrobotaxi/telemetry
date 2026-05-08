@@ -109,15 +109,16 @@ Live drive events (start, route point, speed update) flow over the WebSocket in 
 
 ### 1.4 DB-only tables (Prisma-managed)
 
-These tables have no WebSocket representation. They are managed entirely by the Next.js app's Prisma layer (with the exception of `Account`, which the Go telemetry server reads/writes for OAuth token management).
+These tables have no WebSocket representation. They are managed entirely by the Next.js app's Prisma layer, with two narrowly-scoped exceptions: `Account`, which the Go telemetry server reads/writes for OAuth token management, and `AuditLog`, which the Go telemetry server writes (Insert-only) via raw pgx for system-initiated entries (drive pruning, mask-applied sampling, token refresh).
 
 | Table | SoT | Telemetry server access | Notes |
 |-------|-----|-------------------------|-------|
 | `User` | DB-only | Read (FK resolution) | Prisma-owned. NextAuth manages lifecycle |
 | `Account` | DB-only | Read + Write (OAuth token refresh) | Prisma-owned structure. Go store reads `access_token`/`refresh_token`, writes refreshed tokens |
 | `Settings` | DB-only | None | Prisma-owned. User preferences |
-| `Invite` | DB-only | None | Prisma-owned. Sharing invites |
+| `Invite` | DB-only | None | Prisma-owned. Sharing invites. Per [`rest-api.md`](rest-api.md) §10 DV-23 (RESOLVED 2026-05-08, MYR-69), the Next.js app serves the §7.5 invite endpoints directly; no `InviteRepo` exists in `internal/store/`. |
 | `TripStop` | DB-only | None | Prisma-owned. Trip waypoints |
+| `AuditLog` | DB-only | **Insert-only** (raw pgx) | Prisma-owned schema. Per [`rest-api.md`](rest-api.md) §10 DV-23 (RESOLVED 2026-05-08, MYR-69), the Next.js app initiates the FR-10.1 deletion transaction (and writes the user-initiated audit row in the same `$transaction`). The Go telemetry server holds Insert-only access via raw pgx for system-initiated rows: `drives_pruned` (NFR-3.27 pruning job, §5), `mask_applied` (1% sampling, §4.2 / [`rest-api.md`](rest-api.md) §5.3), `tokens_refreshed` (OAuth refresh). UPDATE/DELETE are prohibited at the database level (§4.3 triggers) and the application level (no `UpdateAuditLog` / `DeleteAuditLog` methods exist; `contract-guard` CG-DL-2 enforces this on every PR). |
 
 ### 1.5 Transient data — NOT persisted (NFR-3.28)
 
@@ -256,6 +257,8 @@ After the database transaction commits:
 ---
 
 ## 4. Audit log table schema
+
+> **Ownership.** The `AuditLog` table is part of the **Next.js app's Prisma schema** (consistent with the §1.4 Prisma-managed-table list and [`rest-api.md`](rest-api.md) §10 DV-23, RESOLVED 2026-05-08, MYR-69). Migrations are authored in the Next.js repo via Prisma; the Go telemetry server does NOT own the migration toolchain for this table. The Next.js app writes user-initiated rows (e.g., `account_deleted` per FR-10.1) inside the Prisma `$transaction` defined in §3.1. The Go telemetry server holds **Insert-only** access via raw pgx for system-initiated rows (`drives_pruned`, `mask_applied`, `tokens_refreshed`). UPDATE and DELETE are prohibited at both the database level (§4.3 triggers) and the application level (`contract-guard` CG-DL-2). The schema below is the canonical definition that both the Prisma model and the Go pgx writer MUST mirror exactly; drift between them is a contract violation.
 
 ### 4.1 Table definition
 
