@@ -45,7 +45,7 @@ var navFieldColumns = map[telemetry.FieldName][]string{
 	telemetry.FieldMinutesToArrival: {"etaMinutes"},
 	telemetry.FieldMilesToArrival:   {"tripDistanceRemaining"},
 	telemetry.FieldOriginLocation:   {"originLatitude", "originLongitude"},
-	telemetry.FieldDestLocation:     {"destinationLatitude", "destinationLongitude"},
+	telemetry.FieldDestLocation:     {"destinationLatitude", "destinationLongitude", "destinationAddress"},
 	telemetry.FieldRouteLine:        {"navRouteCoordinates"},
 }
 

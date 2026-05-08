@@ -59,6 +59,21 @@ type Writer struct {
 	pending   map[string]*VehicleUpdate // VIN → coalesced update
 	count     int                       // total telemetry events since last flush
 
+	// destAddrCache memoizes the most recent (lat, lng) → address
+	// reverse-geocode result per VIN so a stable navigation destination
+	// streamed every flush window does not burn the Mapbox rate budget
+	// or cycle the same address through the DB on each interval. Cleared
+	// for a VIN when the destination GPS is cleared (navigation cancelled
+	// — atomic group clear per data-lifecycle.md §6.1).
+	//
+	// TODO: bound the cache size. Today every VIN that ever streamed a
+	// destination keeps an entry forever; for a small fleet this is
+	// fine but it grows monotonically. Cheap mitigations (file in a
+	// follow-up issue): drop the entry on disconnect when other
+	// per-VIN state is cleaned up, or wrap the map in an LRU.
+	destAddrMu    sync.Mutex
+	destAddrCache map[string]destAddrEntry
+
 	subs      []events.Subscription
 	cancel    context.CancelFunc
 	done      chan struct{}
@@ -86,17 +101,18 @@ func NewWriter(
 		cfg.BatchSize = DefaultWriterConfig().BatchSize
 	}
 	return &Writer{
-		vehicles:  vehicles,
-		drives:    drives,
-		bus:       bus,
-		vinCache:  NewVINCache(vinLookup, logger),
-		geocoder:  geocoder,
-		logger:    logger,
-		cfg:       cfg,
-		routeBuf:  newRouteBuffer(drives, logger, cfg.RouteBuffer),
-		pending:   make(map[string]*VehicleUpdate),
-		done:      make(chan struct{}),
-		flushDone: make(chan struct{}),
+		vehicles:      vehicles,
+		drives:        drives,
+		bus:           bus,
+		vinCache:      NewVINCache(vinLookup, logger),
+		geocoder:      geocoder,
+		logger:        logger,
+		cfg:           cfg,
+		routeBuf:      newRouteBuffer(drives, logger, cfg.RouteBuffer),
+		pending:       make(map[string]*VehicleUpdate),
+		destAddrCache: make(map[string]destAddrEntry),
+		done:          make(chan struct{}),
+		flushDone:     make(chan struct{}),
 	}
 }
 
@@ -251,6 +267,7 @@ func (w *Writer) flush(ctx context.Context) {
 	)
 
 	for vin, update := range batch {
+		w.applyDestinationAddress(ctx, vin, update)
 		if err := w.vehicles.UpdateTelemetry(ctx, vin, *update); err != nil {
 			w.logger.Warn("failed to write telemetry update",
 				slog.String("vin", redactVIN(vin)),
@@ -259,3 +276,4 @@ func (w *Writer) flush(ctx context.Context) {
 		}
 	}
 }
+

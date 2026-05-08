@@ -44,6 +44,7 @@ func mergeUpdate(dst, src *VehicleUpdate) {
 	dst.LocationName = mergePtr(dst.LocationName, src.LocationName)
 	dst.LocationAddr = mergePtr(dst.LocationAddr, src.LocationAddr)
 	dst.DestinationName = mergePtr(dst.DestinationName, src.DestinationName)
+	dst.DestinationAddress = mergePtr(dst.DestinationAddress, src.DestinationAddress)
 	dst.DestinationLatitude = mergePtr(dst.DestinationLatitude, src.DestinationLatitude)
 	dst.DestinationLongitude = mergePtr(dst.DestinationLongitude, src.DestinationLongitude)
 	dst.OriginLatitude = mergePtr(dst.OriginLatitude, src.OriginLatitude)

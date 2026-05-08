@@ -304,11 +304,11 @@ func TestMapTelemetryToUpdate_InvalidNavFields(t *testing.T) {
 			wantClear: []string{"originLatitude", "originLongitude"},
 		},
 		{
-			name: "invalid destinationLocation clears both lat/lng columns",
+			name: "invalid destinationLocation clears the entire navigation atomic group",
 			fields: map[string]events.TelemetryValue{
 				"destinationLocation": {Invalid: true},
 			},
-			wantClear: []string{"destinationLatitude", "destinationLongitude"},
+			wantClear: []string{"destinationLatitude", "destinationLongitude", "destinationAddress"},
 		},
 		{
 			name: "invalid non-nav field is ignored",

@@ -749,7 +749,7 @@ func applyValueToUpdate(u *store.VehicleUpdate, fieldName string, raw json.RawMe
 		}
 		f.Set(reflect.ValueOf(&n))
 		return nil
-	case "ChargeState", "GearPosition", "DestinationName",
+	case "ChargeState", "GearPosition", "DestinationName", "DestinationAddress",
 		"LocationName", "LocationAddr":
 		var s string
 		if err := json.Unmarshal(raw, &s); err != nil {

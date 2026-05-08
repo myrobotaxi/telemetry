@@ -78,6 +78,7 @@ type VehicleUpdate struct {
 	LocationName         *string
 	LocationAddr         *string
 	DestinationName      *string
+	DestinationAddress   *string
 	DestinationLatitude  *float64
 	DestinationLongitude *float64
 	OriginLatitude       *float64

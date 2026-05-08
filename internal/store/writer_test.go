@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"testing"
@@ -177,6 +178,40 @@ func publishTelemetry(t *testing.T, bus events.Bus, vin string, fields map[strin
 	if err := bus.Publish(context.Background(), evt); err != nil {
 		t.Fatalf("publish telemetry: %v", err)
 	}
+}
+
+// stubGeocoder is a deterministic Geocoder for writer-flush tests. Each
+// call returns the next entry from results; once results is exhausted,
+// further calls return ErrNoResult so the writer's graceful-fallback
+// path is exercised rather than panicking. err overrides the result
+// when non-nil. callCount() lets tests assert the exact number of
+// invocations (e.g., the dedup test asserts 1).
+type stubGeocoder struct {
+	mu      sync.Mutex
+	results []geocode.Result
+	err     error
+	calls   int
+}
+
+func (g *stubGeocoder) ReverseGeocode(_ context.Context, _, _ float64) (*geocode.Result, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.calls++
+	if g.err != nil {
+		return nil, g.err
+	}
+	if len(g.results) == 0 {
+		return nil, geocode.ErrNoResult
+	}
+	r := g.results[0]
+	g.results = g.results[1:]
+	return &r, nil
+}
+
+func (g *stubGeocoder) callCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.calls
 }
 
 // --- tests ---
@@ -1089,5 +1124,227 @@ func TestMergeUpdate_OlderTimestampPreserved(t *testing.T) {
 
 	if !dst.LastUpdated.Equal(t1) {
 		t.Errorf("LastUpdated = %v, want %v (should keep later)", dst.LastUpdated, t1)
+	}
+}
+
+// TestWriter_DestinationAddress_GeocodesOnFirstFlush covers MYR-68: when
+// a flushed update sets destinationLatitude/destinationLongitude without
+// an explicit DestinationAddress, the writer reverse-geocodes the GPS
+// pair and stamps the resolved address onto the update before the SQL
+// UPDATE.
+func TestWriter_DestinationAddress_GeocodesOnFirstFlush(t *testing.T) {
+	bus := newTestBus(t)
+	vehicles := &mockVehicleUpdater{}
+	drives := &mockDrivePersister{}
+	lookup := &stubIDLookup{pairs: map[string]struct{ id, userID string }{}}
+	geo := &stubGeocoder{
+		results: []geocode.Result{{PlaceName: "Whole Foods", Address: "2001 Market St"}},
+	}
+
+	w := NewWriter(vehicles, drives, lookup, bus, geo, slog.Default(), WriterConfig{
+		FlushInterval: 50 * time.Millisecond,
+		BatchSize:     1000,
+	})
+	if err := w.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = w.Stop() }()
+
+	publishTelemetry(t, bus, "5YJ3E1EA1NF000068", map[string]events.TelemetryValue{
+		string(telemetry.FieldDestLocation): {LocationVal: &events.Location{Latitude: 37.7849, Longitude: -122.4094}},
+	})
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		return len(vehicles.getTelemetryWrites()) > 0
+	})
+
+	writes := vehicles.getTelemetryWrites()
+	u := writes[0].Update
+	if u.DestinationAddress == nil || *u.DestinationAddress != "2001 Market St" {
+		t.Errorf("DestinationAddress = %v, want %q", ptrVal(u.DestinationAddress), "2001 Market St")
+	}
+	if got := geo.callCount(); got != 1 {
+		t.Errorf("geocoder calls = %d, want 1", got)
+	}
+}
+
+// TestWriter_DestinationAddress_DedupsAcrossFlushes verifies the
+// per-VIN destination cache: a stable navigation destination streamed
+// across multiple flush windows triggers exactly one geocoder call.
+func TestWriter_DestinationAddress_DedupsAcrossFlushes(t *testing.T) {
+	bus := newTestBus(t)
+	vehicles := &mockVehicleUpdater{}
+	drives := &mockDrivePersister{}
+	lookup := &stubIDLookup{pairs: map[string]struct{ id, userID string }{}}
+	geo := &stubGeocoder{
+		results: []geocode.Result{{PlaceName: "Whole Foods", Address: "2001 Market St"}},
+	}
+
+	w := NewWriter(vehicles, drives, lookup, bus, geo, slog.Default(), WriterConfig{
+		FlushInterval: 50 * time.Millisecond,
+		BatchSize:     1000,
+	})
+	if err := w.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = w.Stop() }()
+
+	for i := 0; i < 3; i++ {
+		publishTelemetry(t, bus, "5YJ3E1EA1NF000068", map[string]events.TelemetryValue{
+			string(telemetry.FieldDestLocation): {LocationVal: &events.Location{Latitude: 37.7849, Longitude: -122.4094}},
+		})
+		waitForCondition(t, 2*time.Second, func() bool {
+			return len(vehicles.getTelemetryWrites()) > i
+		})
+	}
+
+	if got := geo.callCount(); got != 1 {
+		t.Errorf("geocoder calls = %d, want 1 (cache must dedupe stable destination)", got)
+	}
+	for _, wr := range vehicles.getTelemetryWrites() {
+		if wr.Update.DestinationAddress == nil || *wr.Update.DestinationAddress != "2001 Market St" {
+			t.Errorf("flush DestinationAddress = %v, want %q", ptrVal(wr.Update.DestinationAddress), "2001 Market St")
+		}
+	}
+}
+
+// TestWriter_DestinationAddress_ClearsOnNavCancel verifies that an
+// active-navigation cancellation (FieldDestLocation Invalid) drops the
+// cached destination address so a subsequent fresh navigation is
+// re-geocoded instead of inheriting the stale entry.
+func TestWriter_DestinationAddress_ClearsOnNavCancel(t *testing.T) {
+	bus := newTestBus(t)
+	vehicles := &mockVehicleUpdater{}
+	drives := &mockDrivePersister{}
+	lookup := &stubIDLookup{pairs: map[string]struct{ id, userID string }{}}
+	geo := &stubGeocoder{
+		results: []geocode.Result{
+			{PlaceName: "Whole Foods", Address: "2001 Market St"},
+			{PlaceName: "Tartine", Address: "600 Guerrero St"},
+		},
+	}
+
+	w := NewWriter(vehicles, drives, lookup, bus, geo, slog.Default(), WriterConfig{
+		FlushInterval: 50 * time.Millisecond,
+		BatchSize:     1000,
+	})
+	if err := w.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = w.Stop() }()
+
+	publishTelemetry(t, bus, "5YJ3E1EA1NF000068", map[string]events.TelemetryValue{
+		string(telemetry.FieldDestLocation): {LocationVal: &events.Location{Latitude: 37.7849, Longitude: -122.4094}},
+	})
+	waitForCondition(t, 2*time.Second, func() bool { return len(vehicles.getTelemetryWrites()) > 0 })
+
+	publishTelemetry(t, bus, "5YJ3E1EA1NF000068", map[string]events.TelemetryValue{
+		string(telemetry.FieldDestLocation): {Invalid: true},
+	})
+	waitForCondition(t, 2*time.Second, func() bool { return len(vehicles.getTelemetryWrites()) > 1 })
+
+	publishTelemetry(t, bus, "5YJ3E1EA1NF000068", map[string]events.TelemetryValue{
+		string(telemetry.FieldDestLocation): {LocationVal: &events.Location{Latitude: 37.7615, Longitude: -122.4243}},
+	})
+	waitForCondition(t, 2*time.Second, func() bool { return len(vehicles.getTelemetryWrites()) > 2 })
+
+	if got := geo.callCount(); got != 2 {
+		t.Errorf("geocoder calls = %d, want 2 (cache must invalidate on nav cancellation)", got)
+	}
+	writes := vehicles.getTelemetryWrites()
+	last := writes[len(writes)-1]
+	if last.Update.DestinationAddress == nil || *last.Update.DestinationAddress != "600 Guerrero St" {
+		t.Errorf("post-cancellation DestinationAddress = %v, want %q",
+			ptrVal(last.Update.DestinationAddress), "600 Guerrero St")
+	}
+}
+
+// TestWriter_DestinationAddress_ClearAndResetInOneFlush_SetWins covers
+// the coalesced "cancel → re-set" path called out in the PR #211 review:
+// when one flush window carries both an Invalid destLocation AND a
+// fresh destLocation, ClearFields and the new GPS pointers both end up
+// on the merged update. The writer must let the new set win — strip
+// the destination columns out of ClearFields, invalidate the cache, and
+// geocode the new GPS — so the first flushed row carries the new
+// address rather than NULL.
+func TestWriter_DestinationAddress_ClearAndResetInOneFlush_SetWins(t *testing.T) {
+	bus := newTestBus(t)
+	vehicles := &mockVehicleUpdater{}
+	drives := &mockDrivePersister{}
+	lookup := &stubIDLookup{pairs: map[string]struct{ id, userID string }{}}
+	geo := &stubGeocoder{
+		results: []geocode.Result{{PlaceName: "Tartine", Address: "600 Guerrero St"}},
+	}
+
+	// Long flush interval + small batch size so both events coalesce
+	// into one flush triggered by BatchSize.
+	w := NewWriter(vehicles, drives, lookup, bus, geo, slog.Default(), WriterConfig{
+		FlushInterval: 10 * time.Second,
+		BatchSize:     2,
+	})
+	if err := w.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = w.Stop() }()
+
+	// Event 1: nav cancel → ClearFields = [destLat, destLng, destAddr].
+	publishTelemetry(t, bus, "5YJ3E1EA1NF000068", map[string]events.TelemetryValue{
+		string(telemetry.FieldDestLocation): {Invalid: true},
+	})
+	// Event 2: fresh destination set → DestinationLatitude/Longitude
+	// pointers populated. Hits BatchSize=2 and triggers the coalesced
+	// flush carrying ClearFields + new GPS together.
+	publishTelemetry(t, bus, "5YJ3E1EA1NF000068", map[string]events.TelemetryValue{
+		string(telemetry.FieldDestLocation): {LocationVal: &events.Location{Latitude: 37.7615, Longitude: -122.4243}},
+	})
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		return len(vehicles.getTelemetryWrites()) > 0
+	})
+
+	writes := vehicles.getTelemetryWrites()
+	u := writes[0].Update
+	if u.DestinationAddress == nil || *u.DestinationAddress != "600 Guerrero St" {
+		t.Errorf("clear+set: DestinationAddress = %v, want %q (set must win over clear)",
+			ptrVal(u.DestinationAddress), "600 Guerrero St")
+	}
+	for _, c := range u.ClearFields {
+		if c == "destinationLatitude" || c == "destinationLongitude" || c == "destinationAddress" {
+			t.Errorf("ClearFields still contains %q after clear+set; SQL builder will SET NULL over the new value", c)
+		}
+	}
+}
+
+// TestWriter_DestinationAddress_GeocoderErrorFallsBack verifies that a
+// geocoder transport error leaves DestinationAddress nil so the SDK can
+// gracefully fall back to the raw GPS pair (FR-3.4).
+func TestWriter_DestinationAddress_GeocoderErrorFallsBack(t *testing.T) {
+	bus := newTestBus(t)
+	vehicles := &mockVehicleUpdater{}
+	drives := &mockDrivePersister{}
+	lookup := &stubIDLookup{pairs: map[string]struct{ id, userID string }{}}
+	geo := &stubGeocoder{err: errors.New("mapbox unreachable")}
+
+	w := NewWriter(vehicles, drives, lookup, bus, geo, slog.Default(), WriterConfig{
+		FlushInterval: 50 * time.Millisecond,
+		BatchSize:     1000,
+	})
+	if err := w.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = w.Stop() }()
+
+	publishTelemetry(t, bus, "5YJ3E1EA1NF000068", map[string]events.TelemetryValue{
+		string(telemetry.FieldDestLocation): {LocationVal: &events.Location{Latitude: 37.7849, Longitude: -122.4094}},
+	})
+	waitForCondition(t, 2*time.Second, func() bool { return len(vehicles.getTelemetryWrites()) > 0 })
+
+	u := vehicles.getTelemetryWrites()[0].Update
+	if u.DestinationAddress != nil {
+		t.Errorf("DestinationAddress = %v, want nil (graceful fallback on geocoder error)", *u.DestinationAddress)
+	}
+	if u.DestinationLatitude == nil || u.DestinationLongitude == nil {
+		t.Errorf("destination GPS lost on geocoder error: lat=%v lng=%v",
+			ptrVal(u.DestinationLatitude), ptrVal(u.DestinationLongitude))
 	}
 }
