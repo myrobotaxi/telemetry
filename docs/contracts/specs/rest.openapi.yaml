@@ -616,15 +616,17 @@ paths:
         DELETE returns 401 auth_failed because the token has been
         invalidated.
 
-        Handler location: depending on the DV-23 decision, this
-        endpoint may be served from the Next.js app rather than the
-        Go telemetry server. The SDK is unaware of the handler
-        location.
+        Handler location: per rest-api.md §10 DV-23 (RESOLVED
+        2026-05-08, MYR-69), the Next.js app serves this endpoint
+        directly against its Prisma-owned schema; the Go telemetry
+        server has no User repository and no DELETE /users/me
+        handler. The public API hostname proxies this path to the
+        Next.js app. The SDK is unaware of the handler location.
       x-anchored-requirements:
         - FR-10.1
         - FR-10.2
         - NFR-3.29
-      x-divergence: DV-20
+      x-divergence: DV-23
       responses:
         '200':
           description: Account deleted, audit log written.
