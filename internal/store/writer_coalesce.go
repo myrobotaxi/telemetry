@@ -40,6 +40,7 @@ func mergeUpdate(dst, src *VehicleUpdate) {
 	dst.InteriorTemp = mergePtr(dst.InteriorTemp, src.InteriorTemp)
 	dst.ExteriorTemp = mergePtr(dst.ExteriorTemp, src.ExteriorTemp)
 	dst.OdometerMiles = mergePtr(dst.OdometerMiles, src.OdometerMiles)
+	dst.FsdMilesSinceReset = mergePtr(dst.FsdMilesSinceReset, src.FsdMilesSinceReset)
 	dst.LocationName = mergePtr(dst.LocationName, src.LocationName)
 	dst.LocationAddr = mergePtr(dst.LocationAddr, src.LocationAddr)
 	dst.DestinationName = mergePtr(dst.DestinationName, src.DestinationName)

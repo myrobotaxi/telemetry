@@ -26,6 +26,7 @@ var fieldAppliers = map[telemetry.FieldName]fieldApplier{
 	telemetry.FieldInsideTemp:      applyFloatAsInt(func(u *VehicleUpdate) **int { return &u.InteriorTemp }),
 	telemetry.FieldOutsideTemp:     applyFloatAsInt(func(u *VehicleUpdate) **int { return &u.ExteriorTemp }),
 	telemetry.FieldOdometer:        applyFloatAsInt(func(u *VehicleUpdate) **int { return &u.OdometerMiles }),
+	telemetry.FieldFSDMiles:        applyFloat(func(u *VehicleUpdate) **float64 { return &u.FsdMilesSinceReset }),
 	telemetry.FieldGear:            applyString(func(u *VehicleUpdate) **string { return &u.GearPosition }),
 	telemetry.FieldLocation:        applyLocation,
 	telemetry.FieldDestinationName: applyString(func(u *VehicleUpdate) **string { return &u.DestinationName }),

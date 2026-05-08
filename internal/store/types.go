@@ -74,6 +74,7 @@ type VehicleUpdate struct {
 	InteriorTemp         *int
 	ExteriorTemp         *int
 	OdometerMiles        *int
+	FsdMilesSinceReset   *float64
 	LocationName         *string
 	LocationAddr         *string
 	DestinationName      *string

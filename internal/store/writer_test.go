@@ -1059,6 +1059,60 @@ func TestWriter_ChargeAtomicGroupCoalesceOrdering(t *testing.T) {
 	}
 }
 
+// TestMergeUpdate_FsdMiles guards MYR-67: per-frame fsdMilesSinceReset
+// updates must survive coalescing the same way every other pointer field
+// in VehicleUpdate does.
+func TestMergeUpdate_FsdMiles(t *testing.T) {
+	t1 := time.Date(2026, 5, 6, 14, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 5, 6, 14, 0, 5, 0, time.UTC)
+
+	tests := []struct {
+		name string
+		dst  *VehicleUpdate
+		src  *VehicleUpdate
+		want *float64
+	}{
+		{
+			name: "src value overwrites dst (last-write-wins)",
+			dst: &VehicleUpdate{
+				FsdMilesSinceReset: floatPtr(412.7),
+				LastUpdated:        t1,
+			},
+			src: &VehicleUpdate{
+				FsdMilesSinceReset: floatPtr(420.4),
+				LastUpdated:        t2,
+			},
+			want: floatPtr(420.4),
+		},
+		{
+			name: "dst preserved when src has no value",
+			dst: &VehicleUpdate{
+				FsdMilesSinceReset: floatPtr(412.7),
+				LastUpdated:        t1,
+			},
+			src: &VehicleUpdate{
+				Speed:       intPtr(72),
+				LastUpdated: t2,
+			},
+			want: floatPtr(412.7),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mergeUpdate(tt.dst, tt.src)
+			switch {
+			case tt.want == nil && tt.dst.FsdMilesSinceReset != nil:
+				t.Errorf("FsdMilesSinceReset = %v, want nil", *tt.dst.FsdMilesSinceReset)
+			case tt.want != nil && tt.dst.FsdMilesSinceReset == nil:
+				t.Errorf("FsdMilesSinceReset = nil, want %v", *tt.want)
+			case tt.want != nil && *tt.dst.FsdMilesSinceReset != *tt.want:
+				t.Errorf("FsdMilesSinceReset = %v, want %v", *tt.dst.FsdMilesSinceReset, *tt.want)
+			}
+		})
+	}
+}
+
 func TestMergeUpdate_OlderTimestampPreserved(t *testing.T) {
 	t1 := time.Date(2026, 3, 17, 14, 0, 5, 0, time.UTC) // later
 	t2 := time.Date(2026, 3, 17, 14, 0, 0, 0, time.UTC) // earlier

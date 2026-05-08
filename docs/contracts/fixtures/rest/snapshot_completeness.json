@@ -140,12 +140,11 @@
       "comment": "DB INT NOT NULL DEFAULT 0. Test asserts non-zero."
     },
     "fsdMilesSinceReset": {
-      "category": "expected_failure",
+      "category": "telemetry",
       "atomicGroup": "",
       "synthetic": { "kind": "vehicleUpdate", "field": "FsdMilesSinceReset", "value": 412.7 },
       "nullableInSteadyState": false,
-      "linearIssue": "MYR-67",
-      "comment": "DOCUMENTED GAP: schema declares fsdMilesSinceReset as a non-nullable telemetry field; ws/field_mapping.go passes it through to the WS broadcast (telemetry.FieldFSDMiles = \"fsdMilesSinceReset\"); but VehicleUpdate has NO FsdMilesSinceReset pointer and field_mapper.go has NO applier for telemetry.FieldFSDMiles. Result: WS clients see the value live, but the DB row keeps the seeded value forever. Cold page reload via REST /snapshot will not reflect FSD-miles-since-reset changes that occurred while the user was offline. Tracked in MYR-67 (https://linear.app/myrobotaxi/issue/MYR-67); category=expected_failure surfaces the gap as a t.Logf warning so the test stays green. The closing PR for MYR-67 re-categorizes this row to category=telemetry and the assertion becomes hard. The test seeds a non-zero baseline so the steady-state DB read returns it."
+      "comment": "Per-frame telemetry field. DB DOUBLE PRECISION NOT NULL DEFAULT 0. VehicleUpdate.FsdMilesSinceReset is plumbed through field_mapper.applyFloat → buildTelemetryUpdate → writer_coalesce so per-frame Tesla telemetry (telemetry.FieldFSDMiles) updates the column. Test asserts non-zero (per fixture)."
     },
     "destinationName": {
       "category": "telemetry",

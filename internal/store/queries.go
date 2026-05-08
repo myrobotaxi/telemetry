@@ -116,6 +116,7 @@ func updateColumns(u VehicleUpdate) []updateColumn {
 		{"interiorTemp", derefInt(u.InteriorTemp), ""},
 		{"exteriorTemp", derefInt(u.ExteriorTemp), ""},
 		{"odometerMiles", derefInt(u.OdometerMiles), ""},
+		{"fsdMilesSinceReset", derefFloat(u.FsdMilesSinceReset), ""},
 		{"locationName", derefString(u.LocationName), ""},
 		{"locationAddress", derefString(u.LocationAddr), ""},
 		{"destinationName", derefString(u.DestinationName), ""},

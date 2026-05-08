@@ -6,8 +6,11 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/time/rate"
 )
 
 func TestMapboxGeocoder_ReverseGeocode(t *testing.T) {
@@ -55,6 +58,12 @@ func TestMapboxGeocoder_ReverseGeocode(t *testing.T) {
 			statusCode: http.StatusUnauthorized,
 			body:       `{"message": "Not Authorized"}`,
 			wantErr:    errors.New("HTTP 401"),
+		},
+		{
+			name:       "rate limited (server-side 429)",
+			statusCode: http.StatusTooManyRequests,
+			body:       `{"message": "Rate limit exceeded"}`,
+			wantErr:    errors.New("HTTP 429"),
 		},
 	}
 
@@ -194,6 +203,132 @@ func TestNoopGeocoder(t *testing.T) {
 	}
 	if result != nil {
 		t.Errorf("expected nil result, got: %v", result)
+	}
+}
+
+// TestMapboxGeocoder_InvalidCoordinate verifies that input validation
+// rejects out-of-range WGS-84 inputs before consuming HTTP / rate-limit
+// budget. Maps to MYR-19 acceptance criterion "Tests: invalid coordinates".
+func TestMapboxGeocoder_InvalidCoordinate(t *testing.T) {
+	tests := []struct {
+		name     string
+		lat, lng float64
+	}{
+		{name: "lat > 90", lat: 91, lng: 0},
+		{name: "lat < -90", lat: -91, lng: 0},
+		{name: "lng > 180", lat: 0, lng: 181},
+		{name: "lng < -180", lat: 0, lng: -181},
+		{name: "both out of range", lat: 200, lng: 200},
+	}
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+	}))
+	defer srv.Close()
+
+	g := &MapboxGeocoder{
+		token:  "test-token",
+		client: srv.Client(),
+	}
+	g.client.Transport = &rewriteTransport{
+		base:    srv.Client().Transport,
+		baseURL: srv.URL,
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := g.ReverseGeocode(context.Background(), tt.lat, tt.lng)
+			if !errors.Is(err, ErrInvalidCoordinate) {
+				t.Errorf("expected ErrInvalidCoordinate, got: %v", err)
+			}
+		})
+	}
+	if got := calls.Load(); got != 0 {
+		t.Errorf("invalid coords must short-circuit before HTTP; got %d calls", got)
+	}
+}
+
+// TestMapboxGeocoder_ClientSideRateLimiter verifies that the configured
+// rate limiter throttles outbound requests. Maps to MYR-19 acceptance
+// criterion "Rate limiting per Mapbox plan".
+func TestMapboxGeocoder_ClientSideRateLimiter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"features":[{"text":"X","place_name":"X"}]}`))
+	}))
+	defer srv.Close()
+
+	// 1 request/second, burst 1 — second call must wait ~1s.
+	g := &MapboxGeocoder{
+		token:   "test-token",
+		client:  srv.Client(),
+		limiter: rate.NewLimiter(1, 1),
+	}
+	g.client.Transport = &rewriteTransport{
+		base:    srv.Client().Transport,
+		baseURL: srv.URL,
+	}
+
+	ctx := context.Background()
+	if _, err := g.ReverseGeocode(ctx, 30, -97); err != nil {
+		t.Fatalf("first call: unexpected error: %v", err)
+	}
+	start := time.Now()
+	if _, err := g.ReverseGeocode(ctx, 30, -97); err != nil {
+		t.Fatalf("second call: unexpected error: %v", err)
+	}
+	elapsed := time.Since(start)
+	// Allow 200ms slack for scheduler/CI variance; the second call is
+	// blocked at least until the next token is available.
+	if elapsed < 600*time.Millisecond {
+		t.Errorf("second call returned in %v; expected >= 600ms (rate limiter not enforcing)", elapsed)
+	}
+}
+
+// TestMapboxGeocoder_RateLimiterCancelledContext verifies that when the
+// caller's context is cancelled while waiting for a rate-limit token,
+// ReverseGeocode returns promptly with a context error rather than
+// burning the token budget on a request that nobody is waiting for.
+func TestMapboxGeocoder_RateLimiterCancelledContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"features":[{"text":"X","place_name":"X"}]}`))
+	}))
+	defer srv.Close()
+
+	// burst=0 so every call has to wait — context cancellation hits
+	// before any token is available.
+	g := &MapboxGeocoder{
+		token:   "test-token",
+		client:  srv.Client(),
+		limiter: rate.NewLimiter(rate.Every(time.Hour), 0),
+	}
+	g.client.Transport = &rewriteTransport{
+		base:    srv.Client().Transport,
+		baseURL: srv.URL,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, err := g.ReverseGeocode(ctx, 30, -97)
+	if err == nil {
+		t.Fatal("expected error from cancelled context inside rate limiter wait")
+	}
+}
+
+// TestNewMapboxGeocoderWithLimiter_NilLimiterDisablesThrottle verifies
+// that passing a nil limiter to NewMapboxGeocoderWithLimiter yields a
+// geocoder that does not throttle at all (used by tests that don't want
+// to wait on the default 10 RPS budget).
+func TestNewMapboxGeocoderWithLimiter_NilLimiterDisablesThrottle(t *testing.T) {
+	g := NewMapboxGeocoderWithLimiter("pk.test", time.Second, nil)
+	if g == nil {
+		t.Fatal("expected non-nil geocoder")
+	}
+	if g.limiter != nil {
+		t.Errorf("expected nil limiter, got %v", g.limiter)
 	}
 }
 
