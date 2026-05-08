@@ -147,16 +147,15 @@ func loadCompletenessFixture(t *testing.T, root string) fixtureRoot {
 // completenessSeedCatalog is the catalog values used by every scenario
 // in TestSnapshotCompleteness. Identity fields are seeded with non-default
 // values so the read-back asserts the column survived the round trip.
-// fsdMilesSinceReset is seeded > 0 so the expected_failure row for the
-// missing writer-pipeline applier surfaces a non-zero baseline (the test
-// asserts non-null/non-zero on read).
+// fsdMilesSinceReset is seeded as 0 so the steady-state assertion validates
+// the writer pipeline wrote the synthetic 412.7 (vs. the seed surviving).
 var completenessSeedCatalog = catalogFields{
 	model:              "Model 3",
 	year:               2024,
 	color:              "Midnight Silver Metallic",
 	locationName:       "",
 	locationAddress:    "",
-	fsdMilesSinceReset: 412.7,
+	fsdMilesSinceReset: 0,
 	destinationAddress: nil,
 }
 
@@ -742,7 +741,8 @@ func applyValueToUpdate(u *store.VehicleUpdate, fieldName string, raw json.RawMe
 		return nil
 	case "TimeToFull", "Latitude", "Longitude",
 		"DestinationLatitude", "DestinationLongitude",
-		"OriginLatitude", "OriginLongitude", "TripDistRemaining":
+		"OriginLatitude", "OriginLongitude", "TripDistRemaining",
+		"FsdMilesSinceReset":
 		var n float64
 		if err := json.Unmarshal(raw, &n); err != nil {
 			return fmt.Errorf("decode float64 for %s: %w", fieldName, err)
