@@ -210,6 +210,20 @@ func TestMapTelemetryToUpdate(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "fsdMilesSinceReset mapped from float",
+			fields: map[string]events.TelemetryValue{
+				string(telemetry.FieldFSDMiles): {FloatVal: floatPtr(412.7)},
+			},
+			check: func(t *testing.T, u *VehicleUpdate) {
+				if u == nil {
+					t.Fatal("expected non-nil update")
+				}
+				if u.FsdMilesSinceReset == nil || *u.FsdMilesSinceReset != 412.7 {
+					t.Errorf("FsdMilesSinceReset = %v, want 412.7", ptrVal(u.FsdMilesSinceReset))
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
