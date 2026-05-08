@@ -626,7 +626,7 @@ paths:
         - FR-10.1
         - FR-10.2
         - NFR-3.29
-      x-divergence: DV-20
+      x-divergence: DV-23
       responses:
         '200':
           description: Account deleted, audit log written.
