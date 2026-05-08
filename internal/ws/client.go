@@ -45,6 +45,17 @@ type Client struct {
 	// known mid-connection refresh gap (role downgrade requires
 	// reconnect).
 	vehicleRoles map[string]auth.Role
+	// defaultRole is the fallback role consulted ONLY when allVehicles=true
+	// and the per-vehicle vehicleRoles map has no entry for the requested
+	// vehicleID. Set by the handshake to auth.RoleOwner for the dev-mode
+	// NoopAuthenticator path (whose ResolveRole returns RoleOwner
+	// unconditionally) so dev-mode clients receive role-projected frames
+	// for every vehicle the server is broadcasting for, instead of the
+	// empty Role("") deny-all sentinel that left them silently filtered
+	// out (MYR-66). Production clients have allVehicles=false; defaultRole
+	// is never consulted, so the fail-closed deny-all posture for clients
+	// without an explicit vehicleRoles entry is preserved.
+	defaultRole auth.Role
 	// subscribed tracks which of the client's owned vehicles are
 	// currently active subscriptions. Initialized at handshake from
 	// vehicleIDs (so a client that never sends subscribe/unsubscribe
@@ -74,15 +85,24 @@ func newClient(conn *websocket.Conn, hub *Hub, logger *slog.Logger) *Client {
 	}
 }
 
-// roleFor returns the role this client holds against vehicleID, or the
-// empty Role("") sentinel if no role was resolved at handshake time.
-// The empty sentinel is the fail-closed "unknown" value the mask layer
-// in internal/mask interprets as deny-all.
+// roleFor returns the role this client holds against vehicleID. Resolution
+// order: (1) the per-vehicle vehicleRoles map populated at handshake; (2)
+// for clients with allVehicles=true that lack a per-vehicle entry, the
+// defaultRole set at handshake (the dev-mode NoopAuthenticator path);
+// (3) the empty Role("") fail-closed sentinel, which the mask layer in
+// internal/mask interprets as deny-all. Production clients (allVehicles=
+// false) skip step 2, so a missing vehicleRoles entry stays deny-all.
 func (c *Client) roleFor(vehicleID string) auth.Role {
 	if c == nil {
 		return auth.Role("")
 	}
-	return c.vehicleRoles[vehicleID]
+	if role, ok := c.vehicleRoles[vehicleID]; ok {
+		return role
+	}
+	if c.allVehicles {
+		return c.defaultRole
+	}
+	return auth.Role("")
 }
 
 // writePump reads messages from the send channel and writes them to the

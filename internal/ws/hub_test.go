@@ -406,6 +406,57 @@ func TestHub_NoopAuth_WildcardSetsAllVehicles(t *testing.T) {
 	}
 }
 
+// TestHub_NoopAuth_BroadcastMaskedDeliversOwnerProjection covers MYR-66:
+// a dev-mode client (NoopAuthenticator with no explicit VehicleIDs) must
+// receive role-projected vehicle_update frames from BroadcastMasked, not
+// silently fall through the deny-all path. Pre-fix, the wildcard handshake
+// stripped the sentinel out of vehicleIDs and the role-resolution loop
+// iterated the empty concreteIDs slice, leaving vehicleRoles empty —
+// which made roleFor return Role("") and BroadcastMasked filter the dev
+// client out of every per-role projection. The fix seeds defaultRole =
+// auth.RoleOwner on wildcard handshake so roleFor returns RoleOwner for
+// any vehicleID. The mask is still applied — dev-mode is not a bypass.
+func TestHub_NoopAuth_BroadcastMaskedDeliversOwnerProjection(t *testing.T) {
+	hub := newTestHub(t)
+	t.Cleanup(hub.Stop)
+
+	auth := &NoopAuthenticator{} // VehicleIDs unset → wildcard expansion
+	srv := newTestServer(t, hub, auth)
+	t.Cleanup(srv.Close)
+
+	conn := dialAndAuth(t, srv.URL, "token")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	waitForClients(t, hub, 1)
+
+	hub.BroadcastMasked(
+		"v-arbitrary",
+		mask.ResourceVehicleState,
+		time.Now().UTC().Format(time.RFC3339),
+		map[string]any{
+			"speed":        65,
+			"licensePlate": "ABC-123",
+		},
+	)
+
+	got := readMessage(t, conn)
+	if got.Type != msgTypeVehicleUpdate {
+		t.Fatalf("expected %q, got %q", msgTypeVehicleUpdate, got.Type)
+	}
+	var pl vehicleUpdatePayload
+	if err := json.Unmarshal(got.Payload, &pl); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	// Owner projection keeps every field (matches
+	// TestHub_BroadcastMasked_OwnerKeepsAllFields).
+	if pl.Fields["speed"] != float64(65) {
+		t.Errorf("speed missing or wrong: %v", pl.Fields["speed"])
+	}
+	if pl.Fields["licensePlate"] != "ABC-123" {
+		t.Errorf("dev-mode owner projection missing licensePlate: %v", pl.Fields)
+	}
+}
+
 func TestHub_Heartbeat(t *testing.T) {
 	hub := newTestHub(t)
 	t.Cleanup(hub.Stop)
