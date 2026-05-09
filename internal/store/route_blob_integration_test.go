@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"reflect"
 	"testing"
 	"time"
 
@@ -13,6 +14,24 @@ import (
 	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/store/routeblob"
 )
+
+// jsonEqual compares two JSON byte slices semantically, ignoring
+// whitespace and key ordering. PostgreSQL's `jsonb` round-trip
+// reformats array literals (`[[-1,2]]` → `[[-1, 2]]`) so a byte-level
+// equality check would fail spuriously after a Vehicle/Drive read.
+func jsonEqual(t *testing.T, got, want []byte) bool {
+	t.Helper()
+	var a, b any
+	if err := json.Unmarshal(got, &a); err != nil {
+		t.Errorf("jsonEqual got: %v (raw=%s)", err, got)
+		return false
+	}
+	if err := json.Unmarshal(want, &b); err != nil {
+		t.Errorf("jsonEqual want: %v (raw=%s)", err, want)
+		return false
+	}
+	return reflect.DeepEqual(a, b)
+}
 
 // silentRouteBlobLogger keeps deliberate decrypt-failure warnings out
 // of test output. Same pattern as silentGPSLogger in vehicle_repo_gps_test.go.
@@ -58,7 +77,7 @@ func TestVehicleRepo_NavRoute_DualWriteOnUpdate(t *testing.T) {
 	}
 
 	plain, ct := readNavRouteShadows(t, testPool, "5YJ3E1EA1NF00NAV1")
-	if string(plain) != string(rawCoords) {
+	if !jsonEqual(t, plain, rawCoords) {
 		t.Errorf("plaintext = %s, want %s", plain, rawCoords)
 	}
 	if ct == nil || *ct == "" {
@@ -77,7 +96,7 @@ func TestVehicleRepo_NavRoute_DualWriteOnUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByVIN: %v", err)
 	}
-	if string(readBack.NavRouteCoordinates) != string(rawCoords) {
+	if !jsonEqual(t, readBack.NavRouteCoordinates, rawCoords) {
 		t.Errorf("read = %s, want %s", readBack.NavRouteCoordinates, rawCoords)
 	}
 }
@@ -110,7 +129,7 @@ func TestVehicleRepo_NavRoute_PrefersCiphertextOnRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByVIN: %v", err)
 	}
-	if string(got.NavRouteCoordinates) != string(realRaw) {
+	if !jsonEqual(t, got.NavRouteCoordinates, realRaw) {
 		t.Errorf("read = %s, want ciphertext-resolved %s", got.NavRouteCoordinates, realRaw)
 	}
 }
@@ -138,7 +157,7 @@ func TestVehicleRepo_NavRoute_DecryptFailureFallsBackToPlaintext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByVIN: %v", err)
 	}
-	if string(got.NavRouteCoordinates) != string(plain) {
+	if !jsonEqual(t, got.NavRouteCoordinates, plain) {
 		t.Errorf("read = %s, want plaintext fallback %s", got.NavRouteCoordinates, plain)
 	}
 }
