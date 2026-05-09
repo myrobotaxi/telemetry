@@ -21,6 +21,7 @@ import (
 	"github.com/tnando/my-robo-taxi-telemetry/internal/drives"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/geocode"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/mask"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/server"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/telemetry"
@@ -142,6 +143,17 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	vehicleRepo := store.NewVehicleRepo(db.Pool(), store.NoopMetrics{})
 	driveRepo := store.NewDriveRepo(db.Pool(), store.NoopMetrics{})
 	accountRepo := store.NewAccountRepo(db.Pool())
+	auditRepo := store.NewAuditRepo(db.Pool())
+
+	// --- Mask-audit emitter (MYR-71, rest-api.md §5.3) ---
+	// MaskAuditEmitter adapts AuditRepo to the mask.AuditEmitter
+	// interface so the hub and any future REST mask paths can fire
+	// non-blocking audit rows. Prometheus counters
+	// telemetry_audit_log_writes_total{action,target} and
+	// telemetry_audit_log_write_failures_total{action,target} make
+	// the 1% sample rate observable in prod.
+	auditEmitter := store.NewMaskAuditEmitter(auditRepo)
+	auditMetrics := mask.NewPrometheusAuditMetrics(reg)
 
 	// --- Geocoder (optional — requires MAPBOX_TOKEN) ---
 	geo := newGeocoder(cfg.MapboxToken(), cfg.Drives().GeocodeTimeout, logger)
@@ -161,7 +173,15 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	defer func() { _ = writer.Stop() }()
 
 	// --- WebSocket hub + broadcaster ---
-	hub := ws.NewHub(logger.With(slog.String("component", "ws")), ws.NoopHubMetrics{})
+	// WithMaskAudit wires the per-(vehicleID, role, frame) mask audit
+	// emit at the hub layer per rest-api.md §5.3. The hub itself uses
+	// a per-vehicle in-process counter as frameSeq until DV-02 ships
+	// envelope sequence numbers.
+	hub := ws.NewHub(
+		logger.With(slog.String("component", "ws")),
+		ws.NoopHubMetrics{},
+		ws.WithMaskAudit(auditEmitter, auditMetrics),
+	)
 	defer hub.Stop()
 
 	// Shared VIN → (vehicleID, userID) cache backing the broadcaster and

@@ -2,9 +2,12 @@ package telemetry
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/auth"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/mask"
@@ -61,6 +64,29 @@ func WithMask(resource mask.ResourceType, roles roleResolver, idLookup vehicleID
 	}
 }
 
+// WithMaskAudit attaches a mask-audit emitter and metrics to the
+// handler (MYR-71, rest-api.md §5.3). When configured, every REST
+// response whose mask projection removed at least one field is
+// audit-logged at a 1% deterministic-hash sample rate. The
+// `endpoint` argument is the route pattern written to
+// metadata.endpoint — pass "/api/vehicles/{vehicleId}/snapshot"
+// rather than the substituted URL so a vehicleID does not appear
+// twice (it is already on AuditEntry.TargetID). emitter MAY be nil
+// — in which case this option is a no-op.
+func WithMaskAudit(emitter mask.AuditEmitter, metrics mask.AuditMetrics, endpoint string) VehicleStatusOption {
+	return func(h *VehicleStatusHandler) {
+		if emitter == nil {
+			return
+		}
+		h.auditEmitter = emitter
+		if metrics == nil {
+			metrics = mask.NoopAuditMetrics{}
+		}
+		h.auditMetrics = metrics
+		h.auditEndpoint = endpoint
+	}
+}
+
 // writeMaskedResponse projects the response struct through the
 // role-based field mask before encoding. When the optional
 // roleResolver / vehicleIDLookup pair is not configured, the response
@@ -74,14 +100,15 @@ func WithMask(resource mask.ResourceType, roles roleResolver, idLookup vehicleID
 // matrix-keyed design used by the WebSocket per-role projection
 // (websocket-protocol.md §4.6).
 //
-// TODO(MYR-XX audit-log): when AuditLog table exists, if
-// len(fieldsMasked) > 0 AND mask.ShouldAuditREST(userID, requestID,
-// vehicleID) == true, emit an audit entry per rest-api.md §5.3. The
-// AuditLog migration is deferred (data-lifecycle.md §4 schema doesn't
-// exist in Prisma yet — same cross-repo pattern as MYR-41's
-// chargeState/timeToFull migration).
+// Audit emit (MYR-71, rest-api.md §5.3): when at least one field is
+// stripped AND ShouldAuditREST samples in at 1%, the handler fires a
+// non-blocking AuditEntry insert via mask.EmitAsync. The 'requestID'
+// hash input is the X-Request-ID header per §4.4 (server generates
+// one if the client did not). Failures log slog.Warn and increment
+// audit_log_write_failures_total — they MUST NOT drop the response.
 func (h *VehicleStatusHandler) writeMaskedResponse(
 	ctx context.Context,
+	r *http.Request,
 	w http.ResponseWriter,
 	vin, userID string,
 	resp vehicleStatusResponse,
@@ -109,10 +136,78 @@ func (h *VehicleStatusHandler) writeMaskedResponse(
 		return
 	}
 
+	// vehicleID is the audit row's TargetID. Resolved best-effort: if
+	// the lookup fails here it would have failed in resolveCallerRole
+	// above (which 500s), so this branch is reached only on success.
+	vehicleID, _ := h.idLookup.GetVehicleIDByVIN(ctx, vin)
+
 	projected, fieldsMasked := mask.Apply(resp.ToMaskMap(), mask.For(h.maskResource, role))
-	_ = fieldsMasked // see TODO(MYR-XX audit-log) above
+
+	h.maybeEmitAuditREST(r, userID, vehicleID, role, fieldsMasked)
 
 	h.writeJSON(w, http.StatusOK, projected)
+}
+
+// maybeEmitAuditREST evaluates the REST audit-emit gate. Pulled out
+// of writeMaskedResponse so the gate logic is testable in isolation
+// and the hot path stays linear.
+func (h *VehicleStatusHandler) maybeEmitAuditREST(
+	r *http.Request,
+	userID, vehicleID string,
+	role auth.Role,
+	fieldsMasked []string,
+) {
+	if h.auditEmitter == nil {
+		return
+	}
+	if len(fieldsMasked) == 0 {
+		return
+	}
+	requestID := requestIDFromRequest(r)
+	if !mask.ShouldAuditREST(userID, requestID, vehicleID) {
+		return
+	}
+
+	entry, err := mask.BuildEntry(
+		userID,
+		mask.TargetRESTResponse,
+		vehicleID,
+		role,
+		mask.AuditChannelREST,
+		fieldsMasked,
+		h.auditEndpoint,
+	)
+	if err != nil {
+		// BuildEntry only fails on programmer errors. Log and skip;
+		// the response itself still goes out.
+		h.logger.Warn("vehicle status: BuildEntry failed",
+			slog.String("user_id", userID),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	mask.EmitAsync(r.Context(), h.auditEmitter, h.auditMetrics, h.logger, entry)
+}
+
+// requestIDFromRequest returns the X-Request-ID header echoed by
+// rest-api.md §4.4. If the client did not send one, a random ID is
+// generated so ShouldAuditREST still has unique sampling input per
+// request. The generated ID is NOT propagated back to the response —
+// adding the response header is left to a future request-ID
+// middleware (out of scope for MYR-71).
+func requestIDFromRequest(r *http.Request) string {
+	if v := r.Header.Get("X-Request-ID"); v != "" {
+		return v
+	}
+	// Fall back to a server-generated random ID so the sampling
+	// remains uniform across clients that omit the header.
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Crypto RNG unavailable is unrecoverable; degrade to a
+		// timestamp-derived value rather than panic.
+		return fmt.Sprintf("ts-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // resolveCallerRole derives the caller's role for the vehicle
