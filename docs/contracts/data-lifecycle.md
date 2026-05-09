@@ -606,6 +606,29 @@ CI enforcement lives in `.github/workflows/contract-guard.yml` under the step "R
 
 **Fix:** Restore the cross-repo coupling header comment and ensure every Prisma `AuditLog` column appears (as a quoted identifier) in `internal/store/audit_repo.go`. If the Prisma side has not been updated yet, hold this PR until the cross-repo PR is merged (or open them as a coordinated pair).
 
+### Rule CG-DL-9: Go migration SQL must not reference Prisma-owned tables
+
+**Trigger:** Any PR that adds or modifies files in `internal/store/migrations/*.sql`.
+
+**Check:** No SQL file in `internal/store/migrations/` may reference a Prisma-owned table name. The prohibited table names are (case-insensitive):
+
+`User`, `Account`, `Session`, `VerificationToken`, `Vehicle`, `Drive`, `TripStop`, `Invite`, `Settings`, `AuditLog`
+
+Referencing a Prisma-owned table in a Go migration file risks schema drift, accidental schema mutation during automated startup, and loss of Prisma ownership over the table's lifecycle. The Go migration toolchain is scoped exclusively to the `_telemetry_*` and `go_*` namespaces.
+
+**Go-owned table naming convention:** All tables created by Go migrations MUST be prefixed `_telemetry_` or `go_`. This makes ownership visible in `psql \dt` output and allows `prisma db pull` filtering.
+
+See `docs/architecture/migrations.md` §4 for the full coexistence rule and table list.
+
+**Violation examples:**
+- `ALTER TABLE "Vehicle" ADD COLUMN ...` in a migration file — Prisma owns `Vehicle`
+- `INSERT INTO "AuditLog" ...` in a migration file — application runtime queries, not migration SQL, handle AuditLog inserts
+- `CREATE INDEX ON "Drive" ...` in a migration file — Prisma owns `Drive`
+
+**Fix:** Replace Prisma table references with Go-owned table names (prefixed `_telemetry_` or `go_`). If the intent is to add an index or constraint to a Prisma-owned table, coordinate with the Next.js repo's Prisma migration instead.
+
+CI enforcement lives in `.github/workflows/contract-guard.yml` under the step "Rule CG-DL-9 — No Prisma table refs in Go migrations".
+
 ---
 
 ## 8. Cross-references
