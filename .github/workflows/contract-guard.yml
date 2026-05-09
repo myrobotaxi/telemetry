@@ -195,15 +195,17 @@ jobs:
 
           FAILURES=""
           for table in $PRISMA_TABLES; do
-            # grep -ril: recursive, case-insensitive, files-with-matches only.
-            # We match the table name as a word boundary to avoid false positives
-            # on column names like "userId" — \b requires ERE (-E flag).
-            MATCHES=$(grep -rilE "\b${table}\b" "${MIGRATION_DIR}"/*.sql 2>/dev/null || true)
-            if [ -n "$MATCHES" ]; then
-              for f in $MATCHES; do
+            # Check each .sql file, ignoring SQL comment lines (lines starting
+            # with optional whitespace followed by "--"). This avoids false
+            # positives from documentation comments that mention Prisma table
+            # names for context (e.g., the CG-DL-9 convention note in 0001_init.up.sql).
+            for f in "${MIGRATION_DIR}"/*.sql; do
+              [ -f "$f" ] || continue
+              # Strip comment lines then test for the table name as a word boundary.
+              if grep -v '^[[:space:]]*--' "$f" | grep -qiE "\b${table}\b"; then
                 FAILURES="$FAILURES\n- $f references Prisma-owned table '${table}'"
-              done
-            fi
+              fi
+            done
           done
 
           if [ -n "$FAILURES" ]; then
