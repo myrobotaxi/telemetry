@@ -10,3 +10,4 @@ func (NoopHubMetrics) SetConnectedClients(int) {}
 func (NoopHubMetrics) IncMessagesSent()        {}
 func (NoopHubMetrics) IncMessagesDropped()     {}
 func (NoopHubMetrics) IncAuthFailures()        {}
+func (NoopHubMetrics) IncCloseUserDeletion()   {}
