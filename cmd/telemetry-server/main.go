@@ -40,6 +40,12 @@ const accountTokenGaugeInterval = 5 * time.Minute
 // in one (e.g., a long-running migration) doesn't starve the other.
 const vehicleGPSGaugeInterval = 5 * time.Minute
 
+// routeBlobGaugeInterval is the MYR-64 sibling — same 5-minute cadence
+// over Vehicle.navRouteCoordinatesEnc and Drive.routePointsEnc. The
+// route-blob queries can be heavier (jsonb columns) so the cadence
+// stays loose to keep the SELECT off the hot path.
+const routeBlobGaugeInterval = 5 * time.Minute
+
 // Build-time variables set via ldflags (see .goreleaser.yml).
 var (
 	version = "dev"
@@ -170,14 +176,14 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	// plaintext per the atomic-pair invariant in
 	// vehicle-state-schema.md §3.3.
 	vehicleRepo := store.NewVehicleRepoWithEncryption(db.Pool(), store.NoopMetrics{}, encryptor, logger.With(slog.String("component", "vehicle-repo")))
-	driveRepo := store.NewDriveRepo(db.Pool(), store.NoopMetrics{})
+	driveRepo := store.NewDriveRepoWithEncryption(db.Pool(), store.NoopMetrics{}, encryptor, logger.With(slog.String("component", "drive-repo")))
 	accountRepo := store.NewAccountRepo(db.Pool(), encryptor)
 
 	// MYR-62 + MYR-63 plaintext-zero gauges. Both register against the
 	// same Prometheus registry the /metrics handler scrapes; each
 	// refreshes on its own goroutine until the rollouts complete. See
 	// startPlaintextGauges in wiring.go.
-	startPlaintextGauges(ctx, reg, db.Pool(), accountTokenGaugeInterval, vehicleGPSGaugeInterval, logger)
+	startPlaintextGauges(ctx, reg, db.Pool(), accountTokenGaugeInterval, vehicleGPSGaugeInterval, routeBlobGaugeInterval, logger)
 	auditRepo := store.NewAuditRepo(db.Pool())
 
 	// --- Mask-audit emitter (MYR-71, rest-api.md §5.3) ---

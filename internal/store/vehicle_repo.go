@@ -32,6 +32,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/cryptox"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/store/routeblob"
 )
 
 // VehicleRepo reads and writes vehicle records in the Prisma-owned
@@ -204,12 +205,21 @@ func (r *VehicleRepo) UpdateStatus(ctx context.Context, vin string, status Vehic
 // short-circuits to a nil map so the dual-write is opt-in via the
 // constructor — buildTelemetryUpdate treats nil and empty identically.
 //
+// MYR-64: also encrypts `Vehicle.navRouteCoordinates` into
+// `navRouteCoordinatesEnc` when the update touches the route blob. An
+// encrypt failure on the route blob is logged at Warn and DOES NOT
+// fail the overall write — the plaintext column still goes through so
+// live telemetry isn't lost. This deliberately differs from the GPS
+// pair behavior, where an encrypt failure is fatal because the GPS
+// shadow is the more constrained format and a partial dual-write would
+// surface as a half-pair on read.
+//
 //nolint:nilnil // (nil map, nil err) signals "no encryptor wired".
 func (r *VehicleRepo) buildShadows(update VehicleUpdate) (map[string]string, error) {
 	if r.encryptor == nil {
 		return nil, nil
 	}
-	out := make(map[string]string, 6)
+	out := make(map[string]string, 7)
 	pairs := []struct {
 		pair gpsPair
 		lat  *float64
@@ -230,7 +240,38 @@ func (r *VehicleRepo) buildShadows(update VehicleUpdate) (map[string]string, err
 		out[p.pair.lat+"Enc"] = *shadow.latEnc
 		out[p.pair.lng+"Enc"] = *shadow.lngEnc
 	}
+	r.addNavRouteShadow(update, out)
 	return out, nil
+}
+
+// addNavRouteShadow encrypts the nav-route blob into out when the
+// update touches `Vehicle.navRouteCoordinates`. Empty/null/`[]` raw
+// JSON maps to a NULL shadow per routeblob.EncryptJSONBytes. An
+// encrypt failure logs at Warn and leaves the entry out of the map so
+// the plaintext write still happens — telemetry is never dropped over
+// a shadow-encryption hiccup.
+func (r *VehicleRepo) addNavRouteShadow(update VehicleUpdate, out map[string]string) {
+	if update.NavRouteCoordinates == nil {
+		return
+	}
+	raw := *update.NavRouteCoordinates
+	ct, err := routeblob.EncryptJSONBytes(raw, r.encryptor)
+	if err != nil {
+		if r.logger != nil {
+			r.logger.Warn("Vehicle navRouteCoordinatesEnc encrypt failed; writing plaintext only",
+				slog.String("error", err.Error()),
+			)
+		}
+		return
+	}
+	// ct == "" means "absent" (empty / null / []). The plaintext path
+	// is responsible for emitting the corresponding NULL on the
+	// plaintext column via ClearFields when the caller wants the row
+	// cleared; we never write an empty ciphertext.
+	if ct == "" {
+		return
+	}
+	out["navRouteCoordinatesEnc"] = ct
 }
 
 // scanVehicle executes a query expected to return one vehicle row and

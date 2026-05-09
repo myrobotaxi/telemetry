@@ -1,19 +1,14 @@
 package store
 
-import (
-	"encoding/json"
-	"fmt"
-	"strings"
-)
-
 // Vehicle queries. All column names use double-quoted camelCase to match
 // the Prisma-generated PostgreSQL schema.
 //
 // vehicleSelectColumns lists every column read into the Vehicle struct
 // (and the encrypted-shadow ciphertext columns the read path needs to
-// resolve a GPS pair). The trailing six *Enc columns are MYR-63 Phase 2
-// additions; see vehicle_gps_encryption.go for the read-side
-// preference + atomic-pair-fallback rule.
+// resolve a GPS pair or nav-route blob). The trailing six *Enc GPS
+// columns are MYR-63 Phase 2 additions; the navRouteCoordinatesEnc
+// column is the MYR-64 Phase 2 addition. See vehicle_gps_encryption.go
+// and vehicle_repo_scan.go for the read-side preference rules.
 
 const vehicleSelectColumns = `"id", "userId", "vin", "name",
 	"model", "year", "color", "status",
@@ -28,7 +23,8 @@ const vehicleSelectColumns = `"id", "userId", "vin", "name",
 	"navRouteCoordinates", "lastUpdated",
 	"latitudeEnc", "longitudeEnc",
 	"destinationLatitudeEnc", "destinationLongitudeEnc",
-	"originLatitudeEnc", "originLongitudeEnc"`
+	"originLatitudeEnc", "originLongitudeEnc",
+	"navRouteCoordinatesEnc"`
 
 const queryVehicleByVIN = `SELECT ` + vehicleSelectColumns + `
 FROM "Vehicle"
@@ -53,24 +49,45 @@ const queryUpdateVehicleStatus = `UPDATE "Vehicle"
 SET "status" = $1::"VehicleStatus", "lastUpdated" = NOW()
 WHERE "vin" = $2`
 
-// Drive queries.
+// Drive queries. The Drive table is Prisma-owned. The MYR-64 dual-write
+// adds `routePointsEnc` (Text?) alongside the existing `routePoints`
+// JSONB column. Append-on-write is plaintext-first via jsonb concat
+// (||); the helper re-encrypts the post-append array into the shadow
+// in a follow-up UPDATE so the plaintext path is never blocked on
+// encryption.
 
 const queryDriveInsert = `INSERT INTO "Drive" (
 	"id", "vehicleId", "date", "startTime", "endTime",
 	"startLocation", "startAddress", "endLocation", "endAddress",
 	"distanceMiles", "durationMinutes", "avgSpeedMph", "maxSpeedMph",
 	"energyUsedKwh", "startChargeLevel", "endChargeLevel",
-	"fsdMiles", "fsdPercentage", "interventions", "routePoints"
+	"fsdMiles", "fsdPercentage", "interventions", "routePoints",
+	"routePointsEnc"
 ) VALUES (
 	$1, $2, $3, $4, $5,
 	$6, $7, $8, $9,
 	$10, $11, $12, $13,
 	$14, $15, $16,
-	$17, $18, $19, $20::jsonb
+	$17, $18, $19, $20::jsonb,
+	$21
 )`
 
+// queryDriveAppendRoutePoints appends the delta to plaintext jsonb AND
+// returns the post-append array so the caller can re-encrypt the full
+// shape into the *Enc shadow in one round-trip. Phase 2 dual-write
+// semantics: the plaintext column is the source-of-truth (Tesla
+// telemetry never goes missing), so a shadow re-encrypt failure logs
+// + fails open without rolling back the plaintext append.
 const queryDriveAppendRoutePoints = `UPDATE "Drive"
 SET "routePoints" = "routePoints" || $2::jsonb
+WHERE "id" = $1
+RETURNING "routePoints"`
+
+// queryDriveSetRoutePointsEnc updates only the encrypted shadow. Used
+// after queryDriveAppendRoutePoints succeeds so the plaintext write is
+// not entangled with the encrypt round-trip.
+const queryDriveSetRoutePointsEnc = `UPDATE "Drive"
+SET "routePointsEnc" = $2
 WHERE "id" = $1`
 
 const queryDriveComplete = `UPDATE "Drive"
@@ -85,7 +102,8 @@ const queryDriveByID = `SELECT "id", "vehicleId", "date", "startTime", "endTime"
 	"startLocation", "startAddress", "endLocation", "endAddress",
 	"distanceMiles", "durationMinutes", "avgSpeedMph", "maxSpeedMph",
 	"energyUsedKwh", "startChargeLevel", "endChargeLevel",
-	"fsdMiles", "fsdPercentage", "interventions", "routePoints", "createdAt"
+	"fsdMiles", "fsdPercentage", "interventions", "routePoints", "createdAt",
+	"routePointsEnc"
 FROM "Drive"
 WHERE "id" = $1`
 
@@ -118,171 +136,3 @@ SET "access_token" = $1, "access_token_enc" = $2,
     "refresh_token" = $3, "refresh_token_enc" = $4,
     "expires_at" = $5
 WHERE "userId" = $6 AND "provider" = 'tesla'`
-
-// updateColumn pairs a PostgreSQL column name with the value to set. A nil
-// value signals that the field was not present in this telemetry event.
-type updateColumn struct {
-	col  string
-	val  any    // nil when the field pointer is nil
-	cast string // optional PostgreSQL type cast (e.g. "::jsonb")
-}
-
-// updateColumns returns the list of column/value pairs for a VehicleUpdate.
-// Values are dereferenced so callers can check for nil uniformly.
-func updateColumns(u VehicleUpdate) []updateColumn {
-	return []updateColumn{
-		{"speed", derefInt(u.Speed), ""},
-		{"chargeLevel", derefInt(u.ChargeLevel), ""},
-		{"estimatedRange", derefInt(u.EstimatedRange), ""},
-		{"chargeState", derefString(u.ChargeState), ""},
-		{"timeToFull", derefFloat(u.TimeToFull), ""},
-		{"gearPosition", derefString(u.GearPosition), ""},
-		{"heading", derefInt(u.Heading), ""},
-		{"latitude", derefFloat(u.Latitude), ""},
-		{"longitude", derefFloat(u.Longitude), ""},
-		{"interiorTemp", derefInt(u.InteriorTemp), ""},
-		{"exteriorTemp", derefInt(u.ExteriorTemp), ""},
-		{"odometerMiles", derefInt(u.OdometerMiles), ""},
-		{"fsdMilesSinceReset", derefFloat(u.FsdMilesSinceReset), ""},
-		{"locationName", derefString(u.LocationName), ""},
-		{"locationAddress", derefString(u.LocationAddr), ""},
-		{"destinationName", derefString(u.DestinationName), ""},
-		{"destinationAddress", derefString(u.DestinationAddress), ""},
-		{"destinationLatitude", derefFloat(u.DestinationLatitude), ""},
-		{"destinationLongitude", derefFloat(u.DestinationLongitude), ""},
-		{"originLatitude", derefFloat(u.OriginLatitude), ""},
-		{"originLongitude", derefFloat(u.OriginLongitude), ""},
-		{"etaMinutes", derefInt(u.EtaMinutes), ""},
-		{"tripDistanceRemaining", derefFloat(u.TripDistRemaining), ""},
-		{"navRouteCoordinates", derefJSON(u.NavRouteCoordinates), "::jsonb"},
-	}
-}
-
-// deref helpers convert typed pointers to any, returning nil when the
-// pointer is nil so the caller can skip the column.
-func derefInt(p *int) any {
-	if p == nil {
-		return nil
-	}
-	return *p
-}
-
-func derefFloat(p *float64) any {
-	if p == nil {
-		return nil
-	}
-	return *p
-}
-
-func derefString(p *string) any {
-	if p == nil {
-		return nil
-	}
-	return *p
-}
-
-func derefJSON(p *json.RawMessage) any {
-	if p == nil {
-		return nil
-	}
-	return *p
-}
-
-// buildTelemetryUpdate constructs a dynamic UPDATE statement for
-// VehicleUpdate, including only columns whose values are non-nil.
-// Returns the query string, the argument slice, and whether any fields
-// were set. The caller should skip the UPDATE when ok is false.
-//
-// encShadows holds pre-computed *Enc ciphertexts for the six GPS
-// columns: keys are the *Enc column names (e.g. "latitudeEnc").
-// Atomic-pair invariant: callers MUST only insert keys in pair-complete
-// pairs (both halves or neither) — see buildEncryptedGPSPair. nil/empty
-// map disables the dual-write entirely (useful in tests that don't
-// inject an Encryptor).
-func buildTelemetryUpdate(vin string, u VehicleUpdate, encShadows map[string]string) (query string, args []any, ok bool) {
-	var setClauses []string
-	argIdx := 1
-
-	// Build a set of columns to clear so we can skip them in the regular loop.
-	clearSet := make(map[string]bool, len(u.ClearFields))
-	for _, col := range u.ClearFields {
-		clearSet[col] = true
-	}
-
-	for _, col := range updateColumns(u) {
-		if col.val == nil || clearSet[col.col] {
-			continue // skip nil values AND columns being explicitly cleared
-		}
-		// %q produces Go double-quoted strings which match PostgreSQL's
-		// double-quoted identifier syntax. Column names are hardcoded constants.
-		setClauses = append(setClauses, fmt.Sprintf("%q = $%d%s", col.col, argIdx, col.cast))
-		args = append(args, col.val)
-		argIdx++
-	}
-
-	// MYR-63 dual-write: every GPS write that survived the atomic-pair
-	// guard in the caller produces an entry in encShadows. Iterate the
-	// canonical pair order so SQL output is stable in tests.
-	for _, p := range gpsPairs {
-		latEncCol := p.lat + "Enc"
-		lngEncCol := p.lng + "Enc"
-		latCT, hasLat := encShadows[latEncCol]
-		lngCT, hasLng := encShadows[lngEncCol]
-		if !hasLat || !hasLng {
-			// Caller-side atomic-pair guard rejects half-pairs; defense
-			// in depth here: if only one half ended up in the map, skip
-			// the dual-write rather than emit a corrupt row.
-			continue
-		}
-		if clearSet[p.lat] || clearSet[p.lng] {
-			continue
-		}
-		setClauses = append(setClauses, fmt.Sprintf("%q = $%d", latEncCol, argIdx))
-		args = append(args, latCT)
-		argIdx++
-		setClauses = append(setClauses, fmt.Sprintf("%q = $%d", lngEncCol, argIdx))
-		args = append(args, lngCT)
-		argIdx++
-	}
-
-	// ClearFields: explicitly SET NULL for columns that should be cleared
-	// (e.g. navigation cancelled by the vehicle). Each plaintext clear
-	// also clears its *Enc shadow so the dual-write invariant survives
-	// navigation cancellation.
-	for _, col := range u.ClearFields {
-		setClauses = append(setClauses, fmt.Sprintf("%q = NULL", col))
-		if encCol, ok := plaintextToEncColumn[col]; ok {
-			setClauses = append(setClauses, fmt.Sprintf("%q = NULL", encCol))
-		}
-	}
-
-	if len(setClauses) == 0 {
-		return "", nil, false
-	}
-
-	// Always update lastUpdated.
-	setClauses = append(setClauses, fmt.Sprintf(`"lastUpdated" = $%d`, argIdx))
-	args = append(args, u.LastUpdated)
-	argIdx++
-
-	// VIN is the final parameter for the WHERE clause.
-	args = append(args, vin)
-	query = fmt.Sprintf(`UPDATE "Vehicle" SET %s WHERE "vin" = $%d`,
-		strings.Join(setClauses, ", "), argIdx)
-
-	return query, args, true
-}
-
-// plaintextToEncColumn maps each GPS plaintext column to its *Enc
-// shadow. Used by buildTelemetryUpdate to extend ClearFields-driven
-// `SET NULL` to the encrypted shadow so a navigation-cancelled row
-// doesn't end up with a NULL plaintext + stale ciphertext (the same
-// half-pair corruption mode the read path warns about).
-var plaintextToEncColumn = map[string]string{
-	"latitude":             "latitudeEnc",
-	"longitude":            "longitudeEnc",
-	"destinationLatitude":  "destinationLatitudeEnc",
-	"destinationLongitude": "destinationLongitudeEnc",
-	"originLatitude":       "originLatitudeEnc",
-	"originLongitude":      "originLongitudeEnc",
-}

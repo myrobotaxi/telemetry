@@ -1,10 +1,18 @@
 // Vehicle row-scanning helpers split out of vehicle_repo.go to keep
 // each file under the 300-line cap. The scan path applies the MYR-63
-// dual-read GPS resolution: encrypted-shadow columns are read into
-// local *string slots and resolved alongside the plaintext halves so
-// the returned Vehicle exposes only float64 values.
+// dual-read GPS resolution AND the MYR-64 nav-route blob resolution:
+// encrypted-shadow columns are read into local *string slots and
+// resolved alongside the plaintext halves so the returned Vehicle
+// exposes only the typed shape consumers expect (float64 GPS,
+// json.RawMessage navRouteCoordinates).
 
 package store
+
+import (
+	"log/slog"
+
+	"github.com/tnando/my-robo-taxi-telemetry/internal/store/routeblob"
+)
 
 // rowScanner abstracts pgx.Row vs pgx.Rows so scanVehicleRow can serve
 // both single-row queries (GetByVIN/GetByID) and rows iteration
@@ -23,9 +31,10 @@ type gpsScanResult struct {
 }
 
 // scanVehicleRow scans the full SELECT into a Vehicle, applying the
-// MYR-63 dual-read GPS resolution on the way out. The encrypted-shadow
-// columns are scanned into local *string slots, never exposed on the
-// returned struct — consumers only see the resolved float64 values.
+// MYR-63 dual-read GPS resolution AND the MYR-64 nav-route blob
+// resolution on the way out. The encrypted-shadow columns are scanned
+// into local *string slots, never exposed on the returned struct —
+// consumers only see the resolved float64 / RawMessage values.
 func (r *VehicleRepo) scanVehicleRow(row rowScanner) (Vehicle, error) {
 	var v Vehicle
 	var status string
@@ -33,6 +42,7 @@ func (r *VehicleRepo) scanVehicleRow(row rowScanner) (Vehicle, error) {
 		latEnc, lngEnc             *string
 		destLatEnc, destLngEnc     *string
 		originLatEnc, originLngEnc *string
+		navRouteEnc                *string
 		latPT, lngPT               float64
 		destLatPT, destLngPT       *float64
 		originLatPT, originLngPT   *float64
@@ -54,6 +64,7 @@ func (r *VehicleRepo) scanVehicleRow(row rowScanner) (Vehicle, error) {
 		&latEnc, &lngEnc,
 		&destLatEnc, &destLngEnc,
 		&originLatEnc, &originLngEnc,
+		&navRouteEnc,
 	)
 	if err != nil {
 		// Caller is scanVehicle (single-row) or ListByUser (rows
@@ -68,7 +79,62 @@ func (r *VehicleRepo) scanVehicleRow(row rowScanner) (Vehicle, error) {
 		gpsScanResult{destLatEnc, destLngEnc, destLatPT, destLngPT},
 		gpsScanResult{originLatEnc, originLngEnc, originLatPT, originLngPT},
 	)
+	r.applyResolvedNavRoute(&v, navRouteEnc)
 	return v, nil
+}
+
+// applyResolvedNavRoute prefers the encrypted shadow ciphertext for
+// `Vehicle.navRouteCoordinates` and falls back to the plaintext column
+// when the shadow is NULL or fails to decrypt/unmarshal. Decrypt
+// failures are logged at Warn so a corrupt 100KB+ blob shows up in
+// operator dashboards without 500'ing the live nav-route view — same
+// fallback policy as the TS counterpart in route-blob-encryption.ts.
+//
+// Legacy callers built without an Encryptor leave the plaintext
+// json.RawMessage untouched.
+func (r *VehicleRepo) applyResolvedNavRoute(v *Vehicle, ct *string) {
+	if r.encryptor == nil || ct == nil || *ct == "" {
+		return
+	}
+	raw, err := routeblob.DecryptJSONBytes(*ct, r.encryptor)
+	if err != nil {
+		if r.logger != nil {
+			r.logger.Warn("Vehicle navRouteCoordinatesEnc decrypt failed; falling back to plaintext",
+				slog.String("vehicle_id", v.ID),
+				slog.String("error", err.Error()),
+			)
+		}
+		return
+	}
+	if len(raw) == 0 {
+		return
+	}
+	// Defense-in-depth: ensure the decrypted plaintext is a JSON array
+	// before exposing it. A non-array shape is treated as corrupt and
+	// falls back to plaintext rather than surfacing garbage to the SDK.
+	if !looksLikeJSONArray(raw) {
+		if r.logger != nil {
+			r.logger.Warn("Vehicle navRouteCoordinatesEnc decoded to non-array; falling back to plaintext",
+				slog.String("vehicle_id", v.ID),
+			)
+		}
+		return
+	}
+	v.NavRouteCoordinates = raw
+}
+
+// looksLikeJSONArray is the minimal shape guard the read path applies
+// before trusting decrypted nav-route bytes — a full json.Unmarshal
+// would force an extra allocation just to confirm `[`. Matches the
+// TS-side `Array.isArray(parsed)` guard.
+func looksLikeJSONArray(raw []byte) bool {
+	for _, b := range raw {
+		if b == ' ' || b == '\t' || b == '\n' || b == '\r' {
+			continue
+		}
+		return b == '['
+	}
+	return false
 }
 
 // applyResolvedGPS walks the three GPS pairs through resolveGPSPair and
