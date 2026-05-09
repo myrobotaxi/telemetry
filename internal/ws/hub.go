@@ -1,10 +1,12 @@
 package ws
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/auth"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/mask"
@@ -18,15 +20,74 @@ type Hub struct {
 	logger  *slog.Logger
 	metrics HubMetrics
 	stopped bool
+
+	// Mask-audit fields (rest-api.md §5.3). All optional — a nil
+	// auditEmitter disables emit and EmitAsync becomes a no-op. Test
+	// wiring leaves them nil; production wiring fills them via
+	// HubOption.
+	auditEmitter mask.AuditEmitter
+	auditMetrics mask.AuditMetrics
+
+	// Per-vehicle monotonic frame counter feeding ShouldAuditWS as
+	// frameSeq input. Per rest-api.md §5.3, until DV-02 lands the hub
+	// uses an in-process counter — distinct vehicles get distinct
+	// streams, distinct frames within a stream get distinct counter
+	// values, and the deterministic hash distributes the 1% sample
+	// across them. sync.Map keyed by vehicleID -> *atomic.Uint64 so
+	// the per-vehicle increment is lock-free on the hot path.
+	frameCounters sync.Map
+}
+
+// HubOption configures optional Hub behavior. Following the v1 SDK
+// pattern (cmd/telemetry-server/main.go's WithMask), options are
+// composable, idempotent, and default to a quiet no-op when omitted.
+type HubOption func(*Hub)
+
+// WithMaskAudit attaches a mask-audit emitter and metrics to the hub.
+// When configured, the hub emits an AuditEntry per (vehicleID, role,
+// frame) where the role's mask removed at least one field, sampled at
+// the 1% rate computed by mask.ShouldAuditWS. emitter MAY be nil — in
+// which case this option is a no-op (defensive: a misconfigured wiring
+// path should not crash the hot path).
+func WithMaskAudit(emitter mask.AuditEmitter, metrics mask.AuditMetrics) HubOption {
+	return func(h *Hub) {
+		if emitter == nil {
+			return
+		}
+		h.auditEmitter = emitter
+		if metrics == nil {
+			metrics = mask.NoopAuditMetrics{}
+		}
+		h.auditMetrics = metrics
+	}
 }
 
 // NewHub creates a Hub ready to accept client registrations.
-func NewHub(logger *slog.Logger, metrics HubMetrics) *Hub {
-	return &Hub{
+func NewHub(logger *slog.Logger, metrics HubMetrics, opts ...HubOption) *Hub {
+	h := &Hub{
 		clients: make(map[*Client]struct{}),
 		logger:  logger,
 		metrics: metrics,
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
+}
+
+// nextFrameSeq increments and returns the per-vehicle monotonic frame
+// counter used as ShouldAuditWS input. The first call for a given
+// vehicleID returns 1; subsequent calls return 2, 3, ... A sync.Map
+// LoadOrStore on the first call avoids the race between two goroutines
+// observing zero and both creating a counter — the second goroutine
+// loses the LoadOrStore race, throws away its counter, and uses the
+// winner's.
+func (h *Hub) nextFrameSeq(vehicleID string) uint64 {
+	v, ok := h.frameCounters.Load(vehicleID)
+	if !ok {
+		v, _ = h.frameCounters.LoadOrStore(vehicleID, new(atomic.Uint64))
+	}
+	return v.(*atomic.Uint64).Add(1)
 }
 
 // Register adds an authenticated client to the hub.
@@ -146,8 +207,15 @@ func (h *Hub) BroadcastMasked(
 		return
 	}
 
+	// Per rest-api.md §5.3: the audit emit's frameSeq is per-vehicle.
+	// Bump once per BroadcastMasked call so every role that processes
+	// this frame sees the same seq value — the role itself goes into
+	// the hash too, so distinct roles still get distinct sampling
+	// decisions for the same frame.
+	frameSeq := h.nextFrameSeq(vehicleID)
+
 	// Pass 2: marshal only the frames we will actually use.
-	framesByRole := buildRoleFrames(vehicleID, resource, timestamp, payload, activeRoles)
+	framesByRole := h.buildRoleFrames(vehicleID, resource, timestamp, payload, activeRoles, frameSeq)
 	if len(framesByRole) == 0 {
 		return
 	}
@@ -189,25 +257,31 @@ var v1Roles = []auth.Role{auth.RoleOwner, auth.RoleViewer}
 // for that role" rather than an error return — a single role's marshal
 // failure must not poison the broadcast for other roles.
 //
-// TODO(MYR-XX audit-log): when AuditLog table exists, for each role
-// where len(fieldsMasked) > 0 AND mask.ShouldAuditWS(vehicleID, role,
-// frameSeq) == true, emit an audit entry per rest-api.md §5.3. The
-// AuditLog migration is deferred (data-lifecycle.md §4 schema doesn't
-// exist in Prisma yet — same cross-repo pattern as MYR-41's
-// chargeState/timeToFull migration). fieldsMasked carries the list of
-// removed field names (P0 — names only, never values).
-func buildRoleFrames(
+// Audit emit (MYR-71, rest-api.md §5.3): for each role where the
+// mask removed at least one field AND mask.ShouldAuditWS samples in,
+// the hub fires a non-blocking AuditEntry insert via mask.EmitAsync.
+// The emit is per (vehicleID, role, frame) at the hub layer rather
+// than per client — this keeps audit volume proportional to vehicle
+// activity, not viewer count. Failures log slog.Warn and increment
+// audit_log_write_failures_total; they MUST NOT drop the frame.
+func (h *Hub) buildRoleFrames(
 	vehicleID string,
 	resource mask.ResourceType,
 	timestamp string,
 	payload map[string]any,
 	activeRoles map[auth.Role]struct{},
+	frameSeq uint64,
 ) map[auth.Role][]byte {
 	frames := make(map[auth.Role][]byte, len(activeRoles))
 	for role := range activeRoles {
 		m := mask.For(resource, role)
 		projected, fieldsMasked := mask.Apply(payload, m)
-		_ = fieldsMasked // see TODO above
+
+		// Audit-log emit per rest-api.md §5.3. Sampled at 1% by
+		// deterministic hash. Skipped if the role didn't actually
+		// strip any fields (the contract gates emit on
+		// "removed at least one field").
+		h.maybeEmitAuditWS(vehicleID, role, frameSeq, fieldsMasked)
 
 		if len(projected) == 0 {
 			// Empty-payload suppression per websocket-protocol.md §4.6.
@@ -222,6 +296,54 @@ func buildRoleFrames(
 		frames[role] = frame
 	}
 	return frames
+}
+
+// maybeEmitAuditWS evaluates the audit-emit gate for one (vehicleID,
+// role, frame) and fires a non-blocking insert if both the
+// "fieldsMasked is non-empty" precondition and the 1% sampler agree.
+// Pulled out of buildRoleFrames so the hot path stays linear and the
+// gate logic is independently testable.
+func (h *Hub) maybeEmitAuditWS(
+	vehicleID string,
+	role auth.Role,
+	frameSeq uint64,
+	fieldsMasked []string,
+) {
+	if h.auditEmitter == nil {
+		return
+	}
+	if len(fieldsMasked) == 0 {
+		return
+	}
+	if !mask.ShouldAuditWS(vehicleID, role, frameSeq) {
+		return
+	}
+	// userID is empty for WS — the audit emit is per (vehicleID, role,
+	// frame) at the hub, not per client. The targetID column carries
+	// the vehicleID; the role is in metadata; that's the canonical
+	// shape from rest-api.md §5.3 ("The audit emit happens once per
+	// (vehicleId, role, frame) at the hub layer, not per client").
+	entry, err := mask.BuildEntry(
+		"",
+		mask.TargetWSBroadcast,
+		vehicleID,
+		role,
+		mask.AuditChannelWS,
+		fieldsMasked,
+		"",
+	)
+	if err != nil {
+		// BuildEntry only fails on programmer errors (empty
+		// fieldsMasked, marshal panic). Log and skip — the frame
+		// itself still flies.
+		h.logger.Warn("hub.maybeEmitAuditWS: BuildEntry failed",
+			slog.String("vehicle_id", vehicleID),
+			slog.String("role", role.String()),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	mask.EmitAsync(context.Background(), h.auditEmitter, h.auditMetrics, h.logger, entry)
 }
 
 // marshalVehicleUpdate wraps a projected payload in the wsMessage
