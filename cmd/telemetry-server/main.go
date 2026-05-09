@@ -25,9 +25,16 @@ import (
 	"github.com/tnando/my-robo-taxi-telemetry/internal/mask"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/server"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/store/accountbackfill"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/telemetry"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/ws"
 )
+
+// accountTokenGaugeInterval is how often the running server polls the
+// Account table for plaintext-without-ciphertext tokens. Slow enough to
+// avoid load (the rollout window is hours/days, not seconds), fast
+// enough that an alerting pipeline catches a regression promptly.
+const accountTokenGaugeInterval = 5 * time.Minute
 
 // Build-time variables set via ldflags (see .goreleaser.yml).
 var (
@@ -98,11 +105,13 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 
 	// --- Column encryption foundation (NFR-3.23, NFR-3.24) ---
+	// MYR-62 wires the Encryptor into AccountRepo for the dual-write
+	// rollout of OAuth tokens. Vehicle/Drive column rollouts land in
+	// follow-on issues that require coordinated Prisma migrations.
 	encryptor, err := setupEncryption(logger)
 	if err != nil {
 		return err
 	}
-	_ = encryptor // foundation: column wiring lands in follow-on PRs (MYR-16 cross-repo rollout issues)
 
 	// --- Database connection ---
 	db, err := store.NewDB(ctx, cfg.Database(), logger.With(slog.String("component", "store")), store.NoopMetrics{})
@@ -153,7 +162,13 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	// --- Store repos ---
 	vehicleRepo := store.NewVehicleRepo(db.Pool(), store.NoopMetrics{})
 	driveRepo := store.NewDriveRepo(db.Pool(), store.NoopMetrics{})
-	accountRepo := store.NewAccountRepo(db.Pool())
+	accountRepo := store.NewAccountRepo(db.Pool(), encryptor)
+
+	// MYR-62 plaintext-zero gauge. Registered with the same Prometheus
+	// registry the /metrics handler scrapes; refreshed every
+	// accountTokenGaugeInterval until the rollout completes.
+	plaintextGauge := accountbackfill.NewPlaintextGauge(reg, db.Pool(), accountTokenGaugeInterval, logger.With(slog.String("component", "account-token-gauge")))
+	go plaintextGauge.Run(ctx)
 	auditRepo := store.NewAuditRepo(db.Pool())
 
 	// --- Mask-audit emitter (MYR-71, rest-api.md §5.3) ---
