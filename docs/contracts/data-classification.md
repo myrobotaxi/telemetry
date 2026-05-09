@@ -61,6 +61,8 @@ Every column in every persisted table is listed below. The **Tier** column is th
 | `session_state` | `String?` | P0 | No | Yes | OAuth session state parameter |
 
 > **Note:** The telemetry server reads `access_token` and `refresh_token` via `AccountRepo.GetTeslaToken()` and writes refreshed tokens via `AccountRepo.UpdateTeslaToken()`. AES-256-GCM encryption for these columns is applied in the store layer per NFR-3.23/NFR-3.25.
+>
+> **Dual-write transition (MYR-62, 2026-05-09):** The Account table now carries `access_token_enc`, `refresh_token_enc`, and `id_token_enc` (`Text?` ciphertext columns) alongside the legacy plaintext columns. The store layer encrypts on write into both columns and prefers `<col>_enc` on read, falling back to plaintext when ciphertext is NULL. The plaintext columns survive the rollout so a roll-back to a pre-encryption binary can still service traffic; they are scheduled for removal in a separate post-rollout migration once `account_token_plaintext_remaining_total` reaches zero across all three columns. See `cmd/backfill-account-tokens/` for the legacy-row migration tool.
 
 ### 1.3 Vehicle table
 
@@ -292,7 +294,7 @@ These P1 columns are sensitive and must never appear in logs, but are NOT encryp
 - **Ciphertext format:** `[1B version][12B nonce][N B ciphertext + 16B GCM tag]`, base64-encoded as `Text` in PostgreSQL. The version byte routes the decrypt path to the matching key in the active `KeySet`, enabling in-place key rotation without re-encrypting old rows up front. Version `0x00` is reserved as invalid; `0x01` is the only emitted version today.
 - **Nonce:** 12-byte cryptographically-random nonce per call (NIST SP 800-38D §5.2.1.1). Catastrophic GCM failure mode is nonce reuse; the package guarantees fresh nonces per `Encrypt` call.
 - **Transparency:** Encrypt on write, decrypt on read, entirely within the store layer (NFR-3.25). The SDK, WebSocket broadcaster, and REST API handlers operate on plaintext values.
-- **Foundation status (as of MYR-16, 2026-05-01):** the `internal/cryptox` package + startup wiring are landed; `ENCRYPTION_KEY` is required at startup. **No P1 columns are yet encrypted on disk** — the per-column rollouts require coordinated Prisma migrations in `../my-robo-taxi/` and are tracked as separate Linear issues (one per migration unit: OAuth tokens, Vehicle GPS coords, route blobs).
+- **Foundation status (as of MYR-62, 2026-05-09):** the `internal/cryptox` package + startup wiring are landed; `ENCRYPTION_KEY` is required at startup. **OAuth tokens (`Account.access_token`, `Account.refresh_token`, `Account.id_token`) are encrypted on disk as of MYR-62** via the dual-write rollout (TS Phase 1 in `tnando/my-robo-taxi#256`, Go Phase 2 in this repo). Remaining P1 column rollouts (Vehicle GPS coords, destination GPS, route blobs) require coordinated Prisma migrations in `../my-robo-taxi/` and are tracked as separate Linear issues. Operators monitor rollout completion via `account_token_plaintext_remaining_total{column=...}` (gauge → 0 once every legacy row has been backfilled).
 
 ---
 
