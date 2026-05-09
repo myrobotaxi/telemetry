@@ -18,7 +18,7 @@ package store
 // declared in AuditEntry below MUST mirror the Prisma model exactly. Any
 // change to either side (column add/rename/retype, classification tier,
 // nullability) requires updating BOTH files in the SAME PR. contract-guard
-// rule CG-DL-7 enforces this on every PR (see .github/workflows/
+// rule CG-DL-8 enforces this on every PR (see .github/workflows/
 // contract-guard.yml and .claude/agents/contract-guard.md). Drift is a
 // contract violation that blocks merge.
 //
@@ -145,6 +145,15 @@ const queryAuditInsert = `INSERT INTO "AuditLog" (
 // document containing only P0 values (see §4.4 / CG-DL-5); pass
 // json.RawMessage("{}") when there is no metadata.
 //
+// Zero-time fallback: if Timestamp or CreatedAt is the zero value
+// (time.Time{}), it is replaced with time.Now().UTC() at insert time.
+// This guards against silent data-quality bugs where a caller forgets
+// to set the timestamp and Postgres would otherwise write
+// 0001-01-01T00:00:00Z. The Prisma model declares @default(now()) on
+// these columns, but because this writer always passes them as bind
+// parameters that DB-side default never fires — the Go-side fallback
+// is what enforces the non-zero invariant.
+//
 // This is the only mutation method on AuditRepo by design — see the
 // append-only invariant note at the top of this file.
 func (r *AuditRepo) InsertAuditLog(ctx context.Context, entry AuditEntry) error {
@@ -153,16 +162,26 @@ func (r *AuditRepo) InsertAuditLog(ctx context.Context, entry AuditEntry) error 
 		metadata = json.RawMessage("{}")
 	}
 
+	now := time.Now().UTC()
+	timestamp := entry.Timestamp
+	if timestamp.IsZero() {
+		timestamp = now
+	}
+	createdAt := entry.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = now
+	}
+
 	_, err := r.pool.Exec(ctx, queryAuditInsert,
 		entry.ID,
 		entry.UserID,
-		entry.Timestamp,
+		timestamp,
 		string(entry.Action),
 		entry.TargetType,
 		entry.TargetID,
 		entry.Initiator,
 		metadata,
-		entry.CreatedAt,
+		createdAt,
 	)
 	if err != nil {
 		return fmt.Errorf("store.AuditRepo.InsertAuditLog: %w", err)

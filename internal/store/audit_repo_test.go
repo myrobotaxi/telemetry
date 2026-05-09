@@ -24,7 +24,7 @@ import (
 // duplicated here verbatim. The cross-repo coupling note at the top of
 // internal/store/audit_repo.go applies to this constant too: any change
 // to the Prisma migration MUST be mirrored here in the same PR, and
-// contract-guard CG-DL-7 enforces it on every PR. The exception text
+// contract-guard CG-DL-8 enforces it on every PR. The exception text
 // "AuditLog rows are append-only" is asserted on by the trigger tests
 // below — keep the strings in sync.
 const auditSchemaSQL = `
@@ -310,6 +310,13 @@ func TestAuditRepo_NotNullColumnsRejectMissingValues(t *testing.T) {
 				  VALUES ($1, 'user_001', 'drives_pruned', NULL, 'veh_001', 'system_pruner')`,
 			args:    []any{"audit_null_target_type"},
 			wantSub: "targetType",
+		},
+		{
+			name: "NULL targetId is rejected",
+			sql: `INSERT INTO "AuditLog" ("id","userId","action","targetType","targetId","initiator")
+				  VALUES ($1, 'user_001', 'drives_pruned', 'drive', NULL, 'system_pruner')`,
+			args:    []any{"audit_null_target_id"},
+			wantSub: "targetId",
 		},
 		{
 			name: "NULL initiator is rejected",
