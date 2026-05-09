@@ -4,10 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
-	"sync"
 	"testing"
 	"time"
 
@@ -22,13 +23,66 @@ import (
 	"github.com/tnando/my-robo-taxi-telemetry/internal/store/accountbackfill"
 )
 
-// shared test pool for the package — initialized lazily by ensurePool so
-// tests skip cleanly when Docker isn't available.
+// shared test pool for the package. Initialized in TestMain so the pool
+// outlives the first test that uses it (a t.Cleanup registration would
+// tie its lifetime to the first test's scope, which silently closes the
+// pool for every later test).
 var (
 	testPool        *pgxpool.Pool
 	dockerAvailable bool
-	poolOnce        sync.Once
+	teardown        func()
 )
+
+func TestMain(m *testing.M) {
+	if !isDockerRunning() {
+		fmt.Fprintln(os.Stderr, "Docker not available, skipping accountbackfill tests")
+		os.Exit(m.Run())
+	}
+	ctx := context.Background()
+	c, err := postgres.Run(ctx,
+		"postgres:16-alpine",
+		postgres.WithDatabase("backfill_test"),
+		postgres.WithUsername("u"),
+		postgres.WithPassword("p"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(60*time.Second),
+		),
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "start postgres: %v\n", err)
+		os.Exit(1)
+	}
+	conn, err := c.ConnectionString(ctx, "sslmode=disable")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "conn string: %v\n", err)
+		_ = c.Terminate(ctx)
+		os.Exit(1)
+	}
+	pool, err := pgxpool.New(ctx, conn)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "new pool: %v\n", err)
+		_ = c.Terminate(ctx)
+		os.Exit(1)
+	}
+	if _, err := pool.Exec(ctx, accountSchemaSQL); err != nil {
+		fmt.Fprintf(os.Stderr, "schema: %v\n", err)
+		pool.Close()
+		_ = c.Terminate(ctx)
+		os.Exit(1)
+	}
+	testPool = pool
+	dockerAvailable = true
+	teardown = func() {
+		pool.Close()
+		_ = c.Terminate(ctx)
+	}
+
+	code := m.Run()
+	teardown()
+	os.Exit(code)
+}
 
 const accountSchemaSQL = `
 CREATE TABLE IF NOT EXISTS "Account" (
@@ -47,49 +101,14 @@ CREATE TABLE IF NOT EXISTS "Account" (
 );
 `
 
-func ensurePool(t *testing.T) {
+// requirePool skips the test if TestMain didn't bring up a Postgres
+// container. Tests don't construct their own pool — TestMain owns the
+// lifecycle.
+func requirePool(t *testing.T) {
 	t.Helper()
-	poolOnce.Do(func() {
-		if !isDockerRunning() {
-			return
-		}
-		ctx := context.Background()
-		c, err := postgres.Run(ctx,
-			"postgres:16-alpine",
-			postgres.WithDatabase("backfill_test"),
-			postgres.WithUsername("u"),
-			postgres.WithPassword("p"),
-			testcontainers.WithWaitStrategy(
-				wait.ForLog("database system is ready to accept connections").
-					WithOccurrence(2).
-					WithStartupTimeout(60*time.Second),
-			),
-		)
-		if err != nil {
-			t.Logf("start postgres: %v", err)
-			return
-		}
-		t.Cleanup(func() { _ = c.Terminate(ctx) })
-
-		conn, err := c.ConnectionString(ctx, "sslmode=disable")
-		if err != nil {
-			t.Logf("conn string: %v", err)
-			return
-		}
-		pool, err := pgxpool.New(ctx, conn)
-		if err != nil {
-			t.Logf("new pool: %v", err)
-			return
-		}
-		if _, err := pool.Exec(ctx, accountSchemaSQL); err != nil {
-			t.Logf("schema: %v", err)
-			pool.Close()
-			return
-		}
-		testPool = pool
-		dockerAvailable = true
-		t.Cleanup(func() { pool.Close() })
-	})
+	if !dockerAvailable {
+		t.Skip("Docker not available")
+	}
 }
 
 func isDockerRunning() bool {
@@ -142,7 +161,7 @@ func seed(t *testing.T, id, userID string, accessPT, refreshPT, idPT *string) {
 func ptr(s string) *string { return &s }
 
 func TestBackfill_EncryptsAllPlaintextColumns(t *testing.T) {
-	ensurePool(t)
+	requirePool(t)
 	if !dockerAvailable {
 		t.Skip("Docker not available")
 	}
@@ -194,7 +213,7 @@ func TestBackfill_EncryptsAllPlaintextColumns(t *testing.T) {
 }
 
 func TestBackfill_Idempotent(t *testing.T) {
-	ensurePool(t)
+	requirePool(t)
 	if !dockerAvailable {
 		t.Skip("Docker not available")
 	}
@@ -225,7 +244,7 @@ func TestBackfill_Idempotent(t *testing.T) {
 }
 
 func TestBackfill_PartialMixedState(t *testing.T) {
-	ensurePool(t)
+	requirePool(t)
 	if !dockerAvailable {
 		t.Skip("Docker not available")
 	}
@@ -267,7 +286,7 @@ func TestBackfill_PartialMixedState(t *testing.T) {
 }
 
 func TestBackfill_NoRowsToProcess(t *testing.T) {
-	ensurePool(t)
+	requirePool(t)
 	if !dockerAvailable {
 		t.Skip("Docker not available")
 	}
@@ -288,7 +307,7 @@ func TestBackfill_NoRowsToProcess(t *testing.T) {
 }
 
 func TestPlaintextGauge_RegistersAndCounts(t *testing.T) {
-	ensurePool(t)
+	requirePool(t)
 	if !dockerAvailable {
 		t.Skip("Docker not available")
 	}
