@@ -105,3 +105,17 @@ func (c *VINCache) resolve(ctx context.Context, vin string) (vinIDs, error) {
 	)
 	return ids, nil
 }
+
+// Invalidate removes the cached entry for vin. After Invalidate
+// returns, the next ResolveID/ResolveOwner call for the same VIN will
+// re-query the database. Used by the data-lifecycle.md §3.5 cleanup
+// path (MYR-73): when a Vehicle row is deleted, the cached
+// (vehicleID, userID) pair must be evicted so any subsequent inbound
+// telemetry for the deleted VIN is rejected as unknown.
+func (c *VINCache) Invalidate(vin string) {
+	if vin == "" {
+		return
+	}
+	c.cache.Delete(vin)
+	c.logger.Info("VIN cache entry invalidated", slog.String("vin", redactVIN(vin)))
+}

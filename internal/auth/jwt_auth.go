@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -26,6 +27,13 @@ var (
 // the Prisma-owned "Vehicle" table.
 const queryUserVehicleIDs = `SELECT "id" FROM "Vehicle" WHERE "userId" = $1`
 
+// queryUserExists is a slim row-existence probe against the
+// Prisma-owned "User" table, used by the FR-10.1 fail-closed JWT
+// existence check (data-lifecycle.md §3.5, MYR-73). SELECT 1 + LIMIT
+// 1 lets Postgres short-circuit on the primary-key index without
+// pulling any data columns.
+const queryUserExists = `SELECT 1 FROM "User" WHERE "id" = $1 LIMIT 1`
+
 // queryVehicleOwnerByID fetches the owning user ID for a vehicle. Used
 // by ResolveRole to determine whether the caller is the owner of the
 // vehicle or a viewer (post-MYR-Invite, after the FR-5.4 invite path
@@ -36,11 +44,12 @@ const queryVehicleOwnerByID = `SELECT "userId" FROM "Vehicle" WHERE "id" = $1`
 // user's vehicle IDs from the database. It caches vehicle lookups to
 // avoid hitting the DB on every WebSocket reconnect.
 type JWTAuthenticator struct {
-	secret      []byte
-	issuer      string
-	audience    string
-	cache       *vehicleCache
-	ownerLookup vehicleOwnerLookup
+	secret           []byte
+	issuer           string
+	audience         string
+	cache            *vehicleCache
+	ownerLookup      vehicleOwnerLookup
+	userExistsCache  *userExistenceCache
 }
 
 // Compile-time interface check.
@@ -67,18 +76,20 @@ type vehicleOwnerLookup interface {
 // Issuer and audience are validated if non-empty.
 func NewJWTAuthenticator(secret, issuer, audience string, pool *pgxpool.Pool) *JWTAuthenticator {
 	querier := &pgVehicleQuerier{pool: pool}
+	existenceQuerier := &pgUserExistenceQuerier{pool: pool}
 	return &JWTAuthenticator{
-		secret:      []byte(secret),
-		issuer:      issuer,
-		audience:    audience,
-		cache:       newVehicleCache(querier, vehicleCacheTTL),
-		ownerLookup: querier,
+		secret:          []byte(secret),
+		issuer:          issuer,
+		audience:        audience,
+		cache:           newVehicleCache(querier, vehicleCacheTTL),
+		ownerLookup:     querier,
+		userExistsCache: newUserExistenceCache(existenceQuerier, userExistenceTTL),
 	}
 }
 
 // ValidateToken parses and verifies an HS256 JWT, checks expiration, and
 // returns the user ID from the "sub" claim.
-func (a *JWTAuthenticator) ValidateToken(_ context.Context, token string) (string, error) {
+func (a *JWTAuthenticator) ValidateToken(ctx context.Context, token string) (string, error) {
 	if token == "" {
 		return "", fmt.Errorf("auth.ValidateToken: %w", ErrInvalidToken)
 	}
@@ -105,6 +116,28 @@ func (a *JWTAuthenticator) ValidateToken(_ context.Context, token string) (strin
 	sub, err := parsed.Claims.GetSubject()
 	if err != nil || sub == "" {
 		return "", fmt.Errorf("auth.ValidateToken: %w", ErrMissingSubject)
+	}
+
+	// FR-10.1 fail-closed existence check (data-lifecycle.md §3.5,
+	// MYR-73): a token whose user has been deleted MUST be rejected.
+	// Authoritative state lives in the User table; the cache absorbs
+	// the per-frame DB cost via singleflight + 1s TTL. A deleted
+	// user's stale token may remain valid for at most ttl after
+	// deletion (acceptable per the issue spec — the WS hub close path
+	// also fires within seconds via LISTEN/NOTIFY).
+	if a.userExistsCache != nil {
+		exists, existsErr := a.userExistsCache.Exists(ctx, sub)
+		if existsErr != nil {
+			// Fail-closed wrap: callers that branch on
+			// errors.Is(err, ErrUserNotFound) get the same answer in
+			// the "DB outage" branch as in the "row missing" branch.
+			// The underlying transient error stays in the chain for
+			// observability.
+			return "", fmt.Errorf("auth.ValidateToken: %w: %w: %w", ErrInvalidToken, ErrUserNotFound, existsErr)
+		}
+		if !exists {
+			return "", fmt.Errorf("auth.ValidateToken: %w: %w", ErrInvalidToken, ErrUserNotFound)
+		}
 	}
 
 	return sub, nil
@@ -186,4 +219,42 @@ func (q *pgVehicleQuerier) GetVehicleOwnerByID(ctx context.Context, vehicleID st
 		return "", fmt.Errorf("pgVehicleQuerier.GetVehicleOwnerByID(%s): %w", vehicleID, err)
 	}
 	return ownerID, nil
+}
+
+// InvalidateUser drops the cached existence entry for userID so the
+// next ValidateToken call refetches from the database. Called by the
+// VehicleDeletedEvent handler (data-lifecycle.md §3.5) so a deleted
+// user's tokens are rejected immediately instead of after the 1s TTL.
+//
+// The §3.5 trigger fires per-Vehicle, not per-User, so the same
+// userID can be invalidated multiple times in a row when several
+// vehicles are deleted in one transaction; Invalidate is idempotent.
+func (a *JWTAuthenticator) InvalidateUser(userID string) {
+	if a.userExistsCache == nil {
+		return
+	}
+	a.userExistsCache.Invalidate(userID)
+}
+
+// pgUserExistenceQuerier queries the Prisma-owned "User" table for a
+// row's existence. Used by userExistenceCache to keep the FR-10.1
+// fail-closed check off the hot path.
+type pgUserExistenceQuerier struct {
+	pool *pgxpool.Pool
+}
+
+// UserExists returns true when a User row with the given id exists.
+// Returns false (no error) for "no row"; returns an error only on
+// transient transport problems. The query targets the primary-key
+// index so this is a microsecond-cost lookup even at scale.
+func (q *pgUserExistenceQuerier) UserExists(ctx context.Context, userID string) (bool, error) {
+	var one int
+	err := q.pool.QueryRow(ctx, queryUserExists, userID).Scan(&one)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return false, fmt.Errorf("pgUserExistenceQuerier.UserExists(%s): %w", userID, err)
 }

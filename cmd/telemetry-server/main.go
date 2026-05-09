@@ -17,6 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
+	"github.com/tnando/my-robo-taxi-telemetry/internal/auth"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/config"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/drives"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
@@ -191,6 +192,7 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	// This replaces ~660k full-row fetches per billing cycle that were
 	// pulling the heavy navRouteCoordinates JSON on every telemetry frame.
 	vinCache := store.NewVINCache(vehicleRepo, logger.With(slog.String("component", "vin-cache")))
+	recv.SetAuthorizer(&vehicleAuthorizerAdapter{cache: vinCache})
 
 	vinResolver := &vinResolverAdapter{cache: vinCache}
 	broadcaster := ws.NewBroadcaster(hub, bus, vinResolver, logger.With(slog.String("component", "broadcaster")))
@@ -203,6 +205,18 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 
 	// --- Client authenticator ---
 	authenticator := setupAuthenticator(cfg, db.Pool(), *devMode, logger)
+
+	// --- vehicle_deleted cleanup pipeline (FR-10.1 / data-lifecycle.md §3.5, MYR-73) ---
+	// Postgres LISTEN/NOTIFY goroutine + dispatcher that fans the event
+	// out to the WS hub, the Tesla receiver, the VIN cache, and the JWT
+	// user-existence cache. Production wires a real JWTAuthenticator;
+	// dev mode uses NoopAuthenticator (no user cache to invalidate).
+	jwtAuth, _ := authenticator.(*auth.JWTAuthenticator)
+	dispatcher := newVehicleDeletedDispatcher(hub, recv, vinCache, jwtAuth, logger.With(slog.String("component", "vehicle-deleted-dispatcher")))
+	if _, err := dispatcher.Subscribe(bus); err != nil {
+		return fmt.Errorf("subscribe vehicle_deleted dispatcher: %w", err)
+	}
+	runNotifyListener(ctx, cfg.Database().URL, bus, logger)
 
 	// --- HTTP server + route registration ---
 	srv := server.New(cfg.Server(), logger, db, reg, cfg.TeslaPublicKey())

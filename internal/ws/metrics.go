@@ -18,4 +18,11 @@ type HubMetrics interface {
 	// IncAuthFailures increments the count of authentication failures
 	// (invalid token or auth timeout).
 	IncAuthFailures()
+
+	// IncCloseUserDeletion increments the count of WebSocket sessions
+	// closed because the underlying Vehicle row was deleted (data
+	// lifecycle §3.5 cleanup, MYR-73). Each closed client increments
+	// the counter once. The corresponding Prometheus metric name is
+	// `ws_close_user_deletion_total`.
+	IncCloseUserDeletion()
 }

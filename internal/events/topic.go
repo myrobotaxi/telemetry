@@ -29,4 +29,13 @@ const (
 	// TopicDriveEnded is published when the drive detector identifies
 	// that a vehicle has completed a drive. The payload is DriveEndedEvent.
 	TopicDriveEnded Topic = "drive.ended"
+
+	// TopicVehicleDeleted is published when a Vehicle row is deleted from
+	// the Prisma-owned "Vehicle" table (sourced from a Postgres
+	// LISTEN/NOTIFY channel; see internal/store/notify_listener.go). The
+	// payload is VehicleDeletedEvent. Consumers: the WS hub (close
+	// subscribed clients with code 4002), the telemetry receiver (close
+	// the active inbound mTLS stream for the VIN), and the auth layer
+	// (invalidate any user-existence cache entry for the owning user).
+	TopicVehicleDeleted Topic = "vehicle.deleted"
 )

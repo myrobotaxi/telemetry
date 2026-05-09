@@ -254,6 +254,18 @@ After the database transaction commits:
 2. The telemetry server detects vehicle deletion on its next DB read cycle and terminates any active WebSocket connections for those vehicles.
 3. Active Tesla Fleet Telemetry streams for deleted vehicles are unsubscribed.
 
+
+### 3.5.1 Asymmetric DB-outage behavior (operational note)
+
+The two new authorization paths added by MYR-73 (2026-05-09) react to transient Postgres errors in opposite directions, and on-call should know about the asymmetry:
+
+| Path | DB-error policy | Outage symptom |
+|------|----------------|---------------|
+| `JWTAuthenticator.ValidateToken` user-existence check | **Fail-closed** | A Postgres blip rejects every new browser WebSocket handshake with `auth_failed`. Existing connections survive (the check runs only on new handshakes). |
+| `Receiver` (Tesla mTLS) authorizer | **Fail-open** | A Postgres blip silently admits every new inbound mTLS upgrade. Real vehicles keep flowing; rejection of post-deletion VINs happens *only* once the cache evicts and the DB is reachable. |
+
+Both choices are individually correct for their context: the WS path is user-facing and a brief auth_failed nag is preferred over silently leaking access; the Tesla path is car-facing and dropping a real vehicle's stream because the DB is briefly unreachable would lose live telemetry that has nowhere to be replayed. The side effect of the combination is that a DB outage produces a one-sided service degradation — the dashboard shows browsers failing while the telemetry rate looks normal. Watch `tesla_inbound_rejected_total{reason="vehicle_not_authorized"}` AND PostgreSQL availability metrics together when triaging.
+
 ---
 
 ## 4. Audit log table schema

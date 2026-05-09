@@ -162,3 +162,101 @@ func (h *Hub) ipConnectionCount(ip string) int {
 	}
 	return count
 }
+
+// closeCodeVehicleAccessRevoked is the WebSocket close code emitted when
+// a client's vehicle subscription is forcibly closed because the
+// underlying Vehicle row was deleted (FR-10.1 / data-lifecycle.md §3.5,
+// MYR-73). Reuses code 4002 from the typed-error catalog (see
+// websocket-protocol.md §6.2 / DV-09 target). Identical wire code as
+// the §6.1.1 vehicle_not_owned path because the SDK's reaction is the
+// same: surface to UI, do not auto-retry the same vehicleId.
+const closeCodeVehicleAccessRevoked = 4002
+
+// vehicleAccessRevokedReason is the close-frame reason string emitted
+// alongside closeCodeVehicleAccessRevoked. Per the issue spec, the
+// reason is "vehicle access revoked" (lowercase, no period).
+const vehicleAccessRevokedReason = "vehicle access revoked"
+
+// RemoveVehicle closes every connected client whose authorized
+// vehicle set or active subscription set contains vehicleID. Each
+// affected client receives a WebSocket close with code 4002 and reason
+// "vehicle access revoked", and the per-deletion counter
+// `ws_close_user_deletion_total` is incremented once per closed
+// session.
+//
+// Used by the data-lifecycle.md §3.5 cleanup path: the Postgres
+// `vehicle_deleted` LISTEN goroutine (internal/store/notify_listener.go)
+// publishes a VehicleDeletedEvent which the hub's subscription invokes
+// here. RemoveVehicle is also safe to call directly from tests.
+//
+// Implementation notes:
+//   - We close the *connection* (not just the send channel) so the
+//     SDK observes the close code, not just an EOF. The Unregister
+//     path runs naturally when the readPump exits on the closed conn.
+//   - allVehicles=true clients (dev-mode wildcard) are closed too —
+//     they were authorized for every vehicle, including this one.
+//   - We snapshot the affected client set under the read lock, then
+//     close outside the lock so we do not hold h.mu while a slow
+//     close handshake is in flight.
+func (h *Hub) RemoveVehicle(vehicleID string) {
+	if vehicleID == "" {
+		return
+	}
+
+	affected := h.collectAffectedClients(vehicleID)
+	if len(affected) == 0 {
+		return
+	}
+
+	for _, client := range affected {
+		if client.conn != nil {
+			_ = client.conn.Close(closeCodeVehicleAccessRevoked, vehicleAccessRevokedReason)
+		}
+		h.metrics.IncCloseUserDeletion()
+		h.logger.Info("closing client: vehicle access revoked",
+			slog.String("user_id", client.userID),
+			slog.String("vehicle_id", vehicleID),
+			slog.Int("close_code", closeCodeVehicleAccessRevoked),
+		)
+	}
+}
+
+// collectAffectedClients walks the hub's client set under RLock and
+// returns every client that owns vehicleID, has it in its active
+// subscription set, OR has the dev-mode wildcard flag set. The
+// returned slice is safe to mutate outside the lock.
+func (h *Hub) collectAffectedClients(vehicleID string) []*Client {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	var affected []*Client
+	for client := range h.clients {
+		if clientAuthorizedForVehicle(client, vehicleID) {
+			affected = append(affected, client)
+		}
+	}
+	return affected
+}
+
+// clientAuthorizedForVehicle reports whether the client's handshake-time
+// authorization or current subscription set covers vehicleID. We close
+// in either case: an authorized-but-not-currently-subscribed client
+// will start receiving frames the moment they re-subscribe, so the
+// revocation signal must reach them now.
+func clientAuthorizedForVehicle(c *Client, vehicleID string) bool {
+	if c == nil {
+		return false
+	}
+	if c.allVehicles {
+		return true
+	}
+	for _, vid := range c.vehicleIDs {
+		if vid == vehicleID {
+			return true
+		}
+	}
+	c.subMu.RLock()
+	_, ok := c.subscribed[vehicleID]
+	c.subMu.RUnlock()
+	return ok
+}
