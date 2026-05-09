@@ -4,23 +4,56 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/auth"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/config"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/cryptox"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/geocode"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/server"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/store/accountbackfill"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/store/vehiclegpsbackfill"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/telemetry"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/ws"
 )
+
+// newLogger constructs the structured logger the binary uses for the
+// rest of its lifetime. JSON in prod (LOG_FORMAT=json), text otherwise.
+func newLogger(level string) (*slog.Logger, error) {
+	var lvl slog.Level
+	if err := lvl.UnmarshalText([]byte(level)); err != nil {
+		return nil, fmt.Errorf("parsing log level %q: %w", level, err)
+	}
+	var handler slog.Handler
+	if os.Getenv("LOG_FORMAT") == "json" {
+		handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})
+	} else {
+		handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})
+	}
+	return slog.New(handler), nil
+}
+
+// newGeocoder creates a Geocoder based on whether a Mapbox token is
+// available. Returns NoopGeocoder when the token is empty.
+func newGeocoder(token string, timeout time.Duration, logger *slog.Logger) geocode.Geocoder {
+	if g := geocode.NewMapboxGeocoder(token, timeout); g != nil {
+		logger.Info("Mapbox reverse geocoding enabled for drive addresses")
+		return g
+	}
+	logger.Warn("Mapbox token not set — drive addresses will show raw coordinates")
+	return geocode.NoopGeocoder{}
+}
 
 // setupEncryption loads the AES-256-GCM key set so the binary fails-fast
 // on missing or invalid ENCRYPTION_KEY at startup (NFR-3.23, NFR-3.24).
@@ -42,6 +75,25 @@ func setupEncryption(logger *slog.Logger) (cryptox.Encryptor, error) {
 		slog.Int("write_version", int(keySet.WriteVersion())),
 	)
 	return encryptor, nil
+}
+
+// startPlaintextGauges registers and runs the two cross-repo encryption
+// rollout health gauges (account_token_plaintext_remaining_total +
+// vehicle_gps_plaintext_remaining_total) on background goroutines tied
+// to ctx. Each loop refreshes on its own cadence; they're independent so
+// a stall in one doesn't starve the other.
+func startPlaintextGauges(
+	ctx context.Context,
+	reg prometheus.Registerer,
+	pool *pgxpool.Pool,
+	accountInterval, gpsInterval time.Duration,
+	logger *slog.Logger,
+) {
+	accountGauge := accountbackfill.NewPlaintextGauge(reg, pool, accountInterval, logger.With(slog.String("component", "account-token-gauge")))
+	go accountGauge.Run(ctx)
+
+	gpsGauge := vehiclegpsbackfill.NewPlaintextGauge(reg, pool, gpsInterval, logger.With(slog.String("component", "vehicle-gps-gauge")))
+	go gpsGauge.Run(ctx)
 }
 
 // setupAuthenticator returns a NoopAuthenticator in dev mode (accepts any

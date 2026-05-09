@@ -61,6 +61,13 @@ type Vehicle struct {
 // VehicleUpdate holds the subset of vehicle fields that can change from
 // a single telemetry event. Nil pointer fields are not written to the
 // database, allowing partial updates.
+//
+// MYR-63 dual-write rollout: the six GPS columns are persisted as a
+// plaintext Float ALONGSIDE a *Enc TEXT shadow. Set the plaintext
+// pointers from the telemetry pipeline as before; the encrypted
+// shadows are computed inside VehicleRepo.UpdateTelemetry from the
+// same values. Half-pair input (lat without lng or vice versa) skips
+// the *Enc write entirely — see vehicle_gps_encryption.go.
 type VehicleUpdate struct {
 	Speed                *int
 	ChargeLevel          *int

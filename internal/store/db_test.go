@@ -120,6 +120,12 @@ func createSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"locationAddress"  TEXT NOT NULL DEFAULT '',
 		"latitude"         DOUBLE PRECISION NOT NULL DEFAULT 0,
 		"longitude"        DOUBLE PRECISION NOT NULL DEFAULT 0,
+		-- MYR-63 Phase 2 — encrypted shadow columns. Mirrors the Prisma
+		-- schema in ../my-robo-taxi/prisma/schema.prisma so the dual-write
+		-- path (UPDATE both Float + *Enc) is exercised against a realistic
+		-- table shape.
+		"latitudeEnc"          TEXT,
+		"longitudeEnc"         TEXT,
 		"interiorTemp"     INT NOT NULL DEFAULT 0,
 		"exteriorTemp"     INT NOT NULL DEFAULT 0,
 		"odometerMiles"    INT NOT NULL DEFAULT 0,
@@ -128,8 +134,12 @@ func createSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"destinationName"  TEXT,
 		"destinationLatitude"  DOUBLE PRECISION,
 		"destinationLongitude" DOUBLE PRECISION,
+		"destinationLatitudeEnc"  TEXT,
+		"destinationLongitudeEnc" TEXT,
 		"originLatitude"       DOUBLE PRECISION,
 		"originLongitude"      DOUBLE PRECISION,
+		"originLatitudeEnc"    TEXT,
+		"originLongitudeEnc"   TEXT,
 		"destinationAddress" TEXT,
 		"etaMinutes"       INT,
 		"tripDistanceMiles" DOUBLE PRECISION,
