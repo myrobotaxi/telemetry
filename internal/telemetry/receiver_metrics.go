@@ -31,6 +31,12 @@ type ReceiverMetrics interface {
 	// IncFieldDecodeError increments the count of per-field decode errors.
 	// The vin should be redacted and field is the internal field name.
 	IncFieldDecodeError(vin, field string)
+
+	// IncRejectedVINNotAuthorized increments the count of inbound frames
+	// rejected because the VIN has no matching Vehicle row (data
+	// lifecycle §3.5 cleanup, MYR-73). Backs the Prometheus counter
+	// `tesla_inbound_rejected_total{reason="vehicle_not_authorized"}`.
+	IncRejectedVINNotAuthorized(vin string)
 }
 
 // NoopReceiverMetrics is a ReceiverMetrics where all methods are no-ops.
@@ -45,13 +51,15 @@ func (NoopReceiverMetrics) IncRateLimited(string)           {}
 func (NoopReceiverMetrics) SetConnectedVehicles(int)        {}
 func (NoopReceiverMetrics) ObserveMessageLatency(float64)   {}
 func (NoopReceiverMetrics) IncFieldDecodeError(string, string) {}
+func (NoopReceiverMetrics) IncRejectedVINNotAuthorized(string) {}
 
 // PrometheusReceiverMetrics implements ReceiverMetrics using Prometheus.
 type PrometheusReceiverMetrics struct {
 	messagesReceived  *prometheus.CounterVec
 	decodeErrors      *prometheus.CounterVec
 	rateLimited       *prometheus.CounterVec
-	fieldDecodeErrors *prometheus.CounterVec
+	fieldDecodeErrors          *prometheus.CounterVec
+	inboundRejectedNotAuthorized *prometheus.CounterVec
 	connectedVehicles prometheus.Gauge
 	messageLatency    prometheus.Histogram
 }
@@ -90,6 +98,11 @@ func NewPrometheusReceiverMetrics(reg prometheus.Registerer) *PrometheusReceiver
 			Help:      "Total per-field decode errors by vehicle and field name.",
 		}, []string{"vin", "field"}),
 
+		inboundRejectedNotAuthorized: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "tesla_inbound_rejected_total",
+			Help: "Total inbound mTLS frames rejected, by reason. Reason vehicle_not_authorized fires when the VIN has no matching Vehicle row (data-lifecycle §3.5).",
+		}, []string{"reason"}),
+
 		connectedVehicles: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: "telemetry",
 			Subsystem: "receiver",
@@ -111,6 +124,7 @@ func NewPrometheusReceiverMetrics(reg prometheus.Registerer) *PrometheusReceiver
 		m.decodeErrors,
 		m.rateLimited,
 		m.fieldDecodeErrors,
+		m.inboundRejectedNotAuthorized,
 		m.connectedVehicles,
 		m.messageLatency,
 	}
@@ -149,4 +163,12 @@ func (m *PrometheusReceiverMetrics) ObserveMessageLatency(seconds float64) {
 
 func (m *PrometheusReceiverMetrics) IncFieldDecodeError(vin, field string) {
 	m.fieldDecodeErrors.WithLabelValues(vin, field).Inc()
+}
+
+// IncRejectedVINNotAuthorized increments the rejection counter with a
+// constant reason label. The vin parameter is intentionally ignored
+// at the metrics layer (passed through for parity with the other
+// per-VIN counters); per-VIN drilldown is available via slog.
+func (m *PrometheusReceiverMetrics) IncRejectedVINNotAuthorized(_ string) {
+	m.inboundRejectedNotAuthorized.WithLabelValues("vehicle_not_authorized").Inc()
 }

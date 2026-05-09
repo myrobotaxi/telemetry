@@ -48,6 +48,7 @@ type Receiver struct {
 	logger           *slog.Logger
 	metrics          ReceiverMetrics
 	rateLimiter      *rateLimiter
+	authorizer       VehicleAuthorizer
 	maxVehicles      int
 	publishRawFields bool
 
@@ -69,9 +70,52 @@ func NewReceiver(decoder *Decoder, bus events.Bus, logger *slog.Logger, metrics 
 		logger:           logger,
 		metrics:          metrics,
 		rateLimiter:      newRateLimiter(maxPerSec),
+		authorizer:       allowAllAuthorizer{},
 		maxVehicles:      cfg.MaxVehicles,
 		publishRawFields: cfg.PublishRawFields,
 	}
+}
+
+// SetAuthorizer wires the VehicleAuthorizer that gates inbound frames.
+// The data-lifecycle.md §3.5 reject path (MYR-73) requires a real
+// authorizer in production; the constructor defaults to allow-all so
+// existing tests do not need to thread an authorizer through their
+// fixtures. Call this before the first vehicle connects.
+func (r *Receiver) SetAuthorizer(a VehicleAuthorizer) {
+	if a == nil {
+		a = allowAllAuthorizer{}
+	}
+	r.authorizer = a
+}
+
+// RemoveStream closes the active inbound mTLS connection for vin, if
+// any. Used by the data-lifecycle.md §3.5 cleanup path (MYR-73): when
+// a Vehicle row is deleted, the receiver tears down any in-flight
+// stream for that VIN so subsequent telemetry frames are rejected at
+// the upgrade layer (the next reconnect will fail the IsAuthorized
+// check). No-op for an unknown or empty VIN.
+func (r *Receiver) RemoveStream(vin string) {
+	if vin == "" {
+		return
+	}
+	val, ok := r.connections.LoadAndDelete(vin)
+	if !ok {
+		return
+	}
+	vc, _ := val.(*vehicleConn)
+	if vc == nil {
+		return
+	}
+	r.connCount.Add(-1)
+	r.metrics.SetConnectedVehicles(int(r.connCount.Load()))
+	r.rateLimiter.remove(vin)
+	if vc.conn != nil {
+		_ = vc.conn.Close(websocket.StatusGoingAway, "vehicle access revoked")
+	}
+	vc.cancel()
+	r.logger.Info("vehicle stream closed: access revoked",
+		slog.String("vin", redactVIN(vin)),
+	)
 }
 
 // Handler returns an http.Handler that accepts WebSocket connections from
@@ -96,6 +140,27 @@ func (r *Receiver) handleUpgrade(w http.ResponseWriter, req *http.Request) {
 	}
 
 	redacted := redactVIN(vin)
+
+	// Reject inbound frames for VINs that have no matching Vehicle row
+	// (data-lifecycle.md §3.5, MYR-73). The check runs *before* the
+	// max-vehicles cap so a flood of unauthorized VINs cannot exhaust
+	// the connection budget. Errors are fail-open — a transient DB
+	// outage must not drop legitimate vehicles.
+	authorized, authErr := r.authorizer.IsAuthorized(req.Context(), vin)
+	if authErr != nil {
+		r.logger.Warn("vehicle authorization check failed; allowing connection (fail-open)",
+			slog.String("vin", redacted),
+			slog.Any("error", authErr),
+		)
+	} else if !authorized {
+		r.logger.Warn("vehicle_not_authorized: rejecting inbound mTLS frame",
+			slog.String("vin", redacted),
+			slog.String("reason", "vehicle_not_authorized"),
+		)
+		r.metrics.IncRejectedVINNotAuthorized(redacted)
+		http.Error(w, "vehicle not authorized", http.StatusForbidden)
+		return
+	}
 
 	// Enforce max vehicle limit.
 	if r.maxVehicles > 0 && int(r.connCount.Load()) >= r.maxVehicles {
