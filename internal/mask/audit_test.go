@@ -291,18 +291,18 @@ func (f *fakeAuditMetrics) IncAuditWriteFailure(string, string) { f.failures.Add
 // waitForCount polls until predicate returns true, or fails the test
 // after a generous deadline. Avoids fragile time.Sleep races on the
 // fire-and-forget Emit goroutine.
-func waitForCount(t *testing.T, name string, deadline time.Duration, want int, count func() int) {
+func waitForCount(t *testing.T, name string, count func() int) {
 	t.Helper()
-	timeout := time.After(deadline)
+	timeout := time.After(time.Second)
 	tick := time.NewTicker(2 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		if count() == want {
+		if count() == 1 {
 			return
 		}
 		select {
 		case <-timeout:
-			t.Fatalf("%s: timed out waiting for count=%d, got %d", name, want, count())
+			t.Fatalf("%s: timed out waiting for count=1, got %d", name, count())
 		case <-tick.C:
 		}
 	}
@@ -327,8 +327,8 @@ func TestEmitAsync_HappyPath(t *testing.T) {
 
 	EmitAsync(context.Background(), emitter, metrics, slog.Default(), entry)
 
-	waitForCount(t, "emitter.entries", time.Second, 1, func() int { return len(emitter.snapshot()) })
-	waitForCount(t, "metrics.writes", time.Second, 1, func() int { return int(metrics.writes.Load()) })
+	waitForCount(t, "emitter.entries", func() int { return len(emitter.snapshot()) })
+	waitForCount(t, "metrics.writes", func() int { return int(metrics.writes.Load()) })
 	if got := metrics.failures.Load(); got != 0 {
 		t.Errorf("expected 0 failures, got %d", got)
 	}
@@ -383,7 +383,7 @@ func TestEmitAsync_InsertErrorIncrementsFailureMetric(t *testing.T) {
 
 	EmitAsync(context.Background(), emitter, metrics, slog.Default(), entry)
 
-	waitForCount(t, "metrics.failures", time.Second, 1, func() int { return int(metrics.failures.Load()) })
+	waitForCount(t, "metrics.failures", func() int { return int(metrics.failures.Load()) })
 	if got := metrics.writes.Load(); got != 0 {
 		t.Errorf("expected 0 writes on error, got %d", got)
 	}
@@ -410,7 +410,7 @@ func TestEmitAsync_PanicInEmitterIncrementsFailureMetric(t *testing.T) {
 	// Must not panic the test process.
 	EmitAsync(context.Background(), emitter, metrics, slog.Default(), entry)
 
-	waitForCount(t, "metrics.failures", time.Second, 1, func() int { return int(metrics.failures.Load()) })
+	waitForCount(t, "metrics.failures", func() int { return int(metrics.failures.Load()) })
 }
 
 func TestEmitAsync_DetachedFromCanceledContext(t *testing.T) {
@@ -437,7 +437,7 @@ func TestEmitAsync_DetachedFromCanceledContext(t *testing.T) {
 
 	EmitAsync(parent, emitter, metrics, slog.Default(), entry)
 
-	waitForCount(t, "emitter.entries", time.Second, 1, func() int { return len(emitter.snapshot()) })
+	waitForCount(t, "emitter.entries", func() int { return len(emitter.snapshot()) })
 }
 
 func TestEmitAsync_NewAuditID_IsCuidShaped(t *testing.T) {

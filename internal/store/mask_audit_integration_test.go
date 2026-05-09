@@ -66,10 +66,7 @@ func TestMaskAuditEmitter_EndToEnd(t *testing.T) {
 	deadline := time.After(5 * time.Second)
 	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
-	for {
-		if metrics.Writes()+metrics.Failures() >= int64(samples) {
-			break
-		}
+	for metrics.Writes()+metrics.Failures() < int64(samples) {
 		select {
 		case <-deadline:
 			t.Fatalf("timed out waiting for writes: writes=%d failures=%d", metrics.Writes(), metrics.Failures())
