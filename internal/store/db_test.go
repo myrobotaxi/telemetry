@@ -145,6 +145,11 @@ func createSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"tripDistanceMiles" DOUBLE PRECISION,
 		"tripDistanceRemaining" DOUBLE PRECISION,
 		"navRouteCoordinates" JSONB,
+		-- MYR-64 Phase 2 — encrypted shadow for navRouteCoordinates.
+		-- Phase 1 added the column to the Prisma schema; the test
+		-- fixture mirrors it so the dual-write path is exercised end
+		-- to end.
+		"navRouteCoordinatesEnc" TEXT,
 		"lastUpdated"      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		"createdAt"        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		"updatedAt"        TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -171,6 +176,10 @@ func createSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"fsdPercentage"    DOUBLE PRECISION NOT NULL DEFAULT 0,
 		"interventions"    INT NOT NULL DEFAULT 0,
 		"routePoints"      JSONB NOT NULL DEFAULT '[]',
+		-- MYR-64 Phase 2 — encrypted shadow for routePoints. Phase 1
+		-- added the column on the Prisma schema (Text?); test fixture
+		-- mirrors it so the dual-write path is exercised end to end.
+		"routePointsEnc"   TEXT,
 		"createdAt"        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);`
 

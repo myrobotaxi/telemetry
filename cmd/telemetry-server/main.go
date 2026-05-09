@@ -170,7 +170,7 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	// plaintext per the atomic-pair invariant in
 	// vehicle-state-schema.md §3.3.
 	vehicleRepo := store.NewVehicleRepoWithEncryption(db.Pool(), store.NoopMetrics{}, encryptor, logger.With(slog.String("component", "vehicle-repo")))
-	driveRepo := store.NewDriveRepo(db.Pool(), store.NoopMetrics{})
+	driveRepo := store.NewDriveRepoWithEncryption(db.Pool(), store.NoopMetrics{}, encryptor, logger.With(slog.String("component", "drive-repo")))
 	accountRepo := store.NewAccountRepo(db.Pool(), encryptor)
 
 	// MYR-62 + MYR-63 plaintext-zero gauges. Both register against the
