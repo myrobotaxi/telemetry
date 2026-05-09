@@ -21,12 +21,9 @@ import (
 	"github.com/tnando/my-robo-taxi-telemetry/internal/config"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/drives"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/geocode"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/mask"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/server"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store/accountbackfill"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store/vehiclegpsbackfill"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/telemetry"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/ws"
 )
@@ -176,17 +173,11 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	driveRepo := store.NewDriveRepo(db.Pool(), store.NoopMetrics{})
 	accountRepo := store.NewAccountRepo(db.Pool(), encryptor)
 
-	// MYR-62 plaintext-zero gauge. Registered with the same Prometheus
-	// registry the /metrics handler scrapes; refreshed every
-	// accountTokenGaugeInterval until the rollout completes.
-	plaintextGauge := accountbackfill.NewPlaintextGauge(reg, db.Pool(), accountTokenGaugeInterval, logger.With(slog.String("component", "account-token-gauge")))
-	go plaintextGauge.Run(ctx)
-
-	// MYR-63 plaintext-zero gauge for Vehicle GPS columns. Same six
-	// labels as the backfill CLI; drains to zero once every legacy row
-	// is encrypted.
-	gpsPlaintextGauge := vehiclegpsbackfill.NewPlaintextGauge(reg, db.Pool(), vehicleGPSGaugeInterval, logger.With(slog.String("component", "vehicle-gps-gauge")))
-	go gpsPlaintextGauge.Run(ctx)
+	// MYR-62 + MYR-63 plaintext-zero gauges. Both register against the
+	// same Prometheus registry the /metrics handler scrapes; each
+	// refreshes on its own goroutine until the rollouts complete. See
+	// startPlaintextGauges in wiring.go.
+	startPlaintextGauges(ctx, reg, db.Pool(), accountTokenGaugeInterval, vehicleGPSGaugeInterval, logger)
 	auditRepo := store.NewAuditRepo(db.Pool())
 
 	// --- Mask-audit emitter (MYR-71, rest-api.md §5.3) ---
@@ -292,31 +283,3 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	return nil
 }
 
-func newLogger(level string) (*slog.Logger, error) {
-	var lvl slog.Level
-	if err := lvl.UnmarshalText([]byte(level)); err != nil {
-		return nil, fmt.Errorf("parsing log level %q: %w", level, err)
-	}
-
-	// Use text handler for local development (human-readable).
-	// In production, set LOG_FORMAT=json or swap to slog.NewJSONHandler.
-	var handler slog.Handler
-	if os.Getenv("LOG_FORMAT") == "json" {
-		handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})
-	} else {
-		handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})
-	}
-
-	return slog.New(handler), nil
-}
-
-// newGeocoder creates a Geocoder based on whether a Mapbox token is
-// available. Returns NoopGeocoder when the token is empty.
-func newGeocoder(token string, timeout time.Duration, logger *slog.Logger) geocode.Geocoder {
-	if g := geocode.NewMapboxGeocoder(token, timeout); g != nil {
-		logger.Info("Mapbox reverse geocoding enabled for drive addresses")
-		return g
-	}
-	logger.Warn("Mapbox token not set — drive addresses will show raw coordinates")
-	return geocode.NoopGeocoder{}
-}
