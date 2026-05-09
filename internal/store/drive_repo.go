@@ -82,13 +82,10 @@ func (r *DriveRepo) Create(ctx context.Context, drive DriveRecord) error {
 		routePoints = json.RawMessage("[]")
 	}
 
-	encShadow, err := r.encryptRoutePointsRaw(routePoints)
-	if err != nil {
-		return fmt.Errorf("DriveRepo.Create(%s): %w", drive.ID, err)
-	}
+	encShadow := r.encryptRoutePointsRaw(routePoints)
 
 	start := time.Now()
-	_, err = r.pool.Exec(ctx, queryDriveInsert,
+	_, err := r.pool.Exec(ctx, queryDriveInsert,
 		drive.ID, drive.VehicleID, drive.Date, drive.StartTime, drive.EndTime,
 		drive.StartLocation, drive.StartAddress, drive.EndLocation, drive.EndAddress,
 		drive.DistanceMiles, drive.DurationMinutes, drive.AvgSpeedMph, drive.MaxSpeedMph,
@@ -179,14 +176,11 @@ func (r *DriveRepo) refreshRoutePointsShadow(ctx context.Context, driveID string
 // seed routePoints array into the shadow value and returns the *string
 // pgx wants for the parameter slot. nil result writes NULL into the
 // column. Encrypt failures are logged at Warn (when a logger is wired)
-// and propagated as the empty sentinel so the plaintext write still
-// goes through. Caller wraps the error from the Exec; this helper
-// never returns an error itself for the same fail-open rationale.
-//
-//nolint:nilnil // (nil string-pointer, nil err) is the explicit "write NULL" signal.
-func (r *DriveRepo) encryptRoutePointsRaw(raw json.RawMessage) (*string, error) {
+// and converted to a NULL shadow so the plaintext write still goes
+// through — telemetry must never be lost over an encryption hiccup.
+func (r *DriveRepo) encryptRoutePointsRaw(raw json.RawMessage) *string {
 	if r.encryptor == nil {
-		return nil, nil
+		return nil
 	}
 	ct, err := routeblob.EncryptJSONBytes(raw, r.encryptor)
 	if err != nil {
@@ -195,12 +189,12 @@ func (r *DriveRepo) encryptRoutePointsRaw(raw json.RawMessage) (*string, error) 
 				slog.String("error", err.Error()),
 			)
 		}
-		return nil, nil
+		return nil
 	}
 	if ct == "" {
-		return nil, nil
+		return nil
 	}
-	return &ct, nil
+	return &ct
 }
 
 // Complete updates a drive with its final stats when the drive ends.

@@ -23,6 +23,7 @@ import (
 	"github.com/tnando/my-robo-taxi-telemetry/internal/server"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/store/accountbackfill"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/store/routeblobbackfill"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/store/vehiclegpsbackfill"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/telemetry"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/ws"
@@ -77,16 +78,19 @@ func setupEncryption(logger *slog.Logger) (cryptox.Encryptor, error) {
 	return encryptor, nil
 }
 
-// startPlaintextGauges registers and runs the two cross-repo encryption
-// rollout health gauges (account_token_plaintext_remaining_total +
-// vehicle_gps_plaintext_remaining_total) on background goroutines tied
-// to ctx. Each loop refreshes on its own cadence; they're independent so
-// a stall in one doesn't starve the other.
+// startPlaintextGauges registers and runs the three cross-repo
+// encryption rollout health gauges:
+//   - account_token_plaintext_remaining_total (MYR-62)
+//   - vehicle_gps_plaintext_remaining_total   (MYR-63)
+//   - route_blob_plaintext_remaining_total    (MYR-64)
+//
+// Each loop runs on a background goroutine tied to ctx and refreshes
+// on its own cadence so a stall in one doesn't starve the others.
 func startPlaintextGauges(
 	ctx context.Context,
 	reg prometheus.Registerer,
 	pool *pgxpool.Pool,
-	accountInterval, gpsInterval time.Duration,
+	accountInterval, gpsInterval, routeBlobInterval time.Duration,
 	logger *slog.Logger,
 ) {
 	accountGauge := accountbackfill.NewPlaintextGauge(reg, pool, accountInterval, logger.With(slog.String("component", "account-token-gauge")))
@@ -94,6 +98,9 @@ func startPlaintextGauges(
 
 	gpsGauge := vehiclegpsbackfill.NewPlaintextGauge(reg, pool, gpsInterval, logger.With(slog.String("component", "vehicle-gps-gauge")))
 	go gpsGauge.Run(ctx)
+
+	routeBlobGauge := routeblobbackfill.NewPlaintextGauge(reg, pool, routeBlobInterval, logger.With(slog.String("component", "route-blob-gauge")))
+	go routeBlobGauge.Run(ctx)
 }
 
 // setupAuthenticator returns a NoopAuthenticator in dev mode (accepts any

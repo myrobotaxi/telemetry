@@ -131,8 +131,12 @@ func buildClearSet(clearFields []string) map[string]bool {
 // appendPlaintextSets walks every non-nil VehicleUpdate field and
 // appends the corresponding `<col> = $N[::cast]` clause + argument.
 // Columns being explicitly cleared are skipped (handled later by
-// appendClearFieldSets).
-func appendPlaintextSets(setClauses []string, args []any, argIdx int, u VehicleUpdate, clearSet map[string]bool) ([]string, []any, int) {
+// appendClearFieldSets). Named returns mirror the input names so the
+// caller's threading reads cleanly.
+func appendPlaintextSets(
+	setClauses []string, args []any, argIdx int,
+	u VehicleUpdate, clearSet map[string]bool,
+) (clauses []string, outArgs []any, nextIdx int) {
 	for _, col := range updateColumns(u) {
 		if col.val == nil || clearSet[col.col] {
 			continue
@@ -150,7 +154,10 @@ func appendPlaintextSets(setClauses []string, args []any, argIdx int, u VehicleU
 // pair order. Half-pair entries are skipped defensively — the caller's
 // atomic-pair guard should reject them, but a half-pair UPDATE would
 // trip the read-side fallback, so we filter again.
-func appendGPSShadowSets(setClauses []string, args []any, argIdx int, encShadows map[string]string, clearSet map[string]bool) ([]string, []any, int) {
+func appendGPSShadowSets(
+	setClauses []string, args []any, argIdx int,
+	encShadows map[string]string, clearSet map[string]bool,
+) (clauses []string, outArgs []any, nextIdx int) {
 	for _, p := range gpsPairs {
 		latEncCol := p.lat + "Enc"
 		lngEncCol := p.lng + "Enc"
@@ -175,7 +182,10 @@ func appendGPSShadowSets(setClauses []string, args []any, argIdx int, encShadows
 // appendNavRouteShadowSet emits the MYR-64 nav-route blob shadow when
 // the encrypted ciphertext is present and the plaintext column isn't
 // being concurrently cleared.
-func appendNavRouteShadowSet(setClauses []string, args []any, argIdx int, encShadows map[string]string, clearSet map[string]bool) ([]string, []any, int) {
+func appendNavRouteShadowSet(
+	setClauses []string, args []any, argIdx int,
+	encShadows map[string]string, clearSet map[string]bool,
+) (clauses []string, outArgs []any, nextIdx int) {
 	navCT, ok := encShadows["navRouteCoordinatesEnc"]
 	if !ok || clearSet["navRouteCoordinates"] {
 		return setClauses, args, argIdx
@@ -191,7 +201,7 @@ func appendNavRouteShadowSet(setClauses []string, args []any, argIdx int, encSha
 // one. This keeps the dual-write invariant intact through navigation
 // cancellation: a NULL plaintext + stale ciphertext would surface as a
 // corrupt half-pair on read.
-func appendClearFieldSets(setClauses []string, clearFields []string) []string {
+func appendClearFieldSets(setClauses, clearFields []string) []string {
 	for _, col := range clearFields {
 		setClauses = append(setClauses, fmt.Sprintf("%q = NULL", col))
 		if encCol, ok := plaintextToEncColumn[col]; ok {
