@@ -138,7 +138,7 @@ func buildVINRequest(t *testing.T, vin string) *http.Request {
 	cert := &x509.Certificate{
 		Subject: pkix.Name{CommonName: vin},
 	}
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
 	return req
 }

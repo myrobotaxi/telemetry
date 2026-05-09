@@ -94,9 +94,9 @@ func (c *userExistenceCache) Exists(ctx context.Context, userID string) (bool, e
 		return exists, nil
 	})
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("userExistenceCache.Exists(user=%s): %w", userID, err)
 	}
-	return val.(bool), nil
+	return val.(bool), nil //nolint:forcetypeassert // singleflight cache only stores bool
 }
 
 // Invalidate removes the cached entry for userID. After Invalidate

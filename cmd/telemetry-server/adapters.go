@@ -220,3 +220,34 @@ func proxyHTTPClient(proxyURL string, logger *slog.Logger) *http.Client {
 		},
 	}
 }
+
+
+// vehicleAuthorizerAdapter adapts store.VINCache to the
+// telemetry.VehicleAuthorizer interface (data-lifecycle.md §3.5,
+// MYR-73). The receiver consults this on every inbound mTLS upgrade
+// to reject frames for VINs whose Vehicle row has been deleted. A
+// cache miss → DB fetch → cache fill (or cached miss for unknown
+// VINs); subsequent calls are O(1).
+type vehicleAuthorizerAdapter struct {
+	cache *store.VINCache
+}
+
+// IsAuthorized returns true when the VIN has a matching Vehicle row.
+// errors.Is(err, store.ErrVehicleNotFound) is treated as the
+// authoritative "not authorized" signal and reported as (false, nil)
+// so the receiver can branch on the boolean alone. Other errors
+// (transient DB outages) propagate so the receiver fails open per
+// the contract.
+func (a *vehicleAuthorizerAdapter) IsAuthorized(ctx context.Context, vin string) (bool, error) {
+	if vin == "" {
+		return false, nil
+	}
+	_, err := a.cache.ResolveID(ctx, vin)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, store.ErrVehicleNotFound) {
+		return false, nil
+	}
+	return false, fmt.Errorf("vehicleAuthorizerAdapter.IsAuthorized(vin redacted): %w", err)
+}

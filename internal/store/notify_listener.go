@@ -95,7 +95,7 @@ func (l *NotifyListener) Run(ctx context.Context) error {
 	backoff := l.cfg.ReconnectBackoff
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil
+			return nil //nolint:nilerr // ctx-cancellation is the clean-shutdown signal
 		}
 
 		err := l.runOnce(ctx)
