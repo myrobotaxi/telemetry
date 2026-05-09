@@ -80,7 +80,14 @@ type Backfiller struct {
 // New returns a Backfiller bound to the given pool + encryptor. The
 // encryptor MUST be the same one wired into AccountRepo so newly
 // encrypted rows are decryptable by the running server.
+//
+// Panics on a nil Encryptor — mirrors store.NewAccountRepo so the
+// dual-write contract fails loud at construction rather than silently
+// NPEing on the first EncryptString call.
 func New(p *pgxpool.Pool, enc cryptox.Encryptor, logger *slog.Logger) *Backfiller {
+	if enc == nil {
+		panic("accountbackfill.New: encryptor must not be nil")
+	}
 	return &Backfiller{pool: p, encryptor: enc, logger: logger}
 }
 

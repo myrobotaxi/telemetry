@@ -36,7 +36,6 @@ import (
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/config"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/cryptox"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/store/accountbackfill"
 )
 
@@ -74,30 +73,31 @@ func run() int {
 		return exitFatalSetup
 	}
 
-	// Verify the AccountRepo path agrees with the encryptor we just
-	// loaded — fail loud if the dual-write contract is broken (e.g. a
-	// nil encryptor sneaking through). This is the same constructor the
-	// running server uses.
-	_ = store.NewAccountRepo(pool, enc)
-
 	bf := accountbackfill.New(pool, enc, logger)
 	res, runErr := bf.Run(ctx)
 
+	// Distinguish "post-run query failed" from "zero rows remaining":
+	// the gauge query is the only thing that populates PlaintextRemaining,
+	// and an empty map is what callers see when that query fails. Omit
+	// the field on the wire (omitempty) so an alerting pipeline that
+	// reads stdout cannot mistake "could not query" for "rollout done".
 	report := struct {
 		RowsScanned        int            `json:"rowsScanned"`
 		ColumnsEncrypted   int            `json:"columnsEncrypted"`
 		RowsUpdated        int            `json:"rowsUpdated"`
 		EncryptErrors      int            `json:"encryptErrors"`
 		UpdateErrors       int            `json:"updateErrors"`
-		PlaintextRemaining map[string]int `json:"plaintextRemaining"`
+		PlaintextRemaining map[string]int `json:"plaintextRemaining,omitempty"`
 		Error              string         `json:"error,omitempty"`
 	}{
-		RowsScanned:        res.RowsScanned,
-		ColumnsEncrypted:   res.ColumnsEncrypted,
-		RowsUpdated:        res.RowsUpdated,
-		EncryptErrors:      res.EncryptErrors,
-		UpdateErrors:       res.UpdateErrors,
-		PlaintextRemaining: res.PlaintextRemaining,
+		RowsScanned:      res.RowsScanned,
+		ColumnsEncrypted: res.ColumnsEncrypted,
+		RowsUpdated:      res.RowsUpdated,
+		EncryptErrors:    res.EncryptErrors,
+		UpdateErrors:     res.UpdateErrors,
+	}
+	if len(res.PlaintextRemaining) > 0 {
+		report.PlaintextRemaining = res.PlaintextRemaining
 	}
 	if runErr != nil {
 		report.Error = runErr.Error()
