@@ -353,8 +353,18 @@ func TestEmitAsync_NilEmitterIsNoop(t *testing.T) {
 
 	EmitAsync(context.Background(), nil, metrics, slog.Default(), entry)
 
-	// Wait a tick to confirm no goroutine fired.
-	time.Sleep(10 * time.Millisecond)
+	// Nil-emitter path is synchronous (the early-return branch runs
+	// on the calling goroutine — no `go ...` is fired), so the
+	// assertion can happen immediately. No Sleep race to wait out.
+	// To prove the synchronous claim, drive a real emitter through
+	// EmitAsync afterward and waitForCount on it: once the
+	// fakeEmitter ticks, every goroutine queued so far has run, and
+	// our metrics counters above remain at zero.
+	control := newFakeAuditEmitter()
+	controlMetrics := &fakeAuditMetrics{}
+	EmitAsync(context.Background(), control, controlMetrics, slog.Default(), entry)
+	waitForCount(t, "control.entries", func() int { return len(control.snapshot()) })
+
 	if got := metrics.writes.Load(); got != 0 {
 		t.Errorf("nil emitter wrote metrics: writes=%d", got)
 	}

@@ -174,6 +174,13 @@ func TestHub_BroadcastMasked_EmitsAudit_OnViewerStrip(t *testing.T) {
 // the mask passes every field through MUST NOT trigger an audit emit
 // even if ShouldAuditWS would otherwise sample in. The contract emits
 // only when at least one field was actually removed.
+//
+// Determinism note: maybeEmitAuditWS evaluates the
+// "len(fieldsMasked) > 0" gate on the CALLING goroutine — the `go ...`
+// in EmitAsync is only reached after the gate passes. For owner-no-
+// strip, no goroutine is spawned, so the emitter's snapshot can be
+// asserted synchronously after BroadcastMasked returns. No
+// time.Sleep is needed.
 func TestHub_BroadcastMasked_NoAudit_OnOwnerNoStrip(t *testing.T) {
 	emitter := &fakeAuditEmitter{}
 	metrics := &fakeAuditMetrics{}
@@ -194,8 +201,10 @@ func TestHub_BroadcastMasked_NoAudit_OnOwnerNoStrip(t *testing.T) {
 
 	waitForClients(t, hub, 1)
 
-	// Drive 1000 broadcasts; without any fields removed, audit emit
-	// must stay at zero.
+	// Drive 1000 owner-only broadcasts. The owner mask passes every
+	// field through, so maybeEmitAuditWS hits the
+	// `len(fieldsMasked) == 0` early return on every iteration — no
+	// goroutines spawn, no asynchrony to wait for.
 	payload := map[string]any{"speed": 65, "licensePlate": "ABC-123"}
 	for range 1000 {
 		hub.BroadcastMasked(
@@ -206,22 +215,21 @@ func TestHub_BroadcastMasked_NoAudit_OnOwnerNoStrip(t *testing.T) {
 		)
 	}
 
-	// Drain the connection so dropped messages don't backfill the
-	// emitter via some unintended path. Read deadlines are short
-	// because the goal is just to consume any pending frames.
+	// Drain the connection so dropped messages don't accumulate.
+	// Read deadlines are short because the goal is just to consume
+	// any pending frames so the buffer doesn't backpressure.
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer drainCancel()
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-		defer cancel()
 		for {
-			if _, _, err := conn.Read(ctx); err != nil {
+			if _, _, err := conn.Read(drainCtx); err != nil {
 				return
 			}
 		}
 	}()
 
-	// Wait briefly for any goroutines to settle.
-	time.Sleep(50 * time.Millisecond)
-
+	// Synchronous assertion — no goroutine ever fired for owner-no-
+	// strip, so the emitter must be empty immediately.
 	if got := len(emitter.snapshot()); got != 0 {
 		t.Errorf("audit emitted %d times for owner with no fields stripped; want 0", got)
 	}

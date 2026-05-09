@@ -233,8 +233,12 @@ func TestVehicleStatus_MaskedResponse_NoAudit_OnNoSample(t *testing.T) {
 		t.Fatalf("status: got %d, want 200", rec.Code)
 	}
 
-	// Wait briefly to catch any async writes.
-	time.Sleep(50 * time.Millisecond)
+	// Determinism: maybeEmitAuditREST evaluates the
+	// "len(fieldsMasked) > 0 && ShouldAuditREST(...)" gate on the
+	// calling goroutine — the `go ...` in EmitAsync is only reached
+	// after both checks pass. For a non-sampling request, no
+	// goroutine is spawned, so the emitter's snapshot can be
+	// asserted synchronously after the response. No Sleep needed.
 	if got := len(emitter.snapshot()); got != 0 {
 		t.Errorf("expected 0 audit entries on non-sampling request, got %d", got)
 	}
