@@ -36,8 +36,15 @@ type VehicleStatusHandler struct {
 	roles        roleResolver      // optional: nil disables mask plumbing
 	idLookup     vehicleIDLookup   // optional: nil disables mask plumbing
 	maskResource mask.ResourceType // populated by WithMask alongside roles/idLookup
-	presence     VehiclePresence
-	logger       *slog.Logger
+
+	// Mask-audit fields (MYR-71, rest-api.md §5.3). All optional —
+	// nil auditEmitter disables emit. WithMaskAudit fills them.
+	auditEmitter  mask.AuditEmitter
+	auditMetrics  mask.AuditMetrics
+	auditEndpoint string // route pattern for metadata.endpoint, e.g. "/api/vehicles/{vehicleId}/snapshot"
+
+	presence VehiclePresence
+	logger   *slog.Logger
 }
 
 // NewVehicleStatusHandler creates a handler that returns real-time vehicle
@@ -134,7 +141,7 @@ func (h *VehicleStatusHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	}
 
 	resp := h.buildStatusResponse(vin)
-	h.writeMaskedResponse(ctx, w, vin, userID, resp)
+	h.writeMaskedResponse(ctx, r, w, vin, userID, resp)
 }
 
 // verifyOwnership checks that userID owns the vehicle identified by vin.
