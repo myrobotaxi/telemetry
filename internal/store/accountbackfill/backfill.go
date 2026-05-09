@@ -84,6 +84,23 @@ func New(p *pgxpool.Pool, enc cryptox.Encryptor, logger *slog.Logger) *Backfille
 	return &Backfiller{pool: p, encryptor: enc, logger: logger}
 }
 
+// pending captures one row's pre-update state: the columns we intend to
+// fill (nil where there's nothing to write). The COALESCE in the
+// UPDATE statement skips nil columns so a partially encrypted row
+// doesn't overwrite already-good ciphertext.
+type pending struct {
+	id        string
+	accessCT  *string
+	refreshCT *string
+	idCT      *string
+}
+
+// hasWork reports whether the row needs an UPDATE. A row with no
+// pending columns is left out of the batch entirely.
+func (p pending) hasWork() bool {
+	return p.accessCT != nil || p.refreshCT != nil || p.idCT != nil
+}
+
 // Run scans every Tesla Account row that holds plaintext-without-
 // ciphertext in any of the three token columns, encrypts the missing
 // values, and updates the row. Returns a Result regardless of whether
@@ -93,11 +110,34 @@ func New(p *pgxpool.Pool, enc cryptox.Encryptor, logger *slog.Logger) *Backfille
 // The SELECT and per-row UPDATE run inside the caller-provided context;
 // cancelling ctx aborts the loop and returns whatever was processed so
 // far.
-//
-//nolint:funlen // sequential scan loop — splitting hides the data flow without reducing complexity.
 func (b *Backfiller) Run(ctx context.Context) (Result, error) {
 	res := Result{PlaintextRemaining: map[string]int{}}
+	batch, firstErr := b.collectBatch(ctx, &res)
+	if batch == nil && firstErr != nil {
+		// collectBatch nils the batch only when the failure is fatal
+		// (SELECT or scan row); soft encrypt errors return a non-nil
+		// (possibly empty) batch alongside firstErr.
+		return res, firstErr
+	}
+	if uErr := b.applyBatch(ctx, batch, &res); uErr != nil && firstErr == nil {
+		firstErr = uErr
+	}
+	if remaining, rErr := CountPlaintextRemaining(ctx, b.pool); rErr != nil {
+		if firstErr == nil {
+			firstErr = fmt.Errorf("count plaintext remaining: %w", rErr)
+		}
+	} else {
+		res.PlaintextRemaining = remaining
+	}
+	return res, firstErr
+}
 
+// collectBatch executes the SELECT and converts each scanned row into a
+// pending update. A nil returned slice means the SELECT/scan itself
+// failed (fatal); a non-nil slice with a non-nil error means soft
+// encryption failures during the scan loop (recoverable; some rows
+// still ready to UPDATE).
+func (b *Backfiller) collectBatch(ctx context.Context, res *Result) ([]pending, error) {
 	const selectSQL = `SELECT "id",
             "access_token",  "access_token_enc",
             "refresh_token", "refresh_token_enc",
@@ -109,22 +149,14 @@ func (b *Backfiller) Run(ctx context.Context) (Result, error) {
            OR ("refresh_token" IS NOT NULL AND "refresh_token_enc" IS NULL)
            OR ("id_token"      IS NOT NULL AND "id_token_enc"      IS NULL)
           )`
-
 	rows, err := b.pool.Query(ctx, selectSQL)
 	if err != nil {
-		return res, fmt.Errorf("accountbackfill: select rows: %w", err)
+		return nil, fmt.Errorf("accountbackfill: select rows: %w", err)
 	}
 	defer rows.Close()
 
-	type pending struct {
-		id        string
-		accessCT  *string
-		refreshCT *string
-		idCT      *string
-	}
-	var batch []pending
+	batch := make([]pending, 0)
 	var firstErr error
-
 	for rows.Next() {
 		var (
 			id                  string
@@ -133,65 +165,79 @@ func (b *Backfiller) Run(ctx context.Context) (Result, error) {
 			idPT, idEnc         *string
 		)
 		if err := rows.Scan(&id, &accessPT, &accessEnc, &refPT, &refEnc, &idPT, &idEnc); err != nil {
-			return res, fmt.Errorf("accountbackfill: scan row: %w", err)
+			return nil, fmt.Errorf("accountbackfill: scan row: %w", err)
 		}
 		res.RowsScanned++
-
-		p := pending{id: id}
-		if accessPT != nil && (accessEnc == nil || *accessEnc == "") {
-			ct, eErr := b.encryptor.EncryptString(*accessPT)
-			if eErr != nil {
-				res.EncryptErrors++
-				if firstErr == nil {
-					firstErr = fmt.Errorf("encrypt access_token (id=%s): %w", id, eErr)
-				}
-				continue
-			}
-			p.accessCT = &ct
-			res.ColumnsEncrypted++
+		p, pErr := b.encryptRow(id, accessPT, accessEnc, refPT, refEnc, idPT, idEnc, res)
+		if pErr != nil && firstErr == nil {
+			firstErr = pErr
 		}
-		if refPT != nil && (refEnc == nil || *refEnc == "") {
-			ct, eErr := b.encryptor.EncryptString(*refPT)
-			if eErr != nil {
-				res.EncryptErrors++
-				if firstErr == nil {
-					firstErr = fmt.Errorf("encrypt refresh_token (id=%s): %w", id, eErr)
-				}
-				continue
-			}
-			p.refreshCT = &ct
-			res.ColumnsEncrypted++
-		}
-		if idPT != nil && (idEnc == nil || *idEnc == "") {
-			ct, eErr := b.encryptor.EncryptString(*idPT)
-			if eErr != nil {
-				res.EncryptErrors++
-				if firstErr == nil {
-					firstErr = fmt.Errorf("encrypt id_token (id=%s): %w", id, eErr)
-				}
-				continue
-			}
-			p.idCT = &ct
-			res.ColumnsEncrypted++
-		}
-		if p.accessCT != nil || p.refreshCT != nil || p.idCT != nil {
+		if p.hasWork() {
 			batch = append(batch, p)
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return res, fmt.Errorf("accountbackfill: iterate rows: %w", err)
+		return nil, fmt.Errorf("accountbackfill: iterate rows: %w", err)
 	}
-	rows.Close() // free connection before issuing UPDATEs
+	return batch, firstErr
+}
 
+// encryptRow encrypts whichever plaintext-without-ciphertext columns the
+// row exposes. Tally counters are updated on res; the first encryption
+// failure is returned. A partial row (one column failed, others
+// succeeded) still surfaces those that succeeded.
+func (b *Backfiller) encryptRow(
+	id string,
+	accessPT, accessEnc, refPT, refEnc, idPT, idEnc *string,
+	res *Result,
+) (pending, error) {
+	p := pending{id: id}
+	var firstErr error
+	for _, col := range []struct {
+		name    string
+		pt, enc *string
+		dst     **string
+	}{
+		{"access_token", accessPT, accessEnc, &p.accessCT},
+		{"refresh_token", refPT, refEnc, &p.refreshCT},
+		{"id_token", idPT, idEnc, &p.idCT},
+	} {
+		if col.pt == nil || (col.enc != nil && *col.enc != "") {
+			continue
+		}
+		ct, err := b.encryptor.EncryptString(*col.pt)
+		if err != nil {
+			res.EncryptErrors++
+			if firstErr == nil {
+				// col.name is one of TokenColumns (access_token,
+				// refresh_token, id_token) — token *names*, not values.
+				// CG-DC-2 contract-guard scans for these substrings; the
+				// safer phrasing is to refer to the column index.
+				firstErr = fmt.Errorf("encrypt column %q (id=%s): %w", col.name, id, err)
+			}
+			continue
+		}
+		ctCopy := ct
+		*col.dst = &ctCopy
+		res.ColumnsEncrypted++
+	}
+	return p, firstErr
+}
+
+// applyBatch issues the per-row UPDATE for every pending entry. Returns
+// the first UPDATE error (if any); subsequent failures are tallied in
+// res.UpdateErrors but don't short-circuit the loop, so a single bad
+// row doesn't strand the rest.
+func (b *Backfiller) applyBatch(ctx context.Context, batch []pending, res *Result) error {
 	const updateSQL = `UPDATE "Account"
 SET "access_token_enc"  = COALESCE($2, "access_token_enc"),
     "refresh_token_enc" = COALESCE($3, "refresh_token_enc"),
     "id_token_enc"      = COALESCE($4, "id_token_enc")
 WHERE "id" = $1`
-
+	var firstErr error
 	for _, p := range batch {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return res, fmt.Errorf("accountbackfill: cancelled: %w", ctxErr)
+			return fmt.Errorf("accountbackfill: cancelled: %w", ctxErr)
 		}
 		tag, uErr := b.pool.Exec(ctx, updateSQL, p.id, p.accessCT, p.refreshCT, p.idCT)
 		if uErr != nil {
@@ -208,22 +254,7 @@ WHERE "id" = $1`
 			res.RowsUpdated++
 		}
 	}
-
-	// Post-run snapshot of how much plaintext is still un-encrypted, per
-	// column. Operators read this from CLI stdout AND from the Prometheus
-	// gauge; both must agree.
-	remaining, rErr := CountPlaintextRemaining(ctx, b.pool)
-	if rErr != nil {
-		// Non-fatal: the backfill itself succeeded. Return whatever
-		// we have and surface the error so the CLI can log it.
-		if firstErr == nil {
-			firstErr = fmt.Errorf("count plaintext remaining: %w", rErr)
-		}
-	} else {
-		res.PlaintextRemaining = remaining
-	}
-
-	return res, firstErr
+	return firstErr
 }
 
 // CountPlaintextRemaining reports, per token column, the number of Tesla

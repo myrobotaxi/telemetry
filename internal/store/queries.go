@@ -92,6 +92,9 @@ WHERE "id" = $1`
 // account_token_plaintext_remaining_total gauge reaches zero across all
 // three columns. See docs/contracts/data-classification.md §3.3.
 
+// #nosec G101 -- column-name SQL, not a credential. gosec greps the
+// constant for "access_token" / "refresh_token" / "id_token" and flags
+// the literal as a hardcoded credential by mistake.
 const queryTeslaToken = `SELECT
     "access_token", "access_token_enc",
     "refresh_token", "refresh_token_enc",

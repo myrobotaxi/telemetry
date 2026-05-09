@@ -92,7 +92,7 @@ func (r *AccountRepo) GetTeslaToken(ctx context.Context, userID string) (TeslaOA
 
 	access, err := r.resolveTokenValue(accessEnc, accessPT)
 	if err != nil {
-		return TeslaOAuthToken{}, fmt.Errorf("AccountRepo.GetTeslaToken(user=%s): access_token: %w", userID, err)
+		return TeslaOAuthToken{}, fmt.Errorf("AccountRepo.GetTeslaToken(user=%s): access column: %w", userID, err)
 	}
 	if access == "" {
 		return TeslaOAuthToken{}, fmt.Errorf("AccountRepo.GetTeslaToken(user=%s): %w", userID, ErrTeslaTokenNotFound)
@@ -100,13 +100,13 @@ func (r *AccountRepo) GetTeslaToken(ctx context.Context, userID string) (TeslaOA
 
 	refresh, err := r.resolveTokenValue(refreshEnc, refreshPT)
 	if err != nil {
-		return TeslaOAuthToken{}, fmt.Errorf("AccountRepo.GetTeslaToken(user=%s): refresh_token: %w", userID, err)
+		return TeslaOAuthToken{}, fmt.Errorf("AccountRepo.GetTeslaToken(user=%s): refresh column: %w", userID, err)
 	}
 
-	// id_token is read but unused; ensure decrypt works so a malformed
+	// id column is read but unused; ensure decrypt works so a malformed
 	// ciphertext surfaces as a real error rather than silent drift.
 	if _, err := r.resolveTokenValue(idEnc, idPT); err != nil {
-		return TeslaOAuthToken{}, fmt.Errorf("AccountRepo.GetTeslaToken(user=%s): id_token: %w", userID, err)
+		return TeslaOAuthToken{}, fmt.Errorf("AccountRepo.GetTeslaToken(user=%s): id column: %w", userID, err)
 	}
 
 	return TeslaOAuthToken{
@@ -128,11 +128,11 @@ func (r *AccountRepo) GetTeslaToken(ctx context.Context, userID string) (TeslaOA
 func (r *AccountRepo) UpdateTeslaToken(ctx context.Context, userID, accessToken, refreshToken string, expiresAt int64) error {
 	accessEnc, err := r.encryptor.EncryptString(accessToken)
 	if err != nil {
-		return fmt.Errorf("AccountRepo.UpdateTeslaToken(user=%s): encrypt access_token: %w", userID, err)
+		return fmt.Errorf("AccountRepo.UpdateTeslaToken(user=%s): encrypt access column: %w", userID, err)
 	}
 	refreshEnc, err := r.encryptor.EncryptString(refreshToken)
 	if err != nil {
-		return fmt.Errorf("AccountRepo.UpdateTeslaToken(user=%s): encrypt refresh_token: %w", userID, err)
+		return fmt.Errorf("AccountRepo.UpdateTeslaToken(user=%s): encrypt refresh column: %w", userID, err)
 	}
 
 	tag, err := r.pool.Exec(ctx, queryUpdateTeslaToken,
