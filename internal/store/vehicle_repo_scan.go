@@ -56,7 +56,10 @@ func (r *VehicleRepo) scanVehicleRow(row rowScanner) (Vehicle, error) {
 		&originLatEnc, &originLngEnc,
 	)
 	if err != nil {
-		return Vehicle{}, err
+		// Caller is scanVehicle (single-row) or ListByUser (rows
+		// iteration). Both wrap with operation context, so we surface
+		// the raw scan error here without double-wrapping.
+		return Vehicle{}, err //nolint:wrapcheck // wrapped by callers
 	}
 	v.Status = VehicleStatus(status)
 	r.applyResolvedGPS(

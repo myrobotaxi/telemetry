@@ -70,14 +70,13 @@ func floatToEncString(v *float64, enc cryptox.Encryptor) (string, error) {
 }
 
 // encStringToFloat is the read-path inverse: decrypt a ciphertext, parse
-// as float64. Returns nil for empty / unparseable input (matches the TS
-// `Number.isFinite` guard).
+// as float64. Returns (nil, nil) for empty / unparseable input — both
+// states are treated as "absent" by the caller. nilnil is intentional
+// here: nil pointer + nil error means "no value to surface" and matches
+// the TS `Number.isFinite` guard. Only genuine cryptographic failures
+// (auth-tag mismatch, version unknown) escalate to a non-nil error.
 //
-// A non-empty ciphertext that decrypts but fails to parse as float is a
-// data-integrity bug, not a read-path concern: surfacing nil here lets
-// the caller fall back to the plaintext column and warn loudly without
-// crashing the read path. The accompanying `err` is non-nil only for
-// genuine cryptographic failures (auth-tag mismatch, version unknown).
+//nolint:nilnil // see comment: (nil,nil) is the absent-value sentinel.
 func encStringToFloat(ciphertext *string, enc cryptox.Encryptor) (*float64, error) {
 	if ciphertext == nil || *ciphertext == "" {
 		return nil, nil
@@ -111,7 +110,7 @@ func resolveGPSPair(
 	enc cryptox.Encryptor,
 	logger *slog.Logger,
 	pair gpsPair,
-) (*float64, *float64) {
+) (lat, lng *float64) {
 	latPresent := latEncCT != nil && *latEncCT != ""
 	lngPresent := lngEncCT != nil && *lngEncCT != ""
 
@@ -135,8 +134,8 @@ func resolveGPSPair(
 		return latPT, lngPT
 	}
 
-	lat, latErr := encStringToFloat(latEncCT, enc)
-	lng, lngErr := encStringToFloat(lngEncCT, enc)
+	latRes, latErr := encStringToFloat(latEncCT, enc)
+	lngRes, lngErr := encStringToFloat(lngEncCT, enc)
 	if latErr != nil || lngErr != nil {
 		// Decrypt-or-parse failure on a fully populated *Enc pair.
 		// Treat the pair as corrupt: fall back to plaintext rather
@@ -152,7 +151,7 @@ func resolveGPSPair(
 		}
 		return latPT, lngPT
 	}
-	return lat, lng
+	return latRes, lngRes
 }
 
 // buildEncryptedGPSPair encrypts a (lat, lng) input pair into the matching

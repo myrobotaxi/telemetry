@@ -46,19 +46,6 @@ var Columns = []string{
 	"originLongitude",
 }
 
-// pairs lists the three (lat, lng) pairs that share atomic-pair
-// semantics on read and write. The backfill writes one pair at a time
-// so a partial encrypt of one column never leaves the row in a
-// half-pair state — a single UPDATE flips the pair as a unit.
-var pairs = []struct {
-	lat string
-	lng string
-}{
-	{"latitude", "longitude"},
-	{"destinationLatitude", "destinationLongitude"},
-	{"originLatitude", "originLongitude"},
-}
-
 // Result reports the outcome of a Run. Counts are tallied in-process
 // and are independent of the post-run plaintext-remaining check.
 type Result struct {

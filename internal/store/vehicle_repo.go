@@ -200,9 +200,11 @@ func (r *VehicleRepo) UpdateStatus(ctx context.Context, vin string, status Vehic
 
 // buildShadows encrypts each GPS pair in update into the matching `*Enc`
 // columns. Returns a map keyed by *Enc column name; an entry exists only
-// if both halves of a pair were present in the update. nil Encryptor
-// short-circuits with an empty map so the dual-write is opt-in via
-// constructor.
+// if both halves of a pair were present in the update. A nil Encryptor
+// short-circuits to a nil map so the dual-write is opt-in via the
+// constructor — buildTelemetryUpdate treats nil and empty identically.
+//
+//nolint:nilnil // (nil map, nil err) signals "no encryptor wired".
 func (r *VehicleRepo) buildShadows(update VehicleUpdate) (map[string]string, error) {
 	if r.encryptor == nil {
 		return nil, nil

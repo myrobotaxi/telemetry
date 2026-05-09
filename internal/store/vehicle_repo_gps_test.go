@@ -10,7 +10,6 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/cryptox"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
 )
 
@@ -19,8 +18,6 @@ import (
 func silentGPSLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
-
-func float64Ptr(f float64) *float64 { return &f }
 
 // readGPSColumns pulls the four MYR-63-relevant columns for one VIN
 // directly via SQL so tests can assert on the exact (Float, Text)
@@ -351,5 +348,4 @@ func TestVehicleRepo_GPS_LegacyConstructorReadsPlaintext(t *testing.T) {
 	if got.Latitude != stalePT {
 		t.Errorf("legacy repo lat = %v, want plaintext %v", got.Latitude, stalePT)
 	}
-	_ = cryptox.Encryptor(enc) // silence unused-import lint when imported only for type
 }
