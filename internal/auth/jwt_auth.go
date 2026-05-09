@@ -128,7 +128,12 @@ func (a *JWTAuthenticator) ValidateToken(ctx context.Context, token string) (str
 	if a.userExistsCache != nil {
 		exists, existsErr := a.userExistsCache.Exists(ctx, sub)
 		if existsErr != nil {
-			return "", fmt.Errorf("auth.ValidateToken: %w: %w", ErrInvalidToken, existsErr)
+			// Fail-closed wrap: callers that branch on
+			// errors.Is(err, ErrUserNotFound) get the same answer in
+			// the "DB outage" branch as in the "row missing" branch.
+			// The underlying transient error stays in the chain for
+			// observability.
+			return "", fmt.Errorf("auth.ValidateToken: %w: %w: %w", ErrInvalidToken, ErrUserNotFound, existsErr)
 		}
 		if !exists {
 			return "", fmt.Errorf("auth.ValidateToken: %w: %w", ErrInvalidToken, ErrUserNotFound)

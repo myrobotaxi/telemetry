@@ -36,7 +36,9 @@ type ReceiverMetrics interface {
 	// rejected because the VIN has no matching Vehicle row (data
 	// lifecycle §3.5 cleanup, MYR-73). Backs the Prometheus counter
 	// `tesla_inbound_rejected_total{reason="vehicle_not_authorized"}`.
-	IncRejectedVINNotAuthorized(vin string)
+	// Per-VIN drilldown lives in slog.Warn at the call site (high
+	// cardinality precludes a VIN label here).
+	IncRejectedVINNotAuthorized()
 }
 
 // NoopReceiverMetrics is a ReceiverMetrics where all methods are no-ops.
@@ -51,7 +53,7 @@ func (NoopReceiverMetrics) IncRateLimited(string)           {}
 func (NoopReceiverMetrics) SetConnectedVehicles(int)        {}
 func (NoopReceiverMetrics) ObserveMessageLatency(float64)   {}
 func (NoopReceiverMetrics) IncFieldDecodeError(string, string) {}
-func (NoopReceiverMetrics) IncRejectedVINNotAuthorized(string) {}
+func (NoopReceiverMetrics) IncRejectedVINNotAuthorized() {}
 
 // PrometheusReceiverMetrics implements ReceiverMetrics using Prometheus.
 type PrometheusReceiverMetrics struct {
@@ -165,10 +167,9 @@ func (m *PrometheusReceiverMetrics) IncFieldDecodeError(vin, field string) {
 	m.fieldDecodeErrors.WithLabelValues(vin, field).Inc()
 }
 
-// IncRejectedVINNotAuthorized increments the rejection counter with a
-// constant reason label. The vin parameter is intentionally ignored
-// at the metrics layer (passed through for parity with the other
-// per-VIN counters); per-VIN drilldown is available via slog.
-func (m *PrometheusReceiverMetrics) IncRejectedVINNotAuthorized(_ string) {
+// IncRejectedVINNotAuthorized increments the rejection counter with
+// a constant reason label. Per-VIN drilldown lives in slog.Warn at
+// the call site (high cardinality precludes a VIN label here).
+func (m *PrometheusReceiverMetrics) IncRejectedVINNotAuthorized() {
 	m.inboundRejectedNotAuthorized.WithLabelValues("vehicle_not_authorized").Inc()
 }

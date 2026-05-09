@@ -157,7 +157,7 @@ func (r *Receiver) handleUpgrade(w http.ResponseWriter, req *http.Request) {
 			slog.String("vin", redacted),
 			slog.String("reason", "vehicle_not_authorized"),
 		)
-		r.metrics.IncRejectedVINNotAuthorized(redacted)
+		r.metrics.IncRejectedVINNotAuthorized()
 		http.Error(w, "vehicle not authorized", http.StatusForbidden)
 		return
 	}

@@ -14,41 +14,6 @@ import (
 	"github.com/tnando/my-robo-taxi-telemetry/internal/ws"
 )
 
-// TestVehicleDeletedDispatcher_FansOutToHub asserts the dispatcher
-// invokes Hub.RemoveVehicle on receipt of a VehicleDeletedEvent.
-//
-// Receiver, vinCache, and jwtAuth branches are exercised by their own
-// package-level tests; here we focus on the dispatcher's fan-out
-// contract — does each consumer get called with the right
-// identifiers when a real event arrives.
-func TestVehicleDeletedDispatcher_FansOutToHub(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(discardWriter{}, nil))
-	bus := events.NewChannelBus(events.BusConfig{}, events.NoopBusMetrics{}, logger)
-	defer bus.Close(context.Background())
-
-	hub := ws.NewHub(logger, ws.NoopHubMetrics{})
-	defer hub.Stop()
-
-	dispatcher := newVehicleDeletedDispatcher(hub, nil, nil, nil, logger)
-	if _, err := dispatcher.Subscribe(bus); err != nil {
-		t.Fatalf("Subscribe: %v", err)
-	}
-
-	if err := bus.Publish(context.Background(), events.NewEvent(events.VehicleDeletedEvent{
-		VehicleID: "veh-test-1",
-		UserID:    "usr-test-1",
-		VIN:       "5YJ3VINTEST00001",
-	})); err != nil {
-		t.Fatalf("Publish: %v", err)
-	}
-
-	// Bus delivery is async (per-subscriber goroutine). Give the
-	// handler a moment to run; the assertion is that no panic
-	// happens and Hub.RemoveVehicle is callable for an
-	// uninhabited hub.
-	time.Sleep(50 * time.Millisecond)
-}
-
 // TestVehicleDeletedDispatcher_ClosesSubscribedClient is a small
 // end-to-end: connect a real WS client, publish VehicleDeletedEvent
 // for that client's vehicle, assert the close arrives.

@@ -76,30 +76,36 @@ func (d *vehicleDeletedDispatcher) handle(evt events.Event) {
 		slog.Bool("has_vin", payload.VIN != ""),
 	)
 
-	// 1. Close WebSocket clients subscribed to this vehicle.
-	if d.hub != nil {
-		d.hub.RemoveVehicle(payload.VehicleID)
-	}
-
-	// 2. Close any active inbound Tesla mTLS stream. Skipped for
-	//    pre-pairing vehicles (empty VIN) — there is no stream.
-	if d.receiver != nil && payload.VIN != "" {
-		d.receiver.RemoveStream(payload.VIN)
-	}
-
-	// 3. Evict the VIN cache entry so the next inbound frame for
-	//    this VIN sees ErrVehicleNotFound and is rejected by the
-	//    receiver authorizer.
+	// Order matters: invalidate caches BEFORE closing streams so a
+	// reconnection that races the close path does not catch a stale
+	// positive cache answer and slip back in. Eviction is cheap and
+	// idempotent; the close path is the slow operation.
+	//
+	// 1. Evict the VIN cache so the next IsAuthorized lookup misses
+	//    and the receiver rejects subsequent inbound frames for this
+	//    VIN with HTTP 403.
 	if d.vinCache != nil && payload.VIN != "" {
 		d.vinCache.Invalidate(payload.VIN)
 	}
 
-	// 4. Drop the JWT user-existence cache entry. The trigger fires
-	//    per-Vehicle, not per-User, so the same userID may be
+	// 2. Drop the JWT user-existence cache entry so a deleted user's
+	//    stale token is rejected on the next handshake. The trigger
+	//    fires per-Vehicle, not per-User, so the same userID may be
 	//    invalidated multiple times in one transaction; Invalidate
 	//    is idempotent.
 	if d.jwtAuth != nil && payload.UserID != "" {
 		d.jwtAuth.InvalidateUser(payload.UserID)
+	}
+
+	// 3. Close WebSocket clients subscribed to this vehicle.
+	if d.hub != nil {
+		d.hub.RemoveVehicle(payload.VehicleID)
+	}
+
+	// 4. Close any active inbound Tesla mTLS stream. Skipped for
+	//    pre-pairing vehicles (empty VIN) — there is no stream.
+	if d.receiver != nil && payload.VIN != "" {
+		d.receiver.RemoveStream(payload.VIN)
 	}
 }
 

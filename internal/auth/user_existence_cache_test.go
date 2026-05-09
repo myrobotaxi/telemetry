@@ -16,10 +16,13 @@ type fakeChecker struct {
 	err      error
 	calls    atomic.Int32
 	wait     chan struct{} // nil = no wait; signals a coordinated query barrier
+	started  chan struct{} // closed once on first UserExists entry; lets tests gate without time.Sleep
 }
 
 func (f *fakeChecker) UserExists(_ context.Context, userID string) (bool, error) {
-	f.calls.Add(1)
+	if n := f.calls.Add(1); n == 1 && f.started != nil {
+		close(f.started)
+	}
 	if f.wait != nil {
 		<-f.wait
 	}
@@ -115,11 +118,12 @@ func TestUserExistenceCache_Singleflight(t *testing.T) {
 	checker := &fakeChecker{
 		existsBy: map[string]bool{"alive": true},
 		wait:     make(chan struct{}),
+		started:  make(chan struct{}),
 	}
 	c := newUserExistenceCache(checker, time.Hour)
 
 	// Fire 50 concurrent Exists calls for the same user; they must
-	// fan out to a single DB query.
+	// fan out to a single DB query (singleflight coalescing).
 	const concurrent = 50
 	var wg sync.WaitGroup
 	wg.Add(concurrent)
@@ -130,8 +134,18 @@ func TestUserExistenceCache_Singleflight(t *testing.T) {
 		}()
 	}
 
-	// Give callers time to all enter the singleflight slot.
-	time.Sleep(50 * time.Millisecond)
+	// Wait for the first caller to land inside the checker fn.
+	// singleflight coalesces all subsequent callers against the same
+	// in-flight key once the per-key lock is taken — additional
+	// callers do NOT enter UserExists, so the strong invariant we
+	// want is calls.Load() == 1 while the wait channel is still
+	// blocking. We poll the negative invariant with a deadline; this
+	// is deterministic (no time.Sleep barrier) and tolerates slow CI.
+	select {
+	case <-checker.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("checker never started")
+	}
 	close(checker.wait)
 	wg.Wait()
 

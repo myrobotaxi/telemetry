@@ -34,7 +34,7 @@ type countingMetrics struct {
 	rejected int
 }
 
-func (m *countingMetrics) IncRejectedVINNotAuthorized(string) { m.rejected++ }
+func (m *countingMetrics) IncRejectedVINNotAuthorized() { m.rejected++ }
 
 // stubBus implements events.Bus with no-op publish.
 type stubBus struct{ published int }
