@@ -132,6 +132,50 @@ jobs:
             echo "✓ No message type changes detected in WS package"
           fi
 
+      - name: Rule CG-DL-8 — AuditRepo cross-repo coupling intact
+        if: contains(steps.changed.outputs.files, 'internal/store/audit_repo.go')
+        run: |
+          # MYR-70: the AuditLog table is owned by the sibling Next.js repo's
+          # Prisma schema. Any change to audit_repo.go MUST keep the
+          # CROSS-REPO COUPLING comment block intact so future engineers
+          # discover the Prisma authority before introducing column drift.
+          # See docs/contracts/data-lifecycle.md §7 Rule CG-DL-8.
+          FILE="internal/store/audit_repo.go"
+          if [ ! -f "$FILE" ]; then
+            echo "::error::$FILE was changed but is no longer present — file delete is not a permitted operation for this Prisma-coupled file."
+            exit 1
+          fi
+          if ! grep -q 'CROSS-REPO COUPLING' "$FILE"; then
+            echo "::error::$FILE is missing the CROSS-REPO COUPLING header comment."
+            echo ""
+            echo "audit_repo.go mirrors the AuditLog model in the Next.js repo's"
+            echo "prisma/schema.prisma. The header comment block names the Prisma"
+            echo "file, the migration file, and the column-by-column cross-walk."
+            echo "Restore the comment block before this PR can merge."
+            echo "See docs/contracts/data-lifecycle.md §7 Rule CG-DL-8."
+            exit 1
+          fi
+          # Spot-check that every column from the data-lifecycle.md §4.1
+          # canonical schema appears in the Go file. If a column is
+          # renamed or removed in Prisma, the Go side MUST be updated in
+          # the same PR — a missing column here surfaces the drift.
+          MISSING=""
+          for col in id userId timestamp action targetType targetId initiator metadata createdAt; do
+            if ! grep -q "\"$col\"" "$FILE"; then
+              MISSING="$MISSING $col"
+            fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::$FILE is missing AuditLog column reference(s):$MISSING"
+            echo ""
+            echo "Every column declared in data-lifecycle.md §4.1 / prisma/schema.prisma"
+            echo "model AuditLog must be referenced (as a quoted column name) in audit_repo.go."
+            echo "If a column was renamed or removed in Prisma, update both repos in the same PR."
+            echo "See docs/contracts/data-lifecycle.md §7 Rule CG-DL-8."
+            exit 1
+          fi
+          echo "✓ AuditRepo cross-repo coupling header and column list intact"
+
       - name: Summary
         if: always()
         run: |
@@ -141,3 +185,4 @@ jobs:
           echo "  - Contract docs reference FRs/NFRs: ${{ steps.changed.outputs.has_contract_docs }}"
           echo "  - Store field classification: ${{ steps.changed.outputs.has_store_changes }}"
           echo "  - WS protocol sync: ${{ steps.changed.outputs.has_ws_changes }}"
+          echo "  - AuditRepo cross-repo coupling (CG-DL-8): scoped to internal/store/audit_repo.go changes"
