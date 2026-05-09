@@ -76,7 +76,7 @@ func TestBuildTelemetryUpdate_ClearFields(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			query, args, ok := buildTelemetryUpdate(tt.vin, tt.update)
+			query, args, ok := buildTelemetryUpdate(tt.vin, tt.update, nil)
 			if ok != tt.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
 			}
@@ -144,7 +144,7 @@ func TestBuildTelemetryUpdate_NewNavFields(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			query, _, ok := buildTelemetryUpdate("TEST_VIN", tt.update)
+			query, _, ok := buildTelemetryUpdate("TEST_VIN", tt.update, nil)
 			if !ok {
 				t.Fatal("expected ok=true")
 			}
@@ -162,7 +162,7 @@ func TestBuildTelemetryUpdate_NavRouteCoordinates(t *testing.T) {
 		LastUpdated:         time.Now(),
 	}
 
-	query, args, ok := buildTelemetryUpdate("TEST_VIN", update)
+	query, args, ok := buildTelemetryUpdate("TEST_VIN", update, nil)
 	if !ok {
 		t.Fatal("expected ok=true")
 	}
@@ -190,7 +190,7 @@ func TestBuildTelemetryUpdate_NavRouteCoordinatesClear(t *testing.T) {
 		LastUpdated: time.Now(),
 	}
 
-	query, _, ok := buildTelemetryUpdate("TEST_VIN", update)
+	query, _, ok := buildTelemetryUpdate("TEST_VIN", update, nil)
 	if !ok {
 		t.Fatal("expected ok=true for ClearFields-only update")
 	}

@@ -8,6 +8,12 @@ import (
 
 // Vehicle queries. All column names use double-quoted camelCase to match
 // the Prisma-generated PostgreSQL schema.
+//
+// vehicleSelectColumns lists every column read into the Vehicle struct
+// (and the encrypted-shadow ciphertext columns the read path needs to
+// resolve a GPS pair). The trailing six *Enc columns are MYR-63 Phase 2
+// additions; see vehicle_gps_encryption.go for the read-side
+// preference + atomic-pair-fallback rule.
 
 const vehicleSelectColumns = `"id", "userId", "vin", "name",
 	"model", "year", "color", "status",
@@ -19,7 +25,10 @@ const vehicleSelectColumns = `"id", "userId", "vin", "name",
 	"destinationName", "destinationAddress", "destinationLatitude",
 	"destinationLongitude", "originLatitude", "originLongitude",
 	"etaMinutes", "tripDistanceRemaining",
-	"navRouteCoordinates", "lastUpdated"`
+	"navRouteCoordinates", "lastUpdated",
+	"latitudeEnc", "longitudeEnc",
+	"destinationLatitudeEnc", "destinationLongitudeEnc",
+	"originLatitudeEnc", "originLongitudeEnc"`
 
 const queryVehicleByVIN = `SELECT ` + vehicleSelectColumns + `
 FROM "Vehicle"
@@ -183,7 +192,14 @@ func derefJSON(p *json.RawMessage) any {
 // VehicleUpdate, including only columns whose values are non-nil.
 // Returns the query string, the argument slice, and whether any fields
 // were set. The caller should skip the UPDATE when ok is false.
-func buildTelemetryUpdate(vin string, u VehicleUpdate) (query string, args []any, ok bool) {
+//
+// encShadows holds pre-computed *Enc ciphertexts for the six GPS
+// columns: keys are the *Enc column names (e.g. "latitudeEnc").
+// Atomic-pair invariant: callers MUST only insert keys in pair-complete
+// pairs (both halves or neither) — see buildEncryptedGPSPair. nil/empty
+// map disables the dual-write entirely (useful in tests that don't
+// inject an Encryptor).
+func buildTelemetryUpdate(vin string, u VehicleUpdate, encShadows map[string]string) (query string, args []any, ok bool) {
 	var setClauses []string
 	argIdx := 1
 
@@ -204,10 +220,40 @@ func buildTelemetryUpdate(vin string, u VehicleUpdate) (query string, args []any
 		argIdx++
 	}
 
+	// MYR-63 dual-write: every GPS write that survived the atomic-pair
+	// guard in the caller produces an entry in encShadows. Iterate the
+	// canonical pair order so SQL output is stable in tests.
+	for _, p := range gpsPairs {
+		latEncCol := p.lat + "Enc"
+		lngEncCol := p.lng + "Enc"
+		latCT, hasLat := encShadows[latEncCol]
+		lngCT, hasLng := encShadows[lngEncCol]
+		if !hasLat || !hasLng {
+			// Caller-side atomic-pair guard rejects half-pairs; defense
+			// in depth here: if only one half ended up in the map, skip
+			// the dual-write rather than emit a corrupt row.
+			continue
+		}
+		if clearSet[p.lat] || clearSet[p.lng] {
+			continue
+		}
+		setClauses = append(setClauses, fmt.Sprintf("%q = $%d", latEncCol, argIdx))
+		args = append(args, latCT)
+		argIdx++
+		setClauses = append(setClauses, fmt.Sprintf("%q = $%d", lngEncCol, argIdx))
+		args = append(args, lngCT)
+		argIdx++
+	}
+
 	// ClearFields: explicitly SET NULL for columns that should be cleared
-	// (e.g. navigation cancelled by the vehicle).
+	// (e.g. navigation cancelled by the vehicle). Each plaintext clear
+	// also clears its *Enc shadow so the dual-write invariant survives
+	// navigation cancellation.
 	for _, col := range u.ClearFields {
 		setClauses = append(setClauses, fmt.Sprintf("%q = NULL", col))
+		if encCol, ok := plaintextToEncColumn[col]; ok {
+			setClauses = append(setClauses, fmt.Sprintf("%q = NULL", encCol))
+		}
 	}
 
 	if len(setClauses) == 0 {
@@ -225,4 +271,18 @@ func buildTelemetryUpdate(vin string, u VehicleUpdate) (query string, args []any
 		strings.Join(setClauses, ", "), argIdx)
 
 	return query, args, true
+}
+
+// plaintextToEncColumn maps each GPS plaintext column to its *Enc
+// shadow. Used by buildTelemetryUpdate to extend ClearFields-driven
+// `SET NULL` to the encrypted shadow so a navigation-cancelled row
+// doesn't end up with a NULL plaintext + stale ciphertext (the same
+// half-pair corruption mode the read path warns about).
+var plaintextToEncColumn = map[string]string{
+	"latitude":             "latitudeEnc",
+	"longitude":            "longitudeEnc",
+	"destinationLatitude":  "destinationLatitudeEnc",
+	"destinationLongitude": "destinationLongitudeEnc",
+	"originLatitude":       "originLatitudeEnc",
+	"originLongitude":      "originLongitudeEnc",
 }
