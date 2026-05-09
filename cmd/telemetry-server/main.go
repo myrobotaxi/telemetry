@@ -26,6 +26,7 @@ import (
 	"github.com/tnando/my-robo-taxi-telemetry/internal/server"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/store/accountbackfill"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/store/vehiclegpsbackfill"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/telemetry"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/ws"
 )
@@ -35,6 +36,12 @@ import (
 // avoid load (the rollout window is hours/days, not seconds), fast
 // enough that an alerting pipeline catches a regression promptly.
 const accountTokenGaugeInterval = 5 * time.Minute
+
+// vehicleGPSGaugeInterval is the MYR-63 sibling of
+// accountTokenGaugeInterval — same 5-minute cadence over the six
+// Vehicle GPS *Enc columns. The two loops are independent so a stall
+// in one (e.g., a long-running migration) doesn't starve the other.
+const vehicleGPSGaugeInterval = 5 * time.Minute
 
 // Build-time variables set via ldflags (see .goreleaser.yml).
 var (
@@ -160,7 +167,12 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	defer func() { _ = detector.Stop() }()
 
 	// --- Store repos ---
-	vehicleRepo := store.NewVehicleRepo(db.Pool(), store.NoopMetrics{})
+	// MYR-63 wires the Encryptor into VehicleRepo so the six GPS
+	// columns are dual-written (plaintext + *Enc) and read with
+	// ciphertext preference. Half-pair *Enc rows fall back to
+	// plaintext per the atomic-pair invariant in
+	// vehicle-state-schema.md §3.3.
+	vehicleRepo := store.NewVehicleRepoWithEncryption(db.Pool(), store.NoopMetrics{}, encryptor, logger.With(slog.String("component", "vehicle-repo")))
 	driveRepo := store.NewDriveRepo(db.Pool(), store.NoopMetrics{})
 	accountRepo := store.NewAccountRepo(db.Pool(), encryptor)
 
@@ -169,6 +181,12 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	// accountTokenGaugeInterval until the rollout completes.
 	plaintextGauge := accountbackfill.NewPlaintextGauge(reg, db.Pool(), accountTokenGaugeInterval, logger.With(slog.String("component", "account-token-gauge")))
 	go plaintextGauge.Run(ctx)
+
+	// MYR-63 plaintext-zero gauge for Vehicle GPS columns. Same six
+	// labels as the backfill CLI; drains to zero once every legacy row
+	// is encrypted.
+	gpsPlaintextGauge := vehiclegpsbackfill.NewPlaintextGauge(reg, db.Pool(), vehicleGPSGaugeInterval, logger.With(slog.String("component", "vehicle-gps-gauge")))
+	go gpsPlaintextGauge.Run(ctx)
 	auditRepo := store.NewAuditRepo(db.Pool())
 
 	// --- Mask-audit emitter (MYR-71, rest-api.md §5.3) ---
