@@ -25,9 +25,16 @@ import (
 	"github.com/tnando/my-robo-taxi-telemetry/internal/mask"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/server"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/store/accountbackfill"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/telemetry"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/ws"
 )
+
+// accountTokenGaugeInterval is how often the running server polls the
+// Account table for plaintext-without-ciphertext tokens. Slow enough to
+// avoid load (the rollout window is hours/days, not seconds), fast
+// enough that an alerting pipeline catches a regression promptly.
+const accountTokenGaugeInterval = 5 * time.Minute
 
 // Build-time variables set via ldflags (see .goreleaser.yml).
 var (
@@ -156,6 +163,12 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	vehicleRepo := store.NewVehicleRepo(db.Pool(), store.NoopMetrics{})
 	driveRepo := store.NewDriveRepo(db.Pool(), store.NoopMetrics{})
 	accountRepo := store.NewAccountRepo(db.Pool(), encryptor)
+
+	// MYR-62 plaintext-zero gauge. Registered with the same Prometheus
+	// registry the /metrics handler scrapes; refreshed every
+	// accountTokenGaugeInterval until the rollout completes.
+	plaintextGauge := accountbackfill.NewPlaintextGauge(reg, db.Pool(), accountTokenGaugeInterval, logger.With(slog.String("component", "account-token-gauge")))
+	go plaintextGauge.Run(ctx)
 	auditRepo := store.NewAuditRepo(db.Pool())
 
 	// --- Mask-audit emitter (MYR-71, rest-api.md §5.3) ---
