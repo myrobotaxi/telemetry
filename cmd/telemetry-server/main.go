@@ -98,11 +98,13 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 
 	// --- Column encryption foundation (NFR-3.23, NFR-3.24) ---
+	// MYR-62 wires the Encryptor into AccountRepo for the dual-write
+	// rollout of OAuth tokens. Vehicle/Drive column rollouts land in
+	// follow-on issues that require coordinated Prisma migrations.
 	encryptor, err := setupEncryption(logger)
 	if err != nil {
 		return err
 	}
-	_ = encryptor // foundation: column wiring lands in follow-on PRs (MYR-16 cross-repo rollout issues)
 
 	// --- Database connection ---
 	db, err := store.NewDB(ctx, cfg.Database(), logger.With(slog.String("component", "store")), store.NoopMetrics{})
@@ -153,7 +155,7 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	// --- Store repos ---
 	vehicleRepo := store.NewVehicleRepo(db.Pool(), store.NoopMetrics{})
 	driveRepo := store.NewDriveRepo(db.Pool(), store.NoopMetrics{})
-	accountRepo := store.NewAccountRepo(db.Pool())
+	accountRepo := store.NewAccountRepo(db.Pool(), encryptor)
 	auditRepo := store.NewAuditRepo(db.Pool())
 
 	// --- Mask-audit emitter (MYR-71, rest-api.md §5.3) ---

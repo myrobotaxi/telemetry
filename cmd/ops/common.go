@@ -10,8 +10,37 @@ import (
 	"strings"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/config"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/cryptox"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
 )
+
+// loadEncryptor builds a cryptox.Encryptor from the same env-var schema
+// the server uses (ENCRYPTION_KEY or the versioned shape). Required for
+// every helper that constructs an AccountRepo: the dual-write contract
+// in MYR-62 enforces a non-nil encryptor.
+func loadEncryptor() (cryptox.Encryptor, error) {
+	ks, err := cryptox.LoadKeySetFromEnv()
+	if err != nil {
+		return nil, fmt.Errorf("load encryption key: %w", err)
+	}
+	enc, err := cryptox.NewEncryptor(ks)
+	if err != nil {
+		return nil, fmt.Errorf("new encryptor: %w", err)
+	}
+	return enc, nil
+}
+
+// newAccountRepo is the canonical constructor used by every ops
+// subcommand that needs to read or write Account tokens. Centralizing it
+// here keeps the encryption foundation in one place across auth, fleet,
+// and link subcommands.
+func newAccountRepo(db *store.DB) (*store.AccountRepo, error) {
+	enc, err := loadEncryptor()
+	if err != nil {
+		return nil, err
+	}
+	return store.NewAccountRepo(db.Pool(), enc), nil
+}
 
 // newLogger returns a text-handler slog logger writing to stderr so
 // normal JSON output on stdout remains machine-parseable.

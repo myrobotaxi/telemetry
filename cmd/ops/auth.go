@@ -58,7 +58,10 @@ func runAuthToken(ctx context.Context, args []string) error {
 	}
 	defer db.Close()
 
-	accountRepo := store.NewAccountRepo(db.Pool())
+	accountRepo, err := newAccountRepo(db)
+	if err != nil {
+		return err
+	}
 
 	tok, err := accountRepo.GetTeslaToken(ctx, *userID)
 	if err != nil {

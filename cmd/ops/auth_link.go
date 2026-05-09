@@ -13,8 +13,6 @@ import (
 	"os/exec"
 	"runtime"
 	"time"
-
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
 )
 
 const (
@@ -98,7 +96,10 @@ func runAuthLink(ctx context.Context, args []string) error {
 		return fmt.Errorf("exchange code for token: %w", err)
 	}
 
-	accountRepo := store.NewAccountRepo(db.Pool())
+	accountRepo, err := newAccountRepo(db)
+	if err != nil {
+		return err
+	}
 	expiresAt := time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second)
 	if err := accountRepo.UpdateTeslaToken(ctx, *userID, tok.AccessToken, tok.RefreshToken, expiresAt.Unix()); err != nil {
 		return fmt.Errorf("persist tesla token: %w", err)

@@ -82,15 +82,69 @@ WHERE "id" = $1`
 
 // Account queries. The Account table is Prisma-owned (NextAuth). We read
 // tokens and update them in-place when refreshing expired OAuth tokens.
+//
+// During the MYR-62 cross-repo encryption rollout we live in a dual-write
+// regime: the read path prefers `*_enc` (AES-256-GCM ciphertext) when
+// non-NULL and falls back to the plaintext columns; the write path
+// updates BOTH the plaintext column and the `*_enc` ciphertext column in
+// one statement. The plaintext columns will be dropped in a separate
+// post-rollout migration once every row is encrypted and the
+// account_token_plaintext_remaining_total gauge reaches zero across all
+// three columns. See docs/contracts/data-classification.md §3.3.
 
-const queryTeslaToken = `SELECT "access_token", "refresh_token", "expires_at"
+const queryTeslaToken = `SELECT
+    "access_token", "access_token_enc",
+    "refresh_token", "refresh_token_enc",
+    "id_token", "id_token_enc",
+    "expires_at"
 FROM "Account"
 WHERE "userId" = $1 AND "provider" = 'tesla'
 LIMIT 1`
 
 const queryUpdateTeslaToken = `UPDATE "Account"
-SET "access_token" = $1, "refresh_token" = $2, "expires_at" = $3
-WHERE "userId" = $4 AND "provider" = 'tesla'`
+SET "access_token" = $1, "access_token_enc" = $2,
+    "refresh_token" = $3, "refresh_token_enc" = $4,
+    "expires_at" = $5
+WHERE "userId" = $6 AND "provider" = 'tesla'`
+
+// queryCountTokenPlaintextRemaining returns the count of Tesla-provider
+// Account rows whose `<col>_enc` is NULL but `<col>` is non-NULL — i.e.
+// rows that still hold plaintext tokens. The column name is interpolated
+// via fmt.Sprintf at call sites; this is safe because the only callers
+// pass a hardcoded enum (access_token, refresh_token, id_token).
+const queryCountTokenPlaintextRemainingTemplate = `SELECT COUNT(*)
+FROM "Account"
+WHERE "provider" = 'tesla'
+  AND %q IS NOT NULL
+  AND %q IS NULL`
+
+// queryBackfillSelect returns Account rows for the Tesla provider where
+// at least one of the three plaintext token columns has not yet been
+// mirrored into its *_enc counterpart. Selecting only the un-encrypted
+// columns keeps the worker idempotent — re-running the script over a
+// fully migrated table touches zero rows.
+const queryBackfillSelect = `SELECT "id", "userId",
+    "access_token", "access_token_enc",
+    "refresh_token", "refresh_token_enc",
+    "id_token", "id_token_enc"
+FROM "Account"
+WHERE "provider" = 'tesla'
+  AND (
+      ("access_token" IS NOT NULL AND "access_token_enc" IS NULL)
+   OR ("refresh_token" IS NOT NULL AND "refresh_token_enc" IS NULL)
+   OR ("id_token" IS NOT NULL AND "id_token_enc" IS NULL)
+  )`
+
+// queryBackfillUpdate sets the three *_enc columns by id. The COALESCE
+// over a typed NULL guarantees that callers only overwrite the columns
+// they intend to: passing NULL leaves the existing value untouched, so
+// a partially encrypted row remains partially encrypted (mixed states
+// are recoverable by re-running the backfill).
+const queryBackfillUpdate = `UPDATE "Account"
+SET "access_token_enc"  = COALESCE($2, "access_token_enc"),
+    "refresh_token_enc" = COALESCE($3, "refresh_token_enc"),
+    "id_token_enc"      = COALESCE($4, "id_token_enc")
+WHERE "id" = $1`
 
 // updateColumn pairs a PostgreSQL column name with the value to set. A nil
 // value signals that the field was not present in this telemetry event.

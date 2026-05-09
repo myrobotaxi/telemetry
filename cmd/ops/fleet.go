@@ -85,7 +85,10 @@ func runFleetConfigPush(ctx context.Context, args []string) error {
 	}
 	defer db.Close()
 
-	accountRepo := store.NewAccountRepo(db.Pool())
+	accountRepo, err := newAccountRepo(db)
+	if err != nil {
+		return err
+	}
 	vehicleRepo := store.NewVehicleRepo(db.Pool(), store.NoopMetrics{})
 
 	if err := verifyVINOwnership(ctx, vehicleRepo, *vin, *userID); err != nil {
