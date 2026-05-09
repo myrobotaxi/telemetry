@@ -176,6 +176,49 @@ jobs:
           fi
           echo "✓ AuditRepo cross-repo coupling header and column list intact"
 
+      - name: Rule CG-DL-9 — No Prisma table refs in Go migrations
+        run: |
+          # MYR-74: Go-owned migration SQL must never reference Prisma-owned
+          # table names. The Go migration toolchain is scoped exclusively to
+          # the _telemetry_* and go_* namespaces.
+          # See docs/contracts/data-lifecycle.md §7 Rule CG-DL-9 and
+          # docs/architecture/migrations.md §4 for the coexistence rule.
+          MIGRATION_DIR="internal/store/migrations"
+          if [ ! -d "$MIGRATION_DIR" ]; then
+            echo "Migration directory not found — skipping CG-DL-9 check"
+            exit 0
+          fi
+
+          # Prisma-owned table names (PascalCase as declared in schema.prisma).
+          # Checked case-insensitively so "vehicle", "VEHICLE", "Vehicle" all match.
+          PRISMA_TABLES="User Account Session VerificationToken Vehicle Drive TripStop Invite Settings AuditLog"
+
+          FAILURES=""
+          for table in $PRISMA_TABLES; do
+            # grep -ril: recursive, case-insensitive, files-with-matches only.
+            # We match the table name as a word boundary to avoid false positives
+            # on column names like "userId" — \b requires ERE (-E flag).
+            MATCHES=$(grep -rilE "\b${table}\b" "${MIGRATION_DIR}"/*.sql 2>/dev/null || true)
+            if [ -n "$MATCHES" ]; then
+              for f in $MATCHES; do
+                FAILURES="$FAILURES\n- $f references Prisma-owned table '${table}'"
+              done
+            fi
+          done
+
+          if [ -n "$FAILURES" ]; then
+            echo "::error::CG-DL-9: Go migration SQL references Prisma-owned table(s):"
+            printf '%b\n' "$FAILURES"
+            echo ""
+            echo "Go migration files are scoped to the _telemetry_* and go_* namespaces."
+            echo "Prisma-owned tables (User, Account, Session, VerificationToken, Vehicle,"
+            echo "Drive, TripStop, Invite, Settings, AuditLog) must never appear in"
+            echo "internal/store/migrations/*.sql."
+            echo "See docs/contracts/data-lifecycle.md §7 Rule CG-DL-9."
+            exit 1
+          fi
+          echo "✓ CG-DL-9: No Prisma table references in Go migration SQL"
+
       - name: Summary
         if: always()
         run: |
@@ -186,3 +229,4 @@ jobs:
           echo "  - Store field classification: ${{ steps.changed.outputs.has_store_changes }}"
           echo "  - WS protocol sync: ${{ steps.changed.outputs.has_ws_changes }}"
           echo "  - AuditRepo cross-repo coupling (CG-DL-8): scoped to internal/store/audit_repo.go changes"
+          echo "  - CG-DL-9 Prisma table isolation in Go migrations: always"

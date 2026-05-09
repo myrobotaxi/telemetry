@@ -72,6 +72,17 @@ If the PR modifies encryption (adds/removes encrypted columns, changes the key m
 - `docs/contracts/data-classification.md`
 - Encryption contract docs (when they exist)
 
+### Rule 10: Go migration SQL must not reference Prisma-owned tables (CG-DL-9)
+
+If the PR adds or modifies files in `internal/store/migrations/*.sql`, you MUST verify:
+
+- No SQL file in `internal/store/migrations/` references any of the following Prisma-owned table names (case-insensitive): `User`, `Account`, `Session`, `VerificationToken`, `Vehicle`, `Drive`, `TripStop`, `Invite`, `Settings`, `AuditLog`.
+- All new tables created by Go migrations carry the `_telemetry_` or `go_` prefix.
+
+The Go migration toolchain is scoped exclusively to the `_telemetry_*` and `go_*` namespaces. Referencing Prisma-owned tables in migration SQL risks accidental schema mutation at startup and violates the coexistence rule in `docs/architecture/migrations.md` §4.
+
+The CI step is `.github/workflows/contract-guard.yml` → "Rule CG-DL-9 — No Prisma table refs in Go migrations". See `docs/contracts/data-lifecycle.md` §7 Rule CG-DL-9 for the full spec.
+
 ### Rule 9: AuditRepo cross-repo column-list drift (CG-DL-8)
 If the PR modifies `internal/store/audit_repo.go`, you MUST verify:
 - The `CROSS-REPO COUPLING` header comment block is still present at the top of the file (it points future engineers at the Prisma schema authority in `../my-robo-taxi/prisma/schema.prisma`).
@@ -87,7 +98,7 @@ The CI step is `.github/workflows/contract-guard.yml` → "Rule CG-DL-8 — Audi
 When a human (or another agent) is actively working in a session, you are invoked via the Task tool to check the current working tree. You:
 
 1. Inspect the current diff (staged + unstaged + untracked).
-2. Apply the 8 rules above to the diff.
+2. Apply the 10 rules above to the diff.
 3. Output a **pass/fail report** with specific file-level feedback.
 4. Recommend specific files to edit to close the drift.
 
@@ -99,7 +110,7 @@ When a PR is opened or updated, you run as a GitHub Action:
 
 1. Check out the PR branch.
 2. Diff against `main`.
-3. Apply the 8 rules above.
+3. Apply the 10 rules above.
 4. Post a PR comment with the pass/fail report.
 5. **Exit with non-zero status if any rule fails.** This blocks merge.
 
@@ -122,6 +133,8 @@ CI mode is **non-negotiable**. PRs cannot merge if contract-guard fails. Admin o
 - **Rule 6 — Latency Regression Check**: [PASS/FAIL/N/A] — [reason]
 - **Rule 7 — Out-of-Scope Block**: [PASS/FAIL] — [reason]
 - **Rule 8 — Encryption Surface**: [PASS/FAIL/N/A] — [reason]
+- **Rule 9 — AuditRepo cross-repo coupling (CG-DL-8)**: [PASS/FAIL/N/A] — [reason]
+- **Rule 10 — Go migration Prisma table isolation (CG-DL-9)**: [PASS/FAIL/N/A] — [reason]
 
 ### Verdict
 [PASS / BLOCK]
