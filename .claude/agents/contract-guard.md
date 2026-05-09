@@ -72,6 +72,14 @@ If the PR modifies encryption (adds/removes encrypted columns, changes the key m
 - `docs/contracts/data-classification.md`
 - Encryption contract docs (when they exist)
 
+### Rule 9: AuditRepo cross-repo column-list drift (CG-DL-8)
+If the PR modifies `internal/store/audit_repo.go`, you MUST verify:
+- The `CROSS-REPO COUPLING` header comment block is still present at the top of the file (it points future engineers at the Prisma schema authority in `../my-robo-taxi/prisma/schema.prisma`).
+- Every column declared in `docs/contracts/data-lifecycle.md` §4.1 / the Prisma `AuditLog` model — `id`, `userId`, `timestamp`, `action`, `targetType`, `targetId`, `initiator`, `metadata`, `createdAt` — appears as a quoted identifier (e.g., `"userId"`) in `internal/store/audit_repo.go`. A missing column literal signals drift between Prisma and the Go writer.
+- If the Prisma `AuditLog` schema is being changed, the `internal/store/audit_repo.go` side MUST be updated in the same PR (or in a tightly-coordinated pair of cross-repo PRs).
+
+The CI step is `.github/workflows/contract-guard.yml` → "Rule CG-DL-8 — AuditRepo cross-repo coupling intact". See `docs/contracts/data-lifecycle.md` §7 Rule CG-DL-8 for the full spec.
+
 ## How You Run
 
 ### Session-time mode (fast feedback)

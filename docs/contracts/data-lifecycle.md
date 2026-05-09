@@ -575,6 +575,25 @@ The `contract-guard` agent/CI check enforces the following rules derived from th
 
 **Fix:** Keep `userId` as an unlinked TEXT column. See Section 4.5 for rationale.
 
+### Rule CG-DL-8: AuditRepo cross-repo column-list drift
+
+**Trigger:** Any PR that modifies `internal/store/audit_repo.go` in the telemetry repo.
+
+**Check:** The Go `AuditEntry` struct and `queryAuditInsert` SQL in `audit_repo.go` mirror the Prisma `AuditLog` model in the Next.js repo (`../my-robo-taxi/prisma/schema.prisma`). The two MUST stay in lock-step. Specifically:
+
+1. The `CROSS-REPO COUPLING` header comment block in `internal/store/audit_repo.go` MUST be present (it tells future engineers where the schema authority lives).
+2. Every column named in §4.1 (and in the Prisma model) MUST appear as a quoted identifier in `audit_repo.go` — `"id"`, `"userId"`, `"timestamp"`, `"action"`, `"targetType"`, `"targetId"`, `"initiator"`, `"metadata"`, `"createdAt"`. A missing column reference is a column-list drift signal: either a column was removed from Prisma (in which case the schema doc must be updated) or the Go side was not updated alongside a Prisma change (in which case both must be updated in the same PR).
+3. If a Prisma migration adds, renames, or removes a column on `AuditLog`, the same PR MUST update `internal/store/audit_repo.go` (or, more precisely, the cross-repo coupling MUST be acknowledged by a same-PR Go-side update, even if the Go column list is intentionally narrower in some hypothetical future).
+
+CI enforcement lives in `.github/workflows/contract-guard.yml` under the step "Rule CG-DL-8 — AuditRepo cross-repo coupling intact". The check fires only when `internal/store/audit_repo.go` is in the PR diff.
+
+**Violation examples:**
+- Removing the `CROSS-REPO COUPLING` header comment from `audit_repo.go` (loses the pointer to the Prisma authority).
+- Renaming a column in Prisma without updating the corresponding column literal in `queryAuditInsert`.
+- Adding a new column to Prisma without adding it to `AuditEntry` and `queryAuditInsert`.
+
+**Fix:** Restore the cross-repo coupling header comment and ensure every Prisma `AuditLog` column appears (as a quoted identifier) in `internal/store/audit_repo.go`. If the Prisma side has not been updated yet, hold this PR until the cross-repo PR is merged (or open them as a coordinated pair).
+
 ---
 
 ## 8. Cross-references
