@@ -111,6 +111,16 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	}
 	defer db.Close()
 
+	// --- Database migrations (Go-owned tables) ---
+	// Applies all embedded SQL migrations in internal/store/migrations/ to the
+	// _telemetry_* namespace. Prisma-owned tables are never touched here.
+	// Fail-fast: a migration error indicates a broken schema that will cause
+	// runtime failures -- there is no safe degraded mode.
+	// See docs/architecture/migrations.md for the coexistence rule.
+	if err := store.RunMigrations(ctx, cfg.Database().URL, logger.With(slog.String("component", "migrations"))); err != nil {
+		return fmt.Errorf("running database migrations: %w", err)
+	}
+
 	// --- Event bus ---
 	bus := events.NewChannelBus(events.BusConfig{
 		BufferSize: cfg.Telemetry().EventBufferSize,
