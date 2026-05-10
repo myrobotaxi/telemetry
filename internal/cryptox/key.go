@@ -63,6 +63,27 @@ func (k *KeySet) HasVersion(v byte) bool {
 	return ok
 }
 
+// ReadableVersions returns the set of version bytes the KeySet can
+// decrypt, in ascending order. Used by the metrics layer to pre-register
+// `cryptox_decrypt_total{version="N"}` labels at startup so a fresh
+// /metrics scrape shows zeros for every readable version rather than
+// missing labels (the latter races with operator dashboards during
+// rotation). Order is deterministic so test assertions are stable.
+func (k *KeySet) ReadableVersions() []byte {
+	out := make([]byte, 0, len(k.keys))
+	for v := range k.keys {
+		out = append(out, v)
+	}
+	// Sort ascending. Bytes are small ints, so an in-place insertion
+	// sort beats sort.Slice's reflective overhead at len ≤ 255.
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j-1] > out[j]; j-- {
+			out[j-1], out[j] = out[j], out[j-1]
+		}
+	}
+	return out
+}
+
 // keyForVersion returns the key for a ciphertext version. Package-private
 // because only the Encryptor's Decrypt path needs it; exposing it would
 // invite callers to encrypt directly with raw keys, bypassing the

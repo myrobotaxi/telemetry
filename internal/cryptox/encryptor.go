@@ -47,7 +47,27 @@ type Encryptor interface {
 // matching key in keys, supporting in-place key rotation without
 // re-encrypting old ciphertexts up front (see docs/contracts/key-rotation.md).
 type keySetEncryptor struct {
-	ks *KeySet
+	ks      *KeySet
+	metrics Metrics
+}
+
+// Option configures the Encryptor at construction time. Use
+// WithMetrics to wire a Prometheus-backed Metrics; defaults to
+// NoopMetrics if no option is supplied.
+type Option func(*keySetEncryptor)
+
+// WithMetrics injects a Metrics implementation that the Encryptor
+// calls on every successful Decrypt. The composition root in
+// cmd/telemetry-server uses this to wire the
+// `cryptox_decrypt_total{version="N"}` Prometheus counter; library
+// consumers without a registry can skip the option to get the
+// zero-cost no-op default.
+func WithMetrics(m Metrics) Option {
+	return func(e *keySetEncryptor) {
+		if m != nil {
+			e.metrics = m
+		}
+	}
 }
 
 // LogValue redacts the encryptor when a structured logger walks pointer
@@ -58,17 +78,24 @@ func (e *keySetEncryptor) LogValue() slog.Value {
 	return slog.StringValue("<Encryptor:redacted>")
 }
 
-// NewEncryptor wraps a KeySet in an Encryptor. Returns an error if ks is
-// nil or has no write key (defensive — LoadKeySetFromEnv already enforces
-// this, but in-process construction by tests bypasses that path).
-func NewEncryptor(ks *KeySet) (Encryptor, error) {
+// NewEncryptor wraps a KeySet in an Encryptor. Returns an error if ks
+// is nil or has no write key (defensive — LoadKeySetFromEnv already
+// enforces this, but in-process construction by tests bypasses that
+// path). Pass WithMetrics to wire decrypt observability; defaults to
+// NoopMetrics so library consumers without a Prometheus registry pay
+// no allocation cost.
+func NewEncryptor(ks *KeySet, opts ...Option) (Encryptor, error) {
 	if ks == nil {
 		return nil, fmt.Errorf("cryptox.NewEncryptor: nil KeySet")
 	}
 	if _, ok := ks.keyForVersion(ks.writeVersion); !ok {
 		return nil, fmt.Errorf("cryptox.NewEncryptor: write version %d has no key in KeySet", ks.writeVersion)
 	}
-	return &keySetEncryptor{ks: ks}, nil
+	e := &keySetEncryptor{ks: ks, metrics: NoopMetrics{}}
+	for _, opt := range opts {
+		opt(e)
+	}
+	return e, nil
 }
 
 // EncryptString seals s, prepends the active write version byte, and
@@ -117,5 +144,11 @@ func (e *keySetEncryptor) DecryptString(ciphertext string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Increment AFTER success: failed decrypts (auth-tag mismatch,
+	// truncated input, unknown version, base64 errors) MUST NOT
+	// count, otherwise a tampering attack inflates the counter and
+	// hides the v1-decay signal during rotation
+	// (key-rotation.md §"Procedure" step 6).
+	e.metrics.IncDecrypt(version)
 	return string(plaintext), nil
 }
