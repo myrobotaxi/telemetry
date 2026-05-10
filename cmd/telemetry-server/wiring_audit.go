@@ -33,21 +33,7 @@ func buildAuditRepo(
 		return nil, fmt.Errorf("setting up audit sidecar: %w", err)
 	}
 	if closeFn != nil {
-		// Register a background goroutine that drains the sidecar when ctx
-		// is cancelled (i.e., when the process receives SIGINT/SIGTERM).
-		// context.Background() is intentional here: the drain timeout must
-		// outlive the cancelled process context.
-		go func() { //nolint:gosec // G118: intentional use of Background for post-cancel drain
-			<-ctx.Done()
-			// #nosec G115 -- The whole point of this goroutine is to run AFTER
-			// ctx is cancelled; we must derive a fresh context from
-			// Background to give the sidecar worker a deadline to drain.
-			closeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if cerr := closeFn(closeCtx); cerr != nil {
-				logger.Warn("audit sidecar close error", slog.String("error", cerr.Error()))
-			}
-		}()
+		registerSidecarDrainGoroutine(ctx, closeFn, logger)
 	}
 	return store.NewAuditRepoWithSidecar(pool, sidecar, logger.With(slog.String("component", "audit-repo"))), nil
 }
@@ -129,4 +115,35 @@ func setupAuditSidecar(
 	return s, func(shutdownCtx context.Context) error {
 		return s.Close(shutdownCtx)
 	}, nil
+}
+
+// registerSidecarDrainGoroutine spawns a background goroutine that calls
+// closeFn after ctx cancels (i.e., on SIGINT/SIGTERM), giving the
+// sidecar worker a fresh context with a finite deadline to drain.
+//
+// The goroutine deliberately derives its drain context from
+// `context.Background()` rather than a request-scoped ancestor — at
+// this point the parent ctx is already cancelled, and the whole point
+// of the drain is to outlive that cancellation. Linters that warn
+// about "context.Background in goroutines while a request-scoped
+// context is in scope" (gosec G117/G118, golangci-lint contextcheck)
+// are wrong here — we extract the goroutine into its own function so
+// the suppression markers attach to a single, narrowly-scoped
+// statement instead of being threaded through buildAuditRepo.
+//
+//nolint:gosec,contextcheck // intentional Background for post-cancel drain
+func registerSidecarDrainGoroutine(
+	ctx context.Context,
+	closeFn func(context.Context) error,
+	logger *slog.Logger,
+) {
+	// #nosec G117,G118 -- intentional Background for post-cancel drain
+	go func() {
+		<-ctx.Done()
+		closeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := closeFn(closeCtx); err != nil {
+			logger.Warn("audit sidecar close error", slog.String("error", err.Error()))
+		}
+	}()
 }
