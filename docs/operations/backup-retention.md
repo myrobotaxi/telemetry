@@ -38,7 +38,7 @@ The MyRoboTaxi Supabase project keeps two parallel recovery surfaces. Both are t
 
 When a Supabase backup is restored — full restore or PITR — the live database is rolled back to the backup's timestamp. Any FR-10.1 deletions that completed AFTER that timestamp are reversed by the restore: User rows reappear, cascaded children (Vehicle, Drive, Invite, Settings, Account) reappear with them.
 
-The AuditLog table is the durable record of what was deleted. Per [`../contracts/data-lifecycle.md`](../contracts/data-lifecycle.md) §4 the AuditLog is append-only and retained indefinitely (NFR-3.29), so audit rows for `account_deleted` actions survive the restore (the restore writes audit rows from the backup AND any post-backup audit rows are rewritten by application traffic; we read both).
+The AuditLog table is the durable record of *what was deleted while the backup itself was the live database*, but a Supabase restore also rolls the AuditLog table back to `backup_timestamp` — any `account_deleted` rows written between `backup_timestamp` and the moment the restore is initiated would be erased by the restore itself. Reading from the restored AuditLog alone would yield zero post-backup deletions and the redelete procedure would silently no-op. To make the procedure operable, the post-backup `account_deleted` rows MUST come from a surface that survives the restore. §2.1 STEP 0 (the pre-restore sidecar export) is what produces that surface; STEP 1 reads from it, NOT from the restored in-DB AuditLog.
 
 ### 2.1 Procedure
 
@@ -47,23 +47,50 @@ INPUT
   backup_timestamp  -- the wall-clock time the restored backup was taken
   restored_database -- the freshly-restored Supabase project
 
-STEP 1 — enumerate post-backup deletions
-  SELECT "userId", "timestamp", "metadata"
-  FROM "AuditLog"
-  WHERE "action" = 'account_deleted'
-    AND "timestamp" > <backup_timestamp>
-  ORDER BY "timestamp" ASC;
+STEP 0 — pre-restore sidecar export (MANDATORY before initiating the restore)
+  -- Run this against the live (pre-restore) database BEFORE the restore is
+  -- triggered. The output is the durable record of post-backup deletions
+  -- that the restore would otherwise erase.
+  COPY (
+    SELECT "id", "userId", "timestamp", "action",
+           "targetType", "targetId", "initiator", "metadata", "createdAt"
+    FROM "AuditLog"
+    WHERE "action" = 'account_deleted'
+      AND "timestamp" > <backup_timestamp>
+    ORDER BY "timestamp" ASC
+  ) TO '/sidecar/audit_log_post_backup.csv' WITH (FORMAT csv, HEADER true);
 
-  -- This yields the set of users whose deletion happened in the
-  -- post-backup window. Each row contains the userId (orphaned —
-  -- intentional per data-lifecycle.md §4.5) and the
-  -- {vehicleCount, driveCount, inviteCount} counts at deletion time.
+  -- Store the sidecar in an append-only external sink (S3 / object storage
+  -- with object-lock, or any equivalent that survives the Supabase project's
+  -- failure modes). The sidecar is the source-of-truth for STEP 1; the
+  -- restored in-DB AuditLog is NOT.
+
+STEP 1 — enumerate post-backup deletions from the sidecar
+  -- Re-import the sidecar into a scratch table on the restored database, or
+  -- read it directly via psql \copy. DO NOT use the restored in-DB AuditLog
+  -- for this — the restore rolled it back to backup_timestamp.
+  result := <rows from /sidecar/audit_log_post_backup.csv>
+
+  -- Each row carries the userId (orphaned — intentional per
+  -- data-lifecycle.md §4.5) and the {vehicleCount, driveCount, inviteCount}
+  -- counts captured at the original deletion time.
 
 STEP 2 — for each (userId) in the set, re-run the FR-10.1 cascade
   FOR EACH userId IN result:
     BEGIN TRANSACTION;
-      -- Write a new audit row recording the redelete itself.
-      -- Use a distinct initiator so the redelete is grep-able.
+      -- Re-import the original audit row from the sidecar (preserves the
+      -- original deletion's audit trail with its original timestamp).
+      INSERT INTO "AuditLog" (
+        "id", "userId", "timestamp", "action",
+        "targetType", "targetId", "initiator", "metadata", "createdAt"
+      ) VALUES (
+        <sidecar.id>, <sidecar.userId>, <sidecar.timestamp>,
+        <sidecar.action>, <sidecar.targetType>, <sidecar.targetId>,
+        <sidecar.initiator>, <sidecar.metadata>, <sidecar.createdAt>
+      );
+
+      -- Write a SECOND audit row recording the redelete itself, with a
+      -- distinct initiator so the redelete is grep-able.
       INSERT INTO "AuditLog" (
         "id", "userId", "timestamp", "action",
         "targetType", "targetId", "initiator", "metadata"
@@ -78,7 +105,7 @@ STEP 2 — for each (userId) in the set, re-run the FR-10.1 cascade
         jsonb_build_object(
           'reason',        'redelete_after_restore',
           'backupRestoredAt', <backup_timestamp>,
-          'originalDeleteAt',  <original audit row timestamp>
+          'originalDeleteAt',  <sidecar.timestamp>
         )
       );
 
@@ -103,8 +130,12 @@ STEP 4 — audit
 
 OUTPUT
   count_redeleted        = |result|
-  audit_rows_written     = 2 * |result|   -- one original + one redelete row per user
+  audit_rows_written     = 2 * |result|   -- one re-imported original + one new redelete row per user
+                                          --   (the "original" comes from the sidecar in STEP 0;
+                                          --    the redelete is written fresh in STEP 2)
 ```
+
+> **Sidecar surface — operational note.** The append-only external sink referenced in STEP 0 is the durable substrate of this procedure. Recommended implementation: an S3 / object-storage bucket with object-lock (Compliance mode) and a 90-day retention floor that exceeds the backup-window cap in §1, so the sidecar never expires before its corresponding backup does. The bucket is a Fly.io secret-managed reference, not committed to either repo. Filing this is a follow-up that ops should track (the sink does not exist today; without it, STEP 0 cannot run, which means the entire redelete procedure is non-operational until the sink is provisioned).
 
 ### 2.2 Cascade reference
 
@@ -125,9 +156,10 @@ The audit row for the redelete uses `initiator: 'system_pruner'` (per [`../contr
 
 ### 2.3 Transactional guarantees
 
-- The audit row write and the User delete MUST be in the same transaction per [`../contracts/data-lifecycle.md`](../contracts/data-lifecycle.md) §3.4.
+- The original-audit re-import, the redelete-audit insert, and the User delete MUST all be in the same transaction per [`../contracts/data-lifecycle.md`](../contracts/data-lifecycle.md) §3.4. If any of the three fails, none of them apply.
 - If the transaction fails for any user in the set, log at `ERROR`, continue with the remaining users, and re-run the procedure for the failed ones after diagnosing.
-- Idempotent: re-running STEP 1 against the live database will yield zero rows after a successful pass (deleted users have no User row to match the audit's `userId`, and the re-emitted `account_deleted` audit row sits alongside the original — both retained indefinitely).
+- STEP 0 (pre-restore sidecar export) is a **prerequisite**, not a transactional step — it MUST complete successfully against the live database before the restore is initiated. Skipping STEP 0 makes STEP 1 unable to source the post-backup audit set, and the entire procedure becomes non-operational.
+- Idempotent: re-running STEP 1 against the live database (re-reading from the same sidecar) after a successful pass writes the redelete audit row a second time but the User delete is a no-op (the row is already gone). The redelete audit row's `metadata.reason: redelete_after_restore` discriminator makes duplicate redelete rows easy to detect during forensic queries; the AuditLog's append-only contract (NFR-3.29) preserves all of them.
 
 ---
 
