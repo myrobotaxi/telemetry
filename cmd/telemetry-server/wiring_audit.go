@@ -62,11 +62,13 @@ func buildAuditRepo(
 //     env var is set (Supabase Storage:
 //     `https://<project>.supabase.co/storage/v1/s3`). When empty the
 //     putter uses the default AWS regional endpoint.
-//   - Authenticates via standard AWS env vars (AWS_ACCESS_KEY_ID /
-//     AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN) or the ambient IAM
-//     role. For Supabase, set the keys to a Supabase Storage S3 access
-//     key scoped to the audit-sidecar bucket (created in the Supabase
-//     dashboard).
+//   - Authenticates via AUDIT_SIDECAR_ACCESS_KEY +
+//     AUDIT_SIDECAR_SECRET_KEY when both are set (the Supabase Storage
+//     S3 access key — Supabase issues these from Storage → S3
+//     connection; **no AWS account required**, the AWS SDK is just the
+//     client library). Falls back to the ambient AWS credential chain
+//     if those env vars are unset, so an AWS-deployed configuration
+//     still works.
 //   - Registers audit_sidecar_writes_total, audit_sidecar_write_failures_total,
 //     and audit_sidecar_queue_depth on reg.
 //   - Starts the background worker goroutine. The returned closeFn must be
@@ -93,11 +95,15 @@ func setupAuditSidecar(
 		region = "us-east-1"
 	}
 	endpoint := os.Getenv("AUDIT_SIDECAR_ENDPOINT")
+	accessKey := os.Getenv("AUDIT_SIDECAR_ACCESS_KEY")
+	secretKey := os.Getenv("AUDIT_SIDECAR_SECRET_KEY")
 
 	putter, err := auditsidecar.NewS3Putter(ctx, auditsidecar.PutterConfig{
-		Region:       region,
-		Endpoint:     endpoint,
-		UsePathStyle: endpoint != "", // Supabase Storage requires path-style.
+		Region:          region,
+		Endpoint:        endpoint,
+		UsePathStyle:    endpoint != "", // Supabase Storage requires path-style.
+		AccessKeyID:     accessKey,
+		SecretAccessKey: secretKey,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("constructing audit sidecar S3 putter: %w", err)

@@ -7,6 +7,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
@@ -21,32 +22,44 @@ type S3Putter struct {
 // PutterConfig controls which S3-compatible endpoint the putter targets.
 //
 // For Supabase Storage (the default infra for this project): set
-// `Endpoint` to `https://<project_ref>.supabase.co/storage/v1/s3` and
-// provide the project's S3 access keys via the standard AWS env vars
-// (Supabase's S3 API keys map onto AWS_ACCESS_KEY_ID /
-// AWS_SECRET_ACCESS_KEY). `UsePathStyle` MUST be true for Supabase.
+// `Endpoint` to `https://<project_ref>.supabase.co/storage/v1/s3`,
+// `UsePathStyle = true`, and pass the Supabase S3 access key in
+// `AccessKeyID` / `SecretAccessKey`. **No AWS account is required** —
+// the credentials are issued by Supabase (Storage → S3 connection) and
+// the endpoint points at Supabase. The AWS SDK is just the client
+// library; it speaks the S3 wire protocol against any S3-compatible
+// server.
 //
-// For real AWS S3: leave `Endpoint` empty and `UsePathStyle` false; the
-// SDK resolves the regional endpoint from `Region` and authenticates
-// via the ambient IAM role (instance profile, ECS task role, env vars).
+// For real AWS S3 (not used by this project today): leave
+// `Endpoint` and credentials empty; the SDK falls back to the ambient
+// AWS credential chain (instance profile, ECS task role, AWS_* env
+// vars) and resolves the regional endpoint from `Region`.
 type PutterConfig struct {
-	Region       string
-	Endpoint     string // Empty → default AWS regional endpoint.
-	UsePathStyle bool   // Required for Supabase; ignored by AWS S3.
+	Region          string
+	Endpoint        string // Empty → default AWS regional endpoint.
+	UsePathStyle    bool   // Required for Supabase; ignored by AWS S3.
+	AccessKeyID     string // Empty → fall back to ambient credential chain.
+	SecretAccessKey string
 }
 
-// NewS3Putter loads the default AWS SDK configuration (respects
-// AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, IAM role
-// credentials, etc.) and constructs a putter pointed at cfg.Endpoint
-// (or the default AWS S3 endpoint when empty).
+// NewS3Putter constructs a putter pointed at cfg.Endpoint. When
+// AccessKeyID is non-empty the putter uses static credentials; otherwise
+// it falls back to the AWS SDK's default credential chain so an
+// AWS-deployed configuration still works.
 func NewS3Putter(ctx context.Context, cfg PutterConfig) (*S3Putter, error) {
 	region := cfg.Region
 	if region == "" {
 		region = "us-east-1"
 	}
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
+	loadOpts := []func(*awsconfig.LoadOptions) error{awsconfig.WithRegion(region)}
+	if cfg.AccessKeyID != "" {
+		loadOpts = append(loadOpts, awsconfig.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.SecretAccessKey, ""),
+		))
+	}
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, loadOpts...)
 	if err != nil {
-		return nil, fmt.Errorf("auditsidecar: loading AWS config: %w", err)
+		return nil, fmt.Errorf("auditsidecar: loading S3 client config: %w", err)
 	}
 	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
 		if cfg.Endpoint != "" {

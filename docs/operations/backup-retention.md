@@ -34,7 +34,13 @@ corruption, or a bad migration).
 **Before** restoring from the sidecar, verify that it covers the target date
 range.
 
-**Sidecar infrastructure (Supabase Storage, S3-compatible API):**
+**Sidecar infrastructure (Supabase Storage, S3-compatible API).**
+
+> **No AWS account is required.** The AWS SDK Go is just the client
+> library — it speaks the S3 wire protocol against any S3-compatible
+> server. Supabase issues its own access keys from Storage → S3
+> connection, the endpoint URL points at Supabase, and there is no
+> AWS billing relationship.
 
 | Parameter | Value |
 |-----------|-------|
@@ -75,7 +81,8 @@ range.
    - `AUDIT_SIDECAR_BUCKET=audit-sidecar`
    - `AUDIT_SIDECAR_ENDPOINT=https://<project_ref>.supabase.co/storage/v1/s3`
    - `AUDIT_SIDECAR_REGION=us-east-1` (any value)
-   - `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` = Supabase Storage S3 key.
+   - `AUDIT_SIDECAR_ACCESS_KEY` = Supabase Storage S3 access key ID
+   - `AUDIT_SIDECAR_SECRET_KEY` = Supabase Storage S3 access key secret
 
 **v2 hardening note (deferred):** Supabase Storage does not expose Object
 Lock. v1 immutability is enforced at the policy layer (RLS deny on UPDATE /
@@ -101,9 +108,11 @@ defense-in-depth against a service-role JWT compromise.
 **Verification steps:**
 
 ```bash
-# Configure aws-cli to talk to Supabase Storage (one-time):
-export AWS_ACCESS_KEY_ID=<supabase-s3-key>
-export AWS_SECRET_ACCESS_KEY=<supabase-s3-secret>
+# Configure the aws CLI to talk to Supabase Storage. The CLI reads
+# AWS_* env vars by convention, but the credentials are Supabase's —
+# no AWS account is involved.
+export AWS_ACCESS_KEY_ID=<supabase-s3-key>           # from Supabase Storage → S3 connection
+export AWS_SECRET_ACCESS_KEY=<supabase-s3-secret>    # from Supabase Storage → S3 connection
 export AWS_DEFAULT_REGION=us-east-1
 SUPABASE_S3="https://<project_ref>.supabase.co/storage/v1/s3"
 
