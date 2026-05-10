@@ -12,7 +12,7 @@ type Metrics interface {
 	// IncWrite records one successful PutObject delivered to S3.
 	IncWrite()
 	// IncFailure records one entry that was permanently dropped after
-	// exhausting all retries. reason is one of "aws", "enqueue_full",
+	// exhausting all retries. reason is one of "put", "enqueue_full",
 	// "other".
 	IncFailure(reason string)
 	// SetQueueDepth records the current length of the in-process queue.
@@ -37,7 +37,7 @@ type PrometheusMetrics struct {
 
 // failureReasons enumerates the label values pre-registered at startup so
 // /metrics always shows all series even before the first failure.
-var failureReasons = []string{"aws", "enqueue_full", "other"}
+var failureReasons = []string{"put", "enqueue_full", "other"}
 
 // NewPrometheusMetrics registers the three sidecar metric series on reg and
 // pre-initialises every label so operators see zero-valued counters on the
@@ -52,7 +52,7 @@ func NewPrometheusMetrics(reg prometheus.Registerer) *PrometheusMetrics {
 
 	failures := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "audit_sidecar_write_failures_total",
-		Help: "Total AuditLog sidecar write failures by reason. reason=aws means the S3 PutObject failed after all retries. reason=enqueue_full means the internal channel was at capacity. reason=other means an unexpected error.",
+		Help: "Total AuditLog sidecar write failures by reason. reason=put means the S3 PutObject (against AWS S3 or any S3-compatible backend, e.g. Supabase Storage) failed after all retries. reason=enqueue_full means the internal channel was at capacity. reason=other means an unexpected error.",
 	}, []string{"reason"})
 	reg.MustRegister(failures)
 	// Pre-register all label values.

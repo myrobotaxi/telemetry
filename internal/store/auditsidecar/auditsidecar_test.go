@@ -98,7 +98,7 @@ func TestMarshalEntryNilMetadata(t *testing.T) {
 func TestNoopMetrics(t *testing.T) {
 	var m NoopMetrics
 	m.IncWrite()
-	m.IncFailure("aws")
+	m.IncFailure("put")
 	m.IncFailure("enqueue_full")
 	m.IncFailure("other")
 	m.IncFailure("unknown") // should not panic

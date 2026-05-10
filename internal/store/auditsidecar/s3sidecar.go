@@ -152,7 +152,7 @@ func (s *S3Sidecar) writeWithRetry(entry AuditEntry) {
 			slog.String("error", putErr.Error()))
 	}
 
-	s.metrics.IncFailure("aws")
+	s.metrics.IncFailure("put")
 	s.logWarn("auditsidecar: permanently dropping entry after all retries",
 		slog.String("audit_log_id", entry.ID),
 		slog.String("key", key),

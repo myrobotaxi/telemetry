@@ -49,8 +49,8 @@ func buildAuditRepo(
 	return store.NewAuditRepoWithSidecar(pool, sidecar, logger.With(slog.String("component", "audit-repo"))), nil
 }
 
-// setupAuditSidecar reads AUDIT_SIDECAR_BUCKET and AUDIT_SIDECAR_REGION
-// (default us-east-1) and returns either a live S3Sidecar or a NoopSidecar.
+// setupAuditSidecar reads AUDIT_SIDECAR_BUCKET / _REGION / _ENDPOINT and
+// returns either a live S3Sidecar or a NoopSidecar.
 //
 // Mode A (AUDIT_SIDECAR_BUCKET empty — local dev):
 //   - Returns auditsidecar.NoopSidecar{}, nil, nil.
@@ -58,10 +58,15 @@ func buildAuditRepo(
 //   - No metrics are registered, no goroutines are started.
 //
 // Mode B (AUDIT_SIDECAR_BUCKET set — production):
-//   - Constructs an AWSS3Putter using the ambient IAM role (IAM instance
-//     profile, ECS task role, or AWS_* env vars). The service role must hold
-//     s3:PutObject on the sidecar bucket ONLY — see
-//     deployments/terraform/audit-sidecar/iam.tf.
+//   - Constructs an S3Putter pointed at AUDIT_SIDECAR_ENDPOINT when that
+//     env var is set (Supabase Storage:
+//     `https://<project>.supabase.co/storage/v1/s3`). When empty the
+//     putter uses the default AWS regional endpoint.
+//   - Authenticates via standard AWS env vars (AWS_ACCESS_KEY_ID /
+//     AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN) or the ambient IAM
+//     role. For Supabase, set the keys to a Supabase Storage S3 access
+//     key scoped to the audit-sidecar bucket (created in the Supabase
+//     dashboard).
 //   - Registers audit_sidecar_writes_total, audit_sidecar_write_failures_total,
 //     and audit_sidecar_queue_depth on reg.
 //   - Starts the background worker goroutine. The returned closeFn must be
@@ -79,7 +84,7 @@ func setupAuditSidecar(
 	bucket := os.Getenv("AUDIT_SIDECAR_BUCKET")
 	if bucket == "" {
 		logger.Warn("AUDIT_SIDECAR_BUCKET not set — audit sidecar disabled (no-op); " +
-			"set AUDIT_SIDECAR_BUCKET to enable S3 mirroring for backup-retention runbook §2")
+			"set AUDIT_SIDECAR_BUCKET to enable Supabase Storage mirroring for backup-retention runbook §2")
 		return auditsidecar.NoopSidecar{}, nil, nil
 	}
 
@@ -87,8 +92,13 @@ func setupAuditSidecar(
 	if region == "" {
 		region = "us-east-1"
 	}
+	endpoint := os.Getenv("AUDIT_SIDECAR_ENDPOINT")
 
-	putter, err := auditsidecar.NewAWSS3Putter(ctx, region)
+	putter, err := auditsidecar.NewS3Putter(ctx, auditsidecar.PutterConfig{
+		Region:       region,
+		Endpoint:     endpoint,
+		UsePathStyle: endpoint != "", // Supabase Storage requires path-style.
+	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("constructing audit sidecar S3 putter: %w", err)
 	}
@@ -97,9 +107,15 @@ func setupAuditSidecar(
 	s := auditsidecar.NewS3Sidecar(auditsidecar.S3SidecarConfig{Bucket: bucket}, putter, m,
 		logger.With(slog.String("component", "audit-sidecar")))
 
+	backend := "aws-s3"
+	if endpoint != "" {
+		backend = "s3-compatible"
+	}
 	logger.Info("audit sidecar enabled",
 		slog.String("bucket", bucket),
-		slog.String("region", region))
+		slog.String("region", region),
+		slog.String("endpoint", endpoint),
+		slog.String("backend", backend))
 
 	return s, func(shutdownCtx context.Context) error {
 		return s.Close(shutdownCtx)

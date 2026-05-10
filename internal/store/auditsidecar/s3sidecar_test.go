@@ -223,12 +223,12 @@ func TestS3Sidecar_PermanentFailure(t *testing.T) {
 	}
 
 	m.mu.Lock()
-	awsFails := m.failures["aws"]
+	putFails := m.failures["put"]
 	writes := m.writes
 	m.mu.Unlock()
 
-	if awsFails != 1 {
-		t.Errorf("expected 1 aws failure; got %d", awsFails)
+	if putFails != 1 {
+		t.Errorf("expected 1 aws failure; got %d", putFails)
 	}
 	if writes != 0 {
 		t.Errorf("expected 0 writes on permanent failure; got %d", writes)
