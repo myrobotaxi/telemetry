@@ -36,11 +36,12 @@ type ResourceType string
 // v1 resource types. Field sets per (resource, role) are defined in
 // tables.go.
 const (
-	ResourceVehicleState ResourceType = "vehicle_state"
-	ResourceDriveSummary ResourceType = "drive_summary"
-	ResourceDriveDetail  ResourceType = "drive_detail"
-	ResourceDriveRoute   ResourceType = "drive_route"
-	ResourceInvite       ResourceType = "invite"
+	ResourceVehicleState   ResourceType = "vehicle_state"
+	ResourceVehicleSummary ResourceType = "vehicle_summary"
+	ResourceDriveSummary   ResourceType = "drive_summary"
+	ResourceDriveDetail    ResourceType = "drive_detail"
+	ResourceDriveRoute     ResourceType = "drive_route"
+	ResourceInvite         ResourceType = "invite"
 )
 
 // ResourceMask is the allow-list of field names visible to a single
