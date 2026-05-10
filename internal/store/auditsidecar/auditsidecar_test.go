@@ -2,6 +2,7 @@ package auditsidecar
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -29,18 +30,10 @@ func TestObjectKey(t *testing.T) {
 		Timestamp: ts,
 	}
 	got := objectKey(e)
-	want := "audit/v1/2026/05/09/user-xyz/123456789000123456789-audit-abc.json"
-	// The nano component encodes ts.UnixNano().
-	wantPrefix := "audit/v1/2026/05/09/user-xyz/"
-	if got[:len(wantPrefix)] != wantPrefix {
-		t.Errorf("objectKey() prefix = %q; want prefix %q", got, wantPrefix)
+	want := fmt.Sprintf("audit/v1/2026/05/09/user-xyz/%d-audit-abc.json", ts.UnixNano())
+	if got != want {
+		t.Errorf("objectKey() = %q; want %q", got, want)
 	}
-	// Verify the suffix contains the id.
-	suffix := "audit-abc.json"
-	if got[len(got)-len(suffix):] != suffix {
-		t.Errorf("objectKey() suffix = %q; want suffix %q", got, suffix)
-	}
-	_ = want // documented shape
 }
 
 // TestObjectKeyZeroTimestamp verifies that a zero Timestamp falls back to

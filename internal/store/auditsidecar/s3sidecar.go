@@ -39,20 +39,25 @@ type ObjectPutter interface {
 
 // S3Sidecar is the production Sidecar implementation. It wraps an
 // ObjectPutter (backed by aws-sdk-go-v2/service/s3 in production) and a
-// bounded in-process channel. The worker goroutine started by Start() drains
-// the channel and writes each entry to S3 with exponential back-off.
+// bounded in-process channel. The worker goroutine started by
+// NewS3Sidecar drains the channel and writes each entry to S3 with
+// exponential back-off.
 //
 // Concurrency model — multiple senders, one closer:
-//   - `closed` is the gate. CompareAndSwap in Close ensures Close is
-//     idempotent (a second invocation is a no-op).
-//   - Emit checks `closed` BEFORE attempting to send so a concurrent
-//     in-flight handler that lands after Close cannot panic on
-//     send-on-closed-channel. The race window between the check and
-//     the send is reabsorbed by the recover() in the send: a panic on
-//     a closed channel is caught and treated identically to a closed-
-//     after-check (return ErrSidecarClosed).
-//   - The worker drains the channel until it's closed AND empty, then
-//     signals via `done`.
+//   - The queue channel is INTENTIONALLY NEVER CLOSED. This eliminates
+//     the send-on-closed-channel race entirely.
+//   - `closed` (atomic.Bool) is the gate. Emit checks it before
+//     attempting to send and returns ErrSidecarClosed if set.
+//   - Close uses CompareAndSwap so a second invocation is a no-op
+//     (concurrent Close calls all wait on the same `done` outcome).
+//   - The worker selects on `<-s.queue` and `<-s.stop`. When `stop` is
+//     closed by Close, the worker drains whatever is already in the
+//     queue and exits.
+//   - There is a microscopic race window where Emit observes
+//     closed==false, Close flips it and the worker drains+exits, and
+//     the Emit send then lands in the buffer with no consumer. The
+//     entry returns nil (success) but never reaches S3. This is
+//     consistent with the at-most-once / DB-canonical contract.
 //
 // Construct via NewS3Sidecar; close via Close to drain the queue.
 type S3Sidecar struct {
@@ -109,7 +114,7 @@ func NewS3Sidecar(cfg S3SidecarConfig, putter ObjectPutter, m Metrics, logger *s
 // never close the channel there is no send-on-closed-channel race.
 func (s *S3Sidecar) Emit(entry AuditEntry) error {
 	if s.closed.Load() {
-		s.metrics.IncFailure("enqueue_full")
+		s.metrics.IncFailure("closed")
 		return ErrSidecarClosed
 	}
 	select {
