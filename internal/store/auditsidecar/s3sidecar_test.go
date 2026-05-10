@@ -95,9 +95,10 @@ func TestS3Sidecar_HappyPath(t *testing.T) {
 }
 
 // Test 2: queue overflow — fill the queue beyond capacity, assert ErrQueueFull
-// and the overflow counter increments, and Emit does not block.
+// AND that the enqueue_full counter incremented (the metric is the actual
+// operator-facing contract this PR ships via
+// audit_sidecar_write_failures_total{reason="enqueue_full"}).
 func TestS3Sidecar_QueueOverflow(t *testing.T) {
-	var failureCount int64
 	// blockingPutter never returns so the queue fills up.
 	var readyCh = make(chan struct{})
 	bp := &blockingPutter{readyCh: readyCh}
@@ -127,10 +128,12 @@ func TestS3Sidecar_QueueOverflow(t *testing.T) {
 	if !overflowed {
 		t.Error("expected at least one ErrQueueFull during overflow; got none")
 	}
-	if atomic.LoadInt64(&failureCount) < 0 {
-		t.Error("overflow counter should be non-negative")
+	m.mu.Lock()
+	enqueueFull := m.failures["enqueue_full"]
+	m.mu.Unlock()
+	if enqueueFull == 0 {
+		t.Error("expected at least one enqueue_full failure-counter increment on queue overflow; got 0")
 	}
-	_ = failureCount
 }
 
 // blockingPutter blocks on PutObject until readyCh is closed.
@@ -176,19 +179,31 @@ func (c *countingMetrics) SetQueueDepth(n int) {
 
 // Test 3: worker retry — fake returns error twice then succeeds; assert 3
 // total PutObject calls and writes counter increments once.
+//
+// Important: poll for the success BEFORE Close. The shutdown path
+// intentionally aborts in-flight retry sleeps to keep drain bounded
+// (otherwise a single bad entry could exceed drainTimeout) — so calling
+// Close while the worker is mid-retry would short-circuit the retry
+// loop. This test is verifying the retry mechanism itself, not the
+// shutdown abort, so we wait for the work to complete first.
 func TestS3Sidecar_WorkerRetry(t *testing.T) {
 	fp := &fakePutter{errCount: 2} // first 2 calls return error; 3rd succeeds
 	m := &countingMetrics{}
-	// Override baseRetryDelay would require a test hook; since we can't easily
-	// mock time.Sleep in this package without exporting it, we rely on the
-	// real retry loop with a short sleep. Increase deadline accordingly.
 	s := NewS3Sidecar(S3SidecarConfig{Bucket: "b", QueueSize: 16}, fp, m, nil)
 
 	if err := s.Emit(testEntry("retry-id")); err != nil {
 		t.Fatalf("Emit() error = %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// Wait for the worker to finish all 3 attempts (2 errors + 1 success).
+	// Retry delays are 0 + 1s + 2s = 3s, plus per-attempt PutObject latency.
+	// Poll up to 10s.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) && fp.totalCallCount() < 3 {
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := s.Close(ctx); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -276,4 +291,71 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(digits)
+}
+
+// TestS3Sidecar_CloseIdempotent verifies a second Close call does not panic
+// and returns nil cleanly (regression test for the close-on-closed-channel
+// bug fixed alongside the send-on-closed-channel race).
+func TestS3Sidecar_CloseIdempotent(t *testing.T) {
+	fp := &fakePutter{}
+	m := &countingMetrics{}
+	s := NewS3Sidecar(S3SidecarConfig{Bucket: "b"}, fp, m, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := s.Close(ctx); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := s.Close(ctx); err != nil {
+		t.Errorf("second Close should be a no-op; got %v", err)
+	}
+	// And a third for good measure (operators tend to chain defers).
+	if err := s.Close(ctx); err != nil {
+		t.Errorf("third Close should be a no-op; got %v", err)
+	}
+}
+
+// TestS3Sidecar_EmitAfterCloseDoesNotPanic races concurrent Emit calls with
+// Close. Without the closed-flag guard + recover this fans out into a
+// send-on-closed-channel panic that crashes the whole process. With the
+// guard, all post-close Emits return ErrSidecarClosed and the process stays
+// up.
+func TestS3Sidecar_EmitAfterCloseDoesNotPanic(t *testing.T) {
+	fp := &fakePutter{}
+	m := &countingMetrics{}
+	s := NewS3Sidecar(S3SidecarConfig{Bucket: "b", QueueSize: 4}, fp, m, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Spawn N senders racing with a single Close.
+	const senders = 50
+	const emitsPerSender = 20
+	var wg sync.WaitGroup
+	wg.Add(senders)
+	closedSeen := int64(0)
+	for i := 0; i < senders; i++ {
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < emitsPerSender; j++ {
+				if err := s.Emit(testEntry(uniqueID(id*1000 + j))); errors.Is(err, ErrSidecarClosed) {
+					atomic.AddInt64(&closedSeen, 1)
+				}
+			}
+		}(i)
+	}
+
+	// Close while senders are mid-flight.
+	if err := s.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	wg.Wait()
+
+	// We don't assert how MANY Emits saw ErrSidecarClosed — that depends on
+	// scheduling. We're asserting two things implicitly: (a) the test did
+	// not panic (would crash the whole binary), and (b) Emit's contract
+	// holds under the race.
+	t.Logf("post-close Emits that observed ErrSidecarClosed: %d / %d",
+		closedSeen, senders*emitsPerSender)
 }

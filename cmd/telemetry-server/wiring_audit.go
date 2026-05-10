@@ -39,6 +39,9 @@ func buildAuditRepo(
 		// outlive the cancelled process context.
 		go func() { //nolint:gosec // G118: intentional use of Background for post-cancel drain
 			<-ctx.Done()
+			// #nosec G115 -- The whole point of this goroutine is to run AFTER
+			// ctx is cancelled; we must derive a fresh context from
+			// Background to give the sidecar worker a deadline to drain.
 			closeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			if cerr := closeFn(closeCtx); cerr != nil {

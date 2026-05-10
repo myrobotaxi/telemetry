@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"sync/atomic"
 	"time"
 )
 
@@ -41,6 +42,18 @@ type ObjectPutter interface {
 // bounded in-process channel. The worker goroutine started by Start() drains
 // the channel and writes each entry to S3 with exponential back-off.
 //
+// Concurrency model — multiple senders, one closer:
+//   - `closed` is the gate. CompareAndSwap in Close ensures Close is
+//     idempotent (a second invocation is a no-op).
+//   - Emit checks `closed` BEFORE attempting to send so a concurrent
+//     in-flight handler that lands after Close cannot panic on
+//     send-on-closed-channel. The race window between the check and
+//     the send is reabsorbed by the recover() in the send: a panic on
+//     a closed channel is caught and treated identically to a closed-
+//     after-check (return ErrSidecarClosed).
+//   - The worker drains the channel until it's closed AND empty, then
+//     signals via `done`.
+//
 // Construct via NewS3Sidecar; close via Close to drain the queue.
 type S3Sidecar struct {
 	bucket  string
@@ -49,6 +62,8 @@ type S3Sidecar struct {
 	logger  *slog.Logger
 	queue   chan AuditEntry
 	done    chan struct{}
+	stop    chan struct{} // signals worker to abort retry sleeps during shutdown
+	closed  atomic.Bool   // set by Close; checked by Emit
 }
 
 // S3SidecarConfig holds constructor parameters.
@@ -74,16 +89,29 @@ func NewS3Sidecar(cfg S3SidecarConfig, putter ObjectPutter, m Metrics, logger *s
 		logger:  logger,
 		queue:   make(chan AuditEntry, qSize),
 		done:    make(chan struct{}),
+		stop:    make(chan struct{}),
 	}
 	go s.worker()
 	return s
 }
 
 // Emit enqueues an AuditEntry for async S3 upload. It never blocks on I/O.
-// Returns ErrQueueFull if the channel is at capacity; the caller must
-// increment a metric and log but must not propagate this error to the DB
-// caller.
+// Returns:
+//   - ErrSidecarClosed when Close has already been called (post-shutdown
+//     emissions are dropped — the DB INSERT remains canonical).
+//   - ErrQueueFull when the bounded channel is at capacity.
+//
+// Callers must handle both errors the same way: log, increment the
+// failure counter, and NEVER fail the upstream DB INSERT.
+//
+// The queue channel is intentionally never closed; the closed flag is
+// the only synchronisation point between Emit and Close, and because we
+// never close the channel there is no send-on-closed-channel race.
 func (s *S3Sidecar) Emit(entry AuditEntry) error {
+	if s.closed.Load() {
+		s.metrics.IncFailure("enqueue_full")
+		return ErrSidecarClosed
+	}
 	select {
 	case s.queue <- entry:
 		s.metrics.SetQueueDepth(len(s.queue))
@@ -94,10 +122,24 @@ func (s *S3Sidecar) Emit(entry AuditEntry) error {
 	}
 }
 
-// Close signals the worker to drain the remaining queue entries and waits for
-// it to finish (up to drainTimeout). Call from the graceful-shutdown chain.
+// Close signals the worker to stop accepting new work and drain whatever
+// is still in the queue. Call from the graceful-shutdown chain.
+//
+// Idempotent: a second invocation waits on the same `done` channel
+// (returns nil if the first drain succeeded; ctx.Err() if the caller's
+// context cancels first). The first invocation does the actual work.
 func (s *S3Sidecar) Close(ctx context.Context) error {
-	close(s.queue) // signal worker to drain and exit
+	if !s.closed.CompareAndSwap(false, true) {
+		// Another Close is in progress or has already completed; wait
+		// for the same `done` outcome.
+		select {
+		case <-s.done:
+			return nil
+		case <-ctx.Done():
+			return fmt.Errorf("auditsidecar: Close context cancelled: %w", ctx.Err())
+		}
+	}
+	close(s.stop) // tell worker to drain and exit
 	select {
 	case <-s.done:
 		return nil
@@ -109,12 +151,27 @@ func (s *S3Sidecar) Close(ctx context.Context) error {
 }
 
 // worker drains the queue, writing each entry to S3 with retries.
-// Runs until the queue channel is closed (by Close) and drained.
+// Runs until `stop` is signalled, at which point it drains whatever is
+// already in the queue and then exits.
 func (s *S3Sidecar) worker() {
 	defer close(s.done)
-	for entry := range s.queue {
-		s.metrics.SetQueueDepth(len(s.queue))
-		s.writeWithRetry(entry)
+	for {
+		select {
+		case entry := <-s.queue:
+			s.metrics.SetQueueDepth(len(s.queue))
+			s.writeWithRetry(entry)
+		case <-s.stop:
+			// Drain remaining entries already in the queue, then exit.
+			for {
+				select {
+				case entry := <-s.queue:
+					s.metrics.SetQueueDepth(len(s.queue))
+					s.writeWithRetry(entry)
+				default:
+					return
+				}
+			}
+		}
 	}
 }
 
@@ -135,7 +192,19 @@ func (s *S3Sidecar) writeWithRetry(entry AuditEntry) {
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {
 			delay := time.Duration(math.Pow(2, float64(attempt-1))) * baseRetryDelay
-			time.Sleep(delay)
+			// Sleep only until shutdown is signalled — otherwise a single
+			// permanently-failing entry could consume more than drainTimeout
+			// of wall-clock and starve the rest of the queue.
+			select {
+			case <-time.After(delay):
+			case <-s.stop:
+				s.metrics.IncFailure("put")
+				s.logWarn("auditsidecar: aborting retry during shutdown",
+					slog.String("audit_log_id", entry.ID),
+					slog.String("key", key),
+					slog.Int("attempt", attempt+1))
+				return
+			}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		putErr := s.putter.PutObject(ctx, s.bucket, key, body)

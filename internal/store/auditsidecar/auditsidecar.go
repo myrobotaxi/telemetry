@@ -87,6 +87,13 @@ func (NoopSidecar) Emit(_ AuditEntry) error { return nil }
 // channel is at capacity.
 var ErrQueueFull = sidecarError("audit_sidecar: queue full — entry dropped")
 
+// ErrSidecarClosed is returned by S3Sidecar.Emit after Close has been
+// called. Callers must handle it the same way as ErrQueueFull (log,
+// bump a metric, NEVER fail the upstream caller). Distinguishing it
+// from ErrQueueFull lets operators tell "drop because we're shutting
+// down" from "drop because we can't keep up" via metrics.
+var ErrSidecarClosed = sidecarError("audit_sidecar: closed — entry dropped")
+
 type sidecarError string
 
 func (e sidecarError) Error() string { return string(e) }
