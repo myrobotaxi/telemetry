@@ -63,6 +63,73 @@ tags:
     description: User-initiated data deletion (FR-10.1, FR-10.2).
 
 paths:
+  /vehicles:
+    get:
+      operationId: listVehicles
+      tags: [snapshot]
+      summary: List the signed-in caller's vehicles (catalog only).
+      description: |
+        Returns a thin catalog of vehicles the authenticated caller is
+        allowed to see. Catalog only — no GPS, no navigation, no live
+        telemetry detail. Per-vehicle live state lives in
+        GET /api/vehicles/{vehicleId}/snapshot (§7.1).
+
+        Pre-MYR-91 the only way to enumerate vehicles was the WebSocket
+        auth_ok frame's vehicleCount, which carried a count but not the
+        IDs needed to call other endpoints. This endpoint closes that
+        gap and is the SDK's vehicle-enumeration entry point.
+
+        RBAC: owner sees all VehicleSummary fields; viewer sees all
+        except `name` (P1, owner-curated nickname). v1 implementation
+        note: only the owner pathway is reachable today — viewer-merged
+        access requires the Go server to read the Prisma-owned Invite
+        table, which lands as a follow-up. Until then, viewer-tier
+        callers receive an empty list.
+
+        Pagination: not required in v1 (response is bounded; most users
+        have ≤ 3 cars). Reserved cursor + limit query params for future
+        use.
+      x-anchored-requirements:
+        - FR-4.x
+        - FR-5.4
+        - NFR-3.21
+      responses:
+        '200':
+          description: Vehicles catalog for the authenticated caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VehiclesListResponse'
+              examples:
+                owner-with-one-vehicle:
+                  summary: Owner sees the full VehicleSummary for their car.
+                  value:
+                    items:
+                      - vehicleId: clxyz1234567890abcdef
+                        name: Stumpy
+                        model: Model 3
+                        year: 2024
+                        color: Midnight Silver Metallic
+                        vinLast4: '0001'
+                        status: parked
+                        chargeLevel: 78
+                        estimatedRange: 245
+                        lastUpdated: '2026-05-10T17:45:00Z'
+                        role: owner
+                empty-list:
+                  summary: Authenticated user with no linked vehicles.
+                  value:
+                    items: []
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      x-role-masks:
+        owner: ['*']
+        viewer: ['*', '!name']
+
   /vehicles/{vehicleId}/snapshot:
     get:
       operationId: getVehicleSnapshot
@@ -992,6 +1059,114 @@ components:
                   row.
               enum: [device_cap, reauth_required]
               x-classification: P0
+
+    VehicleSummary:
+      type: object
+      description: |
+        Thin catalog representation of a vehicle returned by
+        GET /api/vehicles. Owner sees every field; viewer sees every
+        field EXCEPT `name`. No GPS / nav / charge-detail / climate
+        fields — those live in the per-vehicle snapshot (§7.1).
+      required:
+        - vehicleId
+        - model
+        - year
+        - color
+        - vinLast4
+        - status
+        - chargeLevel
+        - estimatedRange
+        - lastUpdated
+        - role
+      properties:
+        vehicleId:
+          type: string
+          description: Opaque DB cuid for the vehicle (FR-4.2). Never a VIN.
+          example: clxyz1234567890abcdef
+          x-classification: P0
+        name:
+          type: string
+          description: |
+            User-assigned vehicle nickname. P1 because it's commonly a
+            recognizable name; owner-only visibility (viewers see the
+            field absent from their projection per §5.2.0).
+          example: Stumpy
+          x-classification: P1
+        model:
+          type: string
+          description: Tesla model — Model 3, Model S, Model X, Model Y, Cybertruck, etc.
+          example: Model 3
+          x-classification: P0
+        year:
+          type: integer
+          description: Model year.
+          example: 2024
+          x-classification: P0
+        color:
+          type: string
+          description: Display color.
+          example: Midnight Silver Metallic
+          x-classification: P0
+        vinLast4:
+          type: string
+          description: Last 4 characters of the VIN. Full VIN never emitted (`redactVIN()`, data-classification.md §1.5).
+          minLength: 4
+          maxLength: 4
+          example: '0001'
+          x-classification: P0
+        status:
+          type: string
+          description: Coarse activity state from the VehicleStatus Prisma enum.
+          enum: [driving, parked, charging, offline, in_service]
+          example: parked
+          x-classification: P0
+        chargeLevel:
+          type: integer
+          description: Battery state of charge, 0–100. Lightweight catalog indicator; full charge group lives in /snapshot.
+          minimum: 0
+          maximum: 100
+          example: 78
+          x-classification: P0
+        estimatedRange:
+          type: integer
+          description: Estimated remaining range in miles. Same lightweight rationale as chargeLevel.
+          minimum: 0
+          example: 245
+          x-classification: P0
+        lastUpdated:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp of the most recent telemetry write.
+          example: '2026-05-10T17:45:00Z'
+          x-classification: P0
+        role:
+          type: string
+          description: |
+            The caller's role for this vehicle. v1 only emits "owner"
+            because viewer-merged access is PLANNED (Go server reads the
+            Prisma-owned Invite table). When that lands, viewer rows
+            will be merged into the same list.
+          enum: [owner, viewer]
+          example: owner
+          x-classification: P0
+
+    VehiclesListResponse:
+      type: object
+      description: |
+        Wrapper response for GET /api/vehicles. v1 returns the full list
+        in `items` and omits pagination metadata (response is bounded).
+        Future iterations may add `nextCursor` + `hasMore` per §4.2 once
+        per-user vehicle counts exceed bounded list rendering — SDK
+        consumers branch on the absence of `nextCursor` to detect a v1
+        server.
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          description: Vehicles the authenticated caller is allowed to see.
+          items:
+            $ref: '#/components/schemas/VehicleSummary'
 
     DriveSummary:
       type: object

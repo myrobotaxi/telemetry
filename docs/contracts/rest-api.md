@@ -63,6 +63,7 @@ Every FR/NFR listed here is anchored in at least one section of this doc. The ta
 5. RBAC and field masks
 6. Endpoint catalog summary
 7. Endpoint reference
+   0. `GET /api/vehicles` (list)
    1. `GET /api/vehicles/{vehicleId}/snapshot`
    2. `GET /api/vehicles/{vehicleId}/drives`
    3. `GET /api/drives/{driveId}`
@@ -92,7 +93,7 @@ REST endpoints are served from the same host as the WebSocket channel. The serve
 
 The base path is `/api` to match the existing `/api/ws` WebSocket path ([`internal/ws/handler.go`](../../internal/ws/handler.go) line 43) and the existing `/api/vehicle-status/{vin}` + `/api/fleet-config/{vin}` REST endpoints already registered in [`cmd/telemetry-server/main.go`](../../cmd/telemetry-server/main.go) lines 190 and 277. Adopting `/api` for the SDK's REST surface keeps the mount point consistent across channels.
 
-> **Divergence (DV-20):** None of the SDK-surface REST endpoints in §6 / §7 are mounted by the Go server today. The `/api` prefix is correct; the routes under it are not yet wired. See §10.
+> **Divergence (DV-20):** Most of the SDK-surface REST endpoints in §6 / §7 are not yet mounted by the Go server. `GET /api/vehicles` (§7.0) is the first to land (MYR-91, 2026-05-10); `/snapshot`, `/drives` (list + detail + route) remain pending. See §10.
 
 ### 2.2 Content type
 
@@ -389,6 +390,13 @@ The mask is applied at the **handler layer**: the store returns plaintext, fully
 
 ### 5.2 Per-resource masks
 
+#### 5.2.0 Vehicles list (`GET /api/vehicles`)
+
+| Role | Visible fields | Notes |
+|------|----------------|-------|
+| `owner` | All `VehicleSummary` fields: `vehicleId`, `name`, `model`, `year`, `color`, `vinLast4`, `status`, `chargeLevel`, `estimatedRange`, `lastUpdated`, `role` | Full catalog visibility. `role` is always `owner` for the row's caller-vehicle relationship. |
+| `viewer` | All `VehicleSummary` fields EXCEPT `name` | The user-assigned nickname (P1, owner-curated) is owner-only. Viewers still see model/year/color so they can identify the vehicle in their list, but the nickname stays with the owner. Forward-looking — see the §7.0 implementation note about the v1 viewer pathway being PLANNED. |
+
 #### 5.2.1 Vehicle snapshot (`GET /api/vehicles/{vehicleId}/snapshot`)
 
 | Role | Visible fields | Notes |
@@ -484,6 +492,7 @@ No contract changes are required for the new role's wire shape (the REST respons
 
 | Method | Path | Purpose | Auth | Anchored FRs/NFRs |
 |--------|------|---------|------|-------------------|
+| `GET` | `/api/vehicles` | List the caller's vehicles (catalog only, no telemetry detail) | Bearer (self) | FR-4.x, FR-5.4, NFR-3.21 |
 | `GET` | `/api/vehicles/{vehicleId}/snapshot` | Cold-load full VehicleState | Bearer + owner-or-viewer of vehicleId | FR-1.1, FR-1.2, FR-2.1, NFR-3.5, NFR-3.11 |
 | `GET` | `/api/vehicles/{vehicleId}/drives` | Paginated drive history for vehicle | Bearer + owner-or-viewer of vehicleId | FR-3.2, FR-9.1, FR-9.2 |
 | `GET` | `/api/drives/{driveId}` | Single drive detail (FR-3.4 stats + start/end addresses) | Bearer + owner-or-viewer of drive's vehicle | FR-3.4, FR-9.1 |
@@ -494,11 +503,115 @@ No contract changes are required for the new role's wire shape (the REST respons
 | `DELETE` | `/api/users/me` | Delete own account + all data | Bearer (self only) | FR-10.1, FR-10.2, NFR-3.29 |
 | `GET` | `/api/users/me/export` | GDPR Art. 15 / 20 portability export of every Prisma row owned by the caller | Bearer (self only) | FR-10, NFR-3.29 |
 
-All paths are PLANNED; none are mounted by the Go server today (DV-20). See §10. Note: `GET /api/users/me/export` (and the §7.6 / §7.5 endpoints) is served by the Next.js app per §10 DV-23 and is NOT in scope for the Go server's DV-20 mount.
+`GET /api/vehicles` is mounted by the Go server as of MYR-91 (2026-05-10). The other Go-server-owned paths (`/snapshot`, `/drives` list, `/drives/{id}`, `/drives/{id}/route`) are PLANNED — see DV-20 in §10. `GET /api/users/me/export` (and the §7.6 / §7.5 endpoints) is served by the Next.js app per §10 DV-23 and is NOT in scope for the Go server's DV-20 mount.
 
 ---
 
 ## 7. Endpoint reference
+
+### 7.0 `GET /api/vehicles`
+
+> **Anchored:** FR-4.x (vehicle catalog), FR-5.4 (owner/viewer roles), NFR-3.21 (ownership enforcement).
+
+#### Purpose
+
+Returns a thin catalog of vehicles the authenticated caller is allowed to see. This is the SDK's vehicle-enumeration entry point — the answer to "what are my cars?" Without it, every SDK consumer would have to read the Prisma `Vehicle` table directly, bypassing the contract.
+
+The response is deliberately a **catalog**, not telemetry. Live state (charge level, speed, location, navigation) lives in `§7.1 /snapshot` and is fetched per-vehicle once the consumer knows which vehicles to ask about. Pre-MYR-91 the only way to enumerate vehicles was the WebSocket `auth_ok` frame's `vehicleCount`, which carried a count but not the IDs needed to call other endpoints.
+
+#### Request
+
+```
+GET /api/vehicles HTTP/1.1
+Host: api.myrobotaxi.com
+Authorization: Bearer <token>
+```
+
+No request body, no query parameters in v1. Pagination (`cursor`, `limit`) is reserved for future use but not required — most users have ≤ 3 cars and the response is bounded.
+
+#### Response -- 200 OK
+
+```json
+{
+  "items": [
+    {
+      "vehicleId": "clxyz1234567890abcdef",
+      "name": "Stumpy",
+      "model": "Model 3",
+      "year": 2024,
+      "color": "Midnight Silver Metallic",
+      "vinLast4": "0001",
+      "status": "parked",
+      "chargeLevel": 78,
+      "estimatedRange": 245,
+      "lastUpdated": "2026-05-10T17:45:00Z",
+      "role": "owner"
+    }
+  ]
+}
+```
+
+##### VehicleSummary fields
+
+| Field | Type | Classification | Notes |
+|-------|------|----------------|-------|
+| `vehicleId` | `string` (cuid) | P0 | Opaque DB cuid. The SDK uses this in every other endpoint's path parameter (`/api/vehicles/{vehicleId}/snapshot`, etc.). |
+| `name` | `string` | P1 | User-assigned vehicle name. P1 because it's commonly a recognizable nickname; owner-visible only (see RBAC below). |
+| `model` | `string` | P0 | Tesla model: `Model 3`, `Model S`, `Model X`, `Model Y`, `Cybertruck`, etc. |
+| `year` | `integer` | P0 | Model year. |
+| `color` | `string` | P0 | Display color. |
+| `vinLast4` | `string` | P0 | Last 4 characters of the VIN — full VIN is never emitted per `data-classification.md` §1.5 + `redactVIN()`. |
+| `status` | `string` (enum) | P0 | One of `driving`, `parked`, `charging`, `offline`, `in_service`. Mirrors `VehicleStatus` Prisma enum. |
+| `chargeLevel` | `integer` | P0 | Battery state of charge, 0–100. Lightweight indicator for the catalog view; full charge group lives in `/snapshot`. |
+| `estimatedRange` | `integer` | P0 | Estimated remaining range in miles. Same lightweight rationale. |
+| `lastUpdated` | `string` (ISO 8601) | P0 | Timestamp of the last telemetry write to this vehicle. The catalog uses it to render "last seen N minutes ago." |
+| `role` | `string` (enum) | P0 | `owner` or `viewer`. The caller's relationship to the vehicle. See RBAC below. |
+
+##### Excluded from the list response
+
+The list is deliberately a thin catalog. The following are NOT in `VehicleSummary` and require `/snapshot` to fetch:
+
+- GPS coordinates (`latitude`, `longitude`, `heading`)
+- Navigation atomic group (`destination*`, `origin*`, `etaMinutes`, `tripDistanceRemaining`, `navRouteCoordinates`)
+- Speed, gear, climate, odometer, FSD-miles, full charge group (`chargeState`, `timeToFull`)
+- Location name / address
+
+The rationale is "the list is what you see; the snapshot is what you drill into." The SDK consumer pattern is: call `/api/vehicles` once on cold load, render the list, then call `/snapshot` for the active vehicle the user clicks into.
+
+#### Response -- error
+
+| HTTP | `error.code` | `subCode` | When |
+|------|--------------|-----------|------|
+| 401 | `auth_failed` | `null` | Missing/malformed/invalid token. |
+| 401 | `auth_failed` | `reauth_required` | The MYR-79 recent-login re-auth gate (`rest-api.md` §4.1.1) is NOT applied to this endpoint in v1 — `/api/vehicles` is non-destructive catalog data, not a deletion / bulk-export surface. The row is listed here as forward-looking: if a future iteration adds catalog-level operations (e.g., bulk un-link), the same carve-out as §7.6 / §7.7 would apply. v1 returns `null` subCode only. |
+| 429 | `rate_limited` | `null` | REST rate limit breached (§4.1.2). |
+| 500 | `internal_error` | `null` | Underlying DB failure during `VehicleRepo.ListByUser` or invite-merge join. |
+
+**Note on 403 / 404:** The list never returns 403 or 404 for the *list itself* — an authenticated user always sees at minimum an empty `items: []` array. Per-vehicle existence is hidden behind RBAC at the list level: vehicles the caller has no relationship to are silently absent (the same "silent existence-hiding" rule as `/snapshot` per §4.1.1). The list will never include a vehicle the caller can't see; conversely, a vehicle the caller can't see is indistinguishable from one that doesn't exist.
+
+#### RBAC
+
+See `§5.2.0` below for the per-role `VehicleSummary` mask. v1 behavior:
+
+- **Owner** sees every `VehicleSummary` field for every vehicle where `Vehicle.userId == callerId`.
+- **Viewer** sees every `VehicleSummary` field **EXCEPT** `name` (P1 — owner-curated nickname) for every vehicle where an accepted `Invite` row exists for the caller's email + the vehicle.
+- v1 implementation note: **owner-only is the only path currently reachable on the Go server.** The viewer-merged behavior is forward-looking — it requires the Go server to read the Prisma-owned `Invite` table, which lands as a follow-up ticket. Until then, viewer-tier callers receive an empty list. The mask matrix for `VehicleSummary` is wired now (in `internal/mask/tables.go`) so the viewer pathway is data-ready when the invite-read pathway lands.
+
+#### Idempotency
+
+`GET` is naturally idempotent. The catalog is read-only — a repeat call returns equivalent data modulo any new vehicle the user just linked.
+
+#### Implementation notes
+
+- The handler lives in `internal/telemetry/vehicles_list_handler.go` (analogous to `vehicle_status_handler.go`). It calls `VehicleRepo.ListByUser(ctx, userId)` for the owner slice. Viewer-shared vehicles are PLANNED (see RBAC v1 note above).
+- The mask projection is applied at the handler layer using `mask.For(mask.ResourceVehicleSummary, role)` — same plumbing as the snapshot endpoint. Owners and viewers branch on the role returned by `authenticator.ResolveRole(ctx, userId, vehicleId)` for each list item.
+- No audit-log row is emitted for the list itself (reads are not P1+ per `data-lifecycle.md` §4.2). The per-row mask projection's `fieldsMasked` count is observable via the existing REST mask-audit hook (1% sample) if any viewer-mask field ever strips, but in v1 (owner-only path) the projection is the identity.
+
+#### Forward-looking: pagination
+
+When a single user can plausibly own > 100 vehicles (fleet operators?), this endpoint will gain `cursor` + `limit` query params per `§4.2` cursor-based pagination. v1 returns the full list in one response and omits the `nextCursor` / `hasMore` envelope — the response is a bare `{ items: [...] }`. SDK consumers that handle the future paginated shape can branch on the absence of `nextCursor` to know they're talking to a v1 server.
+
+---
 
 ### 7.1 `GET /api/vehicles/{vehicleId}/snapshot`
 
@@ -1219,6 +1332,7 @@ Same as [`websocket-protocol.md`](websocket-protocol.md) §10 divergence managem
 
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-05-10 | **New `GET /api/vehicles` list endpoint ([MYR-91](https://linear.app/myrobotaxi/issue/MYR-91)).** Added a thin catalog endpoint to enumerate the signed-in caller's vehicles — closes the gap where the SDK had no way to answer "what are my cars?" without bypassing the contract via direct Prisma reads. Inserted as §7.0 (preserving existing §7.1–§7.7 numbering); §6 endpoint catalog grew a row; §5.2.0 declares the `VehicleSummary` per-role mask (owner sees all fields, viewer sees all minus `name`); OpenAPI spec gains the path + `VehicleSummary` component schema. Implementation: Go server mounts the handler at `GET /api/vehicles` (`internal/telemetry/vehicles_list_handler.go`) reading from `VehicleRepo.ListByUser`. v1 returns owner-owned vehicles only; the viewer-merged pathway is documented but PLANNED — depends on the Go server reading the Prisma-owned `Invite` table in a follow-up. No pagination in v1 (response is bounded; reserved query params for future). Test bench (P6 MYR-88) and SDK `client.vehicles.list()` (P3 MYR-80) consume this endpoint. | sdk-architect |
 | 2026-05-10 | **Recent-login re-auth gate documented ([MYR-79](https://linear.app/myrobotaxi/issue/MYR-79); implementation [MYR-76](https://linear.app/myrobotaxi/issue/MYR-76)).** §7.6 (`DELETE /api/users/me`) and §7.7 (`GET /api/users/me/export`) gain a **Re-auth precondition** subsection requiring the caller's most recent fresh OAuth sign-in to be within `REAUTH_MAX_AGE_SEC` (default 300 s); rejection returns `401 auth_failed` with the new `subCode: reauth_required`. The gate applies symmetrically to deletion (destructive) and export (full-graph exfiltration) per the GDPR Art. 17 recent-auth corollary — both endpoints surface the entire ownership graph, so a stolen Bearer token must not satisfy either path alone. §4.1.1 `auth_failed` row updated to document the new subCode and the **explicit carve-out from the `getToken()` retry path**: SDKs MUST surface `reauth_required` to the consumer's auth layer for an interactive sign-in flow rather than swallowing it with a silent token refresh, because the `auth_time` claim only advances on a fresh OAuth round-trip. The §7.7 deferral note is replaced with the RESOLVED reference. Cross-contract: [`../architecture/requirements.md`](../architecture/requirements.md) §2.10 flipped from Deferred to Resolved. No wire/OpenAPI/schema-shape changes — `subCode` was already an existing field on the §4.1 error envelope. | sdk-architect |
 | 2026-05-09 | **GDPR readiness pack docs ([MYR-75](https://linear.app/myrobotaxi/issue/MYR-75) Phase B).** Adds §7.7 `GET /api/users/me/export` to the endpoint reference (Phase A handler shipped in [tnando/my-robo-taxi#259](https://github.com/tnando/my-robo-taxi/pull/259)) — JSON archive of every Prisma row owned by the caller, P1 columns decrypted at the crypto boundary, OAuth credentials explicitly excluded; audit-log side effect documented as the new `data_exported` action in [`data-lifecycle.md`](data-lifecycle.md) §4.2 with `metadata: {vehicleCount, driveCount, inviteCount, auditCount}` (P0 counts only per Rule CG-DL-5). §1 TOC and §6 endpoint catalog summary updated. The optional recent-login re-auth gate from MYR-75's three-piece scoping is deferred to a follow-up issue and noted in §7.7 implementation notes + [`../architecture/requirements.md`](../architecture/requirements.md) §2.10. Companion runbook: [`../operations/backup-retention.md`](../operations/backup-retention.md) (Supabase backup window, redelete-on-restore procedure honoring GDPR Art. 17, legal-basis-for-retention boundary). | sdk-architect |
 | 2026-05-08 | **DV-23 RESOLVED by [MYR-69](https://linear.app/myrobotaxi/issue/MYR-69).** Locked the FR-10 deletion + §7.5 invite-endpoint architecture to **Option 2 -- Next.js app owns `DELETE /api/users/me` and the three invite endpoints**, with the Go telemetry server holding **Insert-only** access to the Prisma-owned `AuditLog` table via raw pgx. §7.5 preamble rewritten from "two implementation paths" to a single locking sentence. §7.6 implementation notes' "may also run in the Next.js app layer" hedge replaced with a definitive Next.js-owns statement. §10 DV-23 row flipped from **New** to **RESOLVED** with resolution date, rationale, and pointers to MYR-70 / MYR-71 / MYR-72 / MYR-73 implementation follow-ups. **DV-20 row reduced in scope from six endpoints to four**: invite + user-deletion 404s on the Go server are now the terminal behavior (served by Next.js per DV-23), not transitional Go-server work; implementation order steps (5)/(6) and the FR-5.x / FR-10.1 anchors removed. Cross-contract update: [`data-lifecycle.md`](data-lifecycle.md) §1.4 adds an `AuditLog` row noting the telemetry server has Insert-only access; §4 preamble locks `AuditLog` ownership to the Next.js Prisma schema with the Go server as Insert-only writer (responsibility per §3.4). No wire / OpenAPI / SDK API changes -- the SDK still calls the single `https://api.myrobotaxi.com/api/...` base URL. | sdk-architect |

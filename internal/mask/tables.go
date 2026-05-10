@@ -28,6 +28,18 @@ var masksByResource = map[ResourceType]map[auth.Role]ResourceMask{
 		auth.RoleViewer: setFromFields(vehicleStateViewerFields),
 	},
 
+	// rest-api.md §5.2.0 — Vehicles list (vehicle summary). Owners see
+	// every field; viewers see every field EXCEPT `name` (P1,
+	// owner-curated nickname). Per §7.0, v1 only reaches the owner
+	// branch (viewer-merged enumeration depends on the Go server
+	// reading the Prisma-owned Invite table — PLANNED), but the viewer
+	// mask is wired now so the data-side is ready when the invite-read
+	// pathway lands.
+	ResourceVehicleSummary: {
+		auth.RoleOwner:  setFromFields(vehicleSummaryOwnerFields),
+		auth.RoleViewer: setFromFields(vehicleSummaryViewerFields),
+	},
+
 	// rest-api.md §5.2.2 — Drive list (drive summary). Owners and
 	// viewers see the same field set; viewers are read-only per
 	// FR-5.4 but observe the same data. startAddress / startLocation
@@ -143,6 +155,31 @@ var vehicleStateOwnerFields = []string{
 // vehicleStateViewerFields is owner minus licensePlate, per
 // rest-api.md §5.2.1. Built lazily in init() to avoid drift.
 var vehicleStateViewerFields = removeField(vehicleStateOwnerFields, "licensePlate")
+
+// vehicleSummaryOwnerFields is the v1 owner allow-list for the
+// vehicles-list catalog response (rest-api.md §5.2.0 / §7.0). Thin
+// catalog only — no GPS, no nav, no climate. SDK consumers calling
+// `client.vehicles.list()` get these fields per row; per-vehicle
+// telemetry is fetched via `/snapshot` (§7.1).
+var vehicleSummaryOwnerFields = []string{
+	"vehicleId",
+	"name",
+	"model",
+	"year",
+	"color",
+	"vinLast4",
+	"status",
+	"chargeLevel",
+	"estimatedRange",
+	"lastUpdated",
+	"role",
+}
+
+// vehicleSummaryViewerFields is owner minus `name` per rest-api.md
+// §5.2.0. The user-assigned nickname is P1 and stays owner-only;
+// viewers still see model/year/color so they can identify the car in
+// their list.
+var vehicleSummaryViewerFields = removeField(vehicleSummaryOwnerFields, "name")
 
 // driveSummaryFields is the per-row drive-list allow-list shared by
 // owner and viewer per rest-api.md §5.2.2. Excludes startAddress /
