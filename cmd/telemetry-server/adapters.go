@@ -143,6 +143,39 @@ func (a *vehicleOwnerAdapter) GetVehicleOwner(ctx context.Context, vin string) (
 	return userID, nil
 }
 
+// vehicleListerAdapter adapts store.VehicleRepo.ListByUser to the
+// narrow telemetry.VehicleLister interface used by the
+// GET /api/vehicles handler (MYR-91). The adapter exists so the
+// handler can stay decoupled from internal/store (which would
+// otherwise form an import cycle through cmd/ops).
+type vehicleListerAdapter struct {
+	repo *store.VehicleRepo
+}
+
+func (a *vehicleListerAdapter) ListByUser(ctx context.Context, userID string) ([]telemetry.VehicleCatalogRow, error) {
+	rows, err := a.repo.ListByUser(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list vehicles by user: %w", err)
+	}
+	out := make([]telemetry.VehicleCatalogRow, 0, len(rows))
+	for i := range rows {
+		v := &rows[i]
+		out = append(out, telemetry.VehicleCatalogRow{
+			ID:             v.ID,
+			VIN:            v.VIN,
+			Name:           v.Name,
+			Model:          v.Model,
+			Year:           v.Year,
+			Color:          v.Color,
+			Status:         string(v.Status),
+			ChargeLevel:    v.ChargeLevel,
+			EstimatedRange: v.EstimatedRange,
+			LastUpdated:    v.LastUpdated,
+		})
+	}
+	return out, nil
+}
+
 // teslaTokenAdapter adapts store.AccountRepo to the
 // telemetry.TeslaTokenProvider interface, converting the store-layer
 // TeslaOAuthToken (Unix epoch) to the telemetry-layer TeslaToken (time.Time).

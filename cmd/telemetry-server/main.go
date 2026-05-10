@@ -281,6 +281,7 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 		recv:           recv,
 		bus:            bus,
 		vinCache:       vinCache,
+		vehicleRepo:    vehicleRepo,
 		accountRepo:    accountRepo,
 		debugGate:      debugGate,
 		originPatterns: originPatterns,

@@ -132,6 +132,7 @@ type httpRouteDeps struct {
 	recv           *telemetry.Receiver
 	bus            events.Bus
 	vinCache       *store.VINCache
+	vehicleRepo    *store.VehicleRepo
 	accountRepo    *store.AccountRepo
 	debugGate      debugFieldsGate
 	originPatterns []string
@@ -157,6 +158,17 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 		deps.logger.With(slog.String("component", "vehicle-status")),
 	)
 	deps.srv.HandleFunc("GET /api/vehicle-status/{vin}", statusHandler.ServeHTTP)
+
+	// MYR-91: GET /api/vehicles — list endpoint that enumerates the
+	// caller's vehicles for SDK consumers (rest-api.md §7.0). v1
+	// returns owned vehicles only via VehicleRepo.ListByUser; the
+	// viewer-merged pathway is PLANNED.
+	vehiclesListHandler := telemetry.NewVehiclesListHandler(
+		deps.authenticator,
+		&vehicleListerAdapter{repo: deps.vehicleRepo},
+		deps.logger.With(slog.String("component", "vehicles-list")),
+	)
+	deps.srv.HandleFunc("GET /api/vehicles", vehiclesListHandler.ServeHTTP)
 
 	setupFleetConfigEndpoint(deps.cfg, deps.srv, deps.authenticator, deps.vinCache, deps.accountRepo, deps.logger)
 
