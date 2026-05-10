@@ -52,9 +52,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/tnando/my-robo-taxi-telemetry/internal/store/auditsidecar"
 )
 
 // AuditAction is the enum-like string written to the AuditLog.action column.
@@ -119,13 +122,28 @@ type AuditEntry struct {
 // (Phase 1 migration triggers) and at the API surface (this type exposes
 // only InsertAuditLog). See the cross-repo coupling note at the top of
 // this file.
+//
+// Sidecar (MYR-77): after every successful DB INSERT, the repo calls
+// sidecar.Emit to enqueue the entry for async S3 upload. Sidecar failures
+// are logged and metered but NEVER propagate back to the caller — the DB
+// is canonical and the sidecar is best-effort, at-most-once.
 type AuditRepo struct {
-	pool *pgxpool.Pool
+	pool    *pgxpool.Pool
+	sidecar auditsidecar.Sidecar
+	logger  *slog.Logger
 }
 
-// NewAuditRepo creates an AuditRepo backed by the given connection pool.
+// NewAuditRepo creates an AuditRepo backed by the given connection pool
+// and the provided sidecar. Pass auditsidecar.NoopSidecar{} (or use
+// NewAuditRepoWithSidecar) when sidecar mirroring is not required.
 func NewAuditRepo(pool *pgxpool.Pool) *AuditRepo {
-	return &AuditRepo{pool: pool}
+	return &AuditRepo{pool: pool, sidecar: auditsidecar.NoopSidecar{}}
+}
+
+// NewAuditRepoWithSidecar creates an AuditRepo wired with a live sidecar.
+// Used by the composition root when AUDIT_SIDECAR_BUCKET is set.
+func NewAuditRepoWithSidecar(pool *pgxpool.Pool, sc auditsidecar.Sidecar, logger *slog.Logger) *AuditRepo {
+	return &AuditRepo{pool: pool, sidecar: sc, logger: logger}
 }
 
 // queryAuditInsert names every column explicitly so column-order changes
@@ -186,5 +204,30 @@ func (r *AuditRepo) InsertAuditLog(ctx context.Context, entry AuditEntry) error 
 	if err != nil {
 		return fmt.Errorf("store.AuditRepo.InsertAuditLog: %w", err)
 	}
+
+	// Best-effort sidecar emit (MYR-77). The DB INSERT has already succeeded;
+	// sidecar failure MUST NOT fail the audit row from the caller's perspective.
+	// Emit is non-blocking (enqueues to a bounded channel). ErrQueueFull means
+	// the channel was at capacity — the entry is dropped for the sidecar but the
+	// DB row persists.
+	sidecarEntry := auditsidecar.AuditEntry{
+		ID:         entry.ID,
+		UserID:     entry.UserID,
+		Timestamp:  timestamp,
+		Action:     string(entry.Action),
+		TargetType: entry.TargetType,
+		TargetID:   entry.TargetID,
+		Initiator:  entry.Initiator,
+		Metadata:   metadata,
+		CreatedAt:  createdAt,
+	}
+	if emitErr := r.sidecar.Emit(sidecarEntry); emitErr != nil {
+		if r.logger != nil {
+			r.logger.Warn("audit sidecar emit failed — DB row persisted, sidecar entry dropped",
+				slog.String("audit_log_id", entry.ID),
+				slog.String("error", emitErr.Error()))
+		}
+	}
+
 	return nil
 }

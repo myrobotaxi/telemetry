@@ -187,7 +187,16 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	// refreshes on its own goroutine until the rollouts complete. See
 	// startPlaintextGauges in wiring.go.
 	startPlaintextGauges(ctx, reg, db.Pool(), accountTokenGaugeInterval, vehicleGPSGaugeInterval, routeBlobGaugeInterval, logger)
-	auditRepo := store.NewAuditRepo(db.Pool())
+	// --- Audit sidecar (MYR-77) ---
+	// Best-effort S3 mirror of every AuditLog INSERT.
+	// No-op when AUDIT_SIDECAR_BUCKET is empty (local dev).
+	// Production: set AUDIT_SIDECAR_BUCKET + AUDIT_SIDECAR_REGION; the service
+	// IAM role (telemetry-server-audit-sidecar) grants s3:PutObject only —
+	// see deployments/terraform/audit-sidecar/iam.tf.
+	auditRepo, err := buildAuditRepo(ctx, reg, db.Pool(), logger)
+	if err != nil {
+		return fmt.Errorf("building audit repo: %w", err)
+	}
 
 	// --- Mask-audit emitter (MYR-71, rest-api.md §5.3) ---
 	// MaskAuditEmitter adapts AuditRepo to the mask.AuditEmitter
