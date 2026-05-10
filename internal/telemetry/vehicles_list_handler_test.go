@@ -98,6 +98,25 @@ func TestVehiclesListHandler_ServeHTTP(t *testing.T) {
 			wantStatus:     http.StatusOK,
 			wantItemsLen:   1,
 		},
+		{
+			name:           "multi-row owned list returns 200 with N items",
+			authHeader:     "Bearer " + authToken,
+			tokenValidator: &stubTokenValidator{userID: userID},
+			lister: &stubVehicleLister{rows: append([]VehicleCatalogRow{}, owned[0], VehicleCatalogRow{
+				ID:             "clmno5678901234ghijkl",
+				VIN:            "5YJ3E1EA1PF000002",
+				Name:           "Lightning",
+				Model:          "Model Y",
+				Year:           2023,
+				Color:          "Pearl White Multi-Coat",
+				Status:         "charging",
+				ChargeLevel:    42,
+				EstimatedRange: 132,
+				LastUpdated:    now.Add(-3 * time.Minute),
+			})},
+			wantStatus:   http.StatusOK,
+			wantItemsLen: 2,
+		},
 	}
 
 	for _, tt := range tests {
@@ -131,6 +150,91 @@ func TestVehiclesListHandler_ServeHTTP(t *testing.T) {
 				t.Errorf("len(items) = %d, want %d", len(resp.Items), tt.wantItemsLen)
 			}
 		})
+	}
+}
+
+func TestVehiclesListHandler_MultiRowProjectionPreservesOrderAndFields(t *testing.T) {
+	rows := []VehicleCatalogRow{
+		{
+			ID:             "clxyz1234567890abcdef",
+			VIN:            "5YJ3E1EA1PF000001",
+			Name:           "Stumpy",
+			Model:          "Model 3",
+			Year:           2024,
+			Color:          "Midnight Silver Metallic",
+			Status:         "parked",
+			ChargeLevel:    78,
+			EstimatedRange: 245,
+			LastUpdated:    time.Date(2026, 5, 10, 17, 45, 0, 0, time.UTC),
+		},
+		{
+			ID:             "clmno5678901234ghijkl",
+			VIN:            "5YJ3E1EA1PF000002",
+			Name:           "Lightning",
+			Model:          "Model Y",
+			Year:           2023,
+			Color:          "Pearl White Multi-Coat",
+			Status:         "charging",
+			ChargeLevel:    42,
+			EstimatedRange: 132,
+			LastUpdated:    time.Date(2026, 5, 10, 17, 42, 13, 0, time.UTC),
+		},
+	}
+
+	h := NewVehiclesListHandler(
+		&stubTokenValidator{userID: "user-1"},
+		&stubVehicleLister{rows: rows},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/vehicles", nil)
+	req.Header.Set("Authorization", "Bearer valid")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. Body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != 2 {
+		t.Fatalf("want 2 items, got %d. Body: %s", len(resp.Items), rec.Body.String())
+	}
+
+	// Ordering preserved (same as input order — ListByUser sorts
+	// ORDER BY "name", "vin" at the repo layer; the handler does not
+	// re-sort, so input ordering is what the consumer sees).
+	if got := resp.Items[0]["vehicleId"]; got != "clxyz1234567890abcdef" {
+		t.Errorf("items[0].vehicleId = %v, want Stumpy's ID", got)
+	}
+	if got := resp.Items[1]["vehicleId"]; got != "clmno5678901234ghijkl" {
+		t.Errorf("items[1].vehicleId = %v, want Lightning's ID", got)
+	}
+
+	// Each row is independently projected with its own field values.
+	if got := resp.Items[0]["status"]; got != "parked" {
+		t.Errorf("items[0].status = %v, want parked", got)
+	}
+	if got := resp.Items[1]["status"]; got != "charging" {
+		t.Errorf("items[1].status = %v, want charging", got)
+	}
+	if got := resp.Items[0]["chargeLevel"]; got != float64(78) {
+		t.Errorf("items[0].chargeLevel = %v, want 78", got)
+	}
+	if got := resp.Items[1]["chargeLevel"]; got != float64(42) {
+		t.Errorf("items[1].chargeLevel = %v, want 42", got)
+	}
+
+	// VIN redaction applied per-row independently.
+	if got := resp.Items[0]["vinLast4"]; got != "0001" {
+		t.Errorf("items[0].vinLast4 = %v, want 0001", got)
+	}
+	if got := resp.Items[1]["vinLast4"]; got != "0002" {
+		t.Errorf("items[1].vinLast4 = %v, want 0002", got)
 	}
 }
 

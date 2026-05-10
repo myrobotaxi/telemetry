@@ -176,6 +176,15 @@ func (h *VehiclesListHandler) buildResponse(rows []VehicleCatalogRow, role auth.
 			LastUpdated:    v.LastUpdated.UTC().Format(time.RFC3339),
 			Role:           string(role),
 		}
+		// `fieldsMasked` is intentionally discarded in v1: §7.0 reads
+		// are not audited per `data-lifecycle.md` §4.2, and the v1
+		// path only ever projects RoleOwner (which is the identity for
+		// the owner allow-list — projection strips nothing). When the
+		// viewer-merged invite-read pathway lands, this is where the
+		// 1% sampled `mask_applied` audit hook (mirrors
+		// `vehicle_status_mask.go` maybeEmitAuditREST) gets wired so
+		// a misclassified field surfaces in the audit stream rather
+		// than silently dropping.
 		projected, _ := mask.Apply(summary.toMaskMap(), maskSpec)
 		items = append(items, projected)
 	}
