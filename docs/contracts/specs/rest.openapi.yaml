@@ -768,11 +768,13 @@ components:
                 error:
                   code: auth_failed
                   message: invalid token
+                  subCode: null
             auth-timeout:
               value:
                 error:
                   code: auth_timeout
                   message: 'authenticator.ValidateToken: deadline exceeded'
+                  subCode: null
             reauth-required:
               summary: Recent-login re-auth gate failed (rest-api.md §7.6 / §7.7, MYR-76)
               value:
@@ -968,8 +970,11 @@ components:
               x-classification: P0
             subCode:
               type: string
+              nullable: true
               description: |
-                Optional typed sub-code. Two values in v1:
+                Optional typed sub-code. The field is always present on
+                the wire; the carrier emits JSON `null` when there is
+                no sub-code to attach. Two non-null values in v1:
 
                 - device_cap (WS-only): per-user concurrent-connection
                   cap breach on the WebSocket path. Declared on the
