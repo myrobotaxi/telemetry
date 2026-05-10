@@ -1,6 +1,6 @@
 # Encryption key rotation
 
-> **Status (as of MYR-64, 2026-05-09): full P1 rollout — OAuth tokens + Vehicle GPS + route blobs encrypted.** The `internal/cryptox` package and the startup wiring are landed; `ENCRYPTION_KEY` is required at boot. **`Account.access_token`, `Account.refresh_token`, and `Account.id_token` are encrypted on disk** via the MYR-62 dual-write rollout (TS Phase 1 + Go Phase 2). **The six Vehicle GPS columns (`latitude`/`longitude`, `destinationLatitude`/`destinationLongitude`, `originLatitude`/`originLongitude`) are encrypted on disk** via the MYR-63 dual-write rollout (TS Phase 1 + Go Phase 2). **The route-blob polylines (`Vehicle.navRouteCoordinates`, `Drive.routePoints`) are encrypted on disk** via the MYR-64 dual-write rollout (TS Phase 1 + Go Phase 2). Every P1 column identified by `data-classification.md` §3.1 now has a Phase-2 encrypt-on-write path. **Do NOT execute the rotation procedure in production until the `cryptox_decrypt_total{version="N"}` counter is wired** (see §"Observability") — without the counter, step 6 of the procedure cannot be completed safely.
+> **Status (as of MYR-65, 2026-05-09): full P1 rollout + decrypt observability wired — rotation runbook is production-ready.** The `internal/cryptox` package and the startup wiring are landed; `ENCRYPTION_KEY` is required at boot. **`Account.access_token`, `Account.refresh_token`, and `Account.id_token` are encrypted on disk** via the MYR-62 dual-write rollout (TS Phase 1 + Go Phase 2). **The six Vehicle GPS columns (`latitude`/`longitude`, `destinationLatitude`/`destinationLongitude`, `originLatitude`/`originLongitude`) are encrypted on disk** via the MYR-63 dual-write rollout (TS Phase 1 + Go Phase 2). **The route-blob polylines (`Vehicle.navRouteCoordinates`, `Drive.routePoints`) are encrypted on disk** via the MYR-64 dual-write rollout (TS Phase 1 + Go Phase 2). Every P1 column identified by `data-classification.md` §3.1 now has a Phase-2 encrypt-on-write path. **As of MYR-65, the `cryptox_decrypt_total{version="N"}` Prometheus counter is wired and exposed on the existing `/metrics` endpoint** — operators can now drive the rotation procedure end-to-end including step 6 (confirm v1 series decays to zero before retiring v1). The first staging drill is tracked in §"Drill log".
 
 ## Purpose
 
@@ -97,11 +97,39 @@ This is the canonical happy-path rotation. Each step is independent and observab
 
 ## Observability
 
-The `internal/cryptox` package emits one counter per decrypt call (TODO: wired in a follow-on PR alongside the first column rollout):
+The `internal/cryptox` package emits one Prometheus counter per successful decrypt, exposed on the existing `/metrics` endpoint:
 
-- `cryptox_decrypt_total{version="N"}` — increments on every successful decrypt of a ciphertext stamped with version `N`. During rotation, the v1 series should decay to zero before v1 is retired.
+- `cryptox_decrypt_total{version="N"}` — increments on every successful decrypt of a ciphertext stamped with version `N`. During rotation, the v1 series should decay to zero before v1 is retired (procedure step 6).
 
-Until the counter is wired (see "Foundation status" in `data-classification.md` §3.3), rotation operators rely on the application logs (`encryptor initialized` at startup logs `write_version`) and integration tests against representative production data shapes.
+Implementation details:
+
+- Wired into `keySetEncryptor.DecryptString` AFTER the AES-GCM `Open` succeeds. Failed decrypts (auth-tag mismatch, truncated input, unknown version, base64 errors) MUST NOT count — otherwise tampered traffic at the decrypt path inflates the counter and hides the v1-decay signal.
+- All readable-version labels are pre-registered with value `0` at startup, so a `/metrics` scrape immediately after deploy reports the full label set rather than missing labels (the latter is indistinguishable from a never-seen version on operator dashboards).
+- Composition root: `cmd/telemetry-server/wiring.go` `setupEncryption` constructs `cryptox.PrometheusMetrics` against the same registry that already serves `/metrics`. Library consumers without a Prometheus registry get the zero-cost `cryptox.NoopMetrics` default — no allocation, no overhead.
+
+Operators also have the application logs (`encryptor initialized` at startup logs `write_version` and `readable_versions`) for an at-startup sanity check that the deployed key set matches expectations.
+
+## Drill log
+
+Each entry records a real or staged execution of the rotation procedure with the dates, observed counter behavior, and any runbook adjustments. The drill log is the audit trail operators consult before approving a production rotation.
+
+### Drill 1 — Staging dual-key dry run (planned, not yet executed)
+
+- **Status:** Planned — to be executed by the on-call operator on staging once the metric wiring lands on `main`.
+- **Tracking:** Code-level deliverables (metric wiring + runbook updates) ship in [MYR-65](https://linear.app/myrobotaxi/issue/MYR-65). Drill execution itself is an ops-only follow-up tracked separately so contract-level changes don't block on staging-environment availability.
+- **Prerequisites:**
+  - `cryptox_decrypt_total{version="N"}` visible on the staging `/metrics` endpoint with at least the v1 label pre-seeded at zero.
+  - A v2 key generated via `head -c 32 /dev/urandom | base64` and stored in the staging Fly.io secret manager.
+  - Representative load: at least one synthetic vehicle session (cmd/simulator) and one human session active during step 4 onward, so the v1 series ticks under realistic decrypt traffic and the decay curve is observable.
+  - Re-encrypt-on-read background job available (currently per-column backfill CLIs: `cmd/backfill-account-tokens`, `cmd/backfill-vehicle-gps`, `cmd/backfill-route-blobs`). Drill must exercise all three or document which columns the drill skipped.
+- **Plan:** Execute steps 1–7 of the §"Procedure" section above, in order. Each step is observable independently: step 2 is a deploy with a config change, step 3 is a manual check, step 4 is a deploy, step 5 is a backfill run, step 6 is a Grafana query against the staging Prometheus, step 7 is a deploy.
+- **Success criteria:**
+  - Step 3: a manual `/snapshot` request decrypts both v1 and v2 ciphertexts (both labels increment at least once on `cryptox_decrypt_total`).
+  - Step 4: new writes carry version byte `0x02` (verify by tailing a freshly-written row through the backfill CLI's verifier or by base64-decoding the column).
+  - Step 5: the v1 backfill counters in `account_token_plaintext_remaining_total`, `vehicle_gps_plaintext_remaining_total`, and `route_blob_plaintext_remaining_total` go to zero AND `cryptox_decrypt_total{version="1"}` decay rate trends to zero.
+  - Step 6: `cryptox_decrypt_total{version="1"}` rate is `0` for ≥24h continuous under representative staging load. If the counter is stale (no traffic), extend the window — `0` from a quiet system does not satisfy the criterion.
+  - Step 7: post-retirement, any v1 ciphertext that surfaces returns `ErrUnknownKeyVersion`. Synthesize a v1 blob via `cmd/ops cryptox encrypt --version 1 …` and confirm decrypt fails as expected.
+- **Runbook adjustments to record:** When the drill runs, append a new sub-entry under this section recording (a) date, (b) observed v1 decay curve (sketch / Grafana screenshot link), (c) any unexpected behavior, and (d) runbook patches required.
 
 ## Failure modes
 
@@ -128,3 +156,4 @@ Until the counter is wired (see "Foundation status" in `data-classification.md` 
 | 2026-05-09 | [MYR-62](https://linear.app/myrobotaxi/issue/MYR-62) flips Account OAuth-token columns (`access_token`, `refresh_token`, `id_token`) from the unfinished list to the encrypted set. Foundation-status callout updated; OAuth tokens removed from the "no P1 column is yet encrypted" wording. Vehicle/Drive GPS columns and route blobs remain on the unfinished list. | go-engineer |
 | 2026-05-09 | [MYR-63](https://linear.app/myrobotaxi/issue/MYR-63) flips the six Vehicle GPS columns (`latitude`, `longitude`, `destinationLatitude`, `destinationLongitude`, `originLatitude`, `originLongitude`) from the unfinished list to the encrypted set. Foundation-status callout updated; Vehicle GPS removed from the unfinished list. Route blob (`navRouteCoordinates`) remains as MYR-64. | go-engineer |
 | 2026-05-09 | [MYR-64](https://linear.app/myrobotaxi/issue/MYR-64) flips the route-blob polylines (`Vehicle.navRouteCoordinates`, `Drive.routePoints`) from the unfinished list to the encrypted set. Foundation-status callout updated; the unfinished list is now empty — every P1 column in `data-classification.md` §3.1 has an encrypt-on-write path. | go-engineer |
+| 2026-05-09 | [MYR-65](https://linear.app/myrobotaxi/issue/MYR-65) wires `cryptox_decrypt_total{version="N"}` Prometheus counter on the existing `/metrics` endpoint, removes the "do NOT execute the rotation procedure in production yet" callout, adds the §"Drill log" section, and rewrites §"Observability" to drop the TODO. Counter increments only after successful AES-GCM Open; tampered/truncated/unknown-version inputs are explicitly excluded so they cannot mask the v1-decay signal. All readable-version labels pre-seeded at zero so the first scrape reports the full label set. The procedure is now production-ready end-to-end. | go-engineer |
