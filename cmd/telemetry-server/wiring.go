@@ -56,29 +56,25 @@ func newGeocoder(token string, timeout time.Duration, logger *slog.Logger) geoco
 	return geocode.NoopGeocoder{}
 }
 
-// setupEncryption loads the AES-256-GCM key set so the binary fails-fast
-// on missing or invalid ENCRYPTION_KEY at startup (NFR-3.23, NFR-3.24).
-// The Encryptor is returned for the store layer; the per-version
-// `cryptox_decrypt_total` counter is registered against reg and pre-
-// populated with one zero-valued series per readable key version so
-// /metrics shows the full label set on the first scrape. See
-// docs/contracts/key-rotation.md and docs/contracts/data-classification.md
-// §3.3 for the encryption contract; key-rotation.md §"Procedure" step 6
-// is the operator-facing consumer of the counter.
+// setupEncryption loads the AES-256-GCM key set (fails fast on missing
+// or invalid ENCRYPTION_KEY per NFR-3.23/NFR-3.24) and registers the
+// per-version `cryptox_decrypt_total` counter on reg with one zero-
+// valued series per readable key version, so /metrics shows the full
+// label set on the first scrape. Operators read it during rotation to
+// confirm v1-decay (key-rotation.md procedure step 6).
 func setupEncryption(reg prometheus.Registerer, logger *slog.Logger) (cryptox.Encryptor, error) {
 	keySet, err := cryptox.LoadKeySetFromEnv()
 	if err != nil {
 		return nil, fmt.Errorf("loading encryption key set: %w", err)
 	}
-	metrics := cryptox.NewPrometheusMetrics(reg, keySet.ReadableVersions())
-	encryptor, err := cryptox.NewEncryptor(keySet, cryptox.WithMetrics(metrics))
+	encryptor, err := cryptox.NewEncryptor(keySet,
+		cryptox.WithMetrics(cryptox.NewPrometheusMetrics(reg, keySet.ReadableVersions())))
 	if err != nil {
 		return nil, fmt.Errorf("constructing encryptor: %w", err)
 	}
 	logger.Info("encryptor initialized",
 		slog.Int("write_version", int(keySet.WriteVersion())),
-		slog.Int("readable_versions", len(keySet.ReadableVersions())),
-	)
+		slog.Int("readable_versions", len(keySet.ReadableVersions())))
 	return encryptor, nil
 }
 
