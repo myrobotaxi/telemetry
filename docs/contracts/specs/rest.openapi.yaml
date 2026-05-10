@@ -622,6 +622,18 @@ paths:
         server has no User repository and no DELETE /users/me
         handler. The public API hostname proxies this path to the
         Next.js app. The SDK is unaware of the handler location.
+
+        Re-auth precondition (MYR-76, rest-api.md §7.6): in addition
+        to the Bearer-token check, this endpoint requires that the
+        caller's most recent fresh OAuth sign-in is within
+        REAUTH_MAX_AGE_SEC (default 300 s). Sessions whose
+        auth_time claim is older than the window — or sessions that
+        lack the claim entirely — are rejected with 401 auth_failed
+        carrying subCode reauth_required. The SDK MUST surface this
+        subCode to the consumer's auth layer for an interactive
+        sign-in flow; a silent getToken() refresh does NOT satisfy
+        the precondition because the auth_time claim only advances
+        on a fresh OAuth round-trip.
       x-anchored-requirements:
         - FR-10.1
         - FR-10.2
@@ -732,7 +744,20 @@ components:
 
   responses:
     Unauthorized:
-      description: Missing, malformed, or invalid bearer token. On receipt the SDK MUST call getToken() and retry once per FR-6.2. A second 401 is terminal and surfaces as a typed auth_failed error.
+      description: |
+        Missing, malformed, or invalid bearer token. On receipt the SDK
+        MUST call getToken() and retry once per FR-6.2. A second 401 is
+        terminal and surfaces as a typed auth_failed error.
+
+        Special case: 401 auth_failed with subCode=reauth_required is
+        emitted by /users/me (DELETE) and /users/me/export (GET) when
+        the bearer token is valid but the caller's auth_time claim is
+        outside the recent-auth window (rest-api.md §7.6 / §7.7,
+        MYR-76). This subCode is carved out from the getToken() retry
+        path — the SDK MUST surface it to the consumer's auth layer
+        for an interactive sign-in flow rather than swallowing it with
+        a silent refresh, because the auth_time claim only advances on
+        a fresh OAuth round-trip.
       content:
         application/json:
           schema:
@@ -748,6 +773,13 @@ components:
                 error:
                   code: auth_timeout
                   message: 'authenticator.ValidateToken: deadline exceeded'
+            reauth-required:
+              summary: Recent-login re-auth gate failed (rest-api.md §7.6 / §7.7, MYR-76)
+              value:
+                error:
+                  code: auth_failed
+                  message: recent re-authentication required
+                  subCode: reauth_required
     VehicleNotOwned:
       description: Caller is not the owner or an accepted viewer of the requested vehicleId (or drive's parent vehicleId).
       content:
@@ -937,13 +969,23 @@ components:
             subCode:
               type: string
               description: |
-                Optional typed sub-code. Currently only device_cap,
-                shared with the WebSocket ErrorPayload. REST v1 does
-                not emit device_cap -- it is specific to the per-user
-                concurrent-connection cap on the WS path -- but the
-                field is declared here for shared-type compatibility
-                with the SDK's CoreError union.
-              enum: [device_cap]
+                Optional typed sub-code. Two values in v1:
+
+                - device_cap (WS-only): per-user concurrent-connection
+                  cap breach on the WebSocket path. Declared on the
+                  REST envelope only for shared-type compatibility
+                  with the SDK's CoreError union — REST v1 does not
+                  emit this value.
+                - reauth_required (REST-only): the recent-login
+                  re-auth gate on DELETE /users/me and GET
+                  /users/me/export rejected the request because the
+                  caller's auth_time claim is missing or older than
+                  REAUTH_MAX_AGE_SEC (default 300 s). The SDK MUST
+                  surface this subCode to the consumer's auth layer
+                  for an interactive sign-in flow; see rest-api.md
+                  §7.6 / §7.7 (MYR-76) and the §4.1.1 auth_failed
+                  row.
+              enum: [device_cap, reauth_required]
               x-classification: P0
 
     DriveSummary:
