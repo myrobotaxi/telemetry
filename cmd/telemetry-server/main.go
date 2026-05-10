@@ -193,21 +193,10 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	// Production: set AUDIT_SIDECAR_BUCKET + AUDIT_SIDECAR_REGION; the service
 	// IAM role (telemetry-server-audit-sidecar) grants s3:PutObject only —
 	// see deployments/terraform/audit-sidecar/iam.tf.
-	sidecar, sidecarClose, err := setupAuditSidecar(ctx, reg, logger)
+	auditRepo, err := buildAuditRepo(ctx, reg, db.Pool(), logger)
 	if err != nil {
-		return fmt.Errorf("setting up audit sidecar: %w", err)
+		return fmt.Errorf("building audit repo: %w", err)
 	}
-	if sidecarClose != nil {
-		defer func() {
-			closeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if cerr := sidecarClose(closeCtx); cerr != nil {
-				logger.Warn("audit sidecar close error", slog.String("error", cerr.Error()))
-			}
-		}()
-	}
-
-	auditRepo := store.NewAuditRepoWithSidecar(db.Pool(), sidecar, logger.With(slog.String("component", "audit-repo")))
 
 	// --- Mask-audit emitter (MYR-71, rest-api.md §5.3) ---
 	// MaskAuditEmitter adapts AuditRepo to the mask.AuditEmitter

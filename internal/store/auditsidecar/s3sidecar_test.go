@@ -62,19 +62,6 @@ func testEntry(id string) AuditEntry {
 	}
 }
 
-// waitFor polls fn until it returns true or the deadline is reached.
-func waitFor(t *testing.T, deadline time.Duration, fn func() bool) {
-	t.Helper()
-	end := time.Now().Add(deadline)
-	for time.Now().Before(end) {
-		if fn() {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatal("condition not met within deadline")
-}
-
 // Test 1: happy path — Emit an entry, drain queue, assert PutObject fired.
 func TestS3Sidecar_HappyPath(t *testing.T) {
 	fp := &fakePutter{}

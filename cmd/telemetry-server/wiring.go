@@ -268,6 +268,38 @@ func setupFleetConfigEndpoint(
 	)
 }
 
+// buildAuditRepo constructs an AuditRepo wired with the appropriate sidecar.
+// It calls setupAuditSidecar internally; on success, the sidecar Close is
+// registered with the process via a defer that runs on graceful shutdown
+// (controlled by the deferred closure returned here — callers embed it with
+// defer). This extraction keeps run()'s cyclomatic complexity within limits.
+func buildAuditRepo(
+	ctx context.Context,
+	reg prometheus.Registerer,
+	pool *pgxpool.Pool,
+	logger *slog.Logger,
+) (*store.AuditRepo, error) {
+	sidecar, closeFn, err := setupAuditSidecar(ctx, reg, logger)
+	if err != nil {
+		return nil, fmt.Errorf("setting up audit sidecar: %w", err)
+	}
+	if closeFn != nil {
+		// Register a background goroutine that drains the sidecar when ctx
+		// is cancelled (i.e., when the process receives SIGINT/SIGTERM).
+		// context.Background() is intentional here: the drain timeout must
+		// outlive the cancelled process context.
+		go func() { //nolint:gosec // G118: intentional use of Background for post-cancel drain
+			<-ctx.Done()
+			closeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if cerr := closeFn(closeCtx); cerr != nil {
+				logger.Warn("audit sidecar close error", slog.String("error", cerr.Error()))
+			}
+		}()
+	}
+	return store.NewAuditRepoWithSidecar(pool, sidecar, logger.With(slog.String("component", "audit-repo"))), nil
+}
+
 // setupAuditSidecar reads AUDIT_SIDECAR_BUCKET and AUDIT_SIDECAR_REGION
 // (default us-east-1) and returns either a live S3Sidecar or a NoopSidecar.
 //

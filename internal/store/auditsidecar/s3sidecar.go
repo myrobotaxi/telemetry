@@ -104,7 +104,7 @@ func (s *S3Sidecar) Close(ctx context.Context) error {
 	case <-time.After(drainTimeout):
 		return fmt.Errorf("auditsidecar: Close timed out after %s; %d entries may not have been written", drainTimeout, len(s.queue))
 	case <-ctx.Done():
-		return ctx.Err()
+		return fmt.Errorf("auditsidecar: Close context cancelled: %w", ctx.Err())
 	}
 }
 
