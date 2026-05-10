@@ -171,7 +171,7 @@ jobs:
 
       - name: Scan Docker image with Trivy
         if: steps.dockerfile.outputs.exists == 'true'
-        uses: aquasecurity/trivy-action@0.35.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: my-robo-taxi-telemetry:${{ github.sha }}
           format: 'sarif'
