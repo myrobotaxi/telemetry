@@ -115,10 +115,13 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 
 	// --- Column encryption foundation (NFR-3.23, NFR-3.24) ---
-	// MYR-62 wires the Encryptor into AccountRepo for the dual-write
-	// rollout of OAuth tokens. Vehicle/Drive column rollouts land in
-	// follow-on issues that require coordinated Prisma migrations.
-	encryptor, err := setupEncryption(logger)
+	// MYR-62/63/64 wired the Encryptor into AccountRepo, VehicleRepo,
+	// and DriveRepo for the dual-write rollouts of OAuth tokens, GPS
+	// coordinates, and route-blob polylines respectively. MYR-65 wires
+	// `cryptox_decrypt_total{version="N"}` against this registry so
+	// operators can monitor v1-decay during a key rotation
+	// (key-rotation.md §"Procedure" step 6).
+	encryptor, err := setupEncryption(reg, logger)
 	if err != nil {
 		return err
 	}
