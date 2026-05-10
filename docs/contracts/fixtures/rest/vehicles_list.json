@@ -1,0 +1,36 @@
+{
+  "_meta": {
+    "description": "Happy-path response for GET /api/vehicles — the SDK's vehicle-enumeration entry point (rest-api.md §7.0). Owner-tier projection: every VehicleSummary field is present. The list is deliberately a thin catalog — no GPS, no nav, no climate (those live in /snapshot). v1 returns owned vehicles only; viewer-merged enumeration is PLANNED.",
+    "anchoredFRs": ["FR-4.x", "FR-5.4", "NFR-3.21"],
+    "scenario": "happy-path",
+    "addedBy": "MYR-91"
+  },
+  "items": [
+    {
+      "vehicleId": "clxyz1234567890abcdef",
+      "name": "Stumpy",
+      "model": "Model 3",
+      "year": 2024,
+      "color": "Midnight Silver Metallic",
+      "vinLast4": "0001",
+      "status": "parked",
+      "chargeLevel": 78,
+      "estimatedRange": 245,
+      "lastUpdated": "2026-05-10T17:45:00Z",
+      "role": "owner"
+    },
+    {
+      "vehicleId": "clmno5678901234ghijkl",
+      "name": "Lightning",
+      "model": "Model Y",
+      "year": 2023,
+      "color": "Pearl White Multi-Coat",
+      "vinLast4": "0002",
+      "status": "charging",
+      "chargeLevel": 42,
+      "estimatedRange": 132,
+      "lastUpdated": "2026-05-10T17:42:13Z",
+      "role": "owner"
+    }
+  ]
+}

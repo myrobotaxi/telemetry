@@ -273,6 +273,13 @@ func TestFixturesValidateAgainstSchemas(t *testing.T) {
 				case baseName == "drive_route.json":
 					validateDriveRoute(t, stripped)
 
+				case strings.HasPrefix(baseName, "vehicles_list"):
+					// MYR-91: VehiclesListResponse — `{ items: VehicleSummary[] }`
+					// per rest-api.md §7.0. Owner and viewer fixtures share
+					// the same envelope; the viewer fixture strips `name`
+					// per §5.2.0 but the envelope shape is identical.
+					validateVehiclesList(t, stripped, baseName)
+
 				case strings.HasPrefix(baseName, "error."):
 					validateRESTError(t, stripped)
 
@@ -550,6 +557,63 @@ func validateDriveDetail(t *testing.T, m map[string]any) {
 	for _, field := range driveDetailRequired {
 		if _, ok := m[field]; !ok {
 			t.Errorf("drive_detail missing required DriveDetail field %q", field)
+		}
+	}
+}
+
+// validateVehiclesList performs structural validation on the
+// GET /api/vehicles response fixture per rest-api.md §7.0 (MYR-91).
+//
+// The envelope is `{ items: VehicleSummary[] }`. Each item must carry
+// the required VehicleSummary fields; the owner-tier fixture includes
+// `name` (P1, owner-only per §5.2.0) while the viewer-tier fixture
+// omits it. The empty-list fixture has no items at all — that's the
+// canonical v1 viewer-tier response since invite-merged enumeration
+// is PLANNED.
+func validateVehiclesList(t *testing.T, m map[string]any, baseName string) {
+	t.Helper()
+
+	itemsAny, ok := m["items"]
+	if !ok {
+		t.Errorf("vehicles_list missing 'items' array")
+		return
+	}
+	items, ok := itemsAny.([]any)
+	if !ok {
+		t.Errorf("vehicles_list 'items' is not an array")
+		return
+	}
+	// Empty list is valid (no-vehicles user or v1 viewer caller).
+	if len(items) == 0 {
+		return
+	}
+
+	// Every row in non-empty fixtures must include the role-agnostic
+	// required fields. `name` is P1 (owner-only) — required for owner
+	// fixtures but absent on the viewer fixture per the §5.2.0 mask.
+	required := []string{
+		"vehicleId", "model", "year", "color", "vinLast4",
+		"status", "chargeLevel", "estimatedRange", "lastUpdated", "role",
+	}
+	includesName := !strings.HasSuffix(baseName, "_viewer.json")
+
+	for i, raw := range items {
+		row, ok := raw.(map[string]any)
+		if !ok {
+			t.Errorf("vehicles_list items[%d] is not an object", i)
+			continue
+		}
+		for _, field := range required {
+			if _, ok := row[field]; !ok {
+				t.Errorf("vehicles_list items[%d] missing required field %q", i, field)
+			}
+		}
+		if includesName {
+			if _, ok := row["name"]; !ok {
+				t.Errorf("vehicles_list items[%d] (owner-tier) missing required field 'name'", i)
+			}
+		} else if _, ok := row["name"]; ok {
+			t.Errorf("vehicles_list items[%d] (viewer-tier) MUST NOT include 'name' per §5.2.0 mask", i)
 		}
 	}
 }

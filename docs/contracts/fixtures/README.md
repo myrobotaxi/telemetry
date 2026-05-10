@@ -123,6 +123,9 @@ let cleaned = try JSONSerialization.data(withJSONObject: dict)
 
 | File | Schema reference | Scenario | Description |
 |------|------------------|----------|-------------|
+| `vehicles_list.json` | `rest.openapi.yaml#/components/schemas/VehiclesListResponse` | happy-path | Owner-tier two-vehicle catalog from GET /api/vehicles (MYR-91) |
+| `vehicles_list_empty.json` | `rest.openapi.yaml#/components/schemas/VehiclesListResponse` | edge-case | Empty list — user with no linked vehicles or v1 viewer-tier caller |
+| `vehicles_list_viewer.json` | `rest.openapi.yaml#/components/schemas/VehiclesListResponse` | forward-looking | Viewer projection: `name` stripped; other VehicleSummary fields visible. PLANNED — server returns empty until invite-read pathway lands |
 | `snapshot.json` | `vehicle-state.schema.json` (VehicleState) | happy-path | Full VehicleState from GET /api/vehicles/{vehicleId}/snapshot |
 | `drives.json` | `rest.openapi.yaml#/components/schemas/PaginatedDrives` | happy-path | Paginated drive list (2 items, hasMore=true) |
 | `drive_detail.json` | `rest.openapi.yaml#/components/schemas/DriveDetail` | happy-path | Full FR-3.4 drive record from GET /api/drives/{driveId} |

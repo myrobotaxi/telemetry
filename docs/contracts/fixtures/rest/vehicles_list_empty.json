@@ -1,0 +1,9 @@
+{
+  "_meta": {
+    "description": "Empty-list response for GET /api/vehicles. Returned when the authenticated caller has no linked vehicles. Per rest-api.md §7.0 the list never returns 403/404 for the list itself — an authenticated user always sees at minimum an empty items: [] array. This is also the v1 response for viewer-tier callers, because viewer-merged enumeration is PLANNED (the Go server does not yet read the Prisma-owned Invite table).",
+    "anchoredFRs": ["FR-4.x", "FR-5.4", "NFR-3.21"],
+    "scenario": "edge-case",
+    "addedBy": "MYR-91"
+  },
+  "items": []
+}
