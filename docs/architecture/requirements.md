@@ -98,6 +98,10 @@ Build a polished SDK that both web and iOS apps plug into, with comprehensive do
 **FR-10.1** SDK/server MUST support user-initiated deletion of all user data: drive history, vehicle state snapshot, invites, active sessions.
 **FR-10.2** Every deletion MUST write an immutable audit log entry: user ID, timestamp, what was deleted, initiator.
 
+The backup-retention boundary that closes the GDPR Art. 17 obligation across Supabase backup restores is documented in the operational runbook [`docs/operations/backup-retention.md`](../operations/backup-retention.md) — Supabase backup window, redelete-on-restore procedure, and the legal-basis-for-retention boundary spanning primary DB / backups / AuditLog / cold logs. The `data_exported` audit action that records GDPR Art. 15 / 20 portability exports is documented in [`docs/contracts/data-lifecycle.md`](../contracts/data-lifecycle.md) §4.2 and the export endpoint itself in [`docs/contracts/rest-api.md`](../contracts/rest-api.md) §7.7.
+
+> **Deferred (MYR-75 follow-up):** Optional recent-login re-auth gate before `DELETE /api/users/me` deferred to [MYR-76](https://linear.app/myrobotaxi/issue/MYR-76); rationale: low-cost defense vs. stolen-token deletion, but not a launch-blocker per the issue's three-piece scoping.
+
 ### 2.11 Observability (SDK-side)
 
 **FR-11.1** SDK MUST expose structured logging with levels (debug/info/warn/error) via a pluggable logger interface. Default logger writes to console in debug mode, silent in production.

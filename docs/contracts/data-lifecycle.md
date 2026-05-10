@@ -310,6 +310,7 @@ CREATE INDEX "AuditLog_timestamp_idx" ON "AuditLog" ("timestamp");
 | `invite_revoked` | Sharing invite revoked | User |
 | `tokens_refreshed` | OAuth tokens rotated | System (token refresh) |
 | `mask_applied` | Role-based field mask removed at least one field from a REST response or WebSocket broadcast (sampled at 1%) | System (broadcast / handler layer); see [`rest-api.md`](rest-api.md) §5.3 |
+| `data_exported` | User-initiated portability export of every Prisma row owned by the caller (GDPR Art. 15 right of access / Art. 20 portability). Emitted by the Next.js `GET /api/users/me/export` handler ([Phase A: tnando/my-robo-taxi#259](https://github.com/tnando/my-robo-taxi/pull/259); MYR-75). One row per export — sampling 100% (not high-volume); retained indefinitely per NFR-3.29. `targetType` MUST be `user`, `targetId` MUST be the caller's `userId`, `initiator` MUST be `user`. `metadata` shape is exactly `{vehicleCount, driveCount, inviteCount, auditCount}` — P0 counts only per Rule CG-DL-5; never PII, GPS, addresses, or tokens. See [`rest-api.md`](rest-api.md) §7.7. | User (caller-initiated portability export per GDPR Art. 15 / Art. 20) |
 
 **`targetType` values:**
 

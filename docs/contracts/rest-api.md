@@ -69,6 +69,7 @@ Every FR/NFR listed here is anchored in at least one section of this doc. The ta
    4. `GET /api/drives/{driveId}/route`
    5. Invite endpoints (3 operations)
    6. `DELETE /api/users/me`
+   7. `GET /api/users/me/export`
 8. Resource schemas
 9. Observability
 10. Code <-> spec divergences
@@ -491,8 +492,9 @@ No contract changes are required for the new role's wire shape (the REST respons
 | `GET` | `/api/vehicles/{vehicleId}/invites` | List viewers + pending invites | Bearer + owner of vehicleId | FR-5.2 |
 | `DELETE` | `/api/invites/{inviteId}` | Revoke invite | Bearer + owner of invite's vehicle | FR-5.3 |
 | `DELETE` | `/api/users/me` | Delete own account + all data | Bearer (self only) | FR-10.1, FR-10.2, NFR-3.29 |
+| `GET` | `/api/users/me/export` | GDPR Art. 15 / 20 portability export of every Prisma row owned by the caller | Bearer (self only) | FR-10, NFR-3.29 |
 
-All paths are PLANNED; none are mounted by the Go server today (DV-20). See §10.
+All paths are PLANNED; none are mounted by the Go server today (DV-20). See §10. Note: `GET /api/users/me/export` (and the §7.6 / §7.5 endpoints) is served by the Next.js app per §10 DV-23 and is NOT in scope for the Go server's DV-20 mount.
 
 ---
 
@@ -1053,6 +1055,79 @@ The full deletion cascade (User -> Account, Vehicle, Invite, Settings; Vehicle -
 
 ---
 
+### 7.7 `GET /api/users/me/export`
+
+> **Anchored:** FR-10 (data-export companion to FR-10.1 deletion), GDPR Art. 15 (right of access), GDPR Art. 20 (portability), NFR-3.29.
+
+#### Purpose
+
+Returns a JSON archive of every Prisma row owned by the authenticated user — the SDK's single entry point for GDPR Art. 15 / Art. 20 portability exports. The endpoint is the export companion to `DELETE /api/users/me` (§7.6); together they implement the data-export-then-delete flow GDPR requires before erasure. Phase A implementation: [tnando/my-robo-taxi#259](https://github.com/tnando/my-robo-taxi/pull/259) (Next.js handler).
+
+The handler runs in the Next.js app per the same DV-23 routing decision that places `DELETE /api/users/me` and the §7.5 invite endpoints there: the public API hostname (`https://api.myrobotaxi.com/api/...`) proxies `/api/users/me/*` paths to the Next.js app. The Go telemetry server has no User repository and no export handler. The SDK is unaware of which process serves the request.
+
+#### Request
+
+```
+GET /api/users/me/export HTTP/1.1
+Host: api.myrobotaxi.com
+Authorization: Bearer <token>
+Accept: application/json
+```
+
+Authentication is the standard NextAuth session — Bearer token in the `Authorization` header (§3.1) or NextAuth session cookie. No request body, no path or query parameters.
+
+#### Response — 200 OK
+
+The response body is a JSON archive of every Prisma row owned by the caller, with all P1 columns decrypted at the crypto boundary (per [`data-classification.md`](data-classification.md) §3 — the encryption is transparent at the export boundary just as it is at the WebSocket boundary, NFR-3.25). OAuth credentials (`Account.access_token`, `Account.refresh_token`) are explicitly excluded — exporting the user's Tesla OAuth tokens would let an attacker impersonate the user against Tesla's Fleet API after the export, so the export contract treats them as a privileged credential boundary that the export does NOT cross.
+
+The high-level shape is documented here; the canonical field-level schema lives in the Phase A implementation. Consumers MUST treat any field not enumerated here as advisory and branch on its presence, not its specific value.
+
+| Top-level key | Description | Source |
+|---------------|-------------|--------|
+| `user` | The caller's User row (`id`, `email`, `name`, `image`, `createdAt`, `updatedAt`, `emailVerified`). | Prisma `User` |
+| `settings` | The caller's Settings row, if present. | Prisma `Settings` |
+| `vehicles` | Array of vehicles owned by the caller. Each entry includes the full `Vehicle` row with P1 GPS / destination / nav-route columns decrypted. | Prisma `Vehicle` |
+| `drives` | Array of completed drives across all owned vehicles, with `routePoints` (JSONB GPS polyline) decrypted per NFR-3.23. | Prisma `Drive` |
+| `tripStops` | Array of trip stops for owned vehicles. | Prisma `TripStop` |
+| `invitesSent` | Invites the caller created (caller is `senderId`). | Prisma `Invite` |
+| `invitesAccepted` | Invites the caller accepted (caller's email matches `email` and `status = accepted`). | Prisma `Invite` |
+| `auditLogs` | AuditLog rows where `userId` equals the caller's user ID. | Prisma `AuditLog` |
+
+**Explicitly excluded** from the export:
+
+| Excluded | Why |
+|----------|-----|
+| `Account.access_token`, `Account.refresh_token` | Tesla OAuth credentials. Exporting them would extend the user's authorization surface beyond their session. The user can revoke and re-link their Tesla account through the normal account-settings flow. |
+| `Account.expires_at`, `Account.token_type`, `Account.scope` | Companion fields tied to the OAuth credentials above. |
+| Any field not owned by the caller | Cross-user data is filtered at the Prisma query boundary by `userId` / `senderId` / vehicle ownership. The export never includes another user's drives, invites, or audit rows. |
+
+The response body's audit-log side effect is documented in [`data-lifecycle.md`](data-lifecycle.md) §4.2 as the `data_exported` action: one row per export with `targetType: user`, `targetId: <callerUserId>`, `initiator: user`, and `metadata: {vehicleCount, driveCount, inviteCount, auditCount}` (P0 counts only per Rule CG-DL-5; never PII / GPS / tokens). The audit row is retained indefinitely per NFR-3.29.
+
+#### Response — error
+
+Per the §4.1 error envelope:
+
+| HTTP | `error.code` | When |
+|------|--------------|------|
+| 401 | `auth_failed` | Missing/malformed/invalid token. Same error mode as §7.6. |
+| 429 | `rate_limited` | REST rate limit breached |
+| 500 | `internal_error` | Decryption failure, DB read failure, or audit-log write failure. The export and the audit row are written in the same transaction; if the audit row fails, the response is `500` and no archive is returned. |
+
+**Note on 403:** Same as §7.6 — the endpoint operates on `/users/me`, the authenticated user is always the owner of their own data, and there is no cross-user export in v1.
+
+#### Idempotency
+
+`GET` is naturally idempotent. Multiple successive calls return identical archives (modulo any updates the user made between calls), and each call writes a new `data_exported` audit row — that is intentional per the audit-log contract: the audit log records every export attempt that succeeded, not just the first one.
+
+#### Implementation notes
+
+- The handler runs in the Next.js app per DV-23 (RESOLVED 2026-05-08, MYR-69). The Go telemetry server has no User repository.
+- The audit-log row MUST be written in the same Prisma `$transaction` as the export read. If the audit insert fails, the entire export is rolled back per the same atomicity rule that governs `DELETE /api/users/me` in `data-lifecycle.md` §3.4.
+- Decryption of P1 columns at the crypto boundary uses the same `ENCRYPTION_KEY` and AES-256-GCM scheme as the WebSocket and REST snapshot paths (NFR-3.23, NFR-3.25). The export is NOT a separate decryption code path; it reuses the existing one.
+- **Re-auth gate (deferred):** The optional recent-login re-auth precondition discussed in MYR-75's three-piece scoping is deferred to a follow-up issue. v1 exports require only a valid Bearer token; a fresh-OAuth-step requirement (mirroring AWS IAM "recent MFA") is tracked separately and would be an additive precondition that returns `401 auth_failed` if the session is older than the configured window. See the deferral note in [`../architecture/requirements.md`](../architecture/requirements.md) §2.10.
+
+---
+
 ## 8. Resource schemas
 
 The canonical v1 `VehicleState` schema is [`schemas/vehicle-state.schema.json`](schemas/vehicle-state.schema.json). The REST snapshot endpoint returns that shape directly via `$ref` in the OpenAPI spec -- it is NOT re-declared.
@@ -1124,5 +1199,6 @@ Same as [`websocket-protocol.md`](websocket-protocol.md) §10 divergence managem
 
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-05-09 | **GDPR readiness pack docs ([MYR-75](https://linear.app/myrobotaxi/issue/MYR-75) Phase B).** Adds §7.7 `GET /api/users/me/export` to the endpoint reference (Phase A handler shipped in [tnando/my-robo-taxi#259](https://github.com/tnando/my-robo-taxi/pull/259)) — JSON archive of every Prisma row owned by the caller, P1 columns decrypted at the crypto boundary, OAuth credentials explicitly excluded; audit-log side effect documented as the new `data_exported` action in [`data-lifecycle.md`](data-lifecycle.md) §4.2 with `metadata: {vehicleCount, driveCount, inviteCount, auditCount}` (P0 counts only per Rule CG-DL-5). §1 TOC and §6 endpoint catalog summary updated. The optional recent-login re-auth gate from MYR-75's three-piece scoping is deferred to a follow-up issue and noted in §7.7 implementation notes + [`../architecture/requirements.md`](../architecture/requirements.md) §2.10. Companion runbook: [`../operations/backup-retention.md`](../operations/backup-retention.md) (Supabase backup window, redelete-on-restore procedure honoring GDPR Art. 17, legal-basis-for-retention boundary). | sdk-architect |
 | 2026-05-08 | **DV-23 RESOLVED by [MYR-69](https://linear.app/myrobotaxi/issue/MYR-69).** Locked the FR-10 deletion + §7.5 invite-endpoint architecture to **Option 2 -- Next.js app owns `DELETE /api/users/me` and the three invite endpoints**, with the Go telemetry server holding **Insert-only** access to the Prisma-owned `AuditLog` table via raw pgx. §7.5 preamble rewritten from "two implementation paths" to a single locking sentence. §7.6 implementation notes' "may also run in the Next.js app layer" hedge replaced with a definitive Next.js-owns statement. §10 DV-23 row flipped from **New** to **RESOLVED** with resolution date, rationale, and pointers to MYR-70 / MYR-71 / MYR-72 / MYR-73 implementation follow-ups. **DV-20 row reduced in scope from six endpoints to four**: invite + user-deletion 404s on the Go server are now the terminal behavior (served by Next.js per DV-23), not transitional Go-server work; implementation order steps (5)/(6) and the FR-5.x / FR-10.1 anchors removed. Cross-contract update: [`data-lifecycle.md`](data-lifecycle.md) §1.4 adds an `AuditLog` row noting the telemetry server has Insert-only access; §4 preamble locks `AuditLog` ownership to the Next.js Prisma schema with the Go server as Insert-only writer (responsibility per §3.4). No wire / OpenAPI / SDK API changes -- the SDK still calls the single `https://api.myrobotaxi.com/api/...` base URL. | sdk-architect |
 | 2026-04-14 | Initial full draft (MYR-12): §2 transport, §3 auth, §4 conventions (error envelope, pagination, versioning, headers, idempotency), §5 RBAC with forward-looking `limited_viewer` extension seam, §6 catalog summary, §7 per-endpoint reference (snapshot, drives list, drive detail, drive route, 3 invite ops, user self-deletion), §8 resource-schema index cross-referencing the inline OpenAPI components, §9 observability, §10 divergences DV-19 through DV-23 (REST auth middleware, unmounted SDK endpoints, reserved `503 service_unavailable`, REST rate limit, invite handler location decision). Adds REST-only error codes `not_found`, `invalid_request`, `service_unavailable` to the shared catalog with a note that the `ErrorPayload.code` enum in `schemas/ws-messages.schema.json` must be extended in the DV-20 follow-up. Canonical machine-readable twin is `specs/rest.openapi.yaml`. | sdk-architect |
