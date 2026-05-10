@@ -203,3 +203,34 @@ func TestDecodeAndValidate_LengthError(t *testing.T) {
 		t.Fatalf("expected ErrInvalidKeyLength, got %v", err)
 	}
 }
+
+func TestKeySet_ReadableVersions(t *testing.T) {
+	tests := []struct {
+		name     string
+		versions []byte
+		want     []byte
+	}{
+		{"single v1", []byte{1}, []byte{1}},
+		{"v1+v2 ascending", []byte{1, 2}, []byte{1, 2}},
+		{"out of order keys are sorted", []byte{3, 1, 2}, []byte{1, 2, 3}},
+		{"sparse range", []byte{2, 250}, []byte{2, 250}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			keys := make(map[byte][]byte, len(tt.versions))
+			for _, v := range tt.versions {
+				keys[v] = make([]byte, keyLen)
+			}
+			ks := &KeySet{writeVersion: tt.versions[0], keys: keys}
+			got := ks.ReadableVersions()
+			if len(got) != len(tt.want) {
+				t.Fatalf("len = %d, want %d (%v vs %v)", len(got), len(tt.want), got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("[%d] = %d, want %d (full: %v)", i, got[i], tt.want[i], got)
+				}
+			}
+		})
+	}
+}
