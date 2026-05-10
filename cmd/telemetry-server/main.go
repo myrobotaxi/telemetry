@@ -187,7 +187,27 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	// refreshes on its own goroutine until the rollouts complete. See
 	// startPlaintextGauges in wiring.go.
 	startPlaintextGauges(ctx, reg, db.Pool(), accountTokenGaugeInterval, vehicleGPSGaugeInterval, routeBlobGaugeInterval, logger)
-	auditRepo := store.NewAuditRepo(db.Pool())
+	// --- Audit sidecar (MYR-77) ---
+	// Best-effort S3 mirror of every AuditLog INSERT.
+	// No-op when AUDIT_SIDECAR_BUCKET is empty (local dev).
+	// Production: set AUDIT_SIDECAR_BUCKET + AUDIT_SIDECAR_REGION; the service
+	// IAM role (telemetry-server-audit-sidecar) grants s3:PutObject only —
+	// see deployments/terraform/audit-sidecar/iam.tf.
+	sidecar, sidecarClose, err := setupAuditSidecar(ctx, reg, logger)
+	if err != nil {
+		return fmt.Errorf("setting up audit sidecar: %w", err)
+	}
+	if sidecarClose != nil {
+		defer func() {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if cerr := sidecarClose(closeCtx); cerr != nil {
+				logger.Warn("audit sidecar close error", slog.String("error", cerr.Error()))
+			}
+		}()
+	}
+
+	auditRepo := store.NewAuditRepoWithSidecar(db.Pool(), sidecar, logger.With(slog.String("component", "audit-repo")))
 
 	// --- Mask-audit emitter (MYR-71, rest-api.md §5.3) ---
 	// MaskAuditEmitter adapts AuditRepo to the mask.AuditEmitter
