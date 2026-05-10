@@ -182,7 +182,7 @@ All non-2xx responses carry a JSON body with this envelope:
 |-------|------|----------|----------------|-------|
 | `error.code` | `string` (enum) | Yes | P0 | Stable typed code. Consumers branch on this value per FR-7.1. |
 | `error.message` | `string` | Yes | P0 (never contains P1) | Human-readable description for logs and developer tooling. Safe to display in developer-mode banners; not intended for end-user UI. |
-| `error.subCode` | `string` (enum) \| `null` | No | P0 | Optional typed sub-code for branching consumer UI when the primary code is ambiguous across carriers. Currently only `device_cap` (shared with the WS ErrorPayload). |
+| `error.subCode` | `string` (enum) \| `null` | No | P0 | Optional typed sub-code for branching consumer UI when the primary code is ambiguous across carriers. v1 enum: `device_cap` (WS-only, shared with the WS ErrorPayload — REST does not emit it; declared on the REST envelope for shared-type compatibility) and `reauth_required` (REST-only, emitted by §7.6 / §7.7 when the recent-login re-auth gate fails — see §4.1.1 `auth_failed`). The wire shape is **always present**, serialized as JSON `null` when the carrier emits no sub-code (see §4.1 envelope JSON example above). |
 
 Two rules are non-negotiable for every error response:
 
@@ -195,7 +195,7 @@ The REST catalog is a superset of the WebSocket catalog in [`websocket-protocol.
 
 | Code | HTTP | Carrier | Status | Reconnect/retry policy | Description |
 |------|------|---------|--------|------------------------|-------------|
-| `auth_failed` | 401 | Shared (WS + REST) | Implemented (MYR-47) | Surface to UI; refresh token via `getToken()`; retry once (FR-6.2). A second `auth_failed` is terminal for the operation. | Token signature/issuer/audience/expiry check failed, or the `Authorization` header was missing/malformed. |
+| `auth_failed` | 401 | Shared (WS + REST) | Implemented (MYR-47); `subCode: reauth_required` on REST §7.6 / §7.7 (MYR-76) | Surface to UI; refresh token via `getToken()`; retry once (FR-6.2). A second `auth_failed` is terminal for the operation. **`subCode: reauth_required` is NOT eligible for the `getToken()` retry path** — the SDK MUST surface it to the consumer's auth layer, which is responsible for triggering a fresh interactive sign-in flow (e.g., a NextAuth `signIn()` redirect) before retrying. A silent `getToken()` refresh cannot satisfy the precondition because the `auth_time` claim only advances on a fresh OAuth round-trip. | Token signature/issuer/audience/expiry check failed, or the `Authorization` header was missing/malformed. **`subCode: reauth_required` (REST-only, §7.6 / §7.7):** the bearer token is valid but the user's most recent fresh OAuth sign-in is older than the recent-auth window (default 300 s; configurable via `REAUTH_MAX_AGE_SEC`). The SDK MUST trigger an interactive sign-in flow and retry. |
 | `auth_timeout` | 401 | Shared (WS + REST) | Implemented (WS); REST path not yet exercised (server-side ValidateToken has no deadline-only branch in v1) | Auto-retry once with fresh token; NFR-3.10-style backoff on subsequent attempts. | Rare REST path: server-side token validation exceeded its internal deadline. Treated as transient. |
 | `permission_denied` | 403 | Shared (WS + REST, PLANNED on WS per DV-07) | PLANNED — emitted alongside MYR-46 per-vehicle subscribe | Surface to UI; do not auto-retry the same operation. | Authenticated user attempted a resource they do not own or a role they do not have (e.g., viewer calling an invite endpoint). |
 | `vehicle_not_owned` | 403 | Shared (WS + REST, PLANNED on WS per DV-07) | Implemented on REST (MYR-47); PLANNED on WS per DV-07 | Surface to UI; do not auto-retry the same vehicleId. | Specific case of `permission_denied` for a vehicle-scoped endpoint whose `vehicleId` path param is not in the caller's ownership set. |
@@ -995,11 +995,25 @@ Empty body on success.
 
 ### 7.6 `DELETE /api/users/me`
 
-> **Anchored:** FR-10.1, FR-10.2, NFR-3.29.
+> **Anchored:** FR-10.1, FR-10.2, NFR-3.29; GDPR Art. 17 recent-auth corollary.
 
 #### Purpose
 
 Deletes the authenticated user and all associated data per the cascade defined in [`data-lifecycle.md`](data-lifecycle.md) §3. This is the SDK's single entry point for user-initiated data deletion per FR-10.1. The endpoint writes an immutable audit log entry before the destructive operation per FR-10.2 and the data-lifecycle contract, and the audit log entry is retained indefinitely per NFR-3.29.
+
+#### Re-auth precondition (MYR-76)
+
+In addition to the standard Bearer-token check (§3), this endpoint requires that the caller's most recent **fresh OAuth sign-in** occurred within the recent-auth window. The default window is 300 s (5 minutes); operators MAY override via the `REAUTH_MAX_AGE_SEC` environment variable on the Next.js handler.
+
+The precondition is checked before the deletion transaction is entered. Sessions whose `auth_time` (Unix-seconds, mirroring the OIDC `auth_time` claim and surfaced as `session.user.authTime` in NextAuth) is older than the window — or sessions that lack the claim entirely (legacy sessions predating the rollout) — are rejected with `401 auth_failed` carrying `subCode: reauth_required`.
+
+Rationale: v1's Bearer token alone is sufficient to permanently destroy the account and cascade-delete every owned vehicle, drive, invite, and setting per [`data-lifecycle.md`](data-lifecycle.md) §3. A long-lived stolen token would therefore let an attacker erase the user's data before they notice. The recent-auth corollary of GDPR Art. 17 — the right to erasure does not license unauthorized erasure — motivates a fresh-OAuth-step requirement on the destructive path. The same precondition applies symmetrically to §7.7 `GET /api/users/me/export`.
+
+**Behavior on rejection:**
+
+1. The handler returns `401 auth_failed` with `subCode: reauth_required` and message `"recent re-authentication required"`.
+2. The SDK MUST NOT swallow this with a silent `getToken()` retry (see the §4.1.1 row for `auth_failed`); it MUST surface the typed `subCode` so the consumer's auth layer can trigger an interactive sign-in (e.g., NextAuth `signIn()` redirect).
+3. After the user completes a fresh sign-in, the JWT `authTime` claim advances and the next `DELETE /api/users/me` call passes the gate.
 
 #### Request
 
@@ -1031,11 +1045,12 @@ The deletion is executed as a **single database transaction** per [`data-lifecyc
 
 #### Response -- error
 
-| HTTP | `error.code` | When |
-|------|--------------|------|
-| 401 | `auth_failed` | Missing/malformed/invalid token. Also the expected response on a second DELETE attempt after a successful first call -- the token has been invalidated. |
-| 429 | `rate_limited` | REST rate limit breached |
-| 500 | `internal_error` | Transaction rolled back (the cascade failed and no data was deleted per `data-lifecycle.md` §3.4) |
+| HTTP | `error.code` | `subCode` | When |
+|------|--------------|-----------|------|
+| 401 | `auth_failed` | `null` | Missing/malformed/invalid token. Also the expected response on a second DELETE attempt after a successful first call -- the token has been invalidated. |
+| 401 | `auth_failed` | `reauth_required` | Recent-login re-auth gate failed: the session is valid but the `auth_time` claim is older than `REAUTH_MAX_AGE_SEC` (default 300 s), or the claim is absent (legacy session). The SDK MUST trigger interactive re-authentication; see Re-auth precondition above. |
+| 429 | `rate_limited` | `null` | REST rate limit breached |
+| 500 | `internal_error` | `null` | Transaction rolled back (the cascade failed and no data was deleted per `data-lifecycle.md` §3.4) |
 
 **Note on 403:** This endpoint has no 403 path because it operates on `/users/me` -- the authenticated user is always "owner" of their own account. There is no cross-user deletion in v1.
 
@@ -1057,13 +1072,17 @@ The full deletion cascade (User -> Account, Vehicle, Invite, Settings; Vehicle -
 
 ### 7.7 `GET /api/users/me/export`
 
-> **Anchored:** FR-10 (data-export companion to FR-10.1 deletion), GDPR Art. 15 (right of access), GDPR Art. 20 (portability), NFR-3.29.
+> **Anchored:** FR-10 (data-export companion to FR-10.1 deletion), GDPR Art. 15 (right of access), GDPR Art. 20 (portability), NFR-3.29; GDPR Art. 17 recent-auth corollary (symmetric with §7.6).
 
 #### Purpose
 
 Returns a JSON archive of every Prisma row owned by the authenticated user — the SDK's single entry point for GDPR Art. 15 / Art. 20 portability exports. The endpoint is the export companion to `DELETE /api/users/me` (§7.6); together they implement the data-export-then-delete flow GDPR requires before erasure. Phase A implementation: [tnando/my-robo-taxi#259](https://github.com/tnando/my-robo-taxi/pull/259) (Next.js handler).
 
 The handler runs in the Next.js app per the same DV-23 routing decision that places `DELETE /api/users/me` and the §7.5 invite endpoints there: the public API hostname (`https://api.myrobotaxi.com/api/...`) proxies `/api/users/me/*` paths to the Next.js app. The Go telemetry server has no User repository and no export handler. The SDK is unaware of which process serves the request.
+
+#### Re-auth precondition (MYR-76)
+
+Symmetric with §7.6: this endpoint also requires that the caller's most recent fresh OAuth sign-in occurred within `REAUTH_MAX_AGE_SEC` (default 300 s). The decision to apply the gate to the export endpoint as well as the deletion endpoint was made because both endpoints surface the full ownership graph — a stolen Bearer token used against `/api/users/me/export` exfiltrates every owned vehicle, drive, GPS trail, and invite even though it cannot destroy them; the recent-auth corollary applies symmetrically. The mechanism and rejection behavior are identical to §7.6 (see that section); the SDK MUST surface `401 auth_failed` / `subCode: reauth_required` to the consumer's auth layer rather than swallowing it with `getToken()`.
 
 #### Request
 
@@ -1107,11 +1126,12 @@ The response body's audit-log side effect is documented in [`data-lifecycle.md`]
 
 Per the §4.1 error envelope:
 
-| HTTP | `error.code` | When |
-|------|--------------|------|
-| 401 | `auth_failed` | Missing/malformed/invalid token. Same error mode as §7.6. |
-| 429 | `rate_limited` | REST rate limit breached |
-| 500 | `internal_error` | Decryption failure, DB read failure, or audit-log write failure. The export and the audit row are written in the same transaction; if the audit row fails, the response is `500` and no archive is returned. |
+| HTTP | `error.code` | `subCode` | When |
+|------|--------------|-----------|------|
+| 401 | `auth_failed` | `null` | Missing/malformed/invalid token. Same error mode as §7.6. |
+| 401 | `auth_failed` | `reauth_required` | Recent-login re-auth gate failed (see Re-auth precondition above; symmetric with §7.6). |
+| 429 | `rate_limited` | `null` | REST rate limit breached |
+| 500 | `internal_error` | `null` | Decryption failure, DB read failure, or audit-log write failure. The export and the audit row are written in the same transaction; if the audit row fails, the response is `500` and no archive is returned. |
 
 **Note on 403:** Same as §7.6 — the endpoint operates on `/users/me`, the authenticated user is always the owner of their own data, and there is no cross-user export in v1.
 
@@ -1124,7 +1144,7 @@ Per the §4.1 error envelope:
 - The handler runs in the Next.js app per DV-23 (RESOLVED 2026-05-08, MYR-69). The Go telemetry server has no User repository.
 - The audit-log row MUST be written in the same Prisma `$transaction` as the export read. If the audit insert fails, the entire export is rolled back per the same atomicity rule that governs `DELETE /api/users/me` in `data-lifecycle.md` §3.4.
 - Decryption of P1 columns at the crypto boundary uses the same `ENCRYPTION_KEY` and AES-256-GCM scheme as the WebSocket and REST snapshot paths (NFR-3.23, NFR-3.25). The export is NOT a separate decryption code path; it reuses the existing one.
-- **Re-auth gate (deferred):** The optional recent-login re-auth precondition discussed in MYR-75's three-piece scoping is deferred to a follow-up issue. v1 exports require only a valid Bearer token; a fresh-OAuth-step requirement (mirroring AWS IAM "recent MFA") is tracked separately and would be an additive precondition that returns `401 auth_failed` if the session is older than the configured window. See the deferral note in [`../architecture/requirements.md`](../architecture/requirements.md) §2.10.
+- **Re-auth gate (RESOLVED 2026-05-10, MYR-76):** The recent-login re-auth precondition is now enforced symmetrically with §7.6. The Next.js handler reads `session.user.authTime` (the OIDC-style `auth_time` claim stamped by the NextAuth `jwt` callback on every fresh sign-in) and rejects with `401 auth_failed` / `subCode: reauth_required` when the claim is missing or older than `REAUTH_MAX_AGE_SEC` (default 300 s). See the Re-auth precondition subsection above and the resolution note in [`../architecture/requirements.md`](../architecture/requirements.md) §2.10.
 
 ---
 
@@ -1199,6 +1219,7 @@ Same as [`websocket-protocol.md`](websocket-protocol.md) §10 divergence managem
 
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-05-10 | **Recent-login re-auth gate documented ([MYR-79](https://linear.app/myrobotaxi/issue/MYR-79); implementation [MYR-76](https://linear.app/myrobotaxi/issue/MYR-76)).** §7.6 (`DELETE /api/users/me`) and §7.7 (`GET /api/users/me/export`) gain a **Re-auth precondition** subsection requiring the caller's most recent fresh OAuth sign-in to be within `REAUTH_MAX_AGE_SEC` (default 300 s); rejection returns `401 auth_failed` with the new `subCode: reauth_required`. The gate applies symmetrically to deletion (destructive) and export (full-graph exfiltration) per the GDPR Art. 17 recent-auth corollary — both endpoints surface the entire ownership graph, so a stolen Bearer token must not satisfy either path alone. §4.1.1 `auth_failed` row updated to document the new subCode and the **explicit carve-out from the `getToken()` retry path**: SDKs MUST surface `reauth_required` to the consumer's auth layer for an interactive sign-in flow rather than swallowing it with a silent token refresh, because the `auth_time` claim only advances on a fresh OAuth round-trip. The §7.7 deferral note is replaced with the RESOLVED reference. Cross-contract: [`../architecture/requirements.md`](../architecture/requirements.md) §2.10 flipped from Deferred to Resolved. No wire/OpenAPI/schema-shape changes — `subCode` was already an existing field on the §4.1 error envelope. | sdk-architect |
 | 2026-05-09 | **GDPR readiness pack docs ([MYR-75](https://linear.app/myrobotaxi/issue/MYR-75) Phase B).** Adds §7.7 `GET /api/users/me/export` to the endpoint reference (Phase A handler shipped in [tnando/my-robo-taxi#259](https://github.com/tnando/my-robo-taxi/pull/259)) — JSON archive of every Prisma row owned by the caller, P1 columns decrypted at the crypto boundary, OAuth credentials explicitly excluded; audit-log side effect documented as the new `data_exported` action in [`data-lifecycle.md`](data-lifecycle.md) §4.2 with `metadata: {vehicleCount, driveCount, inviteCount, auditCount}` (P0 counts only per Rule CG-DL-5). §1 TOC and §6 endpoint catalog summary updated. The optional recent-login re-auth gate from MYR-75's three-piece scoping is deferred to a follow-up issue and noted in §7.7 implementation notes + [`../architecture/requirements.md`](../architecture/requirements.md) §2.10. Companion runbook: [`../operations/backup-retention.md`](../operations/backup-retention.md) (Supabase backup window, redelete-on-restore procedure honoring GDPR Art. 17, legal-basis-for-retention boundary). | sdk-architect |
 | 2026-05-08 | **DV-23 RESOLVED by [MYR-69](https://linear.app/myrobotaxi/issue/MYR-69).** Locked the FR-10 deletion + §7.5 invite-endpoint architecture to **Option 2 -- Next.js app owns `DELETE /api/users/me` and the three invite endpoints**, with the Go telemetry server holding **Insert-only** access to the Prisma-owned `AuditLog` table via raw pgx. §7.5 preamble rewritten from "two implementation paths" to a single locking sentence. §7.6 implementation notes' "may also run in the Next.js app layer" hedge replaced with a definitive Next.js-owns statement. §10 DV-23 row flipped from **New** to **RESOLVED** with resolution date, rationale, and pointers to MYR-70 / MYR-71 / MYR-72 / MYR-73 implementation follow-ups. **DV-20 row reduced in scope from six endpoints to four**: invite + user-deletion 404s on the Go server are now the terminal behavior (served by Next.js per DV-23), not transitional Go-server work; implementation order steps (5)/(6) and the FR-5.x / FR-10.1 anchors removed. Cross-contract update: [`data-lifecycle.md`](data-lifecycle.md) §1.4 adds an `AuditLog` row noting the telemetry server has Insert-only access; §4 preamble locks `AuditLog` ownership to the Next.js Prisma schema with the Go server as Insert-only writer (responsibility per §3.4). No wire / OpenAPI / SDK API changes -- the SDK still calls the single `https://api.myrobotaxi.com/api/...` base URL. | sdk-architect |
 | 2026-04-14 | Initial full draft (MYR-12): §2 transport, §3 auth, §4 conventions (error envelope, pagination, versioning, headers, idempotency), §5 RBAC with forward-looking `limited_viewer` extension seam, §6 catalog summary, §7 per-endpoint reference (snapshot, drives list, drive detail, drive route, 3 invite ops, user self-deletion), §8 resource-schema index cross-referencing the inline OpenAPI components, §9 observability, §10 divergences DV-19 through DV-23 (REST auth middleware, unmounted SDK endpoints, reserved `503 service_unavailable`, REST rate limit, invite handler location decision). Adds REST-only error codes `not_found`, `invalid_request`, `service_unavailable` to the shared catalog with a note that the `ErrorPayload.code` enum in `schemas/ws-messages.schema.json` must be extended in the DV-20 follow-up. Canonical machine-readable twin is `specs/rest.openapi.yaml`. | sdk-architect |
