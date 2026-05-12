@@ -11,8 +11,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store/routeblob"
+	"github.com/myrobotaxi/telemetry/internal/store"
+	"github.com/myrobotaxi/telemetry/internal/store/routeblob"
 )
 
 // jsonEqual compares two JSON byte slices semantically, ignoring

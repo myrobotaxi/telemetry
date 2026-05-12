@@ -29,7 +29,7 @@ info:
     in this PR). Any divergence not listed there is contract drift.
   contact:
     name: sdk-architect
-    url: https://github.com/tnando/my-robo-taxi-telemetry/tree/main/docs/contracts
+    url: https://github.com/myrobotaxi/telemetry/tree/main/docs/contracts
   license:
     name: Proprietary
     identifier: LicenseRef-Proprietary

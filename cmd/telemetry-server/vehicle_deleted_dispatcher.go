@@ -4,11 +4,11 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/auth"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/telemetry"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/ws"
+	"github.com/myrobotaxi/telemetry/internal/auth"
+	"github.com/myrobotaxi/telemetry/internal/events"
+	"github.com/myrobotaxi/telemetry/internal/store"
+	"github.com/myrobotaxi/telemetry/internal/telemetry"
+	"github.com/myrobotaxi/telemetry/internal/ws"
 )
 
 // vehicleDeletedDispatcher fans a VehicleDeletedEvent out to every

@@ -9,8 +9,8 @@ import (
 )
 
 // expectedFixtureSHA256 is the SHA-256 of the cross-implementation fixture
-// as committed to both this repo and `tnando/my-robo-taxi`. Encoded as the
-// authoritative wire-format fingerprint shared between the Go and TS
+// as committed to both this repo and `myrobotaxi/react-frontend`. Encoded as
+// the authoritative wire-format fingerprint shared between the Go and TS
 // cryptox implementations: any drift here means the two ports have
 // disagreed on AES-256-GCM ciphertext encoding and the fixture must be
 // regenerated in lockstep across both repos.
@@ -18,7 +18,7 @@ import (
 // Source: docs/contracts/key-rotation.md ciphertext format §
 //
 // If this constant changes, also update:
-//   - tnando/my-robo-taxi/src/lib/cryptox/__fixtures__/cross-impl.json
+//   - myrobotaxi/react-frontend/src/lib/cryptox/__fixtures__/cross-impl.json
 //   - the SHA256 quoted in the MYR-62 PR body
 const expectedFixtureSHA256 = "409ccb4a0fd6bff1bd1d97691e9fd17fccbf7f7171561a8a1ebc61b012c7fa8e"
 
@@ -35,7 +35,7 @@ type crossImplFixture struct {
 }
 
 // TestCrossImpl_FixtureSHA256 fails fast if the on-disk fixture has been
-// edited or regenerated independently of its sibling in `tnando/my-robo-taxi`.
+// edited or regenerated independently of its sibling in `myrobotaxi/react-frontend`.
 // It is the byte-equality contract gate: TS encrypts under the same key
 // and the Go port must decrypt the resulting blob without modification.
 func TestCrossImpl_FixtureSHA256(t *testing.T) {
@@ -47,7 +47,7 @@ func TestCrossImpl_FixtureSHA256(t *testing.T) {
 	sum := sha256.Sum256(raw)
 	got := hex.EncodeToString(sum[:])
 	if got != expectedFixtureSHA256 {
-		t.Fatalf("fixture SHA256 drift:\n got=%s\nwant=%s\n(regenerate the cross-impl fixture in lockstep across tnando/my-robo-taxi and this repo)",
+		t.Fatalf("fixture SHA256 drift:\n got=%s\nwant=%s\n(regenerate the cross-impl fixture in lockstep across myrobotaxi/react-frontend and this repo)",
 			got, expectedFixtureSHA256)
 	}
 }

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/cryptox"
+	"github.com/myrobotaxi/telemetry/internal/cryptox"
 )
 
 // newTestEncryptor mints a fresh AES-256-GCM Encryptor backed by a

@@ -3,7 +3,7 @@ package telemetry
 import (
 	"testing"
 
-	tpb "github.com/tnando/my-robo-taxi-telemetry/internal/telemetry/proto/tesla"
+	tpb "github.com/myrobotaxi/telemetry/internal/telemetry/proto/tesla"
 )
 
 func TestFieldMap_ChargeStateSourcedFromProto179(t *testing.T) {

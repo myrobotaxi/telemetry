@@ -28,7 +28,7 @@ The MyRoboTaxi Supabase project keeps two parallel recovery surfaces. Both are t
 | Point-in-time recovery (PITR) | **7 days** | Per-second granularity. Used for "restore to T-2h" disaster recovery. |
 | Daily full backups | **30 days** | One snapshot per day. Used for "restore to a specific date" recovery. |
 
-**Tier verification.** The defaults above match Supabase's published Pro tier. The project's actual tier is not pinned in either repo's environment files (`my-robo-taxi-telemetry/.env*` and `my-robo-taxi/.env.example` do not record a `SUPABASE_TIER` or `SUPABASE_PROJECT_REF` constant), so this runbook documents the **30-day window assumption**. Ops MUST verify against the actual tier in the Supabase dashboard (`Settings → Backups`) and update this section if the tier is Free (no PITR, 7-day daily backups only) or Team / Enterprise (extended PITR).
+**Tier verification.** The defaults above match Supabase's published Pro tier. The project's actual tier is not pinned in either repo's environment files (`telemetry/.env*` and `react-frontend/.env.example` do not record a `SUPABASE_TIER` or `SUPABASE_PROJECT_REF` constant), so this runbook documents the **30-day window assumption**. Ops MUST verify against the actual tier in the Supabase dashboard (`Settings → Backups`) and update this section if the tier is Free (no PITR, 7-day daily backups only) or Team / Enterprise (extended PITR).
 
 **Operational implication.** Any data deleted from primary today is recoverable for **up to 30 days** via a backup restore. The redelete procedure in §2 is what we run after every restore to keep the erasure obligation intact.
 

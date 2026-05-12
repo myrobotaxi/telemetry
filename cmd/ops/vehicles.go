@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
+	"github.com/myrobotaxi/telemetry/internal/store"
 )
 
 func runVehicles(ctx context.Context, args []string) error {

@@ -4,7 +4,7 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/mask"
+	"github.com/myrobotaxi/telemetry/internal/mask"
 )
 
 // Hub manages all connected WebSocket clients. It provides thread-safe

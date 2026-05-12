@@ -310,7 +310,7 @@ CREATE INDEX "AuditLog_timestamp_idx" ON "AuditLog" ("timestamp");
 | `invite_revoked` | Sharing invite revoked | User |
 | `tokens_refreshed` | OAuth tokens rotated | System (token refresh) |
 | `mask_applied` | Role-based field mask removed at least one field from a REST response or WebSocket broadcast (sampled at 1%) | System (broadcast / handler layer); see [`rest-api.md`](rest-api.md) §5.3 |
-| `data_exported` | User-initiated portability export of every Prisma row owned by the caller (GDPR Art. 15 right of access / Art. 20 portability). Emitted by the Next.js `GET /api/users/me/export` handler ([Phase A: tnando/my-robo-taxi#259](https://github.com/tnando/my-robo-taxi/pull/259); MYR-75). One row per export — sampling 100% (not high-volume); retained indefinitely per NFR-3.29. `targetType` MUST be `user`, `targetId` MUST be the caller's `userId`, `initiator` MUST be `user`. `metadata` shape is exactly `{vehicleCount, driveCount, inviteCount, auditCount}` — P0 counts only per Rule CG-DL-5; never PII, GPS, addresses, or tokens. See [`rest-api.md`](rest-api.md) §7.7. | User (caller-initiated portability export per GDPR Art. 15 / Art. 20) |
+| `data_exported` | User-initiated portability export of every Prisma row owned by the caller (GDPR Art. 15 right of access / Art. 20 portability). Emitted by the Next.js `GET /api/users/me/export` handler ([Phase A: myrobotaxi/react-frontend#259](https://github.com/myrobotaxi/react-frontend/pull/259); MYR-75). One row per export — sampling 100% (not high-volume); retained indefinitely per NFR-3.29. `targetType` MUST be `user`, `targetId` MUST be the caller's `userId`, `initiator` MUST be `user`. `metadata` shape is exactly `{vehicleCount, driveCount, inviteCount, auditCount}` — P0 counts only per Rule CG-DL-5; never PII, GPS, addresses, or tokens. See [`rest-api.md`](rest-api.md) §7.7. | User (caller-initiated portability export per GDPR Art. 15 / Art. 20) |
 
 **`targetType` values:**
 
@@ -592,7 +592,7 @@ The `contract-guard` agent/CI check enforces the following rules derived from th
 
 **Trigger:** Any PR that modifies `internal/store/audit_repo.go` in the telemetry repo.
 
-**Check:** The Go `AuditEntry` struct and `queryAuditInsert` SQL in `audit_repo.go` mirror the Prisma `AuditLog` model in the Next.js repo (`../my-robo-taxi/prisma/schema.prisma`). The two MUST stay in lock-step. Specifically:
+**Check:** The Go `AuditEntry` struct and `queryAuditInsert` SQL in `audit_repo.go` mirror the Prisma `AuditLog` model in the Next.js repo (`../react-frontend/prisma/schema.prisma`). The two MUST stay in lock-step. Specifically:
 
 1. The `CROSS-REPO COUPLING` header comment block in `internal/store/audit_repo.go` MUST be present (it tells future engineers where the schema authority lives).
 2. Every column named in §4.1 (and in the Prisma model) MUST appear as a quoted identifier in `audit_repo.go` — `"id"`, `"userId"`, `"timestamp"`, `"action"`, `"targetType"`, `"targetId"`, `"initiator"`, `"metadata"`, `"createdAt"`. A missing column reference is a column-list drift signal: either a column was removed from Prisma (in which case the schema doc must be updated) or the Go side was not updated alongside a Prisma change (in which case both must be updated in the same PR).

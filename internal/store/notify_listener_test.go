@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
+	"github.com/myrobotaxi/telemetry/internal/events"
 )
 
 // fakeBus is a minimal events.Bus stub that captures published events.

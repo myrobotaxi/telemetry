@@ -8,7 +8,7 @@ package telemetry.vehicle_data;
 
 import "google/protobuf/timestamp.proto";
 
-option go_package = "github.com/tnando/my-robo-taxi-telemetry/internal/telemetry/proto/tesla";
+option go_package = "github.com/myrobotaxi/telemetry/internal/telemetry/proto/tesla";
 
 enum Field {
   Unknown = 0;

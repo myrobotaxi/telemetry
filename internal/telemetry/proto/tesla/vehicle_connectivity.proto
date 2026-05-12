@@ -7,7 +7,7 @@ package telemetry.vehicle_connectivity;
 
 import "google/protobuf/timestamp.proto";
 
-option go_package = "github.com/tnando/my-robo-taxi-telemetry/internal/telemetry/proto/tesla";
+option go_package = "github.com/myrobotaxi/telemetry/internal/telemetry/proto/tesla";
 
 message VehicleConnectivity {
   string vin = 1;

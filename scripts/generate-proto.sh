@@ -40,7 +40,7 @@ rm -f "${OUT_DIR}"/*.pb.go
 protoc \
     --proto_path="${PROTO_DIR}" \
     --go_out="${OUT_DIR}" \
-    --go_opt=module=github.com/tnando/my-robo-taxi-telemetry/internal/telemetry/proto/tesla \
+    --go_opt=module=github.com/myrobotaxi/telemetry/internal/telemetry/proto/tesla \
     "${PROTO_DIR}"/*.proto
 
 # Count generated files.

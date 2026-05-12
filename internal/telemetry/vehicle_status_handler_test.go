@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/auth"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/mask"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/wserrors"
-	"github.com/tnando/my-robo-taxi-telemetry/pkg/sdk"
+	"github.com/myrobotaxi/telemetry/internal/auth"
+	"github.com/myrobotaxi/telemetry/internal/mask"
+	"github.com/myrobotaxi/telemetry/internal/wserrors"
+	"github.com/myrobotaxi/telemetry/pkg/sdk"
 )
 
 // --- Test doubles for VehiclePresence ---

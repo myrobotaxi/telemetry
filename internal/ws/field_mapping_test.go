@@ -6,8 +6,8 @@ import (
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/telemetry"
-	tpb "github.com/tnando/my-robo-taxi-telemetry/internal/telemetry/proto/tesla"
+	"github.com/myrobotaxi/telemetry/internal/telemetry"
+	tpb "github.com/myrobotaxi/telemetry/internal/telemetry/proto/tesla"
 )
 
 // TestRouteLine_EndToEnd exercises the full pipeline from a protobuf

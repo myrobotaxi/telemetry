@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/auth"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/mask"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
+	"github.com/myrobotaxi/telemetry/internal/auth"
+	"github.com/myrobotaxi/telemetry/internal/mask"
+	"github.com/myrobotaxi/telemetry/internal/store"
 )
 
 // TestMaskAuditEmitter_EndToEnd is the MYR-71 integration test that

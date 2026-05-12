@@ -3,8 +3,8 @@ package telemetry
 import (
 	"fmt"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
-	tpb "github.com/tnando/my-robo-taxi-telemetry/internal/telemetry/proto/tesla"
+	"github.com/myrobotaxi/telemetry/internal/events"
+	tpb "github.com/myrobotaxi/telemetry/internal/telemetry/proto/tesla"
 )
 
 // This file groups the Tesla-enum-to-string converters. Numeric/location/

@@ -41,7 +41,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/cryptox"
+	"github.com/myrobotaxi/telemetry/internal/cryptox"
 )
 
 // NavRouteCoordinate is the [lng, lat] tuple stored in

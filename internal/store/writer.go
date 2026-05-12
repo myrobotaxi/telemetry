@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/geocode"
+	"github.com/myrobotaxi/telemetry/internal/events"
+	"github.com/myrobotaxi/telemetry/internal/geocode"
 )
 
 // vehicleUpdater is the consumer-site interface for writing vehicle

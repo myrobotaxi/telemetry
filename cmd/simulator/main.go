@@ -17,7 +17,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/simulator"
+	"github.com/myrobotaxi/telemetry/internal/simulator"
 )
 
 func main() {

@@ -31,7 +31,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/cryptox"
+	"github.com/myrobotaxi/telemetry/internal/cryptox"
 )
 
 // Columns is the canonical ordered list of the six plaintext GPS

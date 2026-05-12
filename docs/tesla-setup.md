@@ -55,7 +55,7 @@ https://myrobotaxi.app/.well-known/appspecific/com.tesla.3p.public-key.pem
 If your domain is hosted on Vercel (as the MyRoboTaxi Next.js app is), place the public key file in the Next.js `public/` directory:
 
 ```
-my-robo-taxi/public/.well-known/appspecific/com.tesla.3p.public-key.pem
+react-frontend/public/.well-known/appspecific/com.tesla.3p.public-key.pem
 ```
 
 Verify it is accessible:

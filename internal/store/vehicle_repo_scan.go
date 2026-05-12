@@ -11,7 +11,7 @@ package store
 import (
 	"log/slog"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store/routeblob"
+	"github.com/myrobotaxi/telemetry/internal/store/routeblob"
 )
 
 // rowScanner abstracts pgx.Row vs pgx.Rows so scanVehicleRow can serve

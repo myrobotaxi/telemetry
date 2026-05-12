@@ -6,7 +6,7 @@ import (
 	"io"
 	"strconv"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/auth"
+	"github.com/myrobotaxi/telemetry/internal/auth"
 )
 
 // Sampling rate for the mask audit log. Per docs/contracts/rest-api.md

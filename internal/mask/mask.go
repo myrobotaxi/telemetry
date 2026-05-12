@@ -25,7 +25,7 @@
 package mask
 
 import (
-	"github.com/tnando/my-robo-taxi-telemetry/internal/auth"
+	"github.com/myrobotaxi/telemetry/internal/auth"
 )
 
 // ResourceType identifies the kind of payload being projected. The set

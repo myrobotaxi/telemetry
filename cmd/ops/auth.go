@@ -9,8 +9,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/telemetry"
+	"github.com/myrobotaxi/telemetry/internal/store"
+	"github.com/myrobotaxi/telemetry/internal/telemetry"
 )
 
 // errRefreshSkipped is returned by refreshToken when the Tesla OAuth

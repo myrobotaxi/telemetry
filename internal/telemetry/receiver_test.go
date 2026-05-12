@@ -23,8 +23,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
-	tpb "github.com/tnando/my-robo-taxi-telemetry/internal/telemetry/proto/tesla"
+	"github.com/myrobotaxi/telemetry/internal/events"
+	tpb "github.com/myrobotaxi/telemetry/internal/telemetry/proto/tesla"
 )
 
 const waitTimeout = 2 * time.Second

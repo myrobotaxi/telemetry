@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
+	"github.com/myrobotaxi/telemetry/internal/store"
 )
 
 // TestVehicleSnapshot_JSONShape is the unit-level regression guard for the

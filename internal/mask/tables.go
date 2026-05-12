@@ -1,7 +1,7 @@
 package mask
 
 import (
-	"github.com/tnando/my-robo-taxi-telemetry/internal/auth"
+	"github.com/myrobotaxi/telemetry/internal/auth"
 )
 
 // masksByResource is the v1 per-(resource, role) field-mask matrix.

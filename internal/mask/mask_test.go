@@ -6,7 +6,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/auth"
+	"github.com/myrobotaxi/telemetry/internal/auth"
 )
 
 func TestApply_DenyAllMask(t *testing.T) {

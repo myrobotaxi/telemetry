@@ -1,7 +1,7 @@
 package telemetry
 
 import (
-	tpb "github.com/tnando/my-robo-taxi-telemetry/internal/telemetry/proto/tesla"
+	tpb "github.com/myrobotaxi/telemetry/internal/telemetry/proto/tesla"
 )
 
 // FieldName is the internal name for a telemetry field. These are the

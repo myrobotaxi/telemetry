@@ -18,7 +18,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/config"
+	"github.com/myrobotaxi/telemetry/internal/config"
 )
 
 const (

@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
+	"github.com/myrobotaxi/telemetry/internal/events"
 )
 
 // defaultGroupFlushInterval is the time window for accumulating fields of

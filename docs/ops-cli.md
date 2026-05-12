@@ -25,10 +25,10 @@ go build -o ./bin/ops ./cmd/ops
 | `FLEET_TELEMETRY_CA` | `fleet-config push` (prod) | PEM-encoded CA cert served with the telemetry endpoint. |
 | `DEBUG_FIELDS_TOKEN` | `fields watch` | Shared secret for `/api/debug/fields`. Set identically on the server. In non-dev mode the server requires ≥32 chars and clients must present the token; under `--dev` it is optional. |
 
-`.env.local` from the sibling Next.js app (`../my-robo-taxi/.env.local`) contains every secret you need except `DEBUG_FIELDS_TOKEN`. The fastest local setup:
+`.env.local` from the sibling Next.js app (`../react-frontend/.env.local`) contains every secret you need except `DEBUG_FIELDS_TOKEN`. The fastest local setup:
 
 ```bash
-set -a && source ../my-robo-taxi/.env.local && set +a
+set -a && source ../react-frontend/.env.local && set +a
 ```
 
 ## Subcommands
@@ -237,7 +237,7 @@ Watch a few frames, compare against the in-car display, and you can conclude whe
 
 ## Troubleshooting
 
-- **`DATABASE_URL is required`** — source `../my-robo-taxi/.env.local` (or set the var directly).
+- **`DATABASE_URL is required`** — source `../react-frontend/.env.local` (or set the var directly).
 - **`vehicle owner mismatch`** on `fleet-config push` — the `userId` you passed does not own the VIN. Run `ops vehicles list --user-id <id>` to confirm.
 - **Empty output from `fields watch`** — the vehicle isn't streaming to the server you connected to. Remember real Teslas only dial production; pointing `--server` at a local `--dev` server with no simulator running will always be silent. Check the server logs for a `vehicle connected` line, or confirm with `ops fields snapshot --vin <vin>` that `lastUpdated` is recent.
 - **`/api/debug/fields` endpoint not found (404)** — the server was started without either gate. Pass `--dev` locally, or set `DEBUG_FIELDS_TOKEN` (≥32 chars) on the deployed server.

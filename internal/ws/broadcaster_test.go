@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
+	"github.com/myrobotaxi/telemetry/internal/events"
 )
 
 // stubVINResolver is a test double that maps VINs to vehicle IDs.

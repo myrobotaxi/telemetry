@@ -3,7 +3,7 @@ package telemetry
 import (
 	"fmt"
 
-	fbtesla "github.com/tnando/my-robo-taxi-telemetry/internal/telemetry/flatbuf/tesla"
+	fbtesla "github.com/myrobotaxi/telemetry/internal/telemetry/flatbuf/tesla"
 )
 
 // topicVehicleData is the envelope topic for vehicle telemetry protobuf payloads.

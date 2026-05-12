@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
-	tpb "github.com/tnando/my-robo-taxi-telemetry/internal/telemetry/proto/tesla"
+	"github.com/myrobotaxi/telemetry/internal/events"
+	tpb "github.com/myrobotaxi/telemetry/internal/telemetry/proto/tesla"
 )
 
 // convertValue dispatches to the appropriate converter based on the

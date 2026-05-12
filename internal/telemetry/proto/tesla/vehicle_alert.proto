@@ -7,7 +7,7 @@ package telemetry.vehicle_alerts;
 
 import "google/protobuf/timestamp.proto";
 
-option go_package = "github.com/tnando/my-robo-taxi-telemetry/internal/telemetry/proto/tesla";
+option go_package = "github.com/myrobotaxi/telemetry/internal/telemetry/proto/tesla";
 
 message VehicleAlerts {
   repeated VehicleAlert alerts = 1;

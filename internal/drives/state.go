@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
+	"github.com/myrobotaxi/telemetry/internal/events"
 )
 
 // DriveStatus represents the current state of a vehicle's drive detection.

@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/auth"
+	"github.com/myrobotaxi/telemetry/internal/auth"
 )
 
 // AuditChannel labels the audit row's transport. The set is closed at

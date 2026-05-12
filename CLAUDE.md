@@ -16,7 +16,7 @@ Tesla Vehicle ──mTLS/WSS──► Telemetry Server ──WSS──► Browse
 - **Upstream:** Tesla vehicles push protobuf telemetry over mTLS WebSocket
 - **Downstream:** Browser clients connect via authenticated WebSocket
 - **Persistence:** Shared Supabase PostgreSQL database (same as MyRoboTaxi Next.js app)
-- **Partner app:** `my-robo-taxi` Next.js app at `../my-robo-taxi/`
+- **Partner app:** `react-frontend` Next.js app at `../react-frontend/`
 
 ## Architecture Rules (Enforced)
 
@@ -381,7 +381,7 @@ If you disagree with a review comment, respond with a justification on the PR �
 
 ## What NOT to Do
 
-- Do NOT import from `my-robo-taxi` — communicate only via shared database and documented contracts
+- Do NOT import from `react-frontend` — communicate only via shared database and documented contracts
 - Do NOT use gorilla/websocket (unmaintained) — use `nhooyr.io/websocket`
 - Do NOT use ORMs — use raw SQL with pgx
 - Do NOT store telemetry credentials in config files
