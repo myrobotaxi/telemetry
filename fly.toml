@@ -11,7 +11,7 @@
 # Secrets: fly secrets set DATABASE_URL=... AUTH_SECRET=... ENCRYPTION_KEY=... TESLA_KEY_FILE_B64=...
 # Generate ENCRYPTION_KEY with: openssl rand -base64 32 (see docs/contracts/key-rotation.md).
 
-app = 'telemetry'
+app = 'my-robo-taxi-telemetry'
 primary_region = 'iad'
 
 [build]

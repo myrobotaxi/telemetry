@@ -31,7 +31,7 @@ info:
     DV-NN identifiers. Any divergence not listed there is contract drift.
   contact:
     name: sdk-architect
-    url: https://github.com/tnando/telemetry/tree/main/docs/contracts
+    url: https://github.com/myrobotaxi/telemetry/tree/main/docs/contracts
   license:
     name: Proprietary
   tags:

@@ -83,7 +83,7 @@ import (
 
     "nhooyr.io/websocket"
 
-    "github.com/tnando/robo-taxi-telemetry/internal/events"
+    "github.com/myrobotaxi/telemetry/internal/events"
 )
 
 // Type definitions
