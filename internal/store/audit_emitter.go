@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/mask"
+	"github.com/myrobotaxi/telemetry/internal/mask"
 )
 
 // MaskAuditEmitter adapts AuditRepo to the mask.AuditEmitter

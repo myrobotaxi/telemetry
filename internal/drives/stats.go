@@ -3,7 +3,7 @@ package drives
 import (
 	"math"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
+	"github.com/myrobotaxi/telemetry/internal/events"
 )
 
 const (

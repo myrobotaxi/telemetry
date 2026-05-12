@@ -10,8 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/cryptox"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
+	"github.com/myrobotaxi/telemetry/internal/cryptox"
+	"github.com/myrobotaxi/telemetry/internal/store"
 )
 
 // encodeBase64 returns the standard-alphabet base64 of b. Used to seed

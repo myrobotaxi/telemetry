@@ -226,7 +226,7 @@ const file_vehicle_alert_proto_rawDesc = "" +
 	"\bCustomer\x10\x01\x12\v\n" +
 	"\aService\x10\x02\x12\x0e\n" +
 	"\n" +
-	"ServiceFix\x10\x03BIZGgithub.com/tnando/my-robo-taxi-telemetry/internal/telemetry/proto/teslab\x06proto3"
+	"ServiceFix\x10\x03BIZGgithub.com/myrobotaxi/telemetry/internal/telemetry/proto/teslab\x06proto3"
 
 var (
 	file_vehicle_alert_proto_rawDescOnce sync.Once

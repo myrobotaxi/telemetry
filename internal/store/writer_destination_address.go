@@ -7,7 +7,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/geocode"
+	"github.com/myrobotaxi/telemetry/internal/geocode"
 )
 
 // destGeocodeTimeout caps each per-flush reverse-geocode call so a slow

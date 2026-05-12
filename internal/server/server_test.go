@@ -13,7 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/config"
+	"github.com/myrobotaxi/telemetry/internal/config"
 )
 
 // freePorts returns n available TCP ports by binding to :0 and releasing.

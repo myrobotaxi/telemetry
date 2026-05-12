@@ -11,7 +11,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/wserrors"
+	"github.com/myrobotaxi/telemetry/internal/wserrors"
 )
 
 // TestHub_PerIPCapEmitsRateLimitedEnvelope is the MYR-47 reachability

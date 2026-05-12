@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/wserrors"
+	"github.com/myrobotaxi/telemetry/internal/wserrors"
 )
 
 // vinLength is the standard length of a Vehicle Identification Number.

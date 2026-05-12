@@ -9,9 +9,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/config"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/cryptox"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
+	"github.com/myrobotaxi/telemetry/internal/config"
+	"github.com/myrobotaxi/telemetry/internal/cryptox"
+	"github.com/myrobotaxi/telemetry/internal/store"
 )
 
 // loadEncryptor builds a cryptox.Encryptor from the same env-var schema

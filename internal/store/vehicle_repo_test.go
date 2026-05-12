@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
+	"github.com/myrobotaxi/telemetry/internal/store"
 )
 
 // catalogFields bundles the seven DB-backed columns that MYR-24 promoted

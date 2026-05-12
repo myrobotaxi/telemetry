@@ -10,7 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
+	"github.com/myrobotaxi/telemetry/internal/store"
 )
 
 // silentGPSLogger is the logger we hand the repo so the half-pair

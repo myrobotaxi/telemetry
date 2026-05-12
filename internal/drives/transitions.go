@@ -4,8 +4,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/telemetry"
+	"github.com/myrobotaxi/telemetry/internal/events"
+	"github.com/myrobotaxi/telemetry/internal/telemetry"
 )
 
 // isDriveGear returns true if the gear value indicates the vehicle is moving.

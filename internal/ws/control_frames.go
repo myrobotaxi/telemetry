@@ -9,7 +9,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/wserrors"
+	"github.com/myrobotaxi/telemetry/internal/wserrors"
 )
 
 // closeCodePermissionRevoked is the WebSocket close code emitted after

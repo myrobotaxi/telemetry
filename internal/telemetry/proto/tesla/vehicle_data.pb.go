@@ -5258,7 +5258,7 @@ const file_vehicle_data_proto_rawDesc = "" +
 	"\x12MediaStatusUnknown\x10\x00\x12\x16\n" +
 	"\x12MediaStatusStopped\x10\x01\x12\x16\n" +
 	"\x12MediaStatusPlaying\x10\x02\x12\x15\n" +
-	"\x11MediaStatusPaused\x10\x03BIZGgithub.com/tnando/my-robo-taxi-telemetry/internal/telemetry/proto/teslab\x06proto3"
+	"\x11MediaStatusPaused\x10\x03BIZGgithub.com/myrobotaxi/telemetry/internal/telemetry/proto/teslab\x06proto3"
 
 var (
 	file_vehicle_data_proto_rawDescOnce sync.Once

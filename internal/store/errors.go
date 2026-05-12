@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/tnando/my-robo-taxi-telemetry/pkg/sdk"
+	"github.com/myrobotaxi/telemetry/pkg/sdk"
 )
 
 var (

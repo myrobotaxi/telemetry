@@ -12,7 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/config"
+	"github.com/myrobotaxi/telemetry/internal/config"
 )
 
 // DB manages the PostgreSQL connection pool and provides health checks.

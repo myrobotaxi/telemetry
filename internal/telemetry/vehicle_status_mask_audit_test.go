@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/auth"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/mask"
+	"github.com/myrobotaxi/telemetry/internal/auth"
+	"github.com/myrobotaxi/telemetry/internal/mask"
 )
 
 // fakeAuditEmitter is a recording AuditEmitter for REST mask tests.

@@ -5,7 +5,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	tpb "github.com/tnando/my-robo-taxi-telemetry/internal/telemetry/proto/tesla"
+	tpb "github.com/myrobotaxi/telemetry/internal/telemetry/proto/tesla"
 )
 
 func TestBuildPayload_Fields(t *testing.T) {

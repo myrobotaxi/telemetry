@@ -10,8 +10,8 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/ws"
+	"github.com/myrobotaxi/telemetry/internal/events"
+	"github.com/myrobotaxi/telemetry/internal/ws"
 )
 
 // TestVehicleDeletedDispatcher_ClosesSubscribedClient is a small

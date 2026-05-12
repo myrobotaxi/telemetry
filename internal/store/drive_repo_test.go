@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
+	"github.com/myrobotaxi/telemetry/internal/store"
 )
 
 func TestDriveRepo_Create(t *testing.T) {

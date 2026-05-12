@@ -4,7 +4,7 @@ import (
 	"log/slog"
 	"math"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
+	"github.com/myrobotaxi/telemetry/internal/events"
 )
 
 // internalToClientField maps internal telemetry field names (from the

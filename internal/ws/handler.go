@@ -13,8 +13,8 @@ import (
 	"github.com/coder/websocket"
 	"golang.org/x/sync/errgroup"
 
-	authpkg "github.com/tnando/my-robo-taxi-telemetry/internal/auth"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/wserrors"
+	authpkg "github.com/myrobotaxi/telemetry/internal/auth"
+	"github.com/myrobotaxi/telemetry/internal/wserrors"
 )
 
 // HandlerConfig holds tuning parameters for the WebSocket handler.

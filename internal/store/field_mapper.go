@@ -5,9 +5,9 @@ import (
 	"log/slog"
 	"math"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/polyline"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/telemetry"
+	"github.com/myrobotaxi/telemetry/internal/events"
+	"github.com/myrobotaxi/telemetry/internal/polyline"
+	"github.com/myrobotaxi/telemetry/internal/telemetry"
 )
 
 // fieldApplier applies a TelemetryValue to the matching field on a

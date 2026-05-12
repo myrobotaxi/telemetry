@@ -161,7 +161,7 @@ const file_vehicle_metric_proto_rawDesc = "" +
 	"\x05value\x18\x03 \x01(\x01R\x05value\x1a7\n" +
 	"\tTagsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01BIZGgithub.com/tnando/my-robo-taxi-telemetry/internal/telemetry/proto/teslab\x06proto3"
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01BIZGgithub.com/myrobotaxi/telemetry/internal/telemetry/proto/teslab\x06proto3"
 
 var (
 	file_vehicle_metric_proto_rawDescOnce sync.Once

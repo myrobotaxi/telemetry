@@ -57,7 +57,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store/auditsidecar"
+	"github.com/myrobotaxi/telemetry/internal/store/auditsidecar"
 )
 
 // AuditAction is the enum-like string written to the AuditLog.action column.

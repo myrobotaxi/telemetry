@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/wserrors"
-	"github.com/tnando/my-robo-taxi-telemetry/pkg/sdk"
+	"github.com/myrobotaxi/telemetry/internal/wserrors"
+	"github.com/myrobotaxi/telemetry/pkg/sdk"
 )
 
 // --- Test doubles ---

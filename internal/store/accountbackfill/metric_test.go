@@ -7,7 +7,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store/accountbackfill"
+	"github.com/myrobotaxi/telemetry/internal/store/accountbackfill"
 )
 
 // TestPlaintextGauge_NameAndLabels asserts the gauge metric name and

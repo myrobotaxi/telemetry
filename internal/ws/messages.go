@@ -6,7 +6,7 @@ package ws
 import (
 	"encoding/json"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/wserrors"
+	"github.com/myrobotaxi/telemetry/internal/wserrors"
 )
 
 // Message type constants matching the frontend protocol.

@@ -5,8 +5,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/telemetry"
+	"github.com/myrobotaxi/telemetry/internal/events"
+	"github.com/myrobotaxi/telemetry/internal/telemetry"
 )
 
 func TestMapTelemetryToUpdate(t *testing.T) {

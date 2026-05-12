@@ -19,9 +19,9 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/cryptox"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store/routeblob"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store/routeblobbackfill"
+	"github.com/myrobotaxi/telemetry/internal/cryptox"
+	"github.com/myrobotaxi/telemetry/internal/store/routeblob"
+	"github.com/myrobotaxi/telemetry/internal/store/routeblobbackfill"
 )
 
 var (

@@ -11,8 +11,8 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/telemetry"
+	"github.com/myrobotaxi/telemetry/internal/store"
+	"github.com/myrobotaxi/telemetry/internal/telemetry"
 )
 
 // debugFieldsMinTokenLen is the minimum length required for

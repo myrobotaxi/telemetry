@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	tpb "github.com/tnando/my-robo-taxi-telemetry/internal/telemetry/proto/tesla"
+	tpb "github.com/myrobotaxi/telemetry/internal/telemetry/proto/tesla"
 )
 
 // fleetTestLogger returns a silent logger for fleet API tests.

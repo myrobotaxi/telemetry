@@ -25,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
+	"github.com/myrobotaxi/telemetry/internal/store"
 )
 
 // fixtureRow describes one row in snapshot_completeness.json — one entry

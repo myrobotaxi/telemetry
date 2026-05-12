@@ -5,7 +5,7 @@ package ws
 import (
 	"fmt"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/polyline"
+	"github.com/myrobotaxi/telemetry/internal/polyline"
 )
 
 // DecodeRouteLine delegates to polyline.DecodeRouteLine.

@@ -47,10 +47,10 @@ builds:
 
 dockers:
   - image_templates:
-      - "ghcr.io/tnando/my-robo-taxi-telemetry:{{ .Tag }}"
-      - "ghcr.io/tnando/my-robo-taxi-telemetry:v{{ .Major }}"
-      - "ghcr.io/tnando/my-robo-taxi-telemetry:v{{ .Major }}.{{ .Minor }}"
-      - "ghcr.io/tnando/my-robo-taxi-telemetry:latest"
+      - "ghcr.io/tnando/telemetry:{{ .Tag }}"
+      - "ghcr.io/tnando/telemetry:v{{ .Major }}"
+      - "ghcr.io/tnando/telemetry:v{{ .Major }}.{{ .Minor }}"
+      - "ghcr.io/tnando/telemetry:latest"
     dockerfile: Dockerfile
     ids:
       - telemetry-server
@@ -78,6 +78,6 @@ changelog:
 release:
   github:
     owner: tnando
-    name: my-robo-taxi-telemetry
+    name: telemetry
   draft: false
   prerelease: auto

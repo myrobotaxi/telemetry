@@ -165,7 +165,7 @@ const file_vehicle_connectivity_proto_rawDesc = "" +
 	"\x11ConnectivityEvent\x12\v\n" +
 	"\aUNKNOWN\x10\x00\x12\r\n" +
 	"\tCONNECTED\x10\x01\x12\x10\n" +
-	"\fDISCONNECTED\x10\x02BIZGgithub.com/tnando/my-robo-taxi-telemetry/internal/telemetry/proto/teslab\x06proto3"
+	"\fDISCONNECTED\x10\x02BIZGgithub.com/myrobotaxi/telemetry/internal/telemetry/proto/teslab\x06proto3"
 
 var (
 	file_vehicle_connectivity_proto_rawDescOnce sync.Once

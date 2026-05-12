@@ -13,8 +13,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store/auditsidecar"
+	"github.com/myrobotaxi/telemetry/internal/store"
+	"github.com/myrobotaxi/telemetry/internal/store/auditsidecar"
 )
 
 // buildAuditRepo constructs an AuditRepo wired with the appropriate sidecar.

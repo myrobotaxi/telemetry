@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/mask"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/wserrors"
-	"github.com/tnando/my-robo-taxi-telemetry/pkg/sdk"
+	"github.com/myrobotaxi/telemetry/internal/mask"
+	"github.com/myrobotaxi/telemetry/internal/wserrors"
+	"github.com/myrobotaxi/telemetry/pkg/sdk"
 )
 
 // VehiclePresence provides information about which vehicles are currently

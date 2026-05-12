@@ -27,8 +27,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/cryptox"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store/routeblob"
+	"github.com/myrobotaxi/telemetry/internal/cryptox"
+	"github.com/myrobotaxi/telemetry/internal/store/routeblob"
 )
 
 // Column is a (table, plaintext column, ciphertext column) triple. The

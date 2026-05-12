@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/mask"
+	"github.com/myrobotaxi/telemetry/internal/events"
+	"github.com/myrobotaxi/telemetry/internal/mask"
 )
 
 // handleDriveUpdated accumulates GPS route points and periodically

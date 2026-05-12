@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
+	"github.com/myrobotaxi/telemetry/internal/events"
 )
 
 // mapDriveStarted converts a DriveStartedEvent into a DriveRecord suitable

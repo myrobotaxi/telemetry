@@ -47,9 +47,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/config"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/cryptox"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store/vehiclegpsbackfill"
+	"github.com/myrobotaxi/telemetry/internal/config"
+	"github.com/myrobotaxi/telemetry/internal/cryptox"
+	"github.com/myrobotaxi/telemetry/internal/store/vehiclegpsbackfill"
 )
 
 // exitCodes mirror the package comment above.

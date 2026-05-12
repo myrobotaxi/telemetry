@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
+	"github.com/myrobotaxi/telemetry/internal/events"
 )
 
 // Broadcaster subscribes to event bus topics and transforms domain events

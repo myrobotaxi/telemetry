@@ -1,6 +1,6 @@
 package telemetry
 
-import tpb "github.com/tnando/my-robo-taxi-telemetry/internal/telemetry/proto/tesla"
+import tpb "github.com/myrobotaxi/telemetry/internal/telemetry/proto/tesla"
 
 // shiftStateString converts a Tesla ShiftState enum to a human-readable
 // single-letter gear indicator used throughout MyRoboTaxi.

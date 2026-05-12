@@ -1,4 +1,4 @@
-module github.com/tnando/my-robo-taxi-telemetry
+module github.com/myrobotaxi/telemetry
 
 go 1.25.0
 

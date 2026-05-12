@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
+	"github.com/myrobotaxi/telemetry/internal/events"
 )
 
 // debounceCallback is invoked by time.AfterFunc when the debounce period

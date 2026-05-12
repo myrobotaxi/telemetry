@@ -22,7 +22,7 @@ import (
 	"log/slog"
 	"strconv"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/cryptox"
+	"github.com/myrobotaxi/telemetry/internal/cryptox"
 )
 
 // gpsPair is one of the three latitude/longitude column pairs the

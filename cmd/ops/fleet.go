@@ -14,8 +14,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/telemetry"
+	"github.com/myrobotaxi/telemetry/internal/store"
+	"github.com/myrobotaxi/telemetry/internal/telemetry"
 )
 
 const defaultFleetTelemetryPort = 443
