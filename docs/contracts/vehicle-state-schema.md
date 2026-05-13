@@ -265,21 +265,35 @@ The schema deliberately contains **no `$defs`**. Atomic group membership is enco
 
 ## 6. Type generation targets
 
-### 6.1 TypeScript (via `json-schema-to-typescript`)
+### 6.1 TypeScript (via `@myrobotaxi/contracts`)
 
-**Tool:** [`json-schema-to-typescript`](https://github.com/bcherny/json-schema-to-typescript)
+**Source of truth:** the standalone [`@myrobotaxi/contracts`](https://github.com/myrobotaxi/contracts) npm package. Until [MYR-95](https://linear.app/myrobotaxi/issue/MYR-95) (Phase 2) moves the schema authoring home into that repo, this repo's `docs/contracts/schemas/*.json` is the upstream canonical version; the contracts repo vendors it via paired-PR sync. After MYR-95, this section will redirect outright.
 
-**Generation command:**
+**Tool:** [`json-schema-to-typescript`](https://github.com/bcherny/json-schema-to-typescript) v15+ — invoked from `scripts/codegen.mjs` in the [contracts repo](https://github.com/myrobotaxi/contracts).
+
+**Generation command** (in the contracts repo):
 
 ```bash
-make gen-ts-types
+npm run codegen
 ```
 
-The `gen-ts-types` Makefile target invokes `npx json-schema-to-typescript` against `docs/contracts/schemas/vehicle-state.schema.json` and writes to `sdk/typescript/src/types/vehicle-state.ts`. CI runs the same target so the doc and the actual command can never drift. See the Makefile for the exact arguments.
+The codegen script walks the schemas, folds the custom `x-*` annotations (`x-classification`, `x-atomic-group`, `x-unit`, `x-encrypted`, `x-tesla-proto-field`) into property descriptions so they round-trip into TSDoc, then invokes `json-schema-to-typescript` to emit pre-generated types under `src/generated/`. The output is committed; CI's "Codegen drift check" step fails if the committed output is stale.
 
-**Expected output:** A `VehicleState` interface with all fields typed, nullable fields as `T | null`, and the `status` / `gearPosition` fields as string literal unions.
+**Consumer install:**
 
-**CI enforcement:** The generated types MUST be committed and kept in sync. A CI step runs the generator and fails if the output differs from the committed file (drift detection).
+```bash
+npm install @myrobotaxi/contracts
+```
+
+**Consumer usage** (zero-runtime types-only path):
+
+```ts
+import type { VehicleState } from '@myrobotaxi/contracts/types';
+```
+
+**Expected output:** A `VehicleState` interface with all fields typed, nullable fields as `T | null`, and the `status` / `gearPosition` fields as string literal unions. The TSDoc on every property includes the annotations (e.g., `@classification "P1"`).
+
+**CI enforcement:** Drift detection lives in the contracts repo (`.github/workflows/ci.yml` → "Codegen drift check"). Schema-touching PRs in THIS repo MUST be paired with a contracts-repo PR that regenerates and bumps the version per NFR-3.37.
 
 ### 6.2 Swift (Codable generator)
 
