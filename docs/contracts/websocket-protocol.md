@@ -998,9 +998,15 @@ Browser and Node consumers (TypeScript SDK) have no analogous lifecycle: `docume
 
 ## 9. Type generation targets
 
-### 9.1 TypeScript (AsyncAPI -> TS types)
+### 9.1 TypeScript (via `@myrobotaxi/contracts`)
 
-The `gen-ts-ws-types` Makefile target (PLANNED) will invoke an AsyncAPI -> TypeScript generator against [`specs/websocket.asyncapi.yaml`](specs/websocket.asyncapi.yaml) and write the result to `sdk/typescript/src/types/ws-messages.ts`. The generator MUST consume the linked JSON Schemas via `$ref` rather than inlining. Drift between the generated file and the spec fails CI.
+WebSocket message types are generated alongside `VehicleState` by the [contracts repo](https://github.com/myrobotaxi/contracts) — see [`vehicle-state-schema.md` §6.1](./vehicle-state-schema.md#61-typescript-via-myrobotaxicontracts) for the toolchain and codegen mechanics. Consumers get the discriminated envelope and all eight `$defs` message payload types via:
+
+```ts
+import type { WebSocketEnvelope, VehicleUpdatePayload, ErrorPayload } from '@myrobotaxi/contracts/types';
+```
+
+The previously-planned in-repo `gen-ts-ws-types` Makefile target is OBSOLETE; the contracts repo's `scripts/codegen.mjs` consumes `ws-messages.schema.json` + `ws-envelope.schema.json` directly. Schema-touching PRs in this repo must pair with a contracts-repo PR per the paired-PR convention until MYR-95 collapses schema authoring into the contracts repo.
 
 ### 9.2 Swift (AsyncAPI -> Codable structs)
 

@@ -146,21 +146,21 @@ The SDK v1 contract surface lives in [`docs/contracts/`](docs/contracts/README.m
 
 ### Agent Labels
 
-Issues carry one or more `Agent/<name>` labels in Linear that map directly to `.claude/agents/<name>.md`:
+Issues carry one or more `Agent/<name>` labels in Linear that map to agent files in this repo OR a sibling repo (per the cross-repo organization established in MYR-49). When a label routes to an agent in a sibling repo, the work is done in that repo's session.
 
-| Linear Label | Agent File | When to Use |
+| Linear Label | Lives In | When to Use |
 |-------|-----------|-------------|
-| `Agent/sdk-architect` | `sdk-architect.md` | **Supervisor** — owns requirements + contract docs, reviews every PR for contract adherence, coordinates SDK work. Auto-invoked on contract-relevant paths. |
-| `Agent/sdk-typescript` | `sdk-typescript.md` | TypeScript SDK implementation (core, React, Node — web/Next.js consumers only; **no React Native**) |
-| `Agent/sdk-swift` | `sdk-swift.md` | Swift SDK implementation (iOS, iPadOS, macOS, watchOS, visionOS) |
-| `Agent/contract-tester` | `contract-tester.md` | Contract conformance, FR/NFR, chaos test scenarios |
-| `Agent/contract-guard` | `contract-guard.md` | Automated PR gate — blocks contract drift (session + CI) |
-| `Agent/go-engineer` | `go-engineer.md` | Go implementation, constrained by SDK contract |
-| `Agent/tesla-telemetry` | `tesla-telemetry.md` | Tesla protocol, protobuf, mTLS, cert management |
-| `Agent/security` | `security.md` | Security, encryption, data classification (P0/P1/P2), RBAC |
-| `Agent/testing` | `testing.md` | Unit tests (contract/FR/NFR/chaos owned by `contract-tester`) |
-| `Agent/infra` | `infra.md` | CI/CD, observability stack, deployment, release pipelines |
-| `Agent/ux-audit` | `ux-audit.md` | End-user experience quality audit |
+| `Agent/sdk-architect` | `myrobotaxi/contracts` | **Supervisor** — owns requirements + contract docs, reviews every PR for contract adherence across all consumer repos. Auto-invoked on contract-relevant paths. |
+| `Agent/sdk-typescript` | `myrobotaxi/typescript-sdk` | TypeScript SDK implementation (core, React, Node — web/Next.js consumers only; **no React Native**) |
+| `Agent/sdk-swift` | `myrobotaxi/contracts` (staging) → future `myrobotaxi/swift-sdk` | Swift SDK implementation (iOS, iPadOS, macOS, watchOS, visionOS) |
+| `Agent/contract-tester` | `myrobotaxi/contracts` | Contract conformance, FR/NFR, chaos test scenarios — across all consumers |
+| `Agent/contract-guard` | `myrobotaxi/contracts` | Automated PR gate — blocks contract drift (session + CI) |
+| `Agent/go-engineer` | this repo (`telemetry`) | Go implementation, constrained by SDK contract |
+| `Agent/tesla-telemetry` | this repo | Tesla protocol, protobuf, mTLS, cert management |
+| `Agent/security` | this repo | Security, encryption, data classification (P0/P1/P2), RBAC |
+| `Agent/testing` | this repo | Unit tests (contract/FR/NFR/chaos owned by `contract-tester`) |
+| `Agent/infra` | this repo | CI/CD, observability stack, deployment, release pipelines |
+| `Agent/ux-audit` | this repo | End-user experience quality audit |
 
 ### Picking up issues
 
