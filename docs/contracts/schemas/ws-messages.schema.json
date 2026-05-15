@@ -213,7 +213,7 @@
       "properties": {
         "code": {
           "type": "string",
-          "description": "Stable typed error code from the catalog in websocket-protocol.md §6.1.1. Consumer SDKs map these to typed errors per FR-7.1 and MUST NOT string-match on the sibling `message` field. `auth_failed` and `auth_timeout` are emitted today; the remaining values are reserved for PLANNED server emission tracked by divergences DV-02 / DV-07 / DV-08 in websocket-protocol.md §10. `rate_limited` has two carriers: (a) an HTTP 429 response on the WS upgrade (per-IP cap breach, pre-auth) and (b) an `error` frame paired with WebSocket close code 4003 Server Overload (per-user cap breach, post-auth). The SDK MUST treat both carriers as the same typed error and apply the extended reconnect backoff documented in websocket-protocol.md §6.1.1 and §7.1.",
+          "description": "Stable typed error code. Shared enum across the WebSocket and REST transports so the SDK's CoreError is a single union (rest-api.md §4.1.1, §4.1.1.a; ws catalog websocket-protocol.md §6.1.1). Consumer SDKs map these to typed errors per FR-7.1 and MUST NOT string-match on the sibling `message` field. WS emits today: `auth_failed`, `auth_timeout`; the remaining WS values are PLANNED (divergences DV-02 / DV-07 / DV-08 in websocket-protocol.md §10). `not_found` and `invalid_request` are REST-only on the wire (the WS path enforces ownership via silent filtering and has no structured request bodies, rest-api.md §4.1.1.a) but are members of this shared enum by mandate so the SDK union is one enum across transports — they are NOT a WS drift (DV-20 enum slice). `service_unavailable` is intentionally NOT in this enum: it is REST-only and the WS 503 analogue is a close code, not a typed frame (rest-api.md:258); the SDK declares it as a REST-only variant on its side. `rate_limited` has two carriers: (a) HTTP 429 on the WS upgrade (per-IP, pre-auth) and (b) an `error` frame paired with WS close 4003 (per-user, post-auth) — the SDK treats both as the same typed error with the extended backoff in websocket-protocol.md §6.1.1 / §7.1.",
           "enum": [
             "auth_failed",
             "auth_timeout",
@@ -221,7 +221,9 @@
             "vehicle_not_owned",
             "rate_limited",
             "internal_error",
-            "snapshot_required"
+            "snapshot_required",
+            "not_found",
+            "invalid_request"
           ],
           "x-classification": "P0"
         },
@@ -232,8 +234,8 @@
         },
         "subCode": {
           "type": "string",
-          "description": "Optional typed sub-code for branching consumer-visible UI when the primary code is ambiguous across carriers. Currently defined only for `rate_limited`: when the server rejects a connection because it breached the per-user cap (post-auth, close 4003), the error frame MUST carry `subCode: \"device_cap\"` so SDKs can surface an actionable 'Too many devices signed in' message instead of a generic rate-limit toast. Per-IP breaches (HTTP 429 on upgrade) do NOT carry a sub-code because the SDK cannot distinguish NAT-mate floods from user intent. See websocket-protocol.md §6.1.1 for the full device_cap UX contract.",
-          "enum": ["device_cap"],
+          "description": "Optional typed sub-code for branching consumer-visible UI when the primary code is ambiguous across carriers. v1 enum: `device_cap` (WS-only) and `reauth_required` (REST-only). `device_cap`: WS server rejected a connection because it breached the per-user cap (post-auth, close 4003); the error frame carries `subCode: \"device_cap\"` so SDKs surface an actionable 'Too many devices signed in' message instead of a generic rate-limit toast (per-IP HTTP 429 breaches carry no sub-code — see websocket-protocol.md §6.1.1). `reauth_required`: REST-only, emitted with `code: auth_failed` by rest-api.md §7.6 / §7.7 when the bearer token is valid but the most recent fresh OAuth sign-in is older than the recent-auth window — the SDK MUST surface this to the consumer's auth layer to trigger a fresh interactive sign-in and MUST NOT silently retry via getToken() (a silent refresh cannot advance the `auth_time` claim). Declared on this shared enum for single-union SDK typing; the WS transport never emits `reauth_required`.",
+          "enum": ["device_cap", "reauth_required"],
           "x-classification": "P0"
         }
       }
