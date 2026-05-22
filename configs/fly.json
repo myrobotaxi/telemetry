@@ -34,7 +34,8 @@
     "read_limit": 4096,
     "allowed_origins": [
       "https://myrobotaxi.app",
-      "https://www.myrobotaxi.app"
+      "https://www.myrobotaxi.app",
+      "https://testbench.myrobotaxi.app"
     ]
   },
   "auth": {
