@@ -173,7 +173,7 @@ func (h *Hub) authenticateClient(ctx context.Context, client *Client, auth Authe
 		return fmt.Errorf("hub.authenticateClient: validate token: %w", err)
 	}
 
-	vehicleIDs, err := auth.GetUserVehicles(authCtx, userID)
+	vehicleIDs, err := h.timedGetUserVehicles(authCtx, auth, userID)
 	if err != nil {
 		_ = sendError(authCtx, client.conn, wserrors.ErrCodeAuthFailed, "failed to load vehicles", cfg.WriteTimeout)
 		return fmt.Errorf("hub.authenticateClient: get vehicles(user=%s): %w", userID, err)
@@ -289,6 +289,36 @@ func sendError(ctx context.Context, conn *websocket.Conn, code wserrors.ErrorCod
 		return fmt.Errorf("sendError: write: %w", err)
 	}
 	return nil
+}
+
+// timedGetUserVehicles wraps Authenticator.GetUserVehicles with a
+// `time.Since` duration log so the next deploy produces hard numbers
+// on the WS handshake's pre-auth DB cost. MYR-122 ships this because
+// the cross-repo audit (~/.claude/plans/misty-skipping-seahorse.md W1)
+// called the handshake a suspect for the "live data not populating"
+// symptom; today the implementation uses the slim
+// `SELECT id FROM "Vehicle"` path (auth.queryUserVehicleIDs), so a
+// regression that re-points it at the wide read would surface as a
+// loud duration jump in this log. Drop to Debug or remove once the
+// perf investigation closes.
+func (h *Hub) timedGetUserVehicles(ctx context.Context, auth Authenticator, userID string) ([]string, error) {
+	start := time.Now()
+	vehicleIDs, err := auth.GetUserVehicles(ctx, userID)
+	dur := time.Since(start)
+	if err != nil {
+		h.logger.Warn("ws.handshake: GetUserVehicles failed",
+			slog.String("user_id", userID),
+			slog.Duration("duration", dur),
+			slog.Any("error", err),
+		)
+		return nil, err //nolint:wrapcheck // caller (authenticateClient) wraps with the hub.* prefix.
+	}
+	h.logger.Info("ws.handshake: GetUserVehicles",
+		slog.String("user_id", userID),
+		slog.Int("vehicle_count", len(vehicleIDs)),
+		slog.Duration("duration", dur),
+	)
+	return vehicleIDs, nil
 }
 
 // applyHandlerDefaults fills in zero-value fields with sensible defaults.
