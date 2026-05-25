@@ -169,7 +169,7 @@ func TestLoad_DefaultsApplied(t *testing.T) {
 		{"database.min_conns", cfg.Database().MinConns, 5},
 		{"telemetry.max_vehicles", cfg.Telemetry().MaxVehicles, 100},
 		{"telemetry.event_buffer_size", cfg.Telemetry().EventBufferSize, 1000},
-		{"telemetry.batch_write_interval", cfg.Telemetry().BatchWriteInterval, 5 * time.Second},
+		{"telemetry.batch_write_interval", cfg.Telemetry().BatchWriteInterval, 60 * time.Second},
 		{"telemetry.batch_write_size", cfg.Telemetry().BatchWriteSize, 100},
 		{"drives.min_duration", cfg.Drives().MinDuration, 2 * time.Minute},
 		{"drives.min_distance_miles", cfg.Drives().MinDistanceMiles, 0.1},

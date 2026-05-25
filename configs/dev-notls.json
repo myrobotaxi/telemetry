@@ -16,7 +16,7 @@
   "telemetry": {
     "max_vehicles": 100,
     "event_buffer_size": 1000,
-    "batch_write_interval": "5s",
+    "batch_write_interval": "60s",
     "batch_write_size": 100
   },
   "drives": {
