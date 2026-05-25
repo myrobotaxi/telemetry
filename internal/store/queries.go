@@ -39,6 +39,30 @@ FROM "Vehicle"
 WHERE "userId" = $1
 ORDER BY "name", "vin"`
 
+// vehicleListSummaryColumns is the lean projection used by the
+// GET /api/vehicles list endpoint (MYR-122). It MUST stay aligned with
+// the wire fields emitted by
+// `internal/telemetry/vehicles_list_handler.go` `vehicleSummary`. No
+// GPS columns (plaintext or `*Enc`), no `navRouteCoordinates`, no
+// climate / odometer / fsd columns — list endpoints don't need them
+// and pulling them on every row is what made `GET /api/vehicles` cost
+// ~1.3 min on a warm DB.
+//
+// Anchored by AGENTS.md "Performance invariants": list endpoints use
+// lean projections; wide selects belong only in detail/edit handlers.
+const vehicleListSummaryColumns = `"id", "userId", "vin", "name",
+	"model", "year", "color", "status",
+	"chargeLevel", "estimatedRange", "lastUpdated"`
+
+// queryVehiclesByUserList is the lean read path for the catalog list
+// endpoint. Companion to queryVehiclesByUser (wide read, kept for
+// detail/edit consumers). ORDER BY matches the wide query so the SDK
+// sees stable iteration order across both surfaces.
+const queryVehiclesByUserList = `SELECT ` + vehicleListSummaryColumns + `
+FROM "Vehicle"
+WHERE "userId" = $1
+ORDER BY "name", "vin"`
+
 // queryVehicleIDsByVIN is the slim companion of queryVehicleByVIN. It
 // returns only the immutable identifiers (id, userId) so hot paths that
 // need to map VIN → vehicleID/userID don't pull the heavy navRouteCoordinates

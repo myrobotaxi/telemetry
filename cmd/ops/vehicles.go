@@ -48,8 +48,14 @@ func runVehiclesList(ctx context.Context, args []string) error {
 	}
 	defer db.Close()
 
+	// MYR-122: use the lean catalog projection — the ops CLI's
+	// `vehicleListItem` only emits id/vin/name/status/chargeLevel/
+	// lastUpdated, all of which are in the slim
+	// `ListSummariesByUser` shape. No reason for the CLI to pull the
+	// 37-column wide read (GPS dual-read + nav-route blob) when six
+	// fields are projected out.
 	repo := store.NewVehicleRepo(db.Pool(), store.NoopMetrics{})
-	vehicles, err := repo.ListByUser(ctx, *userID)
+	vehicles, err := repo.ListSummariesByUser(ctx, *userID)
 	if err != nil {
 		return fmt.Errorf("list vehicles: %w", err)
 	}

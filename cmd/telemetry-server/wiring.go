@@ -161,8 +161,14 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 
 	// MYR-91: GET /api/vehicles — list endpoint that enumerates the
 	// caller's vehicles for SDK consumers (rest-api.md §7.0). v1
-	// returns owned vehicles only via VehicleRepo.ListByUser; the
-	// viewer-merged pathway is PLANNED.
+	// returns owned vehicles only; the viewer-merged pathway is
+	// PLANNED.
+	//
+	// MYR-122: the adapter binds to the LEAN read path
+	// (VehicleRepo.ListSummariesByUser) — list endpoints MUST NOT
+	// SELECT columns the response body doesn't emit (AGENTS.md
+	// "Performance invariants"). Wide reads belong only on detail/edit
+	// handlers.
 	vehiclesListHandler := telemetry.NewVehiclesListHandler(
 		deps.authenticator,
 		&vehicleListerAdapter{repo: deps.vehicleRepo},

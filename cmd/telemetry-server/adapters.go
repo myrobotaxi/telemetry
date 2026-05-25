@@ -143,19 +143,26 @@ func (a *vehicleOwnerAdapter) GetVehicleOwner(ctx context.Context, vin string) (
 	return userID, nil
 }
 
-// vehicleListerAdapter adapts store.VehicleRepo.ListByUser to the
-// narrow telemetry.VehicleLister interface used by the
+// vehicleListerAdapter adapts store.VehicleRepo.ListSummariesByUser
+// to the narrow telemetry.VehicleLister interface used by the
 // GET /api/vehicles handler (MYR-91). The adapter exists so the
 // handler can stay decoupled from internal/store (which would
 // otherwise form an import cycle through cmd/ops).
+//
+// MYR-122: the adapter binds to the LEAN read path
+// (`ListSummariesByUser`) — the catalog list endpoint only emits ~10
+// fields per row, so pulling the wide read (37 columns + GPS dual-read
+// + nav-route blob decryption) on every call was what made
+// `GET /api/vehicles` cost ~1.3 min on a warm DB. Detail/edit
+// consumers continue to use the wide `ListByUser` / `GetByID` paths.
 type vehicleListerAdapter struct {
 	repo *store.VehicleRepo
 }
 
 func (a *vehicleListerAdapter) ListByUser(ctx context.Context, userID string) ([]telemetry.VehicleCatalogRow, error) {
-	rows, err := a.repo.ListByUser(ctx, userID)
+	rows, err := a.repo.ListSummariesByUser(ctx, userID)
 	if err != nil {
-		return nil, fmt.Errorf("list vehicles by user: %w", err)
+		return nil, fmt.Errorf("list vehicle summaries by user: %w", err)
 	}
 	out := make([]telemetry.VehicleCatalogRow, 0, len(rows))
 	for i := range rows {
