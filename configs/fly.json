@@ -11,8 +11,8 @@
     "ca_file": "/tmp/certs/tesla-ca.pem"
   },
   "database": {
-    "max_conns": 20,
-    "min_conns": 2,
+    "max_conns": 8,
+    "min_conns": 1,
     "disable_prepared_statements": false
   },
   "telemetry": {
