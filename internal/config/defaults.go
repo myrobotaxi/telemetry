@@ -35,7 +35,11 @@ func applyTelemetryDefaults(t *fileTelemetryConfig) {
 		t.EventBufferSize = 1000
 	}
 	if t.BatchWriteInterval.Dur() == 0 {
-		t.BatchWriteInterval = Duration{d: 5 * time.Second}
+		// 60s default chosen to relieve Postgres write pressure (MYR-131).
+		// NFR-3.11 cold-load freshness tolerates ≤60s staleness because
+		// browsers open the live WS immediately after /snapshot and the
+		// next telemetry frame snaps the UI to current.
+		t.BatchWriteInterval = Duration{d: 60 * time.Second}
 	}
 	if t.BatchWriteSize == 0 {
 		t.BatchWriteSize = 100
