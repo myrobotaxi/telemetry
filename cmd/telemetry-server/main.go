@@ -29,22 +29,25 @@ import (
 )
 
 // accountTokenGaugeInterval is how often the running server polls the
-// Account table for plaintext-without-ciphertext tokens. Slow enough to
-// avoid load (the rollout window is hours/days, not seconds), fast
-// enough that an alerting pipeline catches a regression promptly.
-const accountTokenGaugeInterval = 5 * time.Minute
+// Account table for plaintext-without-ciphertext tokens. The rollout
+// window is hours/days, not seconds — 1h cadence is plenty for an
+// alerting pipeline and a 12× reduction in COUNT(*) scans vs. the
+// prior 5m. MYR-131 flagged the 5m cadence as the bigger disk-IO
+// offender on Nano compute.
+const accountTokenGaugeInterval = 1 * time.Hour
 
 // vehicleGPSGaugeInterval is the MYR-63 sibling of
-// accountTokenGaugeInterval — same 5-minute cadence over the six
-// Vehicle GPS *Enc columns. The two loops are independent so a stall
-// in one (e.g., a long-running migration) doesn't starve the other.
-const vehicleGPSGaugeInterval = 5 * time.Minute
+// accountTokenGaugeInterval — same 1h cadence over the six Vehicle
+// GPS *Enc columns. The two loops are independent so a stall in one
+// (e.g., a long-running migration) doesn't starve the other.
+const vehicleGPSGaugeInterval = 1 * time.Hour
 
-// routeBlobGaugeInterval is the MYR-64 sibling — same 5-minute cadence
-// over Vehicle.navRouteCoordinatesEnc and Drive.routePointsEnc. The
-// route-blob queries can be heavier (jsonb columns) so the cadence
-// stays loose to keep the SELECT off the hot path.
-const routeBlobGaugeInterval = 5 * time.Minute
+// routeBlobGaugeInterval is the MYR-64 sibling — same 1h cadence over
+// Vehicle.navRouteCoordinatesEnc and Drive.routePointsEnc. The
+// route-blob queries can be heavier (jsonb columns), which is exactly
+// why their old 5m cadence kept timing out under statement_timeout on
+// Nano. 1h gives them headroom and matches the other two gauges.
+const routeBlobGaugeInterval = 1 * time.Hour
 
 // Build-time variables set via ldflags (see .goreleaser.yml).
 var (
