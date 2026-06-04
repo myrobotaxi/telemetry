@@ -15,7 +15,16 @@ import (
 // registration would fail-fast inside MustRegister.
 func TestPrometheusMetrics_RegistersAllSeries(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	_ = NewPrometheusMetrics(reg)
+	m := NewPrometheusMetrics(reg)
+
+	// HistogramVec and CounterVec children are materialized lazily —
+	// Gather() returns no metric family for them until at least one
+	// WithLabelValues observation. Force one for each so the
+	// registration assertion below covers all 5 series, not just the 3
+	// label-free Gauges. Observe(0) and Add(0) record without skewing
+	// any subsequent test that uses its own registry.
+	m.ObserveQueryDuration("_startup", 0)
+	m.queryErrors.WithLabelValues("_startup").Add(0)
 
 	mfs, err := reg.Gather()
 	if err != nil {
