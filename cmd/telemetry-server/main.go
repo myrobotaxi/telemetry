@@ -49,6 +49,15 @@ const vehicleGPSGaugeInterval = 1 * time.Hour
 // Nano. 1h gives them headroom and matches the other two gauges.
 const routeBlobGaugeInterval = 1 * time.Hour
 
+// storePoolStatsInterval is how often the running server samples the
+// pgxpool stats (acquired/idle/total) and pushes them into the
+// telemetry_store_pool_*_conns gauges. 15s is short enough to catch
+// short-lived contention spikes between scrapes (Prometheus default
+// 60s) but long enough that the .Stat() call is invisible at the
+// process level. MYR-138 wired this in after MYR-132 found the
+// testbench had no pool visibility.
+const storePoolStatsInterval = 15 * time.Second
+
 // Build-time variables set via ldflags (see .goreleaser.yml).
 var (
 	version = "dev"
@@ -129,12 +138,26 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 		return err
 	}
 
+	// --- Store metrics (MYR-138) ---
+	// Single PrometheusMetrics instance shared by NewDB, VehicleRepo,
+	// and DriveRepo so all telemetry_store_* series come from one
+	// coherent surface. Replaces the three NoopMetrics{} sites that
+	// MYR-132's testbench audit found were hiding DB latency / errors
+	// / pool stats from prod observability.
+	storeMetrics := store.NewPrometheusMetrics(reg)
+
 	// --- Database connection ---
-	db, err := store.NewDB(ctx, cfg.Database(), logger.With(slog.String("component", "store")), store.NoopMetrics{})
+	db, err := store.NewDB(ctx, cfg.Database(), logger.With(slog.String("component", "store")), storeMetrics)
 	if err != nil {
 		return fmt.Errorf("connecting to database: %w", err)
 	}
 	defer db.Close()
+
+	// --- Pool-stats collector (MYR-138) ---
+	// Periodically samples the pgxpool stats and publishes them via
+	// storeMetrics.SetPoolStats so the gauges reflect live state
+	// between Prometheus scrapes. Goroutine exits when ctx cancels.
+	startPoolStatsCollector(ctx, db, storePoolStatsInterval, logger.With(slog.String("component", "store-pool-stats")))
 
 	// --- Database migrations (Go-owned tables) ---
 	// Applies all embedded SQL migrations in internal/store/migrations/ to the
@@ -181,8 +204,8 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	// ciphertext preference. Half-pair *Enc rows fall back to
 	// plaintext per the atomic-pair invariant in
 	// vehicle-state-schema.md §3.3.
-	vehicleRepo := store.NewVehicleRepoWithEncryption(db.Pool(), store.NoopMetrics{}, encryptor, logger.With(slog.String("component", "vehicle-repo")))
-	driveRepo := store.NewDriveRepoWithEncryption(db.Pool(), store.NoopMetrics{}, encryptor, logger.With(slog.String("component", "drive-repo")))
+	vehicleRepo := store.NewVehicleRepoWithEncryption(db.Pool(), storeMetrics, encryptor, logger.With(slog.String("component", "vehicle-repo")))
+	driveRepo := store.NewDriveRepoWithEncryption(db.Pool(), storeMetrics, encryptor, logger.With(slog.String("component", "drive-repo")))
 	accountRepo := store.NewAccountRepo(db.Pool(), encryptor)
 
 	// MYR-62 + MYR-63 plaintext-zero gauges. Both register against the

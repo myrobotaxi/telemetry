@@ -104,6 +104,32 @@ func startPlaintextGauges(
 	go routeBlobGauge.Run(ctx)
 }
 
+// startPoolStatsCollector spawns a background goroutine that polls
+// db.CollectPoolStats every interval and exits when ctx cancels.
+// CollectPoolStats reads pgxpool.Stat() and pushes the values into the
+// store.Metrics implementation wired into the DB — under MYR-138 that
+// is store.PrometheusMetrics, so the gauges land on /metrics. The
+// .Stat() call is a cheap accessor over atomic counters, so the 15s
+// cadence is well below any measurable cost.
+func startPoolStatsCollector(ctx context.Context, db *store.DB, interval time.Duration, logger *slog.Logger) {
+	logger.Info("store pool-stats collector started", slog.Duration("interval", interval))
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		// Sample once immediately so the gauges aren't NaN/zero for
+		// the first interval after startup.
+		db.CollectPoolStats()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				db.CollectPoolStats()
+			}
+		}
+	}()
+}
+
 // setupAuthenticator returns a NoopAuthenticator in dev mode (accepts any
 // token) or a JWTAuthenticator wired against the auth secret + DB pool in
 // production mode.
