@@ -20,6 +20,7 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/cryptox"
 	"github.com/myrobotaxi/telemetry/internal/events"
 	"github.com/myrobotaxi/telemetry/internal/geocode"
+	"github.com/myrobotaxi/telemetry/internal/mask"
 	"github.com/myrobotaxi/telemetry/internal/server"
 	"github.com/myrobotaxi/telemetry/internal/store"
 	"github.com/myrobotaxi/telemetry/internal/store/accountbackfill"
@@ -133,7 +134,10 @@ type httpRouteDeps struct {
 	bus            events.Bus
 	vinCache       *store.VINCache
 	vehicleRepo    *store.VehicleRepo
+	driveRepo      *store.DriveRepo
 	accountRepo    *store.AccountRepo
+	auditEmitter   mask.AuditEmitter
+	auditMetrics   mask.AuditMetrics
 	debugGate      debugFieldsGate
 	originPatterns []string
 	logger         *slog.Logger
@@ -175,6 +179,32 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 		deps.logger.With(slog.String("component", "vehicles-list")),
 	)
 	deps.srv.HandleFunc("GET /api/vehicles", vehiclesListHandler.ServeHTTP)
+
+	// MYR-133: GET /api/vehicles/{vehicleId}/snapshot and
+	// /drives — REST endpoints that close the DV-20 PENDING gap on
+	// the Go server. Both mirror the rest-api.md §7.1 / §7.2 contract:
+	// bearer-token validation, vehicleId path param (cuid, NOT VIN),
+	// ownership verification via VehicleRepo.GetByID, role-based field
+	// mask projection at the handler layer per rest-api.md §5.1.
+	snapshotAdapter := &vehicleSnapshotAdapter{repo: deps.vehicleRepo}
+	snapshotHandler := telemetry.NewVehicleSnapshotHandler(
+		deps.authenticator,
+		snapshotAdapter,
+		deps.logger.With(slog.String("component", "vehicle-snapshot")),
+		telemetry.WithSnapshotRoleResolver(deps.authenticator),
+		telemetry.WithSnapshotMaskAudit(deps.auditEmitter, deps.auditMetrics, "/api/vehicles/{vehicleId}/snapshot"),
+	)
+	deps.srv.HandleFunc("GET /api/vehicles/{vehicleId}/snapshot", snapshotHandler.ServeHTTP)
+
+	drivesHandler := telemetry.NewVehicleDrivesHandler(
+		deps.authenticator,
+		snapshotAdapter,
+		&driveListerAdapter{repo: deps.driveRepo},
+		deps.logger.With(slog.String("component", "vehicle-drives")),
+		telemetry.WithDrivesRoleResolver(deps.authenticator),
+		telemetry.WithDrivesMaskAudit(deps.auditEmitter, deps.auditMetrics, "/api/vehicles/{vehicleId}/drives"),
+	)
+	deps.srv.HandleFunc("GET /api/vehicles/{vehicleId}/drives", drivesHandler.ServeHTTP)
 
 	setupFleetConfigEndpoint(deps.cfg, deps.srv, deps.authenticator, deps.vinCache, deps.accountRepo, deps.logger)
 

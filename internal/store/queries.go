@@ -131,6 +131,41 @@ const queryDriveByID = `SELECT "id", "vehicleId", "date", "startTime", "endTime"
 FROM "Drive"
 WHERE "id" = $1`
 
+// driveSummarySelectColumns is the lean projection used by the
+// GET /api/vehicles/{vehicleId}/drives list endpoint (MYR-133). It
+// MUST stay aligned with the wire fields emitted by
+// `internal/telemetry/vehicle_drives_handler.go` driveSummary. No
+// routePoints (heavy JSON blob), no start/end address/location (per
+// rest-api.md §5.2.2 those belong to drive detail), no energyUsedKwh /
+// fsdMiles / fsdPercentage / interventions (drive detail only).
+const driveSummarySelectColumns = `"id", "vehicleId", "date", "startTime", "endTime",
+	"distanceMiles", "durationMinutes", "avgSpeedMph", "maxSpeedMph",
+	"startChargeLevel", "endChargeLevel", "createdAt"`
+
+// queryDriveListByVehicle is the first-page read path: returns the
+// newest `limit + 1` drives for the given vehicle, ordered per
+// rest-api.md §4.2.2. The +1 is the "is there more?" probe the
+// handler trims back to `limit` before encoding.
+const queryDriveListByVehicle = `SELECT ` + driveSummarySelectColumns + `
+FROM "Drive"
+WHERE "vehicleId" = $1
+ORDER BY "startTime" DESC, "id" DESC
+LIMIT $2`
+
+// queryDriveListByVehicleCursor is the resume path: returns the next
+// `limit + 1` drives whose (startTime, id) sorts strictly below the
+// cursor anchor. The (startTime, id) tuple comparison is the
+// PostgreSQL row-compare operator — it expands to the same
+// `startTime < $2 OR (startTime = $2 AND id < $3)` predicate but is
+// more index-friendly when a composite (startTime DESC, id DESC)
+// index exists.
+const queryDriveListByVehicleCursor = `SELECT ` + driveSummarySelectColumns + `
+FROM "Drive"
+WHERE "vehicleId" = $1
+  AND ("startTime", "id") < ($2, $3)
+ORDER BY "startTime" DESC, "id" DESC
+LIMIT $4`
+
 // Account queries. The Account table is Prisma-owned (NextAuth). We read
 // tokens and update them in-place when refreshing expired OAuth tokens.
 //

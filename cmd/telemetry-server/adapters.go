@@ -183,6 +183,103 @@ func (a *vehicleListerAdapter) ListByUser(ctx context.Context, userID string) ([
 	return out, nil
 }
 
+// vehicleSnapshotAdapter adapts store.VehicleRepo.GetByID to the
+// telemetry.VehicleSnapshotReader interface used by the
+// GET /api/vehicles/{vehicleId}/snapshot and
+// GET /api/vehicles/{vehicleId}/drives handlers (MYR-133). The
+// adapter exists so the handlers stay decoupled from internal/store.
+//
+// GetByID returns the wide read with GPS dual-resolution and
+// nav-route blob decryption already applied per
+// vehicle_repo_scan.go — exactly what /snapshot needs. The drives
+// handler reuses this for the ownership check (it needs the userID
+// off the row; GetByID is the cheapest source of truth for an
+// arbitrary vehicleId cuid).
+type vehicleSnapshotAdapter struct {
+	repo *store.VehicleRepo
+}
+
+func (a *vehicleSnapshotAdapter) GetByID(ctx context.Context, vehicleID string) (telemetry.VehicleSnapshotRow, error) {
+	v, err := a.repo.GetByID(ctx, vehicleID)
+	if err != nil {
+		return telemetry.VehicleSnapshotRow{}, fmt.Errorf("get vehicle by id: %w", err)
+	}
+	return telemetry.VehicleSnapshotRow{
+		ID:                   v.ID,
+		UserID:               v.UserID,
+		VIN:                  v.VIN,
+		Name:                 v.Name,
+		Model:                v.Model,
+		Year:                 v.Year,
+		Color:                v.Color,
+		Status:               string(v.Status),
+		ChargeLevel:          v.ChargeLevel,
+		EstimatedRange:       v.EstimatedRange,
+		ChargeState:          v.ChargeState,
+		TimeToFull:           v.TimeToFull,
+		Speed:                v.Speed,
+		GearPosition:         v.GearPosition,
+		Heading:              v.Heading,
+		Latitude:             v.Latitude,
+		Longitude:            v.Longitude,
+		LocationName:         v.LocationName,
+		LocationAddress:      v.LocationAddress,
+		InteriorTemp:         v.InteriorTemp,
+		ExteriorTemp:         v.ExteriorTemp,
+		OdometerMiles:        v.OdometerMiles,
+		FsdMilesSinceReset:   v.FsdMilesSinceReset,
+		DestinationName:      v.DestinationName,
+		DestinationAddress:   v.DestinationAddress,
+		DestinationLatitude:  v.DestinationLatitude,
+		DestinationLongitude: v.DestinationLongitude,
+		OriginLatitude:       v.OriginLatitude,
+		OriginLongitude:      v.OriginLongitude,
+		EtaMinutes:           v.EtaMinutes,
+		TripDistRemaining:    v.TripDistRemaining,
+		NavRouteCoordinates:  v.NavRouteCoordinates,
+		LastUpdated:          v.LastUpdated,
+	}, nil
+}
+
+// driveListerAdapter adapts store.DriveRepo.ListByVehicleID to the
+// telemetry.DriveLister interface used by the drives handler
+// (MYR-133). The handler defines its own DriveListCursor /
+// DriveListPage / DriveListItem types so it stays decoupled from
+// internal/store; this adapter performs the cursor and row
+// translations at the boundary.
+type driveListerAdapter struct {
+	repo *store.DriveRepo
+}
+
+func (a *driveListerAdapter) ListByVehicleID(ctx context.Context, vehicleID string, cursor telemetry.DriveListCursor, limit int) (telemetry.DriveListPage, error) {
+	page, err := a.repo.ListByVehicleID(ctx, vehicleID, store.DriveListCursor{
+		StartTime: cursor.StartTime,
+		ID:        cursor.ID,
+	}, limit)
+	if err != nil {
+		return telemetry.DriveListPage{}, fmt.Errorf("list drives by vehicle id: %w", err)
+	}
+	items := make([]telemetry.DriveListItem, 0, len(page.Items))
+	for i := range page.Items {
+		d := &page.Items[i]
+		items = append(items, telemetry.DriveListItem{
+			ID:               d.ID,
+			VehicleID:        d.VehicleID,
+			StartTime:        d.StartTime,
+			EndTime:          d.EndTime,
+			Date:             d.Date,
+			DistanceMiles:    d.DistanceMiles,
+			DurationMinutes:  d.DurationMinutes,
+			AvgSpeedMph:      d.AvgSpeedMph,
+			MaxSpeedMph:      d.MaxSpeedMph,
+			StartChargeLevel: d.StartChargeLevel,
+			EndChargeLevel:   d.EndChargeLevel,
+			CreatedAt:        d.CreatedAt,
+		})
+	}
+	return telemetry.DriveListPage{Items: items, HasMore: page.HasMore}, nil
+}
+
 // teslaTokenAdapter adapts store.AccountRepo to the
 // telemetry.TeslaTokenProvider interface, converting the store-layer
 // TeslaOAuthToken (Unix epoch) to the telemetry-layer TeslaToken (time.Time).
