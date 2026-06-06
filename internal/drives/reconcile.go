@@ -26,6 +26,7 @@ package drives
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 )
@@ -133,7 +134,7 @@ func parseDriveStartTime(s string) (time.Time, error) {
 	// Last-resort permissive parse.
 	t, err := time.Parse("2006-01-02T15:04:05", s)
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, fmt.Errorf("parseDriveStartTime(%q): %w", s, err)
 	}
 	return t, nil
 }
