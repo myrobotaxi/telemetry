@@ -17,6 +17,12 @@ type DetectorMetrics interface {
 	// (vehicle resumed driving before debounce elapsed).
 	IncDebounceCancelled()
 
+	// IncWatchdogEnded increments the count of drives ended by the
+	// silent-telemetry watchdog (Tesla stopped streaming without a
+	// gear=P frame, so the AfterFunc-based debounce never primed).
+	// MYR-139 R3a.
+	IncWatchdogEnded()
+
 	// ObserveDriveDuration records the duration of a completed drive.
 	ObserveDriveDuration(seconds float64)
 

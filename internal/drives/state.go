@@ -52,6 +52,13 @@ type vehicleState struct {
 	// lastLocation caches the most recent valid location for drives that
 	// start without a location in the triggering event.
 	lastLocation *events.Location
+
+	// lastTelemetryAt records the wall-clock time of the most recently
+	// received telemetry event for this vehicle (any field, gear-bearing
+	// or not). The end-condition watchdog uses this to detect drives
+	// that have gone silent because Tesla stopped streaming when the car
+	// parked. See watchdogTick in debounce.go.
+	lastTelemetryAt time.Time
 }
 
 // activeDrive accumulates data during an in-progress drive.
