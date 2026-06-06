@@ -281,6 +281,32 @@ func TestScheduleLocationGeocode_NilUpdate(t *testing.T) {
 	}
 }
 
+// TestScheduleLocationGeocode_ZeroZeroSentinel verifies the scheduler
+// filters the (0,0) GPS sentinel the same way geocodeParkedLocation and
+// the drive-start/end paths do. A cold-start / mock / buggy upstream
+// shipping Latitude:&0, Longitude:&0 must not burn a Mapbox call on the
+// Atlantic (asymmetric with field_mapper.applyLocation which does not
+// filter the pair).
+func TestScheduleLocationGeocode_ZeroZeroSentinel(t *testing.T) {
+	vehicles := &mockVehicleUpdater{}
+	geo := &stubGeocoder{}
+	w := newLocAddrTestWriter(t, vehicles, geo)
+
+	zeroLat, zeroLng := 0.0, 0.0
+	w.scheduleLocationGeocode(testVIN, &VehicleUpdate{
+		Latitude:  &zeroLat,
+		Longitude: &zeroLng,
+	})
+	w.geocodeWG.Wait()
+
+	if got := geo.callCount(); got != 0 {
+		t.Errorf("geocoder calls = %d, want 0 (zero-zero sentinel must be filtered)", got)
+	}
+	if writes := vehicles.getTelemetryWrites(); len(writes) != 0 {
+		t.Errorf("vehicle writes = %d, want 0", len(writes))
+	}
+}
+
 // TestGeocodeParkedLocation_HappyPath verifies the synchronous drive-end
 // path: geocoder is called once, Vehicle row is written before the
 // function returns (no waitgroup), and the cache anchor + lastFiredAt

@@ -61,6 +61,13 @@ const defaultLocationGeocodeMinMeters = 50.0
 // has one number to remember.
 const locationGeocodeTimeout = 5 * time.Second
 
+// locationDBWriteTimeout is the budget for the follow-up Vehicle row
+// UpdateTelemetry call that persists the resolved name/address. Sized
+// independently of locationGeocodeTimeout so a slow Mapbox round-trip
+// cannot starve the DB write — a 4.5s geocode followed by a 500ms write
+// budget would routinely cancel the write under load.
+const locationDBWriteTimeout = 5 * time.Second
+
 // locAddrEntry holds the per-VIN debounce state for the current-location
 // reverse-geocode. lat/lng anchor the distance check, lastFiredAt
 // anchors the time-based debounce, and inFlight prevents racing
@@ -90,6 +97,15 @@ func (w *Writer) scheduleLocationGeocode(vin string, update *VehicleUpdate) {
 	}
 	lat := *update.Latitude
 	lng := *update.Longitude
+	// (0, 0) is the sentinel the rest of the codebase treats as "no GPS"
+	// (see writer_drives.go drive-start/end and geocodeParkedLocation).
+	// internal/store/field_mapper.go applyLocation does NOT filter it for
+	// the current-location pair, so a cold-start / mock / buggy upstream
+	// can land us here with both coordinates zero. Skip — geocoding the
+	// Atlantic burns Mapbox quota and produces nonsense.
+	if lat == 0 && lng == 0 {
+		return
+	}
 
 	if !w.shouldFireLocationGeocode(vin, lat, lng, time.Now()) {
 		return
@@ -143,10 +159,12 @@ func (w *Writer) runLocationGeocode(vin string, lat, lng float64) {
 	defer w.geocodeWG.Done()
 	defer w.clearLocationGeocodeInFlight(vin)
 
-	ctx, cancel := context.WithTimeout(context.Background(), locationGeocodeTimeout)
-	defer cancel()
-
-	res, err := w.geocoder.ReverseGeocode(ctx, lat, lng)
+	geoCtx, geoCancel := context.WithTimeout(context.Background(), locationGeocodeTimeout)
+	res, err := w.geocoder.ReverseGeocode(geoCtx, lat, lng)
+	// Release the geocode budget before the DB write so a slow Mapbox
+	// round-trip cannot eat into locationDBWriteTimeout — see comment on
+	// the constants above.
+	geoCancel()
 	if err != nil {
 		// ErrNoResult is the routine "geocoder returned nothing" path
 		// (NoopGeocoder, or Mapbox legitimately had no match). Stay
@@ -160,7 +178,9 @@ func (w *Writer) runLocationGeocode(vin string, lat, lng float64) {
 		return
 	}
 
-	w.persistLocationAddress(ctx, vin, lat, lng, res.PlaceName, res.Address)
+	dbCtx, dbCancel := context.WithTimeout(context.Background(), locationDBWriteTimeout)
+	defer dbCancel()
+	w.persistLocationAddress(dbCtx, vin, lat, lng, res.PlaceName, res.Address)
 }
 
 // persistLocationAddress writes the resolved name + address to the
@@ -221,9 +241,11 @@ func (w *Writer) geocodeParkedLocation(ctx context.Context, vin string, lat, lng
 	if lat == 0 && lng == 0 {
 		return
 	}
-	geoCtx, cancel := context.WithTimeout(ctx, locationGeocodeTimeout)
-	defer cancel()
+	geoCtx, geoCancel := context.WithTimeout(ctx, locationGeocodeTimeout)
 	res, err := w.geocoder.ReverseGeocode(geoCtx, lat, lng)
+	// Release the geocode budget before the DB write so a slow Mapbox
+	// round-trip cannot starve persistLocationAddress's deadline.
+	geoCancel()
 	if err != nil {
 		if !errors.Is(err, geocode.ErrNoResult) {
 			w.logger.Warn("reverse geocode failed for parked location",
@@ -235,7 +257,9 @@ func (w *Writer) geocodeParkedLocation(ctx context.Context, vin string, lat, lng
 	}
 
 	w.markLocationGeocodeFired(vin, time.Now())
-	w.persistLocationAddress(ctx, vin, lat, lng, res.PlaceName, res.Address)
+	dbCtx, dbCancel := context.WithTimeout(ctx, locationDBWriteTimeout)
+	defer dbCancel()
+	w.persistLocationAddress(dbCtx, vin, lat, lng, res.PlaceName, res.Address)
 }
 
 // markLocationGeocodeFired records "we just fired a geocode for vin at
