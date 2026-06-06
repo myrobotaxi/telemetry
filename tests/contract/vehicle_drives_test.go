@@ -214,6 +214,108 @@ func TestContract_GETVehicleDrives(t *testing.T) {
 		assertErrorCode(t, body, "vehicle_not_owned")
 	})
 
+	t.Run("MYR-145: items include start/end location + address when populated, and omit when empty", func(t *testing.T) {
+		srv, seeder := setupTestServer(t)
+		seeder.seedUser(ctx, t, ownerID)
+		seeder.seedVehicle(ctx, t, vehicleSeed{
+			ID:             vehicleID,
+			UserID:         ownerID,
+			VIN:            vehicleVIN,
+			Name:           "Located",
+			Model:          "Model 3",
+			Year:           2024,
+			Color:          "Solid Black",
+			Status:         "parked",
+			ChargeLevel:    80,
+			EstimatedRange: 240,
+		})
+
+		// Drive 1: fully geocoded — all four location fields populated.
+		seeder.seedDrive(ctx, t, driveSeed{
+			ID:               "drive_loc_complete",
+			VehicleID:        vehicleID,
+			Date:             "2026-05-01",
+			StartTime:        "2026-05-01T09:00:00Z",
+			EndTime:          "2026-05-01T09:30:00Z",
+			StartLocation:    "Home",
+			StartAddress:     "742 Evergreen Terrace, San Francisco, CA 94107",
+			EndLocation:      "Whole Foods Market",
+			EndAddress:       "399 4th Street, San Francisco, CA 94107",
+			DistanceMiles:    12.4,
+			DurationMinutes:  30,
+			AvgSpeedMph:      25.5,
+			MaxSpeedMph:      65.0,
+			StartChargeLevel: 80,
+			EndChargeLevel:   78,
+		})
+
+		// Drive 2: not yet geocoded — every location field empty.
+		// startTime is earlier so it sorts after the geocoded drive.
+		seeder.seedDrive(ctx, t, driveSeed{
+			ID:               "drive_loc_empty",
+			VehicleID:        vehicleID,
+			Date:             "2026-05-01",
+			StartTime:        "2026-05-01T07:00:00Z",
+			EndTime:          "2026-05-01T07:30:00Z",
+			DistanceMiles:    5.0,
+			DurationMinutes:  30,
+			AvgSpeedMph:      10.0,
+			MaxSpeedMph:      25.0,
+			StartChargeLevel: 85,
+			EndChargeLevel:   83,
+		})
+
+		token := mintToken(t, ownerID, nil)
+		resp := doGET(t, srv, "/api/vehicles/"+vehicleID+"/drives", token)
+		body := readBody(t, resp)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body: %s", resp.StatusCode, string(body))
+		}
+
+		var page drivesEnvelope
+		decodeJSON(t, body, &page)
+		if len(page.Items) != 2 {
+			t.Fatalf("items = %d, want 2", len(page.Items))
+		}
+
+		// Newest first per (startTime DESC, id DESC) — drive_loc_complete
+		// has the later startTime, so it lands at index 0.
+		populated := page.Items[0]
+		if got := populated["id"]; got != "drive_loc_complete" {
+			t.Fatalf("items[0].id = %v, want drive_loc_complete (ordering check)", got)
+		}
+		for _, kv := range []struct {
+			key  string
+			want string
+		}{
+			{"startLocation", "Home"},
+			{"startAddress", "742 Evergreen Terrace, San Francisco, CA 94107"},
+			{"endLocation", "Whole Foods Market"},
+			{"endAddress", "399 4th Street, San Francisco, CA 94107"},
+		} {
+			got, ok := populated[kv.key]
+			if !ok {
+				t.Errorf("items[0].%s: missing, want %q (MYR-145)", kv.key, kv.want)
+				continue
+			}
+			if got != kv.want {
+				t.Errorf("items[0].%s = %v, want %q", kv.key, got, kv.want)
+			}
+		}
+
+		empty := page.Items[1]
+		if got := empty["id"]; got != "drive_loc_empty" {
+			t.Fatalf("items[1].id = %v, want drive_loc_empty", got)
+		}
+		// MYR-145 nullable convention: drop the key entirely when the
+		// store row carries the empty-string default.
+		for _, k := range []string{"startLocation", "startAddress", "endLocation", "endAddress"} {
+			if _, ok := empty[k]; ok {
+				t.Errorf("items[1].%s: present on the wire; want omitted when DB row is empty (MYR-145)", k)
+			}
+		}
+	})
+
 	t.Run("unknown vehicleId returns 404 not_found (MYR-132 regression)", func(t *testing.T) {
 		// The point of this case: if a future refactor un-mounts
 		// the route, http.ServeMux 404s with `404 page not found`
