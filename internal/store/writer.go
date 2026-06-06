@@ -31,14 +31,32 @@ type WriterConfig struct {
 	FlushInterval time.Duration
 	BatchSize     int
 	RouteBuffer   RouteBufferConfig
+
+	// LocationGeocodeDebounce is the minimum time between successive
+	// reverse-geocode calls for the SAME VIN's current location
+	// (Vehicle.locationName / Vehicle.locationAddress). A stable parked
+	// vehicle streams (lat, lng) every flush window; we don't want to
+	// burn the Mapbox quota on coordinates that haven't moved.
+	// Defaults to 60s when zero — see DefaultWriterConfig.
+	LocationGeocodeDebounce time.Duration
+
+	// LocationGeocodeMinMeters is the minimum great-circle distance (in
+	// meters) the current location must move before triggering a new
+	// reverse-geocode call. Below this threshold the cached address is
+	// kept and the row is left alone. Defaults to 50m when zero — see
+	// DefaultWriterConfig. Sits alongside the time-based debounce so
+	// both rate-AND-distance must pass to fire.
+	LocationGeocodeMinMeters float64
 }
 
 // DefaultWriterConfig returns production-ready defaults.
 func DefaultWriterConfig() WriterConfig {
 	return WriterConfig{
-		FlushInterval: 5 * time.Second,
-		BatchSize:     100,
-		RouteBuffer:   DefaultRouteBufferConfig(),
+		FlushInterval:            5 * time.Second,
+		BatchSize:                100,
+		RouteBuffer:              DefaultRouteBufferConfig(),
+		LocationGeocodeDebounce:  defaultLocationGeocodeDebounce,
+		LocationGeocodeMinMeters: defaultLocationGeocodeMinMeters,
 	}
 }
 
@@ -74,6 +92,21 @@ type Writer struct {
 	destAddrMu    sync.Mutex
 	destAddrCache map[string]destAddrEntry
 
+	// locAddrMu guards locAddrCache, which tracks the most recent
+	// reverse-geocode call per VIN for the current vehicle location.
+	// Unlike destAddrCache (destination), this cache records WHEN the
+	// last geocode fired and whether a goroutine is currently in flight
+	// for that VIN — both inputs to the debounce decision. See
+	// writer_location_address.go.
+	locAddrMu    sync.Mutex
+	locAddrCache map[string]locAddrEntry
+
+	// geocodeWG tracks async location-reverse-geocode goroutines so
+	// Stop() can wait for them to finish before the writer is torn down.
+	// Without this, a slow Mapbox call in flight at shutdown could write
+	// to a pool whose connections were already closed.
+	geocodeWG sync.WaitGroup
+
 	subs      []events.Subscription
 	cancel    context.CancelFunc
 	done      chan struct{}
@@ -100,6 +133,12 @@ func NewWriter(
 	if cfg.BatchSize <= 0 {
 		cfg.BatchSize = DefaultWriterConfig().BatchSize
 	}
+	if cfg.LocationGeocodeDebounce <= 0 {
+		cfg.LocationGeocodeDebounce = defaultLocationGeocodeDebounce
+	}
+	if cfg.LocationGeocodeMinMeters <= 0 {
+		cfg.LocationGeocodeMinMeters = defaultLocationGeocodeMinMeters
+	}
 	return &Writer{
 		vehicles:      vehicles,
 		drives:        drives,
@@ -111,6 +150,7 @@ func NewWriter(
 		routeBuf:      newRouteBuffer(drives, logger, cfg.RouteBuffer),
 		pending:       make(map[string]*VehicleUpdate),
 		destAddrCache: make(map[string]destAddrEntry),
+		locAddrCache:  make(map[string]locAddrEntry),
 		done:          make(chan struct{}),
 		flushDone:     make(chan struct{}),
 	}
@@ -196,6 +236,13 @@ func (w *Writer) Stop() error {
 	defer cancel()
 	w.flush(ctx)
 
+	// Wait for any in-flight async location-reverse-geocode goroutines
+	// to finish writing their Vehicle row updates before declaring the
+	// writer stopped. The Mapbox client honors per-call timeouts so the
+	// wait is bounded; ignoring this race risks writes against a torn-down
+	// connection pool on shutdown.
+	w.geocodeWG.Wait()
+
 	w.closeOnce.Do(func() { close(w.done) })
 
 	w.logger.Info("store writer stopped")
@@ -206,74 +253,3 @@ func (w *Writer) Stop() error {
 func (w *Writer) Done() <-chan struct{} {
 	return w.done
 }
-
-// handleTelemetry is the event handler for VehicleTelemetryEvent. It
-// extracts fields, maps them to a VehicleUpdate, and coalesces into
-// the pending map. If the batch size is reached, it triggers a flush.
-func (w *Writer) handleTelemetry(event events.Event) {
-	telEvt, ok := event.Payload.(events.VehicleTelemetryEvent)
-	if !ok {
-		w.logger.Error("unexpected payload type for telemetry event",
-			slog.String("event_id", event.ID),
-		)
-		return
-	}
-
-	update := mapTelemetryToUpdate(telEvt.Fields)
-	if update == nil {
-		return
-	}
-	update.LastUpdated = telEvt.CreatedAt
-
-	shouldFlush := w.coalesce(telEvt.VIN, update)
-	if shouldFlush {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		w.flush(ctx)
-	}
-}
-
-// flushLoop runs a ticker that calls flush at each interval until the
-// context is cancelled.
-func (w *Writer) flushLoop(ctx context.Context) {
-	ticker := time.NewTicker(w.cfg.FlushInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			w.flush(ctx)
-		}
-	}
-}
-
-// flush drains the pending map and writes each VIN's coalesced update
-// to the database. Errors are logged but do not halt the writer.
-func (w *Writer) flush(ctx context.Context) {
-	w.pendingMu.Lock()
-	if len(w.pending) == 0 {
-		w.pendingMu.Unlock()
-		return
-	}
-	batch := w.pending
-	w.pending = make(map[string]*VehicleUpdate)
-	w.count = 0
-	w.pendingMu.Unlock()
-
-	w.logger.Debug("flushing telemetry batch",
-		slog.Int("vehicles", len(batch)),
-	)
-
-	for vin, update := range batch {
-		w.applyDestinationAddress(ctx, vin, update)
-		if err := w.vehicles.UpdateTelemetry(ctx, vin, *update); err != nil {
-			w.logger.Warn("failed to write telemetry update",
-				slog.String("vin", redactVIN(vin)),
-				slog.String("error", err.Error()),
-			)
-		}
-	}
-}
-
