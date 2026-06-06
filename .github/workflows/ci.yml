@@ -110,6 +110,31 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  contract:
+    name: Contract conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # MYR-141: contract-level conformance tests for the Go REST surface.
+    # These mount the real handlers from `internal/telemetry/*` against a
+    # real Postgres (via testcontainers-go) and assert wire-shape adherence
+    # for every endpoint in `docs/contracts/schemas/`. The tests are
+    # tagged `contract` so the default `go test ./...` (which runs without
+    # Docker on dev laptops) does not pull them in.
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          cache-dependency-path: 'go.sum'
+
+      - name: Run contract conformance tests
+        # GitHub-hosted runners have Docker available; the suite's
+        # TestMain skips out cleanly if it ever isn't. -count=1 disables
+        # the test cache so the suite runs against the canonical
+        # schemas on every push.
+        run: go test -tags=contract -count=1 -timeout=180s ./tests/contract/...
+
   security:
     name: Security
     runs-on: ubuntu-latest
@@ -145,7 +170,7 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: [lint, test, security]
+    needs: [lint, test, contract, security]
     steps:
       - uses: actions/checkout@v6
 

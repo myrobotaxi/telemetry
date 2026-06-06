@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://myrobotaxi.com/schemas/vehicle-summary.schema.json",
+  "title": "VehicleSummary",
+  "description": "Thin per-row catalog shape returned by GET /api/vehicles (rest-api.md §7.0). The list is deliberately a catalog -- live telemetry (GPS, navigation, climate, full charge group) lives in VehicleState (vehicle-state.schema.json) and is fetched per-vehicle via GET /api/vehicles/{vehicleId}/snapshot. Owner sees every field; viewer sees every field except `name` per the §5.2.0 mask.",
+  "type": "object",
+  "required": [
+    "vehicleId",
+    "model",
+    "year",
+    "color",
+    "vinLast4",
+    "status",
+    "chargeLevel",
+    "estimatedRange",
+    "lastUpdated",
+    "role"
+  ],
+  "properties": {
+    "vehicleId": {
+      "type": "string",
+      "description": "Opaque database identifier (cuid). NOT the VIN. The SDK uses this in every other endpoint's path parameter (`/api/vehicles/{vehicleId}/snapshot`, etc.).",
+      "x-classification": "P0",
+      "examples": ["clxyz1234567890abcdef"]
+    },
+    "name": {
+      "type": "string",
+      "description": "User-assigned vehicle name. Owner-only field per §5.2.0 — viewer responses MUST NOT include this property at all (mask-strip removes the key, not nulls it).",
+      "x-classification": "P1",
+      "examples": ["Stumpy"]
+    },
+    "model": {
+      "type": "string",
+      "description": "Tesla model: 'Model 3', 'Model S', 'Model X', 'Model Y', 'Cybertruck', etc.",
+      "x-classification": "P0",
+      "examples": ["Model 3"]
+    },
+    "year": {
+      "type": "integer",
+      "description": "Model year.",
+      "x-classification": "P0",
+      "examples": [2024]
+    },
+    "color": {
+      "type": "string",
+      "description": "Display color.",
+      "x-classification": "P0",
+      "examples": ["Midnight Silver Metallic"]
+    },
+    "vinLast4": {
+      "type": "string",
+      "description": "Last 4 characters of the VIN. The full VIN is never emitted per data-classification.md §1.5 + redactVIN(). Empty string allowed for vehicles whose VIN is unknown.",
+      "x-classification": "P0",
+      "maxLength": 4,
+      "examples": ["0001"]
+    },
+    "status": {
+      "type": "string",
+      "enum": ["driving", "parked", "charging", "offline", "in_service"],
+      "description": "Derived vehicle status. Mirrors the VehicleStatus Prisma enum.",
+      "x-classification": "P0"
+    },
+    "chargeLevel": {
+      "type": "integer",
+      "description": "Battery state of charge, 0-100. Lightweight indicator for the catalog view; full charge group lives in /snapshot.",
+      "x-classification": "P0",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "estimatedRange": {
+      "type": "integer",
+      "description": "Estimated remaining range in miles.",
+      "x-classification": "P0",
+      "minimum": 0
+    },
+    "lastUpdated": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of the most recent telemetry write to this vehicle. The catalog uses it to render 'last seen N minutes ago.'",
+      "x-classification": "P0"
+    },
+    "role": {
+      "type": "string",
+      "enum": ["owner", "viewer"],
+      "description": "The caller's relationship to the vehicle. v1 only emits 'owner' (the only reachable path on the Go server); the 'viewer' value is reserved for the planned viewer-merged pathway. See §7.0 RBAC v1 implementation note.",
+      "x-classification": "P0"
+    }
+  }
+}
