@@ -132,13 +132,21 @@ FROM "Drive"
 WHERE "id" = $1`
 
 // driveSummarySelectColumns is the lean projection used by the
-// GET /api/vehicles/{vehicleId}/drives list endpoint (MYR-133). It
-// MUST stay aligned with the wire fields emitted by
+// GET /api/vehicles/{vehicleId}/drives list endpoint (MYR-133, MYR-145).
+// It MUST stay aligned with the wire fields emitted by
 // `internal/telemetry/vehicle_drives_handler.go` driveSummary. No
-// routePoints (heavy JSON blob), no start/end address/location (per
-// rest-api.md §5.2.2 those belong to drive detail), no energyUsedKwh /
-// fsdMiles / fsdPercentage / interventions (drive detail only).
+// routePoints (heavy JSON blob), no energyUsedKwh / fsdMiles /
+// fsdPercentage / interventions (drive detail only).
+//
+// MYR-145 added the four location columns
+// (`startLocation`, `startAddress`, `endLocation`, `endAddress`) to the
+// projection — they're small `TEXT` columns (max a few hundred bytes
+// each) so adding them keeps the per-page payload well under the
+// ~5 KB-per-page budget called out in rest-api.md §5.2.2 while letting
+// the SDK render origin/destination labels in the drive-history list
+// without a per-row drive-detail fetch.
 const driveSummarySelectColumns = `"id", "vehicleId", "date", "startTime", "endTime",
+	"startLocation", "startAddress", "endLocation", "endAddress",
 	"distanceMiles", "durationMinutes", "avgSpeedMph", "maxSpeedMph",
 	"startChargeLevel", "endChargeLevel", "createdAt"`
 

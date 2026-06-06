@@ -21,12 +21,24 @@ const (
 // `cmd/telemetry-server` wires `store.DriveRepo.ListByVehicleID` into
 // this interface and converts `store.DriveSummaryRow` → DriveListItem
 // at the boundary so the handler stays decoupled from `internal/store`.
+//
+// MYR-145 added Start/End Location + Address. They are reverse-geocoded
+// place names + street addresses written by `internal/store/writer_drives.go`
+// (drive-start and drive-end handlers) and surfaced verbatim — empty
+// strings indicate "not geocoded yet" (e.g., drive still in progress
+// for end-side fields, or zero-GPS at drive start). The handler
+// translates empty values into omitted JSON keys per rest-api.md §7.2
+// nullable-field convention so the SDK can branch on presence.
 type DriveListItem struct {
 	ID               string
 	VehicleID        string
 	StartTime        string // ISO 8601 — Prisma string column
 	EndTime          string
 	Date             string
+	StartLocation    string // P1 — reverse-geocoded place name
+	StartAddress     string // P1 — reverse-geocoded street address
+	EndLocation      string // P1 — empty while drive in progress
+	EndAddress       string // P1 — empty while drive in progress
 	DistanceMiles    float64
 	DurationMinutes  int
 	AvgSpeedMph      float64
@@ -104,12 +116,21 @@ var errMalformedCursor = errors.New("malformed cursor")
 // `internal/mask/tables.go` (driveSummaryFields). The durationSeconds
 // wire field is computed from store.DurationMinutes — the Prisma
 // schema stores minutes but the contract emits seconds.
+//
+// MYR-145: Start/End Location + Address are emitted when non-empty.
+// `toMaskMap` drops empty values entirely so the wire never carries an
+// empty-string place-name (consumers branch on key presence per the
+// rest-api.md §7.2 nullable-field convention).
 type driveSummary struct {
 	ID               string  `json:"id"`
 	VehicleID        string  `json:"vehicleId"`
 	StartTime        string  `json:"startTime"`
 	EndTime          string  `json:"endTime"`
 	Date             string  `json:"date"`
+	StartLocation    string  `json:"startLocation,omitempty"`
+	StartAddress     string  `json:"startAddress,omitempty"`
+	EndLocation      string  `json:"endLocation,omitempty"`
+	EndAddress       string  `json:"endAddress,omitempty"`
 	DistanceMiles    float64 `json:"distanceMiles"`
 	DurationSeconds  int     `json:"durationSeconds"`
 	AvgSpeedMph      float64 `json:"avgSpeedMph"`
@@ -123,8 +144,13 @@ type driveSummary struct {
 // projection through the role-based mask. Owners and viewers see the
 // same field set per rest-api.md §5.2.2 — the projection is the
 // identity in v1 — but the plumbing is wired now for FR-5.5 readiness.
+//
+// Empty location / address values are omitted entirely (no key emitted)
+// rather than serialized as `""`. The store layer stores
+// not-yet-geocoded rows as `""` (Prisma column default), and the SDK
+// branches on key presence per rest-api.md §7.2.
 func (d driveSummary) toMaskMap() map[string]any {
-	return map[string]any{
+	m := map[string]any{
 		"id":               d.ID,
 		"vehicleId":        d.VehicleID,
 		"startTime":        d.StartTime,
@@ -138,6 +164,19 @@ func (d driveSummary) toMaskMap() map[string]any {
 		"endChargeLevel":   d.EndChargeLevel,
 		"createdAt":        d.CreatedAt,
 	}
+	if d.StartLocation != "" {
+		m["startLocation"] = d.StartLocation
+	}
+	if d.StartAddress != "" {
+		m["startAddress"] = d.StartAddress
+	}
+	if d.EndLocation != "" {
+		m["endLocation"] = d.EndLocation
+	}
+	if d.EndAddress != "" {
+		m["endAddress"] = d.EndAddress
+	}
+	return m
 }
 
 // drivesPageResponse is the envelope shape returned by the endpoint
@@ -151,7 +190,8 @@ type drivesPageResponse struct {
 
 // buildDriveSummary maps the store-layer row into the wire shape.
 // DurationMinutes is converted to durationSeconds per the §7.2
-// example.
+// example. Empty location/address fields propagate as empty strings —
+// `toMaskMap` drops them from the JSON map before encoding.
 func buildDriveSummary(row *DriveListItem) driveSummary {
 	return driveSummary{
 		ID:               row.ID,
@@ -159,6 +199,10 @@ func buildDriveSummary(row *DriveListItem) driveSummary {
 		StartTime:        row.StartTime,
 		EndTime:          row.EndTime,
 		Date:             row.Date,
+		StartLocation:    row.StartLocation,
+		StartAddress:     row.StartAddress,
+		EndLocation:      row.EndLocation,
+		EndAddress:       row.EndAddress,
 		DistanceMiles:    row.DistanceMiles,
 		DurationSeconds:  row.DurationMinutes * 60,
 		AvgSpeedMph:      row.AvgSpeedMph,

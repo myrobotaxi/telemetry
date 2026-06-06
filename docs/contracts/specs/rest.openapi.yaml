@@ -1172,12 +1172,17 @@ components:
       type: object
       description: |
         Lightweight drive record returned by the paginated drive list
-        endpoint. Deliberately omits startAddress/endAddress/
-        energyUsedKwh/fsdMiles/fsdPercentage/interventions/routePoints
-        -- those are in DriveDetail and DriveRoute. Omitting the
-        address fields from the list payload keeps the response lean
-        and reduces the P1 surface area per list request (addresses
-        are P1 per data-classification.md §1.4).
+        endpoint. Includes the four P1 location/address fields so the
+        SDK can render origin/destination labels in the history list
+        without an extra DriveDetail fetch per row (MYR-145). Still
+        deliberately omits energyUsedKwh/fsdMiles/fsdPercentage/
+        interventions/routePoints -- those are in DriveDetail and
+        DriveRoute and are heavier per row than the location strings.
+        startLocation / startAddress / endLocation / endAddress are
+        OPTIONAL on the wire: when the underlying Drive column is
+        empty (drive in progress, zero-GPS at start, reverse-geocode
+        failed) the server omits the JSON key entirely rather than
+        emitting "" or null -- consumers branch on key presence.
       required:
         - id
         - vehicleId
@@ -1215,6 +1220,39 @@ components:
           type: string
           description: Local date string (e.g., "2026-04-13").
           x-classification: P0
+        startLocation:
+          type: string
+          description: |
+            Reverse-geocoded place name at the drive's start (e.g.,
+            "Home", "Whole Foods Market"). P1 per data-classification.md
+            §1.4. OMITTED from the JSON payload when the underlying
+            Drive.startLocation column is empty (zero-GPS at drive
+            start or reverse-geocode failed).
+          x-classification: P1
+        startAddress:
+          type: string
+          description: |
+            Reverse-geocoded street address at the drive's start.
+            P1 per data-classification.md §1.4. OMITTED from the JSON
+            payload when the underlying Drive.startAddress column is
+            empty.
+          x-classification: P1
+        endLocation:
+          type: string
+          description: |
+            Reverse-geocoded place name at the drive's end. P1 per
+            data-classification.md §1.4. OMITTED from the JSON payload
+            when the underlying Drive.endLocation column is empty
+            (drive in progress, zero-GPS at drive end, or
+            reverse-geocode failed).
+          x-classification: P1
+        endAddress:
+          type: string
+          description: |
+            Reverse-geocoded street address at the drive's end. P1 per
+            data-classification.md §1.4. OMITTED from the JSON payload
+            when the underlying Drive.endAddress column is empty.
+          x-classification: P1
         distanceMiles:
           type: number
           minimum: 0

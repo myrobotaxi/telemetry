@@ -389,6 +389,10 @@ func (a *contractDriveLister) ListByVehicleID(ctx context.Context, vehicleID str
 			StartTime:        d.StartTime,
 			EndTime:          d.EndTime,
 			Date:             d.Date,
+			StartLocation:    d.StartLocation,
+			StartAddress:     d.StartAddress,
+			EndLocation:      d.EndLocation,
+			EndAddress:       d.EndAddress,
 			DistanceMiles:    d.DistanceMiles,
 			DurationMinutes:  d.DurationMinutes,
 			AvgSpeedMph:      d.AvgSpeedMph,
@@ -543,12 +547,21 @@ func (h *seedHelpers) seedVehicle(ctx context.Context, t *testing.T, v vehicleSe
 // pagination assertions. The store-layer ListByVehicleID reads
 // startTime + id as the cursor anchor, so a test that wants
 // deterministic pagination MUST set both per row.
+//
+// MYR-145 added Start/End Location + Address. Leave them empty to
+// exercise the "drive in progress / not yet geocoded" branch (the wire
+// payload omits the key entirely); set them to non-empty strings to
+// assert the populated branch.
 type driveSeed struct {
 	ID               string
 	VehicleID        string
 	Date             string
 	StartTime        string
 	EndTime          string
+	StartLocation    string
+	StartAddress     string
+	EndLocation      string
+	EndAddress       string
 	DistanceMiles    float64
 	DurationMinutes  int
 	AvgSpeedMph      float64
@@ -558,7 +571,9 @@ type driveSeed struct {
 	CreatedAt        time.Time
 }
 
-// seedDrive inserts a Drive row.
+// seedDrive inserts a Drive row. Empty Start/End Location + Address
+// values rely on the table's NOT NULL DEFAULT '' to stay consistent
+// with the Prisma-owned column semantics.
 func (h *seedHelpers) seedDrive(ctx context.Context, t *testing.T, d driveSeed) {
 	t.Helper()
 	if d.CreatedAt.IsZero() {
@@ -567,18 +582,21 @@ func (h *seedHelpers) seedDrive(ctx context.Context, t *testing.T, d driveSeed) 
 	_, err := h.pool.Exec(ctx, `
 		INSERT INTO "Drive" (
 			"id", "vehicleId", "date", "startTime", "endTime",
+			"startLocation", "startAddress", "endLocation", "endAddress",
 			"distanceMiles", "durationMinutes",
 			"avgSpeedMph", "maxSpeedMph",
 			"startChargeLevel", "endChargeLevel",
 			"createdAt"
 		) VALUES (
 			$1, $2, $3, $4, $5,
-			$6, $7,
-			$8, $9,
+			$6, $7, $8, $9,
 			$10, $11,
-			$12
+			$12, $13,
+			$14, $15,
+			$16
 		)`,
 		d.ID, d.VehicleID, d.Date, d.StartTime, d.EndTime,
+		d.StartLocation, d.StartAddress, d.EndLocation, d.EndAddress,
 		d.DistanceMiles, d.DurationMinutes,
 		d.AvgSpeedMph, d.MaxSpeedMph,
 		d.StartChargeLevel, d.EndChargeLevel,

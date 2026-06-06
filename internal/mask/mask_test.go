@@ -213,10 +213,12 @@ func TestFor_DriveSummary_OwnerAndViewerIdentical(t *testing.T) {
 			t.Errorf("drive_summary missing %q", f)
 		}
 	}
-	// And explicitly check the deliberately-omitted detail fields.
+	// MYR-145: start/end Location + Address are part of the lean
+	// projection now (rest-api.md §5.2.2). Owners and viewers see them
+	// on the list per the FR-5.1 sharing use case.
 	for _, f := range []string{"startAddress", "endAddress", "startLocation", "endLocation"} {
-		if _, ok := owner.Allowed[f]; ok {
-			t.Errorf("drive_summary MUST NOT include %q (drive_detail field)", f)
+		if _, ok := owner.Allowed[f]; !ok {
+			t.Errorf("drive_summary missing %q (MYR-145)", f)
 		}
 	}
 }

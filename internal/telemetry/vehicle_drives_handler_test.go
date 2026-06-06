@@ -31,7 +31,10 @@ func (s *stubDriveLister) ListByVehicleID(_ context.Context, _ string, cursor Dr
 	return s.page, s.err
 }
 
-// fixtureDriveItems returns a deterministic seed of n drives.
+// fixtureDriveItems returns a deterministic seed of n drives. Every
+// row carries reverse-geocoded start/end Location + Address strings so
+// the MYR-145 wire assertions can confirm the fields propagate from the
+// store-adapter boundary all the way to the JSON payload.
 func fixtureDriveItems(vehicleID string, n int) []DriveListItem {
 	base := time.Date(2026, 4, 13, 18, 22, 0, 0, time.UTC)
 	out := make([]DriveListItem, 0, n)
@@ -43,6 +46,10 @@ func fixtureDriveItems(vehicleID string, n int) []DriveListItem {
 			Date:             startTime.Format("2006-01-02"),
 			StartTime:        startTime.Format(time.RFC3339),
 			EndTime:          startTime.Add(24 * time.Minute).Format(time.RFC3339),
+			StartLocation:    "Home",
+			StartAddress:     "742 Evergreen Terrace, San Francisco, CA 94107",
+			EndLocation:      "Whole Foods Market",
+			EndAddress:       "399 4th Street, San Francisco, CA 94107",
 			DistanceMiles:    12.4,
 			DurationMinutes:  24,
 			AvgSpeedMph:      30.5,
@@ -273,10 +280,28 @@ func TestVehicleDrivesHandler_ServeHTTP(t *testing.T) {
 				if first["durationSeconds"] != float64(1440) {
 					t.Errorf("items[0].durationSeconds: got %v, want 1440", first["durationSeconds"])
 				}
-				// startAddress / endAddress / endLocation are deliberately
-				// NOT in the DriveSummary allow-list — they belong to the
-				// drive-detail endpoint per rest-api.md §5.2.2.
-				for _, denied := range []string{"startAddress", "startLocation", "endAddress", "endLocation", "energyUsedKwh", "fsdMiles", "fsdPercentage", "interventions", "routePoints"} {
+				// MYR-145: start/end Location + Address propagate when
+				// populated. The fixture seeds non-empty values so all
+				// four keys MUST be present.
+				wantLoc := map[string]string{
+					"startLocation": items[0].StartLocation,
+					"startAddress":  items[0].StartAddress,
+					"endLocation":   items[0].EndLocation,
+					"endAddress":    items[0].EndAddress,
+				}
+				for k, want := range wantLoc {
+					got, ok := first[k]
+					if !ok {
+						t.Errorf("items[0].%s: missing, want %q (MYR-145)", k, want)
+						continue
+					}
+					if got != want {
+						t.Errorf("items[0].%s: got %v, want %q", k, got, want)
+					}
+				}
+				// Drive-detail-only fields still stay out of the lean
+				// projection per rest-api.md §5.2.2.
+				for _, denied := range []string{"energyUsedKwh", "fsdMiles", "fsdPercentage", "interventions", "routePoints"} {
 					if _, ok := first[denied]; ok {
 						t.Errorf("items[0]: unexpected field %q leaked into drive summary", denied)
 					}
@@ -378,6 +403,72 @@ func TestDriveCursorRoundTrip(t *testing.T) {
 	}
 	if got != in {
 		t.Errorf("round-trip: got %+v, want %+v", got, in)
+	}
+}
+
+// TestVehicleDrivesHandler_OmitsEmptyLocationFields verifies the
+// MYR-145 nullable-field convention: when the store row carries empty
+// Location / Address strings (drive in progress, or geocode failed),
+// the corresponding JSON keys are omitted entirely so the SDK can
+// branch on key presence rather than empty-string compares.
+func TestVehicleDrivesHandler_OmitsEmptyLocationFields(t *testing.T) {
+	const (
+		vehicleID = "clxyz1234567890abcdef"
+		userID    = "user-empty-loc"
+	)
+
+	// Two items, both with empty location/address. The expectation is
+	// that none of the four keys appear on the wire.
+	rows := []DriveListItem{
+		{
+			ID:               "clmno_no_loc_0001",
+			VehicleID:        vehicleID,
+			Date:             "2026-04-13",
+			StartTime:        "2026-04-13T18:22:00Z",
+			EndTime:          "2026-04-13T18:46:18Z",
+			DistanceMiles:    12.4,
+			DurationMinutes:  24,
+			AvgSpeedMph:      30.5,
+			MaxSpeedMph:      65.2,
+			StartChargeLevel: 82,
+			EndChargeLevel:   76,
+			CreatedAt:        time.Date(2026, 4, 13, 18, 46, 19, 0, time.UTC),
+			// All four location/address fields intentionally empty.
+		},
+	}
+
+	h := NewVehicleDrivesHandler(
+		&stubTokenValidator{userID: userID},
+		&stubVehicleSnapshotReader{row: fixtureSnapshotRow(userID)},
+		&stubDriveLister{page: DriveListPage{Items: rows}},
+		discardLogger(),
+	)
+	mux := http.NewServeMux()
+	mux.Handle("GET /api/vehicles/{vehicleId}/drives", h)
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/vehicles/"+vehicleID+"/drives", nil)
+	req.Header.Set("Authorization", "Bearer t")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200. Body: %s", rec.Code, rec.Body.String())
+	}
+
+	var body struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if len(body.Items) != 1 {
+		t.Fatalf("items len: got %d, want 1", len(body.Items))
+	}
+	first := body.Items[0]
+	for _, k := range []string{"startLocation", "startAddress", "endLocation", "endAddress"} {
+		if _, ok := first[k]; ok {
+			t.Errorf("items[0].%s: present on the wire; want omitted when store row has empty value", k)
+		}
 	}
 }
 
