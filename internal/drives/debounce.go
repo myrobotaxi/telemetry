@@ -9,6 +9,89 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/events"
 )
 
+// runWatchdog periodically scans all per-vehicle states and ends any
+// drive whose last telemetry frame is older than EndDebounce. Tesla
+// stops streaming when the vehicle parks, so the gear=P -> AfterFunc
+// path is not guaranteed to fire; this watchdog is the safety net that
+// guarantees DriveEndedEvent emission even when streaming goes silent.
+//
+// MYR-139 R3a: without this, stuck Drive rows accumulate in the DB with
+// endTime IS NULL because the writer subscribes to drive.ended and the
+// detector never publishes it.
+func (d *Detector) runWatchdog() {
+	defer d.watchdogWG.Done()
+
+	ticker := time.NewTicker(d.watchdogInterval())
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-d.ctx.Done():
+			return
+		case <-ticker.C:
+			d.watchdogTick()
+		}
+	}
+}
+
+// watchdogTick walks every active per-vehicle state and ends drives
+// whose last telemetry arrival is older than EndDebounce.
+//
+// Locking: each vehicle lock is acquired in its own iteration so a slow
+// endDrive (which publishes to the bus) does not block other vehicles.
+// We tolerate sync.Map's "no snapshot" semantics because Range visits
+// each key at most once even under concurrent insertion.
+func (d *Detector) watchdogTick() {
+	now := d.now()
+	cutoff := d.cfg.EndDebounce
+
+	d.states.Range(func(key, value any) bool {
+		vin, _ := key.(string)
+		state, _ := value.(*vehicleState)
+		if state == nil {
+			return true
+		}
+
+		state.mu.Lock()
+		// Guard 1: only active drives are candidates.
+		if state.status != StatusDriving {
+			state.mu.Unlock()
+			return true
+		}
+		// Guard 2: never preempt an in-flight gear=P debounce timer.
+		// Letting the AfterFunc fire keeps debounce semantics intact
+		// (cancellable up to EndDebounce after gear=P) and avoids a
+		// double-end race.
+		if state.debounceTimer != nil {
+			state.mu.Unlock()
+			return true
+		}
+		// Guard 3: a drive in flight must have had at least one
+		// telemetry frame already (the start frame). If not, leave
+		// it alone -- the watchdog only acts on observed silence.
+		if state.lastTelemetryAt.IsZero() {
+			state.mu.Unlock()
+			return true
+		}
+		// The actual condition: telemetry has been silent for at
+		// least EndDebounce.
+		if now.Sub(state.lastTelemetryAt) < cutoff {
+			state.mu.Unlock()
+			return true
+		}
+
+		d.logger.Info("ending drive via watchdog (telemetry silent)",
+			slog.String("vin", redactVIN(vin)),
+			slog.Duration("silent_for", now.Sub(state.lastTelemetryAt)),
+			slog.Duration("end_debounce", cutoff),
+		)
+		d.metrics.IncWatchdogEnded()
+		d.endDrive(state, vin)
+		state.mu.Unlock()
+		return true
+	})
+}
+
 // debounceCallback is invoked by time.AfterFunc when the debounce period
 // elapses. It runs on a timer goroutine and must acquire state.mu.
 func (d *Detector) debounceCallback(vin string) {

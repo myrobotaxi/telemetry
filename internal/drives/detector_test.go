@@ -117,6 +117,41 @@ func expectNoEvent(t *testing.T, ch <-chan events.Event, timeout time.Duration, 
 	}
 }
 
+// keepTelemetryAlive starts a goroutine that publishes gear=D telemetry
+// for vin every 20ms until the returned stop function is called. Used
+// by tests that need to assert NO drive.ended event under conditions
+// other than telemetry silence -- without it, the MYR-139 R3a watchdog
+// would end the drive after EndDebounce.
+//
+// The goroutine swallows bus.Publish errors so a teardown race (bus
+// closed while the goroutine is in flight) does not fail the test.
+func keepTelemetryAlive(bus events.Bus, vin string, start time.Time) func() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		i := 0
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				i++
+				ts := start.Add(time.Duration(i) * time.Second)
+				lat := 33.09 + 0.001*float64(i)
+				evt := events.NewEvent(telemetryEvent(vin, ts, driveFields("D", 30.0, lat, -96.82)))
+				_ = bus.Publish(context.Background(), evt)
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
+	}
+}
+
 // subscribeTopic subscribes to a topic and returns a channel that receives events.
 func subscribeTopic(t *testing.T, bus events.Bus, topic events.Topic) <-chan events.Event {
 	t.Helper()
@@ -254,6 +289,12 @@ func TestDetector_DebounceCancellation(t *testing.T) {
 
 	// Shift back to D immediately -- cancels debounce before it fires.
 	publishTelemetry(t, bus, telemetryEvent("VIN003", now.Add(2*time.Second), driveFields("D", 25.0, 33.10, -96.83)))
+
+	// Keep telemetry flowing so the silent-telemetry watchdog (MYR-139
+	// R3a) does not end the drive as a side effect. This test asserts
+	// gear=P -> gear=D debounce cancellation specifically.
+	stopTel := keepTelemetryAlive(bus, "VIN003", now)
+	defer stopTel()
 
 	// The debounce period passes -- drive should NOT have ended.
 	expectNoEvent(t, endedCh, 300*time.Millisecond, "drive should continue after debounce cancellation")
@@ -642,6 +683,135 @@ func TestDetector_DisconnectEndsDrive(t *testing.T) {
 	}
 }
 
+// TestDetector_WatchdogEndsDriveWhenTelemetrySilent reproduces MYR-139 R3a:
+// a vehicle drives for a minute, then Tesla stops streaming entirely
+// without ever sending a gear=P frame. The state machine's gear=P-triggered
+// AfterFunc debounce never primes, so without the watchdog the drive would
+// stay open forever, leaving the DB row with endTime IS NULL.
+//
+// The test uses an injectable clock so it doesn't have to sleep for the
+// real EndDebounce. We feed driving telemetry, then advance the clock
+// past EndDebounce and wait for the watchdog tick to fire.
+func TestDetector_WatchdogEndsDriveWhenTelemetrySilent(t *testing.T) {
+	bus := testBus()
+	defer bus.Close(context.Background())
+
+	cfg := testConfig()
+	// EndDebounce drives the watchdog interval (half of). 200ms keeps
+	// the test under 1s while still exercising the production path.
+	cfg.EndDebounce = 200 * time.Millisecond
+	cfg.MinDuration = 0
+	cfg.MinDistanceMiles = 0
+
+	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{})
+
+	// Inject a clock we can fast-forward. The watchdog reads now() to
+	// decide whether telemetry has been silent for EndDebounce.
+	var clockMu sync.Mutex
+	wallNow := time.Now()
+	d.setNow(func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return wallNow
+	})
+	advanceClock := func(by time.Duration) {
+		clockMu.Lock()
+		wallNow = wallNow.Add(by)
+		clockMu.Unlock()
+	}
+
+	if err := d.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = d.Stop() }()
+
+	startedCh := subscribeTopic(t, bus, events.TopicDriveStarted)
+	endedCh := subscribeTopic(t, bus, events.TopicDriveEnded)
+
+	eventTime := time.Now()
+
+	// Drive for a minute (in event-time): start frame plus several
+	// route points. Telemetry is fully gear=D the whole time; we never
+	// send gear=P -- this is the bug scenario.
+	publishTelemetry(t, bus, telemetryEvent("VIN_SILENT", eventTime, driveFields("D", 30.0, 33.09, -96.82)))
+	if _, ok := waitForEvent(startedCh); !ok {
+		t.Fatal("timed out waiting for DriveStartedEvent")
+	}
+
+	for i := 1; i <= 6; i++ {
+		ts := eventTime.Add(time.Duration(i*10) * time.Second)
+		lat := 33.09 + 0.001*float64(i)
+		publishTelemetry(t, bus, telemetryEvent("VIN_SILENT", ts, driveFields("D", 40.0, lat, -96.82)))
+	}
+
+	// Give the bus handler a moment to process all the telemetry events
+	// so lastTelemetryAt is set in the vehicle state.
+	time.Sleep(50 * time.Millisecond)
+
+	// Confirm no end yet: the gear=P path was never taken and the
+	// clock has not advanced, so the watchdog should not act.
+	expectNoEvent(t, endedCh, 100*time.Millisecond, "watchdog should not fire before silence cutoff")
+
+	// Now simulate Tesla going silent: advance the wall clock past
+	// EndDebounce. The next watchdog tick should observe the silence
+	// and end the drive.
+	advanceClock(2 * cfg.EndDebounce)
+
+	evt, ok := waitForEvent(endedCh)
+	if !ok {
+		t.Fatal("timed out waiting for DriveEndedEvent from watchdog")
+	}
+
+	payload, ok := evt.Payload.(events.DriveEndedEvent)
+	if !ok {
+		t.Fatalf("expected DriveEndedEvent, got %T", evt.Payload)
+	}
+	if payload.VIN != "VIN_SILENT" {
+		t.Errorf("VIN: got %q, want %q", payload.VIN, "VIN_SILENT")
+	}
+	if payload.DriveID == "" {
+		t.Error("DriveID should not be empty")
+	}
+}
+
+// TestDetector_WatchdogIgnoresActiveDrives ensures the watchdog does NOT
+// fire while telemetry is still arriving regularly. Regression guard for
+// the watchdog reading lastTelemetryAt correctly.
+func TestDetector_WatchdogIgnoresActiveDrives(t *testing.T) {
+	bus := testBus()
+	defer bus.Close(context.Background())
+
+	cfg := testConfig()
+	cfg.EndDebounce = 200 * time.Millisecond
+	cfg.MinDuration = 0
+	cfg.MinDistanceMiles = 0
+
+	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{})
+	if err := d.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = d.Stop() }()
+
+	startedCh := subscribeTopic(t, bus, events.TopicDriveStarted)
+	endedCh := subscribeTopic(t, bus, events.TopicDriveEnded)
+
+	now := time.Now()
+
+	// Start a drive.
+	publishTelemetry(t, bus, telemetryEvent("VIN_ACTIVE", now, driveFields("D", 30.0, 33.09, -96.82)))
+	if _, ok := waitForEvent(startedCh); !ok {
+		t.Fatal("timed out waiting for DriveStartedEvent")
+	}
+
+	// Feed telemetry continuously at an interval well below EndDebounce.
+	// The watchdog must NOT fire because lastTelemetryAt is fresh.
+	stopTel := keepTelemetryAlive(bus, "VIN_ACTIVE", now)
+	defer stopTel()
+
+	// Wait longer than EndDebounce -- still no end event.
+	expectNoEvent(t, endedCh, 3*cfg.EndDebounce, "watchdog should not end an active drive")
+}
+
 func TestDetector_DisconnectWhileIdle_NoEffect(t *testing.T) {
 	bus := testBus()
 	defer bus.Close(context.Background())
@@ -688,6 +858,12 @@ func TestDetector_ConnectedEvent_NoEffect(t *testing.T) {
 
 	// Connected event should NOT end the drive.
 	publishConnectivity(t, bus, "VIN_CONN", events.StatusConnected)
+
+	// Keep telemetry flowing so the silent-telemetry watchdog (MYR-139
+	// R3a) does not end the drive as a side effect. This test asserts
+	// connected-event behaviour specifically.
+	stopTel := keepTelemetryAlive(bus, "VIN_CONN", now)
+	defer stopTel()
 
 	expectNoEvent(t, endedCh, 200*time.Millisecond, "connected event should not end drive")
 }

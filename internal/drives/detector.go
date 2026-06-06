@@ -10,11 +10,18 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/config"
 	"github.com/myrobotaxi/telemetry/internal/events"
 	"github.com/myrobotaxi/telemetry/internal/telemetry"
 )
+
+// minWatchdogInterval is the floor for the periodic watchdog tick. Even
+// for very small EndDebounce values used in tests, we won't churn faster
+// than this. In production EndDebounce is 30s, so the watchdog runs at
+// 15s. See Detector.watchdogInterval.
+const minWatchdogInterval = 100 * time.Millisecond
 
 // Detector subscribes to vehicle telemetry events and maintains a per-vehicle
 // state machine that detects drive start/end transitions. It publishes drive
@@ -43,6 +50,15 @@ type Detector struct {
 	// ctx is the parent context for debounce timer goroutines.
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// now returns the current wall-clock time. Indirected so the watchdog
+	// can be tested deterministically without sleeping for EndDebounce.
+	// Defaults to time.Now in NewDetector.
+	now func() time.Time
+
+	// watchdogWG tracks the background watchdog goroutine so Stop can
+	// wait for it to exit before returning.
+	watchdogWG sync.WaitGroup
 }
 
 // NewDetector creates a Detector. The bus is used both for subscribing to
@@ -59,7 +75,26 @@ func NewDetector(
 		cfg:     cfg,
 		logger:  logger,
 		metrics: metrics,
+		now:     time.Now,
 	}
+}
+
+// setNow overrides the time source used by the watchdog. Test-only seam;
+// not exported because no production caller should swap the clock.
+func (d *Detector) setNow(fn func() time.Time) {
+	d.now = fn
+}
+
+// watchdogInterval returns how often the end-condition watchdog runs.
+// Half of EndDebounce keeps worst-case end-detection latency at
+// 1.5 × EndDebounce, while ensuring we never churn faster than
+// minWatchdogInterval even when tests set EndDebounce to a few ms.
+func (d *Detector) watchdogInterval() time.Duration {
+	iv := d.cfg.EndDebounce / 2
+	if iv < minWatchdogInterval {
+		iv = minWatchdogInterval
+	}
+	return iv
 }
 
 // Start subscribes to TopicVehicleTelemetry and TopicConnectivity and begins
@@ -83,7 +118,17 @@ func (d *Detector) Start(ctx context.Context) error {
 
 	d.subs = []events.Subscription{telSub, connSub}
 
-	d.logger.Info("drive detector started")
+	// Start the end-condition watchdog. Tesla stops streaming when the
+	// vehicle parks, so a gear=P frame is not guaranteed -- without this
+	// watchdog the time.AfterFunc-based debounce path is never primed and
+	// the drive stays open forever (the MYR-139 R3a regression).
+	d.watchdogWG.Add(1)
+	go d.runWatchdog()
+
+	d.logger.Info("drive detector started",
+		slog.Duration("end_debounce", d.cfg.EndDebounce),
+		slog.Duration("watchdog_interval", d.watchdogInterval()),
+	)
 	return nil
 }
 
@@ -91,6 +136,11 @@ func (d *Detector) Start(ctx context.Context) error {
 // Active drives are NOT forcibly ended -- they remain in memory.
 func (d *Detector) Stop() error {
 	d.cancel()
+
+	// Wait for the watchdog goroutine to exit before tearing down the
+	// per-vehicle timers below. Otherwise a watchdog tick could race
+	// with this loop and observe nil-but-not-yet-stopped timers.
+	d.watchdogWG.Wait()
 
 	// Stop all debounce timers.
 	d.states.Range(func(_, value any) bool {
@@ -194,6 +244,12 @@ func (d *Detector) handleTelemetry(te events.VehicleTelemetryEvent) {
 
 	state.mu.Lock()
 	defer state.mu.Unlock()
+
+	// Stamp the wall-clock arrival time so the watchdog can detect
+	// vehicles that stopped streaming (Tesla goes silent when the car
+	// parks and the state machine would otherwise never see a gear=P
+	// frame to start the debounce).
+	state.lastTelemetryAt = d.now()
 
 	// Extract gear from the telemetry fields (may be absent).
 	gear := extractStringField(te.Fields, telemetry.FieldGear)
