@@ -141,5 +141,14 @@ func (w *Writer) handleDriveEnded() events.Handler {
 				slog.String("error", err.Error()),
 			)
 		}
+
+		// MYR-144: also snap Vehicle.locationName / Vehicle.locationAddress
+		// to the parked-at coordinates so the testbench Location card
+		// shows a street address as soon as the drive ends. The regular
+		// flush-time debounce would otherwise leave the row stale until
+		// the next 60s window. The geocoder cache makes this idempotent
+		// when the same coordinate streamed via the regular flush moments
+		// earlier.
+		w.geocodeParkedLocation(opCtx, evt.VIN, endLoc.Latitude, endLoc.Longitude)
 	}
 }
