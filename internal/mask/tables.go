@@ -182,15 +182,26 @@ var vehicleSummaryOwnerFields = []string{
 var vehicleSummaryViewerFields = removeField(vehicleSummaryOwnerFields, "name")
 
 // driveSummaryFields is the per-row drive-list allow-list shared by
-// owner and viewer per rest-api.md §5.2.2. Excludes startAddress /
-// startLocation / endAddress / endLocation — those are drive-detail
-// fields.
+// owner and viewer per rest-api.md §5.2.2.
+//
+// MYR-145 added the four start/end Location + Address fields. They
+// carry the reverse-geocoded labels written by
+// `internal/store/writer_drives.go` and let the SDK render origin /
+// destination strings in the drive-history list without a per-row
+// drive-detail fetch. Same allow-list for owner and viewer — viewers
+// already see them on the drive-detail endpoint per §5.2.3, so
+// surfacing them on the list keeps the two payloads consistent and is
+// the whole point of the FR-5.1 sharing use case.
 var driveSummaryFields = []string{
 	"id",
 	"vehicleId",
 	"startTime",
 	"endTime",
 	"date",
+	"startLocation",
+	"startAddress",
+	"endLocation",
+	"endAddress",
 	"distanceMiles",
 	"durationSeconds",
 	"avgSpeedMph",
