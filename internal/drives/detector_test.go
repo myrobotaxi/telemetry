@@ -180,7 +180,7 @@ func TestDetector_IdleToDriving(t *testing.T) {
 			bus := testBus()
 			defer bus.Close(context.Background())
 
-			d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{})
+			d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{}, nil)
 			if err := d.Start(context.Background()); err != nil {
 				t.Fatalf("Start: %v", err)
 			}
@@ -221,7 +221,7 @@ func TestDetector_DrivingToIdle_AfterDebounce(t *testing.T) {
 	cfg.MinDuration = 0
 	cfg.MinDistanceMiles = 0
 
-	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{})
+	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{}, nil)
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestDetector_DebounceCancellation(t *testing.T) {
 	cfg := testConfig()
 	cfg.EndDebounce = 200 * time.Millisecond
 
-	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{})
+	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{}, nil)
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -331,7 +331,7 @@ func TestDetector_MicroDriveFiltering(t *testing.T) {
 			cfg.MinDuration = tt.minDuration
 			cfg.MinDistanceMiles = tt.minDistanceMiles
 
-			d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{})
+			d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{}, nil)
 			if err := d.Start(context.Background()); err != nil {
 				t.Fatalf("Start: %v", err)
 			}
@@ -366,7 +366,7 @@ func TestDetector_MultipleVehicles(t *testing.T) {
 	cfg.MinDuration = 0
 	cfg.MinDistanceMiles = 0
 
-	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{})
+	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{}, nil)
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -403,7 +403,7 @@ func TestDetector_NoGearField_NoTransition(t *testing.T) {
 	bus := testBus()
 	defer bus.Close(context.Background())
 
-	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{})
+	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{}, nil)
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -427,7 +427,7 @@ func TestDetector_GearN_DoesNotStartDrive(t *testing.T) {
 	bus := testBus()
 	defer bus.Close(context.Background())
 
-	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{})
+	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{}, nil)
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -447,7 +447,7 @@ func TestDetector_GearP_WhileIdle_NoEffect(t *testing.T) {
 	bus := testBus()
 	defer bus.Close(context.Background())
 
-	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{})
+	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{}, nil)
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -469,7 +469,7 @@ func TestDetector_DriveUpdatedEvents(t *testing.T) {
 	bus := testBus()
 	defer bus.Close(context.Background())
 
-	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{})
+	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{}, nil)
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -521,7 +521,7 @@ func TestDetector_StatsAccuracy(t *testing.T) {
 	cfg.MinDuration = 0
 	cfg.MinDistanceMiles = 0
 
-	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{})
+	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{}, nil)
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -645,7 +645,7 @@ func TestDetector_DisconnectEndsDrive(t *testing.T) {
 	cfg.MinDuration = 0
 	cfg.MinDistanceMiles = 0
 
-	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{})
+	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{}, nil)
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -703,7 +703,7 @@ func TestDetector_WatchdogEndsDriveWhenTelemetrySilent(t *testing.T) {
 	cfg.MinDuration = 0
 	cfg.MinDistanceMiles = 0
 
-	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{})
+	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{}, nil)
 
 	// Inject a clock we can fast-forward. The watchdog reads now() to
 	// decide whether telemetry has been silent for EndDebounce.
@@ -786,7 +786,7 @@ func TestDetector_WatchdogIgnoresActiveDrives(t *testing.T) {
 	cfg.MinDuration = 0
 	cfg.MinDistanceMiles = 0
 
-	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{})
+	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{}, nil)
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -816,7 +816,7 @@ func TestDetector_DisconnectWhileIdle_NoEffect(t *testing.T) {
 	bus := testBus()
 	defer bus.Close(context.Background())
 
-	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{})
+	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{}, nil)
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -839,7 +839,7 @@ func TestDetector_ConnectedEvent_NoEffect(t *testing.T) {
 	cfg.MinDuration = 0
 	cfg.MinDistanceMiles = 0
 
-	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{})
+	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{}, nil)
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -872,7 +872,7 @@ func TestDetector_DisconnectUnknownVIN_NoEffect(t *testing.T) {
 	bus := testBus()
 	defer bus.Close(context.Background())
 
-	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{})
+	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{}, nil)
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -890,7 +890,7 @@ func TestDetector_StartStop(t *testing.T) {
 	bus := testBus()
 	defer bus.Close(context.Background())
 
-	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{})
+	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{}, nil)
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -903,7 +903,7 @@ func TestDetector_StartLocationFallback(t *testing.T) {
 	bus := testBus()
 	defer bus.Close(context.Background())
 
-	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{})
+	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{}, nil)
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -937,7 +937,7 @@ func TestDetector_EmptyVIN_Ignored(t *testing.T) {
 	bus := testBus()
 	defer bus.Close(context.Background())
 
-	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{})
+	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{}, nil)
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -960,7 +960,7 @@ func TestDetector_ConcurrentDriveEvents(t *testing.T) {
 	cfg.MinDuration = 0
 	cfg.MinDistanceMiles = 0
 
-	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{})
+	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{}, nil)
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -1090,7 +1090,7 @@ func TestDetector_DriveStartUsesGPSNotNavOrigin(t *testing.T) {
 	bus := testBus()
 	defer bus.Close(context.Background())
 
-	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{})
+	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{}, nil)
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -1129,7 +1129,7 @@ func TestDetector_OriginLocationOnlyDoesNotCacheLocation(t *testing.T) {
 	bus := testBus()
 	defer bus.Close(context.Background())
 
-	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{})
+	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{}, nil)
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

@@ -34,6 +34,13 @@ type Detector struct {
 	logger  *slog.Logger
 	metrics DetectorMetrics
 
+	// reconciler is the read-side hook used on Start to reattach
+	// in-memory state for Drive rows orphaned by a previous restart
+	// (MYR-146). nil disables reconciliation — tests use this; the
+	// production constructor in cmd/telemetry-server wires a
+	// DriveRepo-backed adapter.
+	reconciler OpenDriveLister
+
 	// states holds per-vehicle drive state. Keyed by VIN.
 	// Using sync.Map because vehicles connect/disconnect dynamically and
 	// reads vastly outnumber writes (every telemetry tick is a read;
@@ -64,18 +71,28 @@ type Detector struct {
 // NewDetector creates a Detector. The bus is used both for subscribing to
 // telemetry events and publishing drive lifecycle events. Call Start to
 // begin processing.
+//
+// reconciler is the read-side hook used on Start to reattach in-memory
+// state for Drive rows orphaned by a previous restart (MYR-146). Pass
+// nil to disable reconciliation (tests use this; production wires a
+// DriveRepo-backed adapter). It is a required constructor argument
+// rather than an optional functional setter so the dependency fails
+// loud at compile time — silently shipping a nil reconciler in prod
+// is exactly the regression Option B is meant to prevent.
 func NewDetector(
 	bus events.Bus,
 	cfg config.DrivesConfig,
 	logger *slog.Logger,
 	metrics DetectorMetrics,
+	reconciler OpenDriveLister,
 ) *Detector {
 	return &Detector{
-		bus:     bus,
-		cfg:     cfg,
-		logger:  logger,
-		metrics: metrics,
-		now:     time.Now,
+		bus:        bus,
+		cfg:        cfg,
+		logger:     logger,
+		metrics:    metrics,
+		reconciler: reconciler,
+		now:        time.Now,
 	}
 }
 
@@ -117,6 +134,15 @@ func (d *Detector) Start(ctx context.Context) error {
 	}
 
 	d.subs = []events.Subscription{telSub, connSub}
+
+	// MYR-146: reconcile Drive rows orphaned by a previous restart.
+	// MUST run after subscribing (so any inbound telemetry that arrives
+	// concurrently is queued by the bus, not dropped) and BEFORE the
+	// watchdog starts (so the first watchdog tick observes the
+	// reconciled state and either confirms ongoing telemetry or ends
+	// the row within EndDebounce). Fails open — a DB hiccup here
+	// MUST NOT block Detector.Start.
+	d.reconcileOpenDrives(d.ctx)
 
 	// Start the end-condition watchdog. Tesla stops streaming when the
 	// vehicle parks, so a gear=P frame is not guaranteed -- without this
