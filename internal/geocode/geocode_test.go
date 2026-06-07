@@ -6,11 +6,21 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"golang.org/x/time/rate"
+)
+
+// queryLat / queryLng are the coordinates used as inputs across the
+// table-driven tests below. Other coordinates referenced in tests are
+// expressed as offsets from these so the haversine distance is
+// predictable: at this latitude, ~0.00009 deg in lng ≈ 10m.
+const (
+	queryLat = 30.2672
+	queryLng = -97.7431
 )
 
 func TestMapboxGeocoder_ReverseGeocode(t *testing.T) {
@@ -22,20 +32,121 @@ func TestMapboxGeocoder_ReverseGeocode(t *testing.T) {
 		wantErr    error
 	}{
 		{
-			name:       "successful geocode",
+			// POI ~11m east of the query coord (well within the 50m
+			// threshold) followed by an address feature. PlaceName
+			// should be the POI's text; Address should come from the
+			// address feature's place_name.
+			name:       "POI within threshold",
 			statusCode: http.StatusOK,
 			body: `{
-				"features": [{
-					"text": "Thompson Hotel",
-					"place_name": "Thompson Hotel, 506 San Jacinto Blvd, Austin, TX 78701"
-				}]
+				"features": [
+					{
+						"text": "Whole Foods Market",
+						"place_name": "Whole Foods Market, 525 N Lamar Blvd, Austin, TX 78703",
+						"place_type": ["poi"],
+						"center": [-97.7430, 30.2672]
+					},
+					{
+						"text": "525 N Lamar Blvd",
+						"place_name": "525 N Lamar Blvd, Austin, TX 78703",
+						"place_type": ["address"],
+						"center": [-97.7431, 30.2672]
+					}
+				]
 			}`,
 			wantResult: &Result{
-				PlaceName: "Thompson Hotel",
-				Address:   "Thompson Hotel, 506 San Jacinto Blvd, Austin, TX 78701",
+				PlaceName: "Whole Foods Market",
+				Address:   "525 N Lamar Blvd, Austin, TX 78703",
 			},
 		},
 		{
+			// POI ~200m north of the query coord (outside threshold);
+			// an address feature is at the query coord. PlaceName must
+			// be empty so downstream consumers fall back to the street
+			// address.
+			name:       "POI too far",
+			statusCode: http.StatusOK,
+			body: `{
+				"features": [
+					{
+						"text": "Far Away Cafe",
+						"place_name": "Far Away Cafe, 999 Elsewhere St, Austin, TX",
+						"place_type": ["poi"],
+						"center": [-97.7431, 30.2690]
+					},
+					{
+						"text": "100 Tributary Way",
+						"place_name": "100 Tributary Way, Austin, TX 78703",
+						"place_type": ["address"],
+						"center": [-97.7431, 30.2672]
+					}
+				]
+			}`,
+			wantResult: &Result{
+				PlaceName: "",
+				Address:   "100 Tributary Way, Austin, TX 78703",
+			},
+		},
+		{
+			// No POI features at all (residential drive). PlaceName
+			// stays empty; Address comes from the first address
+			// feature's place_name.
+			name:       "no POI at all",
+			statusCode: http.StatusOK,
+			body: `{
+				"features": [
+					{
+						"text": "Tributary Way",
+						"place_name": "1234 Tributary Way, Austin, TX 78704",
+						"place_type": ["address"],
+						"center": [-97.7431, 30.2672]
+					}
+				]
+			}`,
+			wantResult: &Result{
+				PlaceName: "",
+				Address:   "1234 Tributary Way, Austin, TX 78704",
+			},
+		},
+		{
+			// Multiple POIs in the response: POI "A" is within
+			// threshold and appears FIRST in Mapbox's relevance order;
+			// POI "B" is also within threshold but listed later. We
+			// trust Mapbox's ranking and pick the FIRST qualifying POI
+			// (not the geometrically closest), so PlaceName == "A".
+			name:       "multiple POIs, first qualifying wins",
+			statusCode: http.StatusOK,
+			body: `{
+				"features": [
+					{
+						"text": "A",
+						"place_name": "A, 100 Main St",
+						"place_type": ["poi"],
+						"center": [-97.7428, 30.2672]
+					},
+					{
+						"text": "B",
+						"place_name": "B, 200 Side St",
+						"place_type": ["poi"],
+						"center": [-97.74305, 30.2672]
+					},
+					{
+						"text": "100 Main St",
+						"place_name": "100 Main St, Austin, TX",
+						"place_type": ["address"],
+						"center": [-97.7431, 30.2672]
+					}
+				]
+			}`,
+			wantResult: &Result{
+				PlaceName: "A",
+				Address:   "100 Main St, Austin, TX",
+			},
+		},
+		{
+			// API returns zero features — preserved ErrNoResult
+			// behavior so callers (writer_drives, writer_location_address)
+			// can treat it as a soft-fail and skip persistence.
 			name:       "no features returned",
 			statusCode: http.StatusOK,
 			body:       `{"features": []}`,
@@ -80,15 +191,12 @@ func TestMapboxGeocoder_ReverseGeocode(t *testing.T) {
 				token:  "test-token",
 				client: srv.Client(),
 			}
-			// Override the API URL by using a custom transport that
-			// redirects requests to the test server.
-			origURL := srv.URL
 			g.client.Transport = &rewriteTransport{
 				base:    srv.Client().Transport,
-				baseURL: origURL,
+				baseURL: srv.URL,
 			}
 
-			result, err := g.ReverseGeocode(context.Background(), 30.2672, -97.7431)
+			result, err := g.ReverseGeocode(context.Background(), queryLat, queryLng)
 
 			if tt.wantErr != nil {
 				if err == nil {
@@ -113,17 +221,58 @@ func TestMapboxGeocoder_ReverseGeocode(t *testing.T) {
 	}
 }
 
+// TestMapboxGeocoder_AddressFallbackToFirstFeature exercises the
+// fallback branch in buildResult: if no feature is tagged "address",
+// we use features[0].place_name so the caller always gets something
+// rather than an empty string.
+func TestMapboxGeocoder_AddressFallbackToFirstFeature(t *testing.T) {
+	body := `{
+		"features": [
+			{
+				"text": "Lonely POI",
+				"place_name": "Lonely POI, somewhere",
+				"place_type": ["poi"],
+				"center": [-97.7431, 30.2690]
+			}
+		]
+	}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	g := &MapboxGeocoder{token: "test-token", client: srv.Client()}
+	g.client.Transport = &rewriteTransport{base: srv.Client().Transport, baseURL: srv.URL}
+
+	result, err := g.ReverseGeocode(context.Background(), queryLat, queryLng)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// POI is 200m away, so PlaceName is empty.
+	if result.PlaceName != "" {
+		t.Errorf("PlaceName = %q, want empty", result.PlaceName)
+	}
+	// No address-typed feature, so Address falls back to features[0].
+	if result.Address != "Lonely POI, somewhere" {
+		t.Errorf("Address = %q, want fallback to features[0].place_name", result.Address)
+	}
+}
+
 func TestMapboxGeocoder_RequestFormat(t *testing.T) {
 	var capturedPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedPath = r.URL.String()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(mapboxResponse{
-			Features: []struct {
-				Text      string `json:"text"`
-				PlaceName string `json:"place_name"`
-			}{
-				{Text: "Test", PlaceName: "Test Place"},
+			Features: []mapboxFeature{
+				{
+					Text:      "Test",
+					PlaceName: "Test Place",
+					PlaceType: []string{"address"},
+					Center:    [2]float64{-96.8518, 33.0860},
+				},
 			},
 		})
 	}))
@@ -144,12 +293,16 @@ func TestMapboxGeocoder_RequestFormat(t *testing.T) {
 	}
 
 	// Verify the URL contains the correct coordinates in lng,lat order
-	// (Mapbox expects lng,lat, not lat,lng).
+	// (Mapbox expects lng,lat, not lat,lng) and the bumped limit param.
 	if capturedPath == "" {
 		t.Fatal("no request was captured")
 	}
-	// The URL should have lng (-96.8518) before lat (33.0860).
-	// Just verify the token is present and types param is set.
+	if !strings.Contains(capturedPath, "limit=5") {
+		t.Errorf("expected limit=5 in URL, got: %s", capturedPath)
+	}
+	if !strings.Contains(capturedPath, "types=poi,address") {
+		t.Errorf("expected types=poi,address in URL, got: %s", capturedPath)
+	}
 	t.Logf("captured path: %s", capturedPath)
 }
 
@@ -255,7 +408,7 @@ func TestMapboxGeocoder_InvalidCoordinate(t *testing.T) {
 func TestMapboxGeocoder_ClientSideRateLimiter(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"features":[{"text":"X","place_name":"X"}]}`))
+		_, _ = w.Write([]byte(`{"features":[{"text":"X","place_name":"X","place_type":["address"],"center":[-97,30]}]}`))
 	}))
 	defer srv.Close()
 
@@ -293,7 +446,7 @@ func TestMapboxGeocoder_ClientSideRateLimiter(t *testing.T) {
 func TestMapboxGeocoder_RateLimiterCancelledContext(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"features":[{"text":"X","place_name":"X"}]}`))
+		_, _ = w.Write([]byte(`{"features":[{"text":"X","place_name":"X","place_type":["address"],"center":[-97,30]}]}`))
 	}))
 	defer srv.Close()
 
