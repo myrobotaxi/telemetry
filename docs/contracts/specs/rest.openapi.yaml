@@ -1174,11 +1174,12 @@ components:
         Lightweight drive record returned by the paginated drive list
         endpoint. Includes the four P1 location/address fields so the
         SDK can render origin/destination labels in the history list
-        without an extra DriveDetail fetch per row (MYR-145). Still
-        deliberately omits energyUsedKwh/fsdMiles/fsdPercentage/
-        interventions/routePoints -- those are in DriveDetail and
-        DriveRoute and are heavier per row than the location strings.
-        startLocation / startAddress / endLocation / endAddress are
+        without an extra DriveDetail fetch per row (MYR-145), plus the
+        P0 fsdMiles/fsdPercentage stats so the history list can show
+        FSD usage per drive without a DriveDetail fetch (MYR-152).
+        Still deliberately omits energyUsedKwh/interventions/routePoints
+        -- those are in DriveDetail and DriveRoute and are heavier per
+        row. startLocation / startAddress / endLocation / endAddress are
         OPTIONAL on the wire: when the underlying Drive column is
         empty (drive in progress, zero-GPS at start, reverse-geocode
         failed) the server omits the JSON key entirely rather than
@@ -1195,6 +1196,8 @@ components:
         - maxSpeedMph
         - startChargeLevel
         - endChargeLevel
+        - fsdMiles
+        - fsdPercentage
         - createdAt
       additionalProperties: false
       properties:
@@ -1289,6 +1292,19 @@ components:
           minimum: 0
           maximum: 100
           description: Battery percent at drive end (FR-3.4).
+          x-classification: P0
+          x-unit: percent
+        fsdMiles:
+          type: number
+          minimum: 0
+          description: Miles driven under Full Self-Driving during this drive (FR-3.4).
+          x-classification: P0
+          x-unit: miles
+        fsdPercentage:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: Percent of the drive covered by FSD (FR-3.4).
           x-classification: P0
           x-unit: percent
         createdAt:
