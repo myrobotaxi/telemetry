@@ -65,13 +65,15 @@ func calculateStats(drive *activeDrive) events.DriveStats {
 		energyDelta = 0
 	}
 
-	fsdMiles := drive.lastFSDMiles - drive.startFSDMiles
-	if fsdMiles < 0 {
-		fsdMiles = 0
-	}
-	// If start FSD miles was not captured, report zero.
-	if drive.startFSDMiles == 0 {
-		fsdMiles = 0
+	// FSD miles is the delta of the cumulative "miles since reset" counter
+	// over the drive. Only meaningful if a baseline was actually observed;
+	// otherwise report zero rather than the full cumulative counter.
+	var fsdMiles float64
+	if drive.fsdBaselineSet {
+		fsdMiles = drive.lastFSDMiles - drive.startFSDMiles
+		if fsdMiles < 0 {
+			fsdMiles = 0
+		}
 	}
 
 	var fsdPercentage float64

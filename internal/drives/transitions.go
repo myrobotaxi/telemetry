@@ -51,8 +51,14 @@ func (d *Detector) handleDriving(state *vehicleState, vin string, te events.Vehi
 		}
 	}
 
-	// Update FSD miles tracking.
+	// Update FSD miles tracking. If the baseline was never seeded at drive
+	// start (no FSD value had been observed yet), lazily capture it from the
+	// first in-drive sample so the end-of-drive diff has a valid reference.
 	if fsd, ok := extractFloatField(te.Fields, telemetry.FieldFSDMiles); ok {
+		if !drive.fsdBaselineSet {
+			drive.startFSDMiles = fsd
+			drive.fsdBaselineSet = true
+		}
 		drive.lastFSDMiles = fsd
 	}
 
@@ -126,25 +132,27 @@ func (d *Detector) startDrive(state *vehicleState, vin string, te events.Vehicle
 		startEnergy = energy
 	}
 
-	var startFSDMiles float64
-	if fsd, ok := extractFloatField(te.Fields, telemetry.FieldFSDMiles); ok {
-		startFSDMiles = fsd
-	}
-
+	// Seed the FSD baseline from the most recent value seen for this vehicle
+	// (cached in handleTelemetry, including while idle). FSD miles is a
+	// cumulative "miles since reset" counter that does not advance while
+	// parked, so the last value before the drive is the correct baseline.
+	// If no value has ever been observed, leave the baseline unset —
+	// handleDriving lazily captures it from the first in-drive FSD sample.
 	drive := &activeDrive{
-		id:            driveID,
-		startedAt:     te.CreatedAt,
-		startLocation: startLoc,
-		maxSpeed:      0,
-		startCharge:   startCharge,
-		startOdometer: startOdometer,
-		startEnergy:   startEnergy,
-		startFSDMiles: startFSDMiles,
-		lastFSDMiles:  startFSDMiles,
-		lastLocation:  startLoc,
+		id:             driveID,
+		startedAt:      te.CreatedAt,
+		startLocation:  startLoc,
+		maxSpeed:       0,
+		startCharge:    startCharge,
+		startOdometer:  startOdometer,
+		startEnergy:    startEnergy,
+		startFSDMiles:  state.lastFSDMiles,
+		lastFSDMiles:   state.lastFSDMiles,
+		fsdBaselineSet: state.fsdMilesKnown,
+		lastLocation:   startLoc,
 		lastTimestamp:  te.CreatedAt,
-		lastSOC:       startCharge,
-		lastEnergy:    startEnergy,
+		lastSOC:        startCharge,
+		lastEnergy:     startEnergy,
 	}
 
 	state.status = StatusDriving
@@ -206,4 +214,3 @@ func (d *Detector) cancelDebounce(state *vehicleState, vin string) {
 		slog.String("vin", redactVIN(vin)),
 	)
 }
-
