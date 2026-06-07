@@ -41,6 +41,18 @@ const defaultRateLimit = rate.Limit(10)
 // without exceeding the steady-state cap.
 const defaultRateBurst = 10
 
+// poiDistanceThreshold is the maximum distance, in meters, between the
+// queried coordinate and a POI feature's center for that POI to be
+// treated as the place name. Roughly a one-minute walk — close enough
+// that the driver is plausibly *at* the POI, far enough to absorb GPS
+// jitter and Mapbox's own POI centroid placement.
+//
+// Tuned for residential drives: Mapbox often returns a street-name
+// "address" feature as the closest result, which makes a poor label
+// ("Tributary Way"). Falling back to an empty PlaceName lets downstream
+// consumers render the full street address instead.
+const poiDistanceThreshold = 50.0
+
 // Result holds the output of a reverse geocode lookup.
 type Result struct {
 	// PlaceName is the short place name (e.g. "Thompson Hotel").
@@ -57,12 +69,21 @@ type Geocoder interface {
 }
 
 // mapboxResponse is the minimal subset of the Mapbox Geocoding API
-// response that we parse.
+// response that we parse. Feature ordering, place_type, and center are
+// all load-bearing — see ReverseGeocode for how features are ranked.
 type mapboxResponse struct {
-	Features []struct {
-		Text      string `json:"text"`
-		PlaceName string `json:"place_name"`
-	} `json:"features"`
+	Features []mapboxFeature `json:"features"`
+}
+
+// mapboxFeature is a single feature in a Mapbox Geocoding v5 response.
+// PlaceType is a list because Mapbox can tag a feature with multiple
+// types (e.g. ["poi", "landmark"]). Center is [lng, lat] per the v5
+// GeoJSON convention — NOT [lat, lng].
+type mapboxFeature struct {
+	Text      string     `json:"text"`
+	PlaceName string     `json:"place_name"`
+	PlaceType []string   `json:"place_type"`
+	Center    [2]float64 `json:"center"`
 }
 
 // MapboxGeocoder calls the Mapbox Geocoding API for reverse geocoding.
@@ -118,8 +139,11 @@ func (g *MapboxGeocoder) ReverseGeocode(ctx context.Context, lat, lng float64) (
 		}
 	}
 
+	// limit=5 gives us a small candidate set so we can prefer a nearby
+	// POI over the closest address-only feature when one is in walking
+	// range; see the post-decode ranking below.
 	url := fmt.Sprintf(
-		"https://api.mapbox.com/geocoding/v5/mapbox.places/%f,%f.json?access_token=%s&limit=1&types=poi,address",
+		"https://api.mapbox.com/geocoding/v5/mapbox.places/%f,%f.json?access_token=%s&limit=5&types=poi,address",
 		lng, lat, g.token,
 	)
 
@@ -148,10 +172,68 @@ func (g *MapboxGeocoder) ReverseGeocode(ctx context.Context, lat, lng float64) (
 		return nil, ErrNoResult
 	}
 
+	return buildResult(lat, lng, data.Features), nil
+}
+
+// buildResult selects the best PlaceName and Address from a Mapbox
+// response.
+//
+// PlaceName: returns the FIRST POI feature (in Mapbox's relevance order)
+// whose center is within poiDistanceThreshold of the queried coord. If
+// no POI qualifies, PlaceName is empty so downstream consumers fall
+// back to the street address — Mapbox's "address" features carry only
+// the street name in Text (e.g. "Tributary Way"), which makes a poor
+// label for a residential drive.
+//
+// Address: prefers the first address feature's full place_name; if none
+// is present, falls back to features[0].place_name so we never return
+// an empty address when the API gave us something.
+func buildResult(lat, lng float64, features []mapboxFeature) *Result {
+	var (
+		placeName   string
+		addressLine string
+		haveAddress bool
+	)
+
+	for _, f := range features {
+		if placeName == "" && isPOI(f.PlaceType) {
+			featLng, featLat := f.Center[0], f.Center[1]
+			if haversineMeters(lat, lng, featLat, featLng) <= poiDistanceThreshold {
+				placeName = f.Text
+			}
+		}
+		if !haveAddress && containsType(f.PlaceType, "address") {
+			addressLine = f.PlaceName
+			haveAddress = true
+		}
+	}
+
+	if !haveAddress {
+		addressLine = features[0].PlaceName
+	}
+
 	return &Result{
-		PlaceName: data.Features[0].Text,
-		Address:   data.Features[0].PlaceName,
-	}, nil
+		PlaceName: placeName,
+		Address:   addressLine,
+	}
+}
+
+// isPOI reports whether a Mapbox feature's place_type list includes the
+// "poi" tag.
+func isPOI(types []string) bool {
+	return containsType(types, "poi")
+}
+
+// containsType reports whether want appears in the given place_type
+// list. Mapbox features routinely carry multiple types
+// (e.g. ["poi", "landmark"]), so we cannot rely on the first element.
+func containsType(types []string, want string) bool {
+	for _, t := range types {
+		if t == want {
+			return true
+		}
+	}
+	return false
 }
 
 // NoopGeocoder always returns ErrNoResult, effectively disabling
