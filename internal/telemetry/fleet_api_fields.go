@@ -155,8 +155,20 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		FleetFieldLocked:      {IntervalSeconds: 30},
 		FleetFieldSentryMode:  {IntervalSeconds: 30},
 
-		// Safety / ADAS — low frequency
-		FleetFieldMilesSinceReset:    {IntervalSeconds: 60, MinimumDelta: &oneMile},
-		FleetFieldFSDMilesSinceReset: {IntervalSeconds: 60, MinimumDelta: &oneMile},
+		// Safety / ADAS — low frequency.
+		//
+		// MYR-155: these two are cumulative "miles since reset" counters
+		// gated by MinimumDelta (1 mile), so they ONLY emit while the value
+		// is changing — i.e. while driving. They go silent the moment the
+		// car parks. A server that (re)starts while a vehicle is parked
+		// therefore never receives an FSD value until that car drives a full
+		// FSD mile, leaving the drive detector with no FSD baseline at the
+		// start of the first post-restart drive (it records 0). The
+		// ResendIntervalSeconds forces a periodic re-emit even when
+		// unchanged — exactly the "server that misses the initial emission"
+		// case the file header calls out — so the cache (and the snapshot)
+		// re-warm within a minute of any reconnect, before a drive begins.
+		FleetFieldMilesSinceReset:    {IntervalSeconds: 60, MinimumDelta: &oneMile, ResendIntervalSeconds: intPtr(60)},
+		FleetFieldFSDMilesSinceReset: {IntervalSeconds: 60, MinimumDelta: &oneMile, ResendIntervalSeconds: intPtr(60)},
 	}
 }
