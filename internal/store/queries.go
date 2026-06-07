@@ -158,8 +158,8 @@ WHERE d."endTime" IS NULL OR d."endTime" = ''`
 // GET /api/vehicles/{vehicleId}/drives list endpoint (MYR-133, MYR-145).
 // It MUST stay aligned with the wire fields emitted by
 // `internal/telemetry/vehicle_drives_handler.go` driveSummary. No
-// routePoints (heavy JSON blob), no energyUsedKwh / fsdMiles /
-// fsdPercentage / interventions (drive detail only).
+// routePoints (heavy JSON blob), no energyUsedKwh / interventions
+// (drive detail only).
 //
 // MYR-145 added the four location columns
 // (`startLocation`, `startAddress`, `endLocation`, `endAddress`) to the
@@ -168,10 +168,14 @@ WHERE d."endTime" IS NULL OR d."endTime" = ''`
 // ~5 KB-per-page budget called out in rest-api.md §5.2.2 while letting
 // the SDK render origin/destination labels in the drive-history list
 // without a per-row drive-detail fetch.
+//
+// MYR-152 added `fsdMiles` / `fsdPercentage` — two small `double`
+// columns (P0, non-identifying) so the drive-history list can show FSD
+// usage per drive without a per-row drive-detail fetch.
 const driveSummarySelectColumns = `"id", "vehicleId", "date", "startTime", "endTime",
 	"startLocation", "startAddress", "endLocation", "endAddress",
 	"distanceMiles", "durationMinutes", "avgSpeedMph", "maxSpeedMph",
-	"startChargeLevel", "endChargeLevel", "createdAt"`
+	"startChargeLevel", "endChargeLevel", "fsdMiles", "fsdPercentage", "createdAt"`
 
 // queryDriveListByVehicle is the first-page read path: returns the
 // newest `limit + 1` drives for the given vehicle, ordered per
