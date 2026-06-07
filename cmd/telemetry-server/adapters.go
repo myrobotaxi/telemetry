@@ -279,6 +279,8 @@ func (a *driveListerAdapter) ListByVehicleID(ctx context.Context, vehicleID stri
 			MaxSpeedMph:      d.MaxSpeedMph,
 			StartChargeLevel: d.StartChargeLevel,
 			EndChargeLevel:   d.EndChargeLevel,
+			FsdMiles:         d.FsdMiles,
+			FsdPercentage:    d.FsdPercentage,
 			CreatedAt:        d.CreatedAt,
 		})
 	}

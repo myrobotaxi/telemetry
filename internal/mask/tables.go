@@ -208,6 +208,8 @@ var driveSummaryFields = []string{
 	"maxSpeedMph",
 	"startChargeLevel",
 	"endChargeLevel",
+	"fsdMiles",
+	"fsdPercentage",
 	"createdAt",
 }
 

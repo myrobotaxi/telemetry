@@ -45,6 +45,8 @@ type DriveListItem struct {
 	MaxSpeedMph      float64
 	StartChargeLevel int
 	EndChargeLevel   int
+	FsdMiles         float64 // P0 — FSD distance this drive (miles)
+	FsdPercentage    float64 // P0 — FSD share of distance (percent)
 	CreatedAt        time.Time
 }
 
@@ -137,6 +139,8 @@ type driveSummary struct {
 	MaxSpeedMph      float64 `json:"maxSpeedMph"`
 	StartChargeLevel int     `json:"startChargeLevel"`
 	EndChargeLevel   int     `json:"endChargeLevel"`
+	FsdMiles         float64 `json:"fsdMiles"`
+	FsdPercentage    float64 `json:"fsdPercentage"`
 	CreatedAt        string  `json:"createdAt"`
 }
 
@@ -162,6 +166,8 @@ func (d driveSummary) toMaskMap() map[string]any {
 		"maxSpeedMph":      d.MaxSpeedMph,
 		"startChargeLevel": d.StartChargeLevel,
 		"endChargeLevel":   d.EndChargeLevel,
+		"fsdMiles":         d.FsdMiles,
+		"fsdPercentage":    d.FsdPercentage,
 		"createdAt":        d.CreatedAt,
 	}
 	if d.StartLocation != "" {
@@ -209,6 +215,8 @@ func buildDriveSummary(row *DriveListItem) driveSummary {
 		MaxSpeedMph:      row.MaxSpeedMph,
 		StartChargeLevel: row.StartChargeLevel,
 		EndChargeLevel:   row.EndChargeLevel,
+		FsdMiles:         row.FsdMiles,
+		FsdPercentage:    row.FsdPercentage,
 		CreatedAt:        row.CreatedAt.UTC().Format(time.RFC3339),
 	}
 }
