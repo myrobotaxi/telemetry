@@ -13,9 +13,19 @@ import (
 // fakeOpenDriveLister is a minimal in-memory OpenDriveLister used by
 // the reconciliation tests. rows is returned verbatim from ListOpen;
 // err (if set) is returned instead.
+//
+// MYR-147: also captures MarkOrphanEnded calls. endedIDs records every
+// drive ID the reconciler asked us to close (in call order); when
+// markEndedErr is non-nil it is returned to the reconciler instead,
+// exercising the fail-open path.
 type fakeOpenDriveLister struct {
+	mu sync.Mutex
+
 	rows []OpenDriveRow
 	err  error
+
+	endedIDs     []string
+	markEndedErr error
 }
 
 func (f *fakeOpenDriveLister) ListOpen(_ context.Context) ([]OpenDriveRow, error) {
@@ -23,6 +33,26 @@ func (f *fakeOpenDriveLister) ListOpen(_ context.Context) ([]OpenDriveRow, error
 		return nil, f.err
 	}
 	return f.rows, nil
+}
+
+func (f *fakeOpenDriveLister) MarkOrphanEnded(_ context.Context, driveID string) error {
+	if f.markEndedErr != nil {
+		return f.markEndedErr
+	}
+	f.mu.Lock()
+	f.endedIDs = append(f.endedIDs, driveID)
+	f.mu.Unlock()
+	return nil
+}
+
+// endedSnapshot returns a copy of the captured drive IDs in call order,
+// safe to inspect without holding f.mu.
+func (f *fakeOpenDriveLister) endedSnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.endedIDs))
+	copy(out, f.endedIDs)
+	return out
 }
 
 // loadState is a test-only helper that pulls a vehicleState out of the
