@@ -27,8 +27,8 @@ import (
 // DriveRepo.ListByVehicleID. Mirrors the columns selected by
 // `queryDriveListByVehicle` and the wire fields emitted by
 // `internal/telemetry/vehicle_drives_handler.go` driveSummary. No
-// routePoints, no energyUsedKwh/fsdMiles/interventions — those belong
-// in the wide detail read.
+// routePoints, no energyUsedKwh/interventions — those belong in the
+// wide detail read.
 //
 // MYR-145: start/end Location + Address are included so the SDK can
 // render origin/destination labels in the drive-history list without
@@ -38,6 +38,10 @@ import (
 // represented as `""` (the Prisma columns are `TEXT NOT NULL DEFAULT
 // ''`) and are surfaced unchanged to the wire layer; the handler
 // decides how to expose them (e.g., empty string vs. omitted JSON key).
+//
+// MYR-152: FsdMiles + FsdPercentage are included so the list can show
+// FSD usage per drive. Both are small `double` columns (P0,
+// non-identifying) that stay within the lean-projection budget.
 type DriveSummaryRow struct {
 	ID               string
 	VehicleID        string
@@ -54,6 +58,8 @@ type DriveSummaryRow struct {
 	MaxSpeedMph      float64
 	StartChargeLevel int
 	EndChargeLevel   int
+	FsdMiles         float64
+	FsdPercentage    float64
 	CreatedAt        time.Time
 }
 
@@ -148,6 +154,8 @@ func scanDriveSummaryRow(row rowScanner) (DriveSummaryRow, error) {
 		&d.MaxSpeedMph,
 		&d.StartChargeLevel,
 		&d.EndChargeLevel,
+		&d.FsdMiles,
+		&d.FsdPercentage,
 		&d.CreatedAt,
 	); err != nil {
 		return DriveSummaryRow{}, fmt.Errorf("scan drive summary: %w", err)
