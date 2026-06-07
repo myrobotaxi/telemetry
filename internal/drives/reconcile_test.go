@@ -155,10 +155,18 @@ func TestDetector_ReconciledDrive_NoTelemetry_WatchdogEnds(t *testing.T) {
 		},
 	}
 
+	// Use prod-realistic micro-drive thresholds (MinDuration=2m,
+	// MinDistanceMiles=0.1 — the actual defaults from
+	// internal/config/defaults.go). A reconciled drive with no resumed
+	// telemetry has Duration=0, Distance=0; without the reconciled
+	// bypass in endDrive, the filter would discard the
+	// DriveEndedEvent and the DB row would stay open forever
+	// (MYR-146 critical regression). This test would have failed
+	// before the bypass was added.
 	cfg := testConfig()
 	cfg.EndDebounce = 200 * time.Millisecond
-	cfg.MinDuration = 0
-	cfg.MinDistanceMiles = 0
+	cfg.MinDuration = 2 * time.Minute
+	cfg.MinDistanceMiles = 0.1
 
 	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{}, lister)
 
@@ -203,6 +211,72 @@ func TestDetector_ReconciledDrive_NoTelemetry_WatchdogEnds(t *testing.T) {
 	if ended.VIN != vin {
 		t.Errorf("VIN = %q, want %q", ended.VIN, vin)
 	}
+}
+
+// TestDetector_RegularMicroDrive_StillFiltered is the negative
+// counterpart to TestDetector_ReconciledDrive_NoTelemetry_WatchdogEnds.
+// It proves the micro-drive bypass in endDrive applies ONLY to
+// reconciled drives — a regular drive that starts from a single D
+// telemetry event and goes silent (no resumed telemetry, same
+// "Duration=0, Distance=0" shape as the reconciled case) MUST still be
+// discarded by the prod-default micro-drive filter. Otherwise the
+// bypass would leak and accept every short blip as a real drive.
+func TestDetector_RegularMicroDrive_StillFiltered(t *testing.T) {
+	bus := testBus()
+	defer bus.Close(context.Background())
+
+	const vin = "VIN_REGULAR_MICRO"
+
+	// Prod-realistic thresholds. No reconciler — this is a fresh,
+	// non-reconciled drive.
+	cfg := testConfig()
+	cfg.EndDebounce = 200 * time.Millisecond
+	cfg.MinDuration = 2 * time.Minute
+	cfg.MinDistanceMiles = 0.1
+
+	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{}, nil)
+
+	// Injectable clock so we can advance past EndDebounce without
+	// sleeping for the watchdog tick.
+	var clockMu sync.Mutex
+	wallNow := time.Now()
+	d.setNow(func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return wallNow
+	})
+	advanceClock := func(by time.Duration) {
+		clockMu.Lock()
+		wallNow = wallNow.Add(by)
+		clockMu.Unlock()
+	}
+
+	startedCh := subscribeTopic(t, bus, events.TopicDriveStarted)
+	endedCh := subscribeTopic(t, bus, events.TopicDriveEnded)
+
+	if err := d.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = d.Stop() }()
+
+	// Single D-gear telemetry event starts the drive. Critically, no
+	// further telemetry arrives — so the watchdog-end path will see
+	// Duration=0 (lastTimestamp == startedAt) and Distance=0 (a single
+	// route point yields zero totalDistance), the same shape as a
+	// reconciled drive with no resumed telemetry. The only difference
+	// is the reconciled flag, which is false here.
+	publishTelemetry(t, bus, telemetryEvent(vin, wallNow, driveFields("D", 5.0, 33.09, -96.82)))
+	if _, ok := waitForEvent(startedCh); !ok {
+		t.Fatal("timed out waiting for DriveStartedEvent on regular drive")
+	}
+
+	// Advance past EndDebounce so the watchdog ends the drive.
+	advanceClock(2 * cfg.EndDebounce)
+
+	// With reconciled=false and prod-default micro-drive thresholds,
+	// endDrive MUST discard the drive — no DriveEndedEvent.
+	expectNoEvent(t, endedCh, 500*time.Millisecond,
+		"regular micro-drive must still be filtered by endDrive — bypass is only for reconciled drives")
 }
 
 func TestDetector_ReconcilerError_DoesNotFailStart(t *testing.T) {
