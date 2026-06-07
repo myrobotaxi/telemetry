@@ -289,6 +289,15 @@ func (d *Detector) handleTelemetry(te events.VehicleTelemetryEvent) {
 		state.lastLocation = loc
 	}
 
+	// Cache FSD miles whenever present (including while idle) so startDrive
+	// can seed the drive baseline from the most recent value — the
+	// gear-change event that starts a drive almost never carries FSD miles
+	// because it streams on a much slower cadence than gear.
+	if fsd, ok := extractFloatField(te.Fields, telemetry.FieldFSDMiles); ok {
+		state.lastFSDMiles = fsd
+		state.fsdMilesKnown = true
+	}
+
 	switch state.status {
 	case StatusIdle:
 		d.handleIdle(state, vin, te)
@@ -296,4 +305,3 @@ func (d *Detector) handleTelemetry(te events.VehicleTelemetryEvent) {
 		d.handleDriving(state, vin, te)
 	}
 }
-

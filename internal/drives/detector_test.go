@@ -636,6 +636,87 @@ func TestDetector_StatsAccuracy(t *testing.T) {
 	}
 }
 
+// TestDetector_FSDMilesAcrossCadenceMismatch reproduces the real-world field
+// cadence: gear streams every 1s but FSD miles only arrives on a much slower
+// cadence (60s / 1-mile delta), so the gear-change frame that starts a drive
+// carries no FSD value. The detector must seed the FSD baseline from the most
+// recent value cached while idle (or, failing that, the first in-drive sample)
+// rather than recording zero. Regression test for the bug where FSD miles was
+// always reported as 0 because startFSDMiles was never captured.
+func TestDetector_FSDMilesAcrossCadenceMismatch(t *testing.T) {
+	bus := testBus()
+	defer bus.Close(context.Background())
+
+	cfg := testConfig()
+	cfg.EndDebounce = 20 * time.Millisecond
+	cfg.MinDuration = 0
+	cfg.MinDistanceMiles = 0
+
+	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{}, nil)
+	if err := d.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = d.Stop() }()
+
+	startedCh := subscribeTopic(t, bus, events.TopicDriveStarted)
+	endedCh := subscribeTopic(t, bus, events.TopicDriveEnded)
+
+	now := time.Now()
+
+	// Idle FSD tick: the vehicle reports an FSD value while parked. This is
+	// the baseline the next drive should use.
+	idleFields := map[string]events.TelemetryValue{
+		string(telemetry.FieldGear):     {StringVal: ptr("P")},
+		string(telemetry.FieldFSDMiles): {FloatVal: ptr(200.0)},
+	}
+	publishTelemetry(t, bus, telemetryEvent("VIN_FSD", now, idleFields))
+
+	// Drive starts on a gear-change frame that carries NO FSD field — the
+	// realistic case given the 1s gear / 60s FSD cadence mismatch.
+	startFields := map[string]events.TelemetryValue{
+		string(telemetry.FieldGear):     {StringVal: ptr("D")},
+		string(telemetry.FieldSpeed):    {FloatVal: ptr(0.0)},
+		string(telemetry.FieldLocation): {LocationVal: &events.Location{Latitude: 33.0, Longitude: -96.0}},
+	}
+	publishTelemetry(t, bus, telemetryEvent("VIN_FSD", now.Add(1*time.Second), startFields))
+	if _, ok := waitForEvent(startedCh); !ok {
+		t.Fatal("timed out waiting for DriveStartedEvent")
+	}
+
+	// A later in-drive frame carries an updated FSD value (next 60s tick).
+	midFields := map[string]events.TelemetryValue{
+		string(telemetry.FieldGear):     {StringVal: ptr("D")},
+		string(telemetry.FieldSpeed):    {FloatVal: ptr(60.0)},
+		string(telemetry.FieldLocation): {LocationVal: &events.Location{Latitude: 33.2, Longitude: -96.2}},
+		string(telemetry.FieldFSDMiles): {FloatVal: ptr(208.0)},
+	}
+	publishTelemetry(t, bus, telemetryEvent("VIN_FSD", now.Add(61*time.Second), midFields))
+
+	// Park to end the drive, at a distinct location so the route has nonzero
+	// distance (needed to exercise the FSD-percentage calculation).
+	stopFields := map[string]events.TelemetryValue{
+		string(telemetry.FieldGear):     {StringVal: ptr("P")},
+		string(telemetry.FieldSpeed):    {FloatVal: ptr(0.0)},
+		string(telemetry.FieldLocation): {LocationVal: &events.Location{Latitude: 33.3, Longitude: -96.3}},
+	}
+	publishTelemetry(t, bus, telemetryEvent("VIN_FSD", now.Add(120*time.Second), stopFields))
+
+	evt, ok := waitForEvent(endedCh)
+	if !ok {
+		t.Fatal("timed out waiting for DriveEndedEvent")
+	}
+	stats := evt.Payload.(events.DriveEndedEvent).Stats
+
+	// Baseline 200 (from the idle tick) → 208 = 8 FSD miles. Before the fix
+	// this was 0 because the gear-change start frame carried no FSD field.
+	if want := 8.0; stats.FSDMiles != want {
+		t.Errorf("FSDMiles: got %f, want %f", stats.FSDMiles, want)
+	}
+	if stats.FSDPercentage <= 0 {
+		t.Errorf("FSDPercentage: got %f, want > 0", stats.FSDPercentage)
+	}
+}
+
 func TestDetector_DisconnectEndsDrive(t *testing.T) {
 	bus := testBus()
 	defer bus.Close(context.Background())
@@ -1041,7 +1122,7 @@ func TestExtractLocation_IgnoresOriginLocation(t *testing.T) {
 			name: "both location and originLocation present, returns GPS location",
 			fields: map[string]events.TelemetryValue{
 				string(telemetry.FieldLocation):       {LocationVal: gpsLoc},
-				string(telemetry.FieldOriginLocation):  {LocationVal: navOrigin},
+				string(telemetry.FieldOriginLocation): {LocationVal: navOrigin},
 			},
 			want: gpsLoc,
 		},
@@ -1102,10 +1183,10 @@ func TestDetector_DriveStartUsesGPSNotNavOrigin(t *testing.T) {
 
 	// Send telemetry with both GPS location and nav origin — GPS should win.
 	fields := map[string]events.TelemetryValue{
-		string(telemetry.FieldGear):            {StringVal: ptr("D")},
-		string(telemetry.FieldSpeed):           {FloatVal: ptr(10.0)},
-		string(telemetry.FieldLocation):        {LocationVal: &events.Location{Latitude: 32.95, Longitude: -96.73}},
-		string(telemetry.FieldOriginLocation):  {LocationVal: &events.Location{Latitude: 33.09, Longitude: -96.82}},
+		string(telemetry.FieldGear):           {StringVal: ptr("D")},
+		string(telemetry.FieldSpeed):          {FloatVal: ptr(10.0)},
+		string(telemetry.FieldLocation):       {LocationVal: &events.Location{Latitude: 32.95, Longitude: -96.73}},
+		string(telemetry.FieldOriginLocation): {LocationVal: &events.Location{Latitude: 33.09, Longitude: -96.82}},
 	}
 	publishTelemetry(t, bus, telemetryEvent("VIN_NAV", now, fields))
 
@@ -1163,32 +1244,32 @@ func TestDetector_OriginLocationOnlyDoesNotCacheLocation(t *testing.T) {
 
 func TestHaversine(t *testing.T) {
 	tests := []struct {
-		name     string
-		lat1     float64
-		lon1     float64
-		lat2     float64
-		lon2     float64
-		wantMi   float64
+		name      string
+		lat1      float64
+		lon1      float64
+		lat2      float64
+		lon2      float64
+		wantMi    float64
 		tolerance float64
 	}{
 		{
-			name:      "same point",
-			lat1:      33.09, lon1: -96.82,
-			lat2:      33.09, lon2: -96.82,
+			name: "same point",
+			lat1: 33.09, lon1: -96.82,
+			lat2: 33.09, lon2: -96.82,
 			wantMi:    0,
 			tolerance: 0.001,
 		},
 		{
-			name:      "short distance (Frisco to Plano ~5mi)",
-			lat1:      33.15, lon1: -96.82,
-			lat2:      33.02, lon2: -96.77,
+			name: "short distance (Frisco to Plano ~5mi)",
+			lat1: 33.15, lon1: -96.82,
+			lat2: 33.02, lon2: -96.77,
 			wantMi:    9.3, // approximate
 			tolerance: 1.0,
 		},
 		{
-			name:      "moderate distance (Dallas to Austin ~182mi great circle)",
-			lat1:      32.78, lon1: -96.80,
-			lat2:      30.27, lon2: -97.74,
+			name: "moderate distance (Dallas to Austin ~182mi great circle)",
+			lat1: 32.78, lon1: -96.80,
+			lat2: 30.27, lon2: -97.74,
 			wantMi:    182.0,
 			tolerance: 5.0,
 		},
@@ -1276,9 +1357,10 @@ func TestRedactVIN(t *testing.T) {
 
 func TestCalculateStats_FSDClampedToZero(t *testing.T) {
 	drive := &activeDrive{
-		startedAt:     time.Now(),
-		startFSDMiles: 100.0,
-		lastFSDMiles:  50.0, // counter reset mid-drive
+		startedAt:      time.Now(),
+		startFSDMiles:  100.0,
+		lastFSDMiles:   50.0, // counter reset mid-drive
+		fsdBaselineSet: true,
 		lastTimestamp:  time.Now().Add(5 * time.Minute),
 	}
 
@@ -1288,11 +1370,28 @@ func TestCalculateStats_FSDClampedToZero(t *testing.T) {
 	}
 }
 
+// TestCalculateStats_FSDBaselineUnset verifies that when no FSD value was ever
+// observed for a drive, FSD miles is reported as zero rather than the full
+// cumulative "miles since reset" counter.
+func TestCalculateStats_FSDBaselineUnset(t *testing.T) {
+	drive := &activeDrive{
+		startedAt:     time.Now(),
+		lastFSDMiles:  5000.0, // cumulative counter — must NOT be reported as-is
+		lastTimestamp: time.Now().Add(5 * time.Minute),
+		// fsdBaselineSet defaults to false.
+	}
+
+	stats := calculateStats(drive)
+	if stats.FSDMiles != 0 {
+		t.Errorf("FSDMiles: got %f, want 0 (no baseline observed)", stats.FSDMiles)
+	}
+}
+
 func TestCalculateStats_ZeroSpeedCount(t *testing.T) {
 	drive := &activeDrive{
-		startedAt:    time.Now(),
-		speedCount:   0,
-		speedSum:     0,
+		startedAt:     time.Now(),
+		speedCount:    0,
+		speedSum:      0,
 		lastTimestamp: time.Now().Add(5 * time.Minute),
 	}
 

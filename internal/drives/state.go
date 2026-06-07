@@ -53,6 +53,17 @@ type vehicleState struct {
 	// start without a location in the triggering event.
 	lastLocation *events.Location
 
+	// lastFSDMiles caches the most recent fsdMilesSinceReset value seen for
+	// this vehicle, including while idle. fsdMilesKnown reports whether a
+	// value has ever been observed. FSD miles is a cumulative "miles since
+	// reset" counter streamed on a slow cadence (60s / 1-mile delta) while
+	// gear streams every 1s, so the gear-change event that starts a drive
+	// almost never carries FSD miles. Caching it here lets startDrive seed
+	// the drive baseline from the last value seen before the drive began —
+	// the correct baseline, since FSD miles do not accumulate while parked.
+	lastFSDMiles  float64
+	fsdMilesKnown bool
+
 	// lastTelemetryAt records the wall-clock time of the most recently
 	// received telemetry event for this vehicle (any field, gear-bearing
 	// or not). The end-condition watchdog uses this to detect drives
@@ -63,22 +74,23 @@ type vehicleState struct {
 
 // activeDrive accumulates data during an in-progress drive.
 type activeDrive struct {
-	id            string
-	startedAt     time.Time
-	startLocation events.Location
-	routePoints   []events.RoutePoint
-	maxSpeed      float64
-	speedSum      float64 // running sum for average calculation
-	speedCount    int     // number of speed samples
-	startCharge   float64 // SOC at drive start (percent)
-	startOdometer float64 // odometer at drive start (miles)
-	startEnergy   float64 // energyRemaining at drive start (kWh)
-	startFSDMiles float64 // fsdMilesSinceReset at drive start
-	lastFSDMiles  float64 // most recent fsdMilesSinceReset seen
-	lastLocation  events.Location
-	lastTimestamp time.Time
-	lastSOC       float64 // most recent SOC for EndChargeLevel
-	lastEnergy    float64 // most recent energyRemaining for EnergyDelta
+	id             string
+	startedAt      time.Time
+	startLocation  events.Location
+	routePoints    []events.RoutePoint
+	maxSpeed       float64
+	speedSum       float64 // running sum for average calculation
+	speedCount     int     // number of speed samples
+	startCharge    float64 // SOC at drive start (percent)
+	startOdometer  float64 // odometer at drive start (miles)
+	startEnergy    float64 // energyRemaining at drive start (kWh)
+	startFSDMiles  float64 // fsdMilesSinceReset baseline for this drive
+	lastFSDMiles   float64 // most recent fsdMilesSinceReset seen
+	fsdBaselineSet bool    // true once startFSDMiles holds a real observed value
+	lastLocation   events.Location
+	lastTimestamp  time.Time
+	lastSOC        float64 // most recent SOC for EndChargeLevel
+	lastEnergy     float64 // most recent energyRemaining for EnergyDelta
 
 	// reconciled is true when this drive was reattached from a DB row
 	// orphaned by a previous restart (MYR-146). endDrive bypasses the
