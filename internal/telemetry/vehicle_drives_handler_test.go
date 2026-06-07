@@ -56,6 +56,8 @@ func fixtureDriveItems(vehicleID string, n int) []DriveListItem {
 			MaxSpeedMph:      65.2,
 			StartChargeLevel: 82,
 			EndChargeLevel:   76,
+			FsdMiles:         8.1,
+			FsdPercentage:    65.3,
 			CreatedAt:        startTime.Add(25 * time.Minute),
 		})
 	}
@@ -299,9 +301,18 @@ func TestVehicleDrivesHandler_ServeHTTP(t *testing.T) {
 						t.Errorf("items[0].%s: got %v, want %q", k, got, want)
 					}
 				}
+				// MYR-152: FSD miles + percentage are surfaced on the lean
+				// list projection (P0, non-identifying) so the SDK/testbench
+				// can show FSD usage per drive without a drive-detail fetch.
+				if first["fsdMiles"] != items[0].FsdMiles {
+					t.Errorf("items[0].fsdMiles: got %v, want %v", first["fsdMiles"], items[0].FsdMiles)
+				}
+				if first["fsdPercentage"] != items[0].FsdPercentage {
+					t.Errorf("items[0].fsdPercentage: got %v, want %v", first["fsdPercentage"], items[0].FsdPercentage)
+				}
 				// Drive-detail-only fields still stay out of the lean
 				// projection per rest-api.md §5.2.2.
-				for _, denied := range []string{"energyUsedKwh", "fsdMiles", "fsdPercentage", "interventions", "routePoints"} {
+				for _, denied := range []string{"energyUsedKwh", "interventions", "routePoints"} {
 					if _, ok := first[denied]; ok {
 						t.Errorf("items[0]: unexpected field %q leaked into drive summary", denied)
 					}
