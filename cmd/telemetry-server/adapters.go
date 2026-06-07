@@ -287,6 +287,28 @@ func (a *driveListerAdapter) ListByVehicleID(ctx context.Context, vehicleID stri
 	return telemetry.DriveListPage{Items: items, HasMore: page.HasMore}, nil
 }
 
+// driveRouteAdapter adapts store.DriveRepo.GetByID to the
+// telemetry.DriveRouteFetcher interface used by the drive-route handler
+// (DV-20). GetByID already resolves the routePointsEnc shadow into the
+// decrypted RoutePoints, so the handler sees plaintext. store.ErrDriveNotFound
+// wraps sdk.ErrNotFound, so passing the error through with %w lets the
+// handler map an unknown drive to a 404.
+type driveRouteAdapter struct {
+	repo *store.DriveRepo
+}
+
+func (a *driveRouteAdapter) GetDriveRoute(ctx context.Context, driveID string) (telemetry.DriveRouteData, error) {
+	rec, err := a.repo.GetByID(ctx, driveID)
+	if err != nil {
+		return telemetry.DriveRouteData{}, fmt.Errorf("get drive by id: %w", err)
+	}
+	return telemetry.DriveRouteData{
+		DriveID:     rec.ID,
+		VehicleID:   rec.VehicleID,
+		RoutePoints: rec.RoutePoints,
+	}, nil
+}
+
 // teslaTokenAdapter adapts store.AccountRepo to the
 // telemetry.TeslaTokenProvider interface, converting the store-layer
 // TeslaOAuthToken (Unix epoch) to the telemetry-layer TeslaToken (time.Time).
