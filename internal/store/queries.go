@@ -131,6 +131,29 @@ const queryDriveByID = `SELECT "id", "vehicleId", "date", "startTime", "endTime"
 FROM "Drive"
 WHERE "id" = $1`
 
+// queryDriveListOpen returns every Drive row whose endTime is unset.
+// MYR-146: read on Detector.Start to reconcile rows orphaned by a Fly
+// redeploy mid-drive (in-memory vehicleState was lost; without
+// reconciliation the watchdog never observes these rows and they stay
+// "active" forever).
+//
+// Single JOIN to Vehicle is the cleanest shape because the Detector is
+// global (one instance, all VINs) and keys in-memory state by VIN. A
+// two-step (open drives → per-row VIN lookup) would round-trip per
+// vehicle for no benefit. The set is bounded by the live-fleet size,
+// and `endTime IS NULL OR endTime = ''` is by definition rare in steady
+// state.
+//
+// Predicate covers both representations because the cleanup-binary
+// findings showed the column can be either NULL or empty string
+// depending on how the row was inserted. No `LIMIT` because we want
+// every orphan, not a page.
+const queryDriveListOpen = `SELECT
+	d."id", d."vehicleId", v."vin", d."startTime", d."date", d."startChargeLevel"
+FROM "Drive" d
+JOIN "Vehicle" v ON d."vehicleId" = v."id"
+WHERE d."endTime" IS NULL OR d."endTime" = ''`
+
 // driveSummarySelectColumns is the lean projection used by the
 // GET /api/vehicles/{vehicleId}/drives list endpoint (MYR-133, MYR-145).
 // It MUST stay aligned with the wire fields emitted by

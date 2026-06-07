@@ -74,7 +74,7 @@ func TestStartDrive_ZeroLocation(t *testing.T) {
 			bus := testBus()
 			defer bus.Close(context.Background())
 
-			d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{})
+			d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{}, nil)
 			if err := d.Start(context.Background()); err != nil {
 				t.Fatalf("Start: %v", err)
 			}

@@ -191,14 +191,7 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 		},
 	)
 
-	// --- Drive detector ---
-	detector := drives.NewDetector(bus, cfg.Drives(), logger.With(slog.String("component", "drives")), drives.NoopDetectorMetrics{})
-	if err := detector.Start(ctx); err != nil {
-		return fmt.Errorf("starting drive detector: %w", err)
-	}
-	defer func() { _ = detector.Stop() }()
-
-	// --- Store repos ---
+	// --- Store repos (needed by the Detector reconciler) ---
 	// MYR-63 wires the Encryptor into VehicleRepo so the six GPS
 	// columns are dual-written (plaintext + *Enc) and read with
 	// ciphertext preference. Half-pair *Enc rows fall back to
@@ -207,6 +200,23 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	vehicleRepo := store.NewVehicleRepoWithEncryption(db.Pool(), storeMetrics, encryptor, logger.With(slog.String("component", "vehicle-repo")))
 	driveRepo := store.NewDriveRepoWithEncryption(db.Pool(), storeMetrics, encryptor, logger.With(slog.String("component", "drive-repo")))
 	accountRepo := store.NewAccountRepo(db.Pool(), encryptor)
+
+	// --- Drive detector ---
+	// MYR-146: reconciler reads open Drive rows on Start so a Fly
+	// redeploy mid-drive doesn't leave forever-active rows. The
+	// adapter lives in adapters.go and translates store.OpenDriveRow
+	// into the drives package's local type.
+	detector := drives.NewDetector(
+		bus,
+		cfg.Drives(),
+		logger.With(slog.String("component", "drives")),
+		drives.NoopDetectorMetrics{},
+		&openDriveListerAdapter{repo: driveRepo},
+	)
+	if err := detector.Start(ctx); err != nil {
+		return fmt.Errorf("starting drive detector: %w", err)
+	}
+	defer func() { _ = detector.Stop() }()
 
 	// MYR-62 + MYR-63 plaintext-zero gauges. Both register against the
 	// same Prometheus registry the /metrics handler scrapes; each

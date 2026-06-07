@@ -134,7 +134,16 @@ func (d *Detector) endDrive(state *vehicleState, vin string) {
 	stats := calculateStats(drive)
 
 	// Micro-drive filtering: discard short or short-distance drives.
-	if stats.Duration < d.cfg.MinDuration || stats.Distance < d.cfg.MinDistanceMiles {
+	// Reconciled drives that never saw resumed telemetry bypass this
+	// gate -- their stats are Duration=0, Distance=0, which the
+	// prod-default filter (MinDuration=2m, MinDistanceMiles=0.1) would
+	// otherwise discard, leaving the open DB row to be reconciled
+	// again forever (MYR-146 critical bug). Closing those rows is the
+	// whole point of reconciliation, so we publish DriveEndedEvent
+	// unconditionally for them and let the writer UPDATE the existing
+	// row with endTime=NOW().
+	if !drive.reconciled &&
+		(stats.Duration < d.cfg.MinDuration || stats.Distance < d.cfg.MinDistanceMiles) {
 		d.logger.Info("discarding micro-drive",
 			slog.String("vin", redactVIN(vin)),
 			slog.String("drive_id", drive.id),

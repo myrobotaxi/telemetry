@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/myrobotaxi/telemetry/internal/drives"
 	"github.com/myrobotaxi/telemetry/internal/store"
 	"github.com/myrobotaxi/telemetry/internal/telemetry"
 )
@@ -362,6 +363,33 @@ func proxyHTTPClient(proxyURL string, logger *slog.Logger) *http.Client {
 	}
 }
 
+
+// openDriveListerAdapter adapts store.DriveRepo.ListOpen to the
+// drives.OpenDriveLister interface used by Detector.Start for orphan
+// reconciliation (MYR-146). The drives package defines its own
+// OpenDriveRow type so it stays decoupled from internal/store; this
+// adapter performs the row-shape translation at the boundary.
+type openDriveListerAdapter struct {
+	repo *store.DriveRepo
+}
+
+func (a *openDriveListerAdapter) ListOpen(ctx context.Context) ([]drives.OpenDriveRow, error) {
+	rows, err := a.repo.ListOpen(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list open drives: %w", err)
+	}
+	out := make([]drives.OpenDriveRow, 0, len(rows))
+	for i := range rows {
+		r := &rows[i]
+		out = append(out, drives.OpenDriveRow{
+			ID:               r.ID,
+			VIN:              r.VIN,
+			StartTime:        r.StartTime,
+			StartChargeLevel: r.StartChargeLevel,
+		})
+	}
+	return out, nil
+}
 
 // vehicleAuthorizerAdapter adapts store.VINCache to the
 // telemetry.VehicleAuthorizer interface (data-lifecycle.md §3.5,

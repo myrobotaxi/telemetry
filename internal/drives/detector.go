@@ -34,6 +34,13 @@ type Detector struct {
 	logger  *slog.Logger
 	metrics DetectorMetrics
 
+	// reconciler is the read-side hook used on Start to reattach
+	// in-memory state for Drive rows orphaned by a previous restart
+	// (MYR-146). nil disables reconciliation — tests use this; the
+	// production constructor in cmd/telemetry-server wires a
+	// DriveRepo-backed adapter.
+	reconciler OpenDriveLister
+
 	// states holds per-vehicle drive state. Keyed by VIN.
 	// Using sync.Map because vehicles connect/disconnect dynamically and
 	// reads vastly outnumber writes (every telemetry tick is a read;
@@ -64,18 +71,28 @@ type Detector struct {
 // NewDetector creates a Detector. The bus is used both for subscribing to
 // telemetry events and publishing drive lifecycle events. Call Start to
 // begin processing.
+//
+// reconciler is the read-side hook used on Start to reattach in-memory
+// state for Drive rows orphaned by a previous restart (MYR-146). Pass
+// nil to disable reconciliation (tests use this; production wires a
+// DriveRepo-backed adapter). It is a required constructor argument
+// rather than an optional functional setter so the dependency fails
+// loud at compile time — silently shipping a nil reconciler in prod
+// is exactly the regression Option B is meant to prevent.
 func NewDetector(
 	bus events.Bus,
 	cfg config.DrivesConfig,
 	logger *slog.Logger,
 	metrics DetectorMetrics,
+	reconciler OpenDriveLister,
 ) *Detector {
 	return &Detector{
-		bus:     bus,
-		cfg:     cfg,
-		logger:  logger,
-		metrics: metrics,
-		now:     time.Now,
+		bus:        bus,
+		cfg:        cfg,
+		logger:     logger,
+		metrics:    metrics,
+		reconciler: reconciler,
+		now:        time.Now,
 	}
 }
 
@@ -103,6 +120,14 @@ func (d *Detector) watchdogInterval() time.Duration {
 func (d *Detector) Start(ctx context.Context) error {
 	d.ctx, d.cancel = context.WithCancel(ctx)
 
+	// MYR-146: reconcile orphaned Drive rows BEFORE bus subscription.
+	// ChannelBus.Subscribe spawns its deliverLoop goroutine before
+	// returning, so subscribing first would race the d.states.Store
+	// writes inside reconcileOpenDrives against any in-process
+	// publisher (today nothing publishes that early, but the order
+	// makes the invariant load-bearing). Fails open on DB hiccup.
+	d.reconcileOpenDrives(d.ctx)
+
 	telSub, err := d.bus.Subscribe(events.TopicVehicleTelemetry, d.handleEvent)
 	if err != nil {
 		d.cancel()
@@ -121,7 +146,9 @@ func (d *Detector) Start(ctx context.Context) error {
 	// Start the end-condition watchdog. Tesla stops streaming when the
 	// vehicle parks, so a gear=P frame is not guaranteed -- without this
 	// watchdog the time.AfterFunc-based debounce path is never primed and
-	// the drive stays open forever (the MYR-139 R3a regression).
+	// the drive stays open forever (the MYR-139 R3a regression). Runs
+	// AFTER reconciliation so the first tick observes the reconciled
+	// state.
 	d.watchdogWG.Add(1)
 	go d.runWatchdog()
 
@@ -270,32 +297,3 @@ func (d *Detector) handleTelemetry(te events.VehicleTelemetryEvent) {
 	}
 }
 
-// extractStringField returns the string value for a telemetry field,
-// or empty string if absent or not a string.
-func extractStringField(fields map[string]events.TelemetryValue, name telemetry.FieldName) string {
-	v, ok := fields[string(name)]
-	if !ok || v.StringVal == nil {
-		return ""
-	}
-	return *v.StringVal
-}
-
-// extractFloatField returns the float64 value for a telemetry field,
-// or 0 if absent or not a float.
-func extractFloatField(fields map[string]events.TelemetryValue, name telemetry.FieldName) (float64, bool) {
-	v, ok := fields[string(name)]
-	if !ok || v.FloatVal == nil {
-		return 0, false
-	}
-	return *v.FloatVal, true
-}
-
-// extractLocation returns the Location from the telemetry fields, or nil
-// if absent.
-func extractLocation(fields map[string]events.TelemetryValue) *events.Location {
-	v, ok := fields[string(telemetry.FieldLocation)]
-	if !ok || v.LocationVal == nil {
-		return nil
-	}
-	return v.LocationVal
-}
