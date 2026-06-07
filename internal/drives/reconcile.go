@@ -56,9 +56,10 @@ type OpenDriveLister interface {
 // and continue. Worst case the orphaned rows stay open until the next
 // successful restart cycle.
 //
-// Called from Start AFTER bus subscription succeeds but BEFORE the
-// watchdog goroutine starts, so the very first watchdog tick observes
-// the reconciled state.
+// Called from Start BEFORE bus subscription so no handler callback
+// goroutine can race the d.states.Store calls below, and BEFORE the
+// watchdog goroutine starts so the first watchdog tick observes the
+// reconciled state.
 func (d *Detector) reconcileOpenDrives(ctx context.Context) {
 	if d.reconciler == nil {
 		return
@@ -99,13 +100,24 @@ func (d *Detector) reconcileOpenDrives(ctx context.Context) {
 				startCharge:   float64(row.StartChargeLevel),
 				lastSOC:       float64(row.StartChargeLevel),
 				lastTimestamp: startedAt,
+				// reconciled tags the watchdog-end path to bypass the
+				// micro-drive filter (MYR-146 critical). With no
+				// resumed telemetry the stats are Duration=0,
+				// Distance=0 and the prod-default filter
+				// (MinDuration=2m, MinDistanceMiles=0.1) would discard
+				// the DriveEndedEvent -- leaving the DB row open and
+				// reconciled again on the next restart forever.
+				// Cleared in handleDriving once real telemetry
+				// resumes; from that point the drive is treated as a
+				// normal continuation and any subsequent end goes
+				// through the standard filter.
+				reconciled: true,
 			},
 		}
-		// Use Store (not LoadOrStore) — Start runs before any
-		// telemetry handlers, so the map is empty and overwriting any
-		// concurrent insert would be a bug, not a race we tolerate.
-		// In practice no other goroutine touches d.states until
-		// Subscribe callbacks fire, which happens after Start returns.
+		// Use Store (not LoadOrStore) — reconcileOpenDrives runs
+		// BEFORE Start calls Subscribe (see Start in detector.go), so
+		// no handler goroutine can touch d.states yet. Overwriting any
+		// pre-existing entry would be a bug, not a race we tolerate.
 		d.states.Store(row.VIN, state)
 		d.activeCount.Add(1)
 		reconciled++

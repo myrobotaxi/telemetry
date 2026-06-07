@@ -120,6 +120,14 @@ func (d *Detector) watchdogInterval() time.Duration {
 func (d *Detector) Start(ctx context.Context) error {
 	d.ctx, d.cancel = context.WithCancel(ctx)
 
+	// MYR-146: reconcile orphaned Drive rows BEFORE bus subscription.
+	// ChannelBus.Subscribe spawns its deliverLoop goroutine before
+	// returning, so subscribing first would race the d.states.Store
+	// writes inside reconcileOpenDrives against any in-process
+	// publisher (today nothing publishes that early, but the order
+	// makes the invariant load-bearing). Fails open on DB hiccup.
+	d.reconcileOpenDrives(d.ctx)
+
 	telSub, err := d.bus.Subscribe(events.TopicVehicleTelemetry, d.handleEvent)
 	if err != nil {
 		d.cancel()
@@ -135,19 +143,12 @@ func (d *Detector) Start(ctx context.Context) error {
 
 	d.subs = []events.Subscription{telSub, connSub}
 
-	// MYR-146: reconcile Drive rows orphaned by a previous restart.
-	// MUST run after subscribing (so any inbound telemetry that arrives
-	// concurrently is queued by the bus, not dropped) and BEFORE the
-	// watchdog starts (so the first watchdog tick observes the
-	// reconciled state and either confirms ongoing telemetry or ends
-	// the row within EndDebounce). Fails open — a DB hiccup here
-	// MUST NOT block Detector.Start.
-	d.reconcileOpenDrives(d.ctx)
-
 	// Start the end-condition watchdog. Tesla stops streaming when the
 	// vehicle parks, so a gear=P frame is not guaranteed -- without this
 	// watchdog the time.AfterFunc-based debounce path is never primed and
-	// the drive stays open forever (the MYR-139 R3a regression).
+	// the drive stays open forever (the MYR-139 R3a regression). Runs
+	// AFTER reconciliation so the first tick observes the reconciled
+	// state.
 	d.watchdogWG.Add(1)
 	go d.runWatchdog()
 
@@ -296,32 +297,3 @@ func (d *Detector) handleTelemetry(te events.VehicleTelemetryEvent) {
 	}
 }
 
-// extractStringField returns the string value for a telemetry field,
-// or empty string if absent or not a string.
-func extractStringField(fields map[string]events.TelemetryValue, name telemetry.FieldName) string {
-	v, ok := fields[string(name)]
-	if !ok || v.StringVal == nil {
-		return ""
-	}
-	return *v.StringVal
-}
-
-// extractFloatField returns the float64 value for a telemetry field,
-// or 0 if absent or not a float.
-func extractFloatField(fields map[string]events.TelemetryValue, name telemetry.FieldName) (float64, bool) {
-	v, ok := fields[string(name)]
-	if !ok || v.FloatVal == nil {
-		return 0, false
-	}
-	return *v.FloatVal, true
-}
-
-// extractLocation returns the Location from the telemetry fields, or nil
-// if absent.
-func extractLocation(fields map[string]events.TelemetryValue) *events.Location {
-	v, ok := fields[string(telemetry.FieldLocation)]
-	if !ok || v.LocationVal == nil {
-		return nil
-	}
-	return v.LocationVal
-}
