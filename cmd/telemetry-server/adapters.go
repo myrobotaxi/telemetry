@@ -364,11 +364,18 @@ func proxyHTTPClient(proxyURL string, logger *slog.Logger) *http.Client {
 }
 
 
-// openDriveListerAdapter adapts store.DriveRepo.ListOpen to the
+// openDriveListerAdapter adapts store.DriveRepo to the
 // drives.OpenDriveLister interface used by Detector.Start for orphan
 // reconciliation (MYR-146). The drives package defines its own
 // OpenDriveRow type so it stays decoupled from internal/store; this
 // adapter performs the row-shape translation at the boundary.
+//
+// MYR-147: also exposes MarkOrphanEnded so the reconciler can close
+// older same-VIN orphans synchronously instead of silently dropping
+// them. The implementation reuses DriveRepo.Complete with zero stats
+// and EndTime=now — the only path that doesn't require non-zero
+// distance/duration (which we don't have for a drive that never
+// resumed telemetry).
 type openDriveListerAdapter struct {
 	repo *store.DriveRepo
 }
@@ -389,6 +396,27 @@ func (a *openDriveListerAdapter) ListOpen(ctx context.Context) ([]drives.OpenDri
 		})
 	}
 	return out, nil
+}
+
+// MarkOrphanEnded closes the Drive row identified by driveID with
+// zero stats and EndTime set to "now" (RFC3339, UTC). Called by the
+// reconciler for older same-VIN orphans — drives that pre-date the
+// most recent open drive for the same VIN and are therefore
+// definitively over.
+//
+// We pass zero values for all numeric fields because the row never
+// accumulated post-restart telemetry (the in-memory state was lost on
+// redeploy and the Detector now reattaches only the LATEST per VIN).
+// The endTime column is what unblocks the existing
+// "endTime IS NULL OR endTime = ''" ListOpen predicate; the zero
+// stats are the honest representation of "we don't know what
+// happened between start and now".
+func (a *openDriveListerAdapter) MarkOrphanEnded(ctx context.Context, driveID string) error {
+	endedAt := time.Now().UTC().Format(time.RFC3339)
+	if err := a.repo.Complete(ctx, driveID, store.DriveCompletion{EndTime: endedAt}); err != nil {
+		return fmt.Errorf("mark orphan ended (drive_id=%s): %w", driveID, err)
+	}
+	return nil
 }
 
 // vehicleAuthorizerAdapter adapts store.VINCache to the
