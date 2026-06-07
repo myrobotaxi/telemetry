@@ -507,6 +507,39 @@ func TestDefaultFieldConfig(t *testing.T) {
 	}
 }
 
+// TestDefaultFieldConfig_MileageCountersResend verifies the cumulative
+// "miles since reset" counters carry a ResendIntervalSeconds (MYR-155).
+// Without it, these delta-gated fields go silent while parked, so a
+// server that (re)starts during a parked window never receives an FSD
+// value until the car drives a full mile — leaving the drive detector
+// with no FSD baseline for the first post-restart drive (records 0).
+func TestDefaultFieldConfig_MileageCountersResend(t *testing.T) {
+	t.Parallel()
+
+	fields := DefaultFieldConfig()
+
+	for _, name := range []string{FleetFieldMilesSinceReset, FleetFieldFSDMilesSinceReset} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			fc, ok := fields[name]
+			if !ok {
+				t.Fatalf("field %q not found in default config", name)
+			}
+			if fc.ResendIntervalSeconds == nil {
+				t.Fatalf("field %q must set ResendIntervalSeconds so the value re-emits "+
+					"while parked / after reconnect (MYR-155)", name)
+			}
+			if *fc.ResendIntervalSeconds != 60 {
+				t.Errorf("resend_interval_seconds = %d, want 60", *fc.ResendIntervalSeconds)
+			}
+			// The delta gate must remain so live driving still emits on change.
+			if fc.MinimumDelta == nil || *fc.MinimumDelta != 1 {
+				t.Errorf("minimum_delta must stay 1 mile alongside the resend interval")
+			}
+		})
+	}
+}
+
 // TestDefaultFieldConfig_CoversAllTrackedFields ensures every field in
 // fieldMap has a corresponding entry in DefaultFieldConfig. This prevents
 // the bug where a field is decoded but never requested from the vehicle.
