@@ -232,6 +232,20 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 	)
 	deps.srv.HandleFunc("GET /api/vehicles/{vehicleId}/drives", drivesHandler.ServeHTTP)
 
+	// DV-20 (FR-3.3): GET /api/drives/{driveId}/route — the recorded
+	// breadcrumb polyline for a completed drive. Same auth + ownership +
+	// role-mask flow as the drives list; the route's vehicleId comes off
+	// the drive record, then snapshotAdapter checks ownership.
+	driveRouteHandler := telemetry.NewDriveRouteHandler(
+		deps.authenticator,
+		snapshotAdapter,
+		&driveRouteAdapter{repo: deps.driveRepo},
+		deps.logger.With(slog.String("component", "drive-route")),
+		telemetry.WithDriveRouteRoleResolver(deps.authenticator),
+		telemetry.WithDriveRouteMaskAudit(deps.auditEmitter, deps.auditMetrics, "/api/drives/{driveId}/route"),
+	)
+	deps.srv.HandleFunc("GET /api/drives/{driveId}/route", driveRouteHandler.ServeHTTP)
+
 	setupFleetConfigEndpoint(deps.cfg, deps.srv, deps.authenticator, deps.vinCache, deps.accountRepo, deps.logger)
 
 	// Mounted when resolveDebugFieldsGate says so — either because the
