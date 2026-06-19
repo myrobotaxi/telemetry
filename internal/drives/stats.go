@@ -53,7 +53,19 @@ func totalDistance(points []events.RoutePoint) float64 {
 // The endSOC and endEnergy values come from the most recent telemetry event.
 func calculateStats(drive *activeDrive) events.DriveStats {
 	duration := drive.lastTimestamp.Sub(drive.startedAt)
+
+	// Distance prefers the odometer delta (MYR-157): odometer is an
+	// accurate cumulative counter, whereas totalDistance() sums GPS
+	// haversine chords between sparse route points and undercounts real
+	// road distance. Fall back to GPS when no odometer baseline was
+	// observed, or when the delta is non-positive (e.g. an odometer reset,
+	// or a drive with no in-motion odometer sample yet).
 	distance := totalDistance(drive.routePoints)
+	if drive.odometerBaselineSet {
+		if odoDist := drive.lastOdometer - drive.startOdometer; odoDist > 0 {
+			distance = odoDist
+		}
+	}
 
 	var avgSpeed float64
 	if drive.speedCount > 0 {
@@ -76,9 +88,16 @@ func calculateStats(drive *activeDrive) events.DriveStats {
 		}
 	}
 
+	// FSD share, clamped to [0,100]. FSD miles ⊆ total odometer miles, so a
+	// correct measurement is always ≤100%; the clamp guards against residual
+	// counter/sampling skew that previously produced >100% (e.g. 176%) when
+	// FSD (odometer-accurate) was divided by the undercounting GPS distance.
 	var fsdPercentage float64
 	if distance > 0 && fsdMiles > 0 {
 		fsdPercentage = (fsdMiles / distance) * 100.0
+		if fsdPercentage > 100.0 {
+			fsdPercentage = 100.0
+		}
 	}
 
 	endLocation := drive.lastLocation

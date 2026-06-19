@@ -1400,3 +1400,105 @@ func TestCalculateStats_ZeroSpeedCount(t *testing.T) {
 		t.Errorf("AvgSpeed: got %f, want 0 (no speed samples)", stats.AvgSpeed)
 	}
 }
+
+// MYR-157: drive distance is derived from the odometer delta (an accurate
+// cumulative counter), not the GPS haversine of sparse route points. The
+// route points here span a large GPS distance to prove the odometer wins.
+func TestCalculateStats_DistanceFromOdometer(t *testing.T) {
+	drive := &activeDrive{
+		startedAt:           time.Now(),
+		lastTimestamp:       time.Now().Add(5 * time.Minute),
+		startOdometer:       1000.0,
+		lastOdometer:        1002.0, // odometer delta = 2.0 mi
+		odometerBaselineSet: true,
+		routePoints: []events.RoutePoint{
+			{Latitude: 33.0, Longitude: -96.0},
+			{Latitude: 33.5, Longitude: -96.5}, // ~45 mi of GPS — must be ignored
+		},
+	}
+	stats := calculateStats(drive)
+	if stats.Distance != 2.0 {
+		t.Errorf("Distance: got %f, want 2.0 (odometer delta, not GPS)", stats.Distance)
+	}
+}
+
+// MYR-157: with no odometer baseline observed, distance falls back to the
+// GPS haversine sum (legacy behavior).
+func TestCalculateStats_DistanceFallsBackToGPS(t *testing.T) {
+	drive := &activeDrive{
+		startedAt:     time.Now(),
+		lastTimestamp: time.Now().Add(5 * time.Minute),
+		// odometerBaselineSet defaults false → GPS fallback.
+		routePoints: []events.RoutePoint{
+			{Latitude: 33.0, Longitude: -96.0},
+			{Latitude: 33.01, Longitude: -96.0},
+		},
+	}
+	gps := totalDistance(drive.routePoints)
+	stats := calculateStats(drive)
+	if gps <= 0 || stats.Distance != gps {
+		t.Errorf("Distance: got %f, want GPS fallback %f (>0)", stats.Distance, gps)
+	}
+}
+
+// MYR-157: a mid-drive odometer reset (delta ≤ 0) falls back to GPS rather
+// than reporting a negative/zero distance.
+func TestCalculateStats_DistanceFallsBackOnOdometerReset(t *testing.T) {
+	drive := &activeDrive{
+		startedAt:           time.Now(),
+		lastTimestamp:       time.Now().Add(5 * time.Minute),
+		startOdometer:       2000.0,
+		lastOdometer:        1.0, // reset mid-drive → non-positive delta
+		odometerBaselineSet: true,
+		routePoints: []events.RoutePoint{
+			{Latitude: 33.0, Longitude: -96.0},
+			{Latitude: 33.01, Longitude: -96.0},
+		},
+	}
+	gps := totalDistance(drive.routePoints)
+	stats := calculateStats(drive)
+	if stats.Distance != gps {
+		t.Errorf("Distance: got %f, want GPS fallback %f on odometer reset", stats.Distance, gps)
+	}
+}
+
+// MYR-157: FSD% is clamped to ≤100% — guards the >100% (e.g. 176%) that
+// previously surfaced when FSD miles were divided by an undercounting
+// distance.
+func TestCalculateStats_FSDPercentageClampedTo100(t *testing.T) {
+	drive := &activeDrive{
+		startedAt:           time.Now(),
+		lastTimestamp:       time.Now().Add(5 * time.Minute),
+		startFSDMiles:       100.0,
+		lastFSDMiles:        102.0, // FSD delta = 2.0
+		fsdBaselineSet:      true,
+		startOdometer:       500.0,
+		lastOdometer:        501.0, // distance = 1.0 → 200% pre-clamp
+		odometerBaselineSet: true,
+	}
+	stats := calculateStats(drive)
+	if stats.FSDPercentage != 100.0 {
+		t.Errorf("FSDPercentage: got %f, want 100 (clamped)", stats.FSDPercentage)
+	}
+}
+
+// MYR-157: a normal FSD share computed against the odometer distance.
+func TestCalculateStats_FSDPercentageFromOdometer(t *testing.T) {
+	drive := &activeDrive{
+		startedAt:           time.Now(),
+		lastTimestamp:       time.Now().Add(5 * time.Minute),
+		startFSDMiles:       100.0,
+		lastFSDMiles:        101.0, // FSD = 1.0
+		fsdBaselineSet:      true,
+		startOdometer:       500.0,
+		lastOdometer:        502.0, // distance = 2.0
+		odometerBaselineSet: true,
+	}
+	stats := calculateStats(drive)
+	if stats.Distance != 2.0 {
+		t.Errorf("Distance: got %f, want 2.0", stats.Distance)
+	}
+	if stats.FSDPercentage != 50.0 {
+		t.Errorf("FSDPercentage: got %f, want 50", stats.FSDPercentage)
+	}
+}

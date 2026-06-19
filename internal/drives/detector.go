@@ -298,6 +298,14 @@ func (d *Detector) handleTelemetry(te events.VehicleTelemetryEvent) {
 		state.fsdMilesKnown = true
 	}
 
+	// Cache odometer the same way (MYR-157) so startDrive can seed an
+	// accurate distance baseline — odometer streams on the same slow
+	// cadence as FSD and is usually absent from the gear-change frame.
+	if odo, ok := extractFloatField(te.Fields, telemetry.FieldOdometer); ok {
+		state.lastOdometer = odo
+		state.odometerKnown = true
+	}
+
 	switch state.status {
 	case StatusIdle:
 		d.handleIdle(state, vin, te)

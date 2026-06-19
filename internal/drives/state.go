@@ -64,6 +64,17 @@ type vehicleState struct {
 	lastFSDMiles  float64
 	fsdMilesKnown bool
 
+	// lastOdometer caches the most recent odometer value seen for this
+	// vehicle, including while idle (mirrors lastFSDMiles). odometerKnown
+	// reports whether a value has been observed. Odometer streams on a slow
+	// cadence (60s), so the gear-change event that starts a drive usually
+	// lacks it; caching lets startDrive seed an accurate baseline (the car
+	// has not moved since the last parked sample). calculateStats derives
+	// drive distance from the odometer delta (MYR-157), which is far more
+	// accurate than the GPS-haversine of sparse route points.
+	lastOdometer  float64
+	odometerKnown bool
+
 	// lastTelemetryAt records the wall-clock time of the most recently
 	// received telemetry event for this vehicle (any field, gear-bearing
 	// or not). The end-condition watchdog uses this to detect drives
@@ -87,7 +98,11 @@ type activeDrive struct {
 	startFSDMiles  float64 // fsdMilesSinceReset baseline for this drive
 	lastFSDMiles   float64 // most recent fsdMilesSinceReset seen
 	fsdBaselineSet bool    // true once startFSDMiles holds a real observed value
-	lastLocation   events.Location
+	// Odometer distance (MYR-157): distance = lastOdometer - startOdometer
+	// when odometerBaselineSet, else fall back to GPS totalDistance.
+	lastOdometer        float64 // most recent odometer reading (miles)
+	odometerBaselineSet bool    // true once startOdometer holds a real observed value
+	lastLocation        events.Location
 	lastTimestamp  time.Time
 	lastSOC        float64 // most recent SOC for EndChargeLevel
 	lastEnergy     float64 // most recent energyRemaining for EnergyDelta
