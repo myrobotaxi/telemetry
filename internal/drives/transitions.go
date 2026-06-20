@@ -62,6 +62,16 @@ func (d *Detector) handleDriving(state *vehicleState, vin string, te events.Vehi
 		drive.lastFSDMiles = fsd
 	}
 
+	// Update odometer tracking the same way (MYR-157) — lazily seed the
+	// baseline from the first in-drive sample when it was cold at start.
+	if odo, ok := extractFloatField(te.Fields, telemetry.FieldOdometer); ok {
+		if !drive.odometerBaselineSet {
+			drive.startOdometer = odo
+			drive.odometerBaselineSet = true
+		}
+		drive.lastOdometer = odo
+	}
+
 	// Update SOC tracking.
 	if soc, ok := extractFloatField(te.Fields, telemetry.FieldSOC); ok {
 		drive.lastSOC = soc
@@ -122,37 +132,35 @@ func (d *Detector) startDrive(state *vehicleState, vin string, te events.Vehicle
 		startCharge = soc
 	}
 
-	var startOdometer float64
-	if odo, ok := extractFloatField(te.Fields, telemetry.FieldOdometer); ok {
-		startOdometer = odo
-	}
-
 	var startEnergy float64
 	if energy, ok := extractFloatField(te.Fields, telemetry.FieldEnergyRemaining); ok {
 		startEnergy = energy
 	}
 
-	// Seed the FSD baseline from the most recent value seen for this vehicle
-	// (cached in handleTelemetry, including while idle). FSD miles is a
-	// cumulative "miles since reset" counter that does not advance while
-	// parked, so the last value before the drive is the correct baseline.
-	// If no value has ever been observed, leave the baseline unset —
-	// handleDriving lazily captures it from the first in-drive FSD sample.
+	// Seed the FSD + odometer baselines from the most recent values seen for
+	// this vehicle (cached in handleTelemetry, including while idle). Both
+	// are cumulative counters that don't advance while parked, so the last
+	// value before the drive is the correct baseline; the gear-change frame
+	// that starts the drive usually lacks them (slow cadence). If none has
+	// been observed, the baseline stays unset and handleDriving lazily
+	// captures it from the first in-drive sample (MYR-157).
 	drive := &activeDrive{
-		id:             driveID,
-		startedAt:      te.CreatedAt,
-		startLocation:  startLoc,
-		maxSpeed:       0,
-		startCharge:    startCharge,
-		startOdometer:  startOdometer,
-		startEnergy:    startEnergy,
-		startFSDMiles:  state.lastFSDMiles,
-		lastFSDMiles:   state.lastFSDMiles,
-		fsdBaselineSet: state.fsdMilesKnown,
-		lastLocation:   startLoc,
-		lastTimestamp:  te.CreatedAt,
-		lastSOC:        startCharge,
-		lastEnergy:     startEnergy,
+		id:                  driveID,
+		startedAt:           te.CreatedAt,
+		startLocation:       startLoc,
+		maxSpeed:            0,
+		startCharge:         startCharge,
+		startOdometer:       state.lastOdometer,
+		lastOdometer:        state.lastOdometer,
+		odometerBaselineSet: state.odometerKnown,
+		startEnergy:         startEnergy,
+		startFSDMiles:       state.lastFSDMiles,
+		lastFSDMiles:        state.lastFSDMiles,
+		fsdBaselineSet:      state.fsdMilesKnown,
+		lastLocation:        startLoc,
+		lastTimestamp:       te.CreatedAt,
+		lastSOC:             startCharge,
+		lastEnergy:          startEnergy,
 	}
 
 	state.status = StatusDriving
