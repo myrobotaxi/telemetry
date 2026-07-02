@@ -394,12 +394,12 @@ func proxyHTTPClient(proxyURL string, logger *slog.Logger) *http.Client {
 // OpenDriveRow type so it stays decoupled from internal/store; this
 // adapter performs the row-shape translation at the boundary.
 //
-// MYR-147: also exposes MarkOrphanEnded so the reconciler can close
-// older same-VIN orphans synchronously instead of silently dropping
-// them. The implementation reuses DriveRepo.Complete with zero stats
-// and EndTime=now — the only path that doesn't require non-zero
-// distance/duration (which we don't have for a drive that never
-// resumed telemetry).
+// MYR-147/MYR-149: also exposes MarkOrphanEnded, which the reconciler
+// now calls for EVERY orphan row (the in-memory reattach path was
+// removed — see internal/drives/reconcile.go). The implementation
+// reuses DriveRepo.Complete with zero stats and EndTime=now — the only
+// path that doesn't require non-zero distance/duration (which we don't
+// have for a drive whose in-memory state was lost on restart).
 type openDriveListerAdapter struct {
 	repo *store.DriveRepo
 }
@@ -424,14 +424,11 @@ func (a *openDriveListerAdapter) ListOpen(ctx context.Context) ([]drives.OpenDri
 
 // MarkOrphanEnded closes the Drive row identified by driveID with
 // zero stats and EndTime set to "now" (RFC3339, UTC). Called by the
-// reconciler for older same-VIN orphans — drives that pre-date the
-// most recent open drive for the same VIN and are therefore
-// definitively over.
+// reconciler for every orphan row found on startup (MYR-149).
 //
 // We pass zero values for all numeric fields because the row never
 // accumulated post-restart telemetry (the in-memory state was lost on
-// redeploy and the Detector now reattaches only the LATEST per VIN).
-// The endTime column is what unblocks the existing
+// redeploy). The endTime column is what unblocks the existing
 // "endTime IS NULL OR endTime = ''" ListOpen predicate; the zero
 // stats are the honest representation of "we don't know what
 // happened between start and now".
