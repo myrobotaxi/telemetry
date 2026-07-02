@@ -175,6 +175,8 @@ func TestLoad_DefaultsApplied(t *testing.T) {
 		{"drives.min_distance_miles", cfg.Drives().MinDistanceMiles, 0.1},
 		{"drives.end_debounce", cfg.Drives().EndDebounce, 30 * time.Second},
 		{"drives.geocode_timeout", cfg.Drives().GeocodeTimeout, 5 * time.Second},
+		{"drives.stall_timeout", cfg.Drives().StallTimeout, 15 * time.Minute},
+		{"drives.max_drive_duration", cfg.Drives().MaxDriveDuration, 12 * time.Hour},
 		{"websocket.heartbeat_interval", cfg.WebSocket().HeartbeatInterval, 15 * time.Second},
 		{"websocket.write_timeout", cfg.WebSocket().WriteTimeout, 10 * time.Second},
 		{"websocket.max_connections_per_user", cfg.WebSocket().MaxConnectionsPerUser, 5},

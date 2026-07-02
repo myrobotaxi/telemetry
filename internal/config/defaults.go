@@ -59,6 +59,16 @@ func applyDrivesDefaults(d *fileDrivesConfig) {
 	if d.GeocodeTimeout.Dur() == 0 {
 		d.GeocodeTimeout = Duration{d: 5 * time.Second}
 	}
+	if d.StallTimeout.Dur() == 0 {
+		// 15m: long enough that a drive-thru / rail-crossing stop
+		// doesn't split a real drive, short enough that a missed
+		// gear=P frame closes the drive promptly (MYR-160).
+		d.StallTimeout = Duration{d: 15 * time.Minute}
+	}
+	if d.MaxDriveDuration.Dur() == 0 {
+		// 12h backstop — see DrivesConfig.MaxDriveDuration.
+		d.MaxDriveDuration = Duration{d: 12 * time.Hour}
+	}
 }
 
 func applyWebSocketDefaults(ws *fileWebSocketConfig) {
