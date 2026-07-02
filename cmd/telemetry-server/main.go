@@ -210,7 +210,7 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 		bus,
 		cfg.Drives(),
 		logger.With(slog.String("component", "drives")),
-		drives.NoopDetectorMetrics{},
+		drives.NewPrometheusDetectorMetrics(reg),
 		&openDriveListerAdapter{repo: driveRepo},
 	)
 	if err := detector.Start(ctx); err != nil {
