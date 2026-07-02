@@ -38,52 +38,7 @@ func (d *Detector) handleDriving(state *vehicleState, vin string, te events.Vehi
 	// point, or odometer advance). Feeds the watchdog's stall condition
 	// (MYR-160): a drive whose telemetry keeps flowing without movement
 	// for StallTimeout is a parked car whose gear=P frame was missed.
-	moved := false
-
-	// Accumulate speed stats.
-	if speed, ok := extractFloatField(te.Fields, telemetry.FieldSpeed); ok {
-		drive.speedSum += speed
-		drive.speedCount++
-		if speed > drive.maxSpeed {
-			drive.maxSpeed = speed
-		}
-		if speed > 0 {
-			moved = true
-		}
-	}
-
-	// Update FSD miles tracking. If the baseline was never seeded at drive
-	// start (no FSD value had been observed yet), lazily capture it from the
-	// first in-drive sample so the end-of-drive diff has a valid reference.
-	if fsd, ok := extractFloatField(te.Fields, telemetry.FieldFSDMiles); ok {
-		if !drive.fsdBaselineSet {
-			drive.startFSDMiles = fsd
-			drive.fsdBaselineSet = true
-		}
-		drive.lastFSDMiles = fsd
-	}
-
-	// Update odometer tracking the same way (MYR-157) — lazily seed the
-	// baseline from the first in-drive sample when it was cold at start.
-	if odo, ok := extractFloatField(te.Fields, telemetry.FieldOdometer); ok {
-		if !drive.odometerBaselineSet {
-			drive.startOdometer = odo
-			drive.odometerBaselineSet = true
-		} else if odo > drive.lastOdometer {
-			moved = true
-		}
-		drive.lastOdometer = odo
-	}
-
-	// Update SOC tracking.
-	if soc, ok := extractFloatField(te.Fields, telemetry.FieldSOC); ok {
-		drive.lastSOC = soc
-	}
-
-	// Update energy tracking.
-	if energy, ok := extractFloatField(te.Fields, telemetry.FieldEnergyRemaining); ok {
-		drive.lastEnergy = energy
-	}
+	moved := accumulateDriveCounters(drive, te)
 
 	// Accumulate route point if location is present.
 	if loc := extractLocation(te.Fields); loc != nil {
@@ -118,6 +73,55 @@ func (d *Detector) handleDriving(state *vehicleState, vin string, te events.Vehi
 	case isDriveGear(gear) && state.debounceTimer != nil:
 		d.cancelDebounce(state, vin)
 	}
+}
+
+// accumulateDriveCounters folds the event's speed/FSD/odometer/SOC/
+// energy samples into the active drive and reports whether the event
+// carried a movement signal (positive speed or odometer advance).
+// FSD and odometer baselines are lazily seeded from the first in-drive
+// sample when they were cold at drive start (MYR-157). The caller must
+// hold state.mu.
+func accumulateDriveCounters(drive *activeDrive, te events.VehicleTelemetryEvent) bool {
+	moved := false
+
+	if speed, ok := extractFloatField(te.Fields, telemetry.FieldSpeed); ok {
+		drive.speedSum += speed
+		drive.speedCount++
+		if speed > drive.maxSpeed {
+			drive.maxSpeed = speed
+		}
+		if speed > 0 {
+			moved = true
+		}
+	}
+
+	if fsd, ok := extractFloatField(te.Fields, telemetry.FieldFSDMiles); ok {
+		if !drive.fsdBaselineSet {
+			drive.startFSDMiles = fsd
+			drive.fsdBaselineSet = true
+		}
+		drive.lastFSDMiles = fsd
+	}
+
+	if odo, ok := extractFloatField(te.Fields, telemetry.FieldOdometer); ok {
+		if !drive.odometerBaselineSet {
+			drive.startOdometer = odo
+			drive.odometerBaselineSet = true
+		} else if odo > drive.lastOdometer {
+			moved = true
+		}
+		drive.lastOdometer = odo
+	}
+
+	if soc, ok := extractFloatField(te.Fields, telemetry.FieldSOC); ok {
+		drive.lastSOC = soc
+	}
+
+	if energy, ok := extractFloatField(te.Fields, telemetry.FieldEnergyRemaining); ok {
+		drive.lastEnergy = energy
+	}
+
+	return moved
 }
 
 // startDrive transitions the vehicle from Idle to Driving.
