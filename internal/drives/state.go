@@ -106,6 +106,16 @@ type activeDrive struct {
 	lastTimestamp  time.Time
 	lastSOC        float64 // most recent SOC for EndChargeLevel
 	lastEnergy     float64 // most recent energyRemaining for EnergyDelta
+
+	// startedWall and lastMovementAt are wall-clock (Detector.now)
+	// timestamps backing the watchdog's stall and duration-cap end
+	// conditions (MYR-160). startedAt/lastTimestamp carry vehicle
+	// event times, which cannot safely be compared against the
+	// watchdog's clock. lastMovementAt advances whenever the drive
+	// shows real motion: a positive speed sample, a new route point,
+	// or an odometer increase.
+	startedWall    time.Time
+	lastMovementAt time.Time
 }
 
 // resetToIdle resets the vehicle state to idle. The caller must hold s.mu.

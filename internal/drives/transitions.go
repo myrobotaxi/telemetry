@@ -34,12 +34,21 @@ func (d *Detector) handleDriving(state *vehicleState, vin string, te events.Vehi
 		return
 	}
 
+	// moved flags real motion in this event (positive speed, new route
+	// point, or odometer advance). Feeds the watchdog's stall condition
+	// (MYR-160): a drive whose telemetry keeps flowing without movement
+	// for StallTimeout is a parked car whose gear=P frame was missed.
+	moved := false
+
 	// Accumulate speed stats.
 	if speed, ok := extractFloatField(te.Fields, telemetry.FieldSpeed); ok {
 		drive.speedSum += speed
 		drive.speedCount++
 		if speed > drive.maxSpeed {
 			drive.maxSpeed = speed
+		}
+		if speed > 0 {
+			moved = true
 		}
 	}
 
@@ -60,6 +69,8 @@ func (d *Detector) handleDriving(state *vehicleState, vin string, te events.Vehi
 		if !drive.odometerBaselineSet {
 			drive.startOdometer = odo
 			drive.odometerBaselineSet = true
+		} else if odo > drive.lastOdometer {
+			moved = true
 		}
 		drive.lastOdometer = odo
 	}
@@ -89,9 +100,14 @@ func (d *Detector) handleDriving(state *vehicleState, vin string, te events.Vehi
 		drive.routePoints = append(drive.routePoints, rp)
 		drive.lastLocation = *loc
 		drive.lastTimestamp = te.CreatedAt
+		moved = true
 
 		// Publish DriveUpdatedEvent for each location-bearing tick.
 		d.publishDriveUpdated(vin, drive.id, rp)
+	}
+
+	if moved {
+		drive.lastMovementAt = d.now()
 	}
 
 	// Check for gear transitions that affect drive state.
@@ -136,9 +152,12 @@ func (d *Detector) startDrive(state *vehicleState, vin string, te events.Vehicle
 	// that starts the drive usually lacks them (slow cadence). If none has
 	// been observed, the baseline stays unset and handleDriving lazily
 	// captures it from the first in-drive sample (MYR-157).
+	now := d.now()
 	drive := &activeDrive{
 		id:                  driveID,
 		startedAt:           te.CreatedAt,
+		startedWall:         now,
+		lastMovementAt:      now,
 		startLocation:       startLoc,
 		maxSpeed:            0,
 		startCharge:         startCharge,
