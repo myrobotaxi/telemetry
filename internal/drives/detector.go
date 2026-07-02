@@ -34,11 +34,12 @@ type Detector struct {
 	logger  *slog.Logger
 	metrics DetectorMetrics
 
-	// reconciler is the read-side hook used on Start to reattach
-	// in-memory state for Drive rows orphaned by a previous restart
-	// (MYR-146). nil disables reconciliation — tests use this; the
-	// production constructor in cmd/telemetry-server wires a
-	// DriveRepo-backed adapter.
+	// reconciler is the hook used on Start to close Drive rows
+	// orphaned by a previous restart (MYR-146, hardened in MYR-149:
+	// every orphan is ended synchronously — no in-memory reattach).
+	// nil disables reconciliation — tests use this; the production
+	// constructor in cmd/telemetry-server wires a DriveRepo-backed
+	// adapter.
 	reconciler OpenDriveLister
 
 	// states holds per-vehicle drive state. Keyed by VIN.
@@ -72,10 +73,10 @@ type Detector struct {
 // telemetry events and publishing drive lifecycle events. Call Start to
 // begin processing.
 //
-// reconciler is the read-side hook used on Start to reattach in-memory
-// state for Drive rows orphaned by a previous restart (MYR-146). Pass
-// nil to disable reconciliation (tests use this; production wires a
-// DriveRepo-backed adapter). It is a required constructor argument
+// reconciler is the hook used on Start to close Drive rows orphaned
+// by a previous restart (MYR-146/MYR-149). Pass nil to disable
+// reconciliation (tests use this; production wires a DriveRepo-backed
+// adapter). It is a required constructor argument
 // rather than an optional functional setter so the dependency fails
 // loud at compile time — silently shipping a nil reconciler in prod
 // is exactly the regression Option B is meant to prevent.
@@ -120,12 +121,10 @@ func (d *Detector) watchdogInterval() time.Duration {
 func (d *Detector) Start(ctx context.Context) error {
 	d.ctx, d.cancel = context.WithCancel(ctx)
 
-	// MYR-146: reconcile orphaned Drive rows BEFORE bus subscription.
-	// ChannelBus.Subscribe spawns its deliverLoop goroutine before
-	// returning, so subscribing first would race the d.states.Store
-	// writes inside reconcileOpenDrives against any in-process
-	// publisher (today nothing publishes that early, but the order
-	// makes the invariant load-bearing). Fails open on DB hiccup.
+	// MYR-146/MYR-149: close orphaned Drive rows BEFORE bus
+	// subscription so the DB reaches a consistent state (no open
+	// rows) before any telemetry frame can start a fresh drive for
+	// the same vehicle. Fails open on DB hiccup.
 	d.reconcileOpenDrives(d.ctx)
 
 	telSub, err := d.bus.Subscribe(events.TopicVehicleTelemetry, d.handleEvent)

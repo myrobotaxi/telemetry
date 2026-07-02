@@ -34,14 +34,6 @@ func (d *Detector) handleDriving(state *vehicleState, vin string, te events.Vehi
 		return
 	}
 
-	// Real telemetry has resumed for a reconciled drive (MYR-146):
-	// from this point legitimate route data accumulates, so the normal
-	// micro-drive filter semantics apply on the eventual end
-	// transition. Clear the bypass flag.
-	if drive.reconciled {
-		drive.reconciled = false
-	}
-
 	// Accumulate speed stats.
 	if speed, ok := extractFloatField(te.Fields, telemetry.FieldSpeed); ok {
 		drive.speedSum += speed
