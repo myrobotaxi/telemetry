@@ -216,11 +216,19 @@ var driveSummaryFields = []string{
 // driveDetailFields is the drive-detail allow-list shared by owner and
 // viewer per rest-api.md §5.2.3. Includes start/end location and
 // address (rationale: FR-5.1 sharing use case).
+//
+// MYR-130: `date` was added to close a mask/OpenAPI drift — the
+// `DriveDetail` OpenAPI component (specs/rest.openapi.yaml) marks `date`
+// as required and the §7.3 / fixture response bodies include it, but the
+// allow-list had omitted it, which would have stripped `date` from the
+// masked response and broken OpenAPI conformance for the new
+// GET /api/drives/{driveId} handler. §5.2.3 updated in lockstep.
 var driveDetailFields = []string{
 	"id",
 	"vehicleId",
 	"startTime",
 	"endTime",
+	"date",
 	"distanceMiles",
 	"durationSeconds",
 	"avgSpeedMph",
