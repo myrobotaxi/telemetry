@@ -246,6 +246,22 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 	)
 	deps.srv.HandleFunc("GET /api/drives/{driveId}/route", driveRouteHandler.ServeHTTP)
 
+	// MYR-130 (FR-3.4): GET /api/drives/{driveId} — the full per-drive
+	// stats record (distance, duration, energy, FSD, interventions,
+	// start/end loc+addr) minus routePoints. Closes the last DV-20
+	// SDK-surface gap. Same auth + ownership + role-mask flow as the
+	// route endpoint; the drive's vehicleId comes off the drive record,
+	// then snapshotAdapter checks ownership.
+	driveDetailHandler := telemetry.NewDriveDetailHandler(
+		deps.authenticator,
+		snapshotAdapter,
+		&driveDetailAdapter{repo: deps.driveRepo},
+		deps.logger.With(slog.String("component", "drive-detail")),
+		telemetry.WithDriveDetailRoleResolver(deps.authenticator),
+		telemetry.WithDriveDetailMaskAudit(deps.auditEmitter, deps.auditMetrics, "/api/drives/{driveId}"),
+	)
+	deps.srv.HandleFunc("GET /api/drives/{driveId}", driveDetailHandler.ServeHTTP)
+
 	setupFleetConfigEndpoint(deps.cfg, deps.srv, deps.authenticator, deps.vinCache, deps.accountRepo, deps.logger)
 
 	// Mounted when resolveDebugFieldsGate says so — either because the
