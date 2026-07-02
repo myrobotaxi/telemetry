@@ -164,6 +164,9 @@ func (d *Detector) endDrive(state *vehicleState, vin string) {
 	stats := calculateStats(drive)
 
 	// Micro-drive filtering: discard short or short-distance drives.
+	// The writer created a Drive row on drive.started, so a silent
+	// discard would leak an open row with endTime unset (MYR-160);
+	// DriveDiscardedEvent tells the store to delete it.
 	if stats.Duration < d.cfg.MinDuration || stats.Distance < d.cfg.MinDistanceMiles {
 		d.logger.Info("discarding micro-drive",
 			slog.String("vin", redactVIN(vin)),
@@ -172,9 +175,22 @@ func (d *Detector) endDrive(state *vehicleState, vin string) {
 			slog.Float64("distance_miles", stats.Distance),
 		)
 		d.metrics.IncMicroDriveDiscarded()
+		driveID := drive.id
 		resetToIdle(state)
 		d.activeCount.Add(-1)
 		d.metrics.SetActiveVehicles(int(d.activeCount.Load()))
+
+		evt := events.NewEvent(events.DriveDiscardedEvent{
+			VIN:         vin,
+			DriveID:     driveID,
+			DiscardedAt: d.now(),
+		})
+		if err := d.bus.Publish(d.ctx, evt); err != nil {
+			d.logger.Error("failed to publish DriveDiscardedEvent",
+				slog.String("vin", redactVIN(vin)),
+				slog.String("error", err.Error()),
+			)
+		}
 		return
 	}
 

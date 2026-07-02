@@ -122,6 +122,15 @@ SET "endTime" = $2, "endLocation" = $3, "endAddress" = $4,
 	"interventions" = $13
 WHERE "id" = $1`
 
+// queryDriveDelete removes a Drive row outright. Used when the drive
+// detector discards a micro-drive (MYR-160): the row was created on
+// drive.started but the drive never met the minimum duration/distance
+// thresholds, so keeping it would leak a stuck-open row (endTime
+// unset). Route points live on the row itself (routePoints /
+// routePointsEnc), so a single-row DELETE is complete.
+const queryDriveDelete = `DELETE FROM "Drive"
+WHERE "id" = $1`
+
 const queryDriveByID = `SELECT "id", "vehicleId", "date", "startTime", "endTime",
 	"startLocation", "startAddress", "endLocation", "endAddress",
 	"distanceMiles", "durationMinutes", "avgSpeedMph", "maxSpeedMph",

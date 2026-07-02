@@ -41,6 +41,20 @@ type DriveEndedEvent struct {
 // EventTopic returns TopicDriveEnded.
 func (DriveEndedEvent) EventTopic() Topic { return TopicDriveEnded }
 
+// DriveDiscardedEvent is published when the drive detector drops an
+// active drive via the micro-drive filter instead of completing it.
+// The store subscriber deletes the Drive row created on drive.started
+// so discarded blips don't accumulate as stuck-open rows (MYR-160).
+type DriveDiscardedEvent struct {
+	BasePayload
+	VIN         string
+	DriveID     string
+	DiscardedAt time.Time
+}
+
+// EventTopic returns TopicDriveDiscarded.
+func (DriveDiscardedEvent) EventTopic() Topic { return TopicDriveDiscarded }
+
 // RoutePoint is a single GPS sample captured during an active drive.
 type RoutePoint struct {
 	Latitude  float64

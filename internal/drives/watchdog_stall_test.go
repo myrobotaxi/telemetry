@@ -227,3 +227,76 @@ func TestDetector_WatchdogCapsMaxDriveDuration(t *testing.T) {
 		t.Errorf("IncStallEnded count = %d, want 0", got)
 	}
 }
+
+// TestDetector_MicroDriveDiscard_PublishesDriveDiscarded: a discarded
+// micro-drive must emit DriveDiscardedEvent (and no DriveEndedEvent) so
+// the store can delete the row created on drive.started — otherwise the
+// row leaks open with endTime unset (MYR-160).
+func TestDetector_MicroDriveDiscard_PublishesDriveDiscarded(t *testing.T) {
+	bus := testBus()
+	defer bus.Close(context.Background())
+
+	const vin = "VIN_MICRO_BLIP"
+
+	cfg := testConfig()
+	cfg.EndDebounce = 10 * time.Second // manual ticks only (see stallTestHarness doc)
+	cfg.MinDuration = 2 * time.Minute
+	cfg.MinDistanceMiles = 0.1
+	cfg.StallTimeout = 300 * time.Millisecond
+	cfg.MaxDriveDuration = 24 * time.Hour
+
+	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{}, nil)
+
+	var clockMu sync.Mutex
+	wallNow := time.Now()
+	d.setNow(func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return wallNow
+	})
+
+	startedCh := subscribeTopic(t, bus, events.TopicDriveStarted)
+	endedCh := subscribeTopic(t, bus, events.TopicDriveEnded)
+	discardedCh := subscribeTopic(t, bus, events.TopicDriveDiscarded)
+
+	if err := d.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = d.Stop() }()
+
+	// A gear blip starts a drive that never accumulates duration or
+	// distance.
+	publishTelemetry(t, bus, telemetryEvent(vin, time.Now(), driveFields("D", 2.0, 33.09, -96.82)))
+	evt, ok := waitForEvent(startedCh)
+	if !ok {
+		t.Fatal("timed out waiting for DriveStartedEvent")
+	}
+	started := evt.Payload.(events.DriveStartedEvent)
+	time.Sleep(50 * time.Millisecond)
+
+	// Stall out the blip and tick the watchdog.
+	clockMu.Lock()
+	wallNow = wallNow.Add(400 * time.Millisecond)
+	clockMu.Unlock()
+	publishTelemetry(t, bus, telemetryEvent(vin, time.Now(), idleStreamFields()))
+	time.Sleep(50 * time.Millisecond)
+	d.watchdogTick()
+
+	evt, ok = waitForEvent(discardedCh)
+	if !ok {
+		t.Fatal("timed out waiting for DriveDiscardedEvent")
+	}
+	discarded, ok := evt.Payload.(events.DriveDiscardedEvent)
+	if !ok {
+		t.Fatalf("expected DriveDiscardedEvent, got %T", evt.Payload)
+	}
+	if discarded.DriveID != started.DriveID {
+		t.Errorf("DriveID = %q, want %q", discarded.DriveID, started.DriveID)
+	}
+	if discarded.VIN != vin {
+		t.Errorf("VIN = %q, want %q", discarded.VIN, vin)
+	}
+
+	expectNoEvent(t, endedCh, 200*time.Millisecond,
+		"a discarded micro-drive must not also publish DriveEndedEvent")
+}
