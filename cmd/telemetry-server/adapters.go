@@ -309,6 +309,47 @@ func (a *driveRouteAdapter) GetDriveRoute(ctx context.Context, driveID string) (
 	}, nil
 }
 
+// driveDetailAdapter adapts store.DriveRepo.GetByID to the
+// telemetry.DriveDetailFetcher interface used by the drive-detail
+// handler (MYR-130). GetByID is the wide read — appropriate for a
+// detail endpoint — and returns the full DriveRecord; the adapter
+// projects it into DriveDetailData, dropping routePoints (served by the
+// separate route endpoint). store.ErrDriveNotFound wraps sdk.ErrNotFound,
+// so passing the error through with %w lets the handler map an unknown
+// drive to a 404.
+type driveDetailAdapter struct {
+	repo *store.DriveRepo
+}
+
+func (a *driveDetailAdapter) GetDriveDetail(ctx context.Context, driveID string) (telemetry.DriveDetailData, error) {
+	rec, err := a.repo.GetByID(ctx, driveID)
+	if err != nil {
+		return telemetry.DriveDetailData{}, fmt.Errorf("get drive by id: %w", err)
+	}
+	return telemetry.DriveDetailData{
+		ID:               rec.ID,
+		VehicleID:        rec.VehicleID,
+		StartTime:        rec.StartTime,
+		EndTime:          rec.EndTime,
+		Date:             rec.Date,
+		DistanceMiles:    rec.DistanceMiles,
+		DurationMinutes:  rec.DurationMinutes,
+		AvgSpeedMph:      rec.AvgSpeedMph,
+		MaxSpeedMph:      rec.MaxSpeedMph,
+		EnergyUsedKwh:    rec.EnergyUsedKwh,
+		StartChargeLevel: rec.StartChargeLevel,
+		EndChargeLevel:   rec.EndChargeLevel,
+		FsdMiles:         rec.FsdMiles,
+		FsdPercentage:    rec.FsdPercentage,
+		Interventions:    rec.Interventions,
+		StartLocation:    rec.StartLocation,
+		StartAddress:     rec.StartAddress,
+		EndLocation:      rec.EndLocation,
+		EndAddress:       rec.EndAddress,
+		CreatedAt:        rec.CreatedAt,
+	}, nil
+}
+
 // teslaTokenAdapter adapts store.AccountRepo to the
 // telemetry.TeslaTokenProvider interface, converting the store-layer
 // TeslaOAuthToken (Unix epoch) to the telemetry-layer TeslaToken (time.Time).
