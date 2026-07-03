@@ -81,6 +81,7 @@ type mockDrivePersister struct {
 	creates   []recordedDriveCreate
 	completes []recordedDriveComplete
 	appends   []recordedRouteAppend
+	deletes   []string
 	err       error
 }
 
@@ -103,6 +104,21 @@ func (m *mockDrivePersister) AppendRoutePoints(_ context.Context, driveID string
 	defer m.mu.Unlock()
 	m.appends = append(m.appends, recordedRouteAppend{DriveID: driveID, Points: points})
 	return m.err
+}
+
+func (m *mockDrivePersister) Delete(_ context.Context, driveID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deletes = append(m.deletes, driveID)
+	return m.err
+}
+
+func (m *mockDrivePersister) getDeletes() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := make([]string, len(m.deletes))
+	copy(cp, m.deletes)
+	return cp
 }
 
 func (m *mockDrivePersister) getCreates() []recordedDriveCreate {
@@ -1346,5 +1362,82 @@ func TestWriter_DestinationAddress_GeocoderErrorFallsBack(t *testing.T) {
 	if u.DestinationLatitude == nil || u.DestinationLongitude == nil {
 		t.Errorf("destination GPS lost on geocoder error: lat=%v lng=%v",
 			ptrVal(u.DestinationLatitude), ptrVal(u.DestinationLongitude))
+	}
+}
+
+// TestWriter_DriveDiscarded verifies the MYR-160 micro-drive cleanup:
+// the detector discards a drive that never met the minimum
+// duration/distance thresholds, and the writer must delete the Drive
+// row created on drive.started AND drop (not flush) any buffered route
+// points for it.
+func TestWriter_DriveDiscarded(t *testing.T) {
+	bus := newTestBus(t)
+	vehicles := &mockVehicleUpdater{}
+	drives := &mockDrivePersister{}
+	lookup := &stubIDLookup{
+		pairs: map[string]struct{ id, userID string }{
+			"5YJ3E1EA1NF000001": {id: "veh_001", userID: "user_001"},
+		},
+	}
+
+	w := newTestWriter(t, bus, vehicles, drives, lookup)
+	if err := w.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = w.Stop() }()
+
+	const driveID = "drive_micro"
+	now := time.Now()
+
+	startEvt := events.NewEvent(events.DriveStartedEvent{
+		VIN:       "5YJ3E1EA1NF000001",
+		DriveID:   driveID,
+		Location:  events.Location{Latitude: 33.0975, Longitude: -96.8214},
+		StartedAt: now,
+	})
+	if err := bus.Publish(context.Background(), startEvt); err != nil {
+		t.Fatalf("publish started: %v", err)
+	}
+	waitForCondition(t, 2*time.Second, func() bool {
+		return len(drives.getCreates()) > 0
+	})
+
+	// Buffer a route point so the discard path has something to drop.
+	updateEvt := events.NewEvent(events.DriveUpdatedEvent{
+		VIN:     "5YJ3E1EA1NF000001",
+		DriveID: driveID,
+		RoutePoint: events.RoutePoint{
+			Latitude: 33.0976, Longitude: -96.8215, Speed: 3.0, Heading: 90.0, Timestamp: now,
+		},
+	})
+	if err := bus.Publish(context.Background(), updateEvt); err != nil {
+		t.Fatalf("publish updated: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+
+	discardEvt := events.NewEvent(events.DriveDiscardedEvent{
+		VIN:         "5YJ3E1EA1NF000001",
+		DriveID:     driveID,
+		DiscardedAt: now.Add(30 * time.Second),
+	})
+	if err := bus.Publish(context.Background(), discardEvt); err != nil {
+		t.Fatalf("publish discarded: %v", err)
+	}
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		return len(drives.getDeletes()) > 0
+	})
+
+	deletes := drives.getDeletes()
+	if len(deletes) != 1 || deletes[0] != driveID {
+		t.Errorf("deletes = %v, want [%s]", deletes, driveID)
+	}
+	// Buffered points must be dropped, not flushed — the row is gone.
+	if appends := drives.getAppends(); len(appends) != 0 {
+		t.Errorf("appends = %d, want 0 (buffered points for a discarded drive must not be persisted)", len(appends))
+	}
+	// The row is deleted, never completed.
+	if completes := drives.getCompletes(); len(completes) != 0 {
+		t.Errorf("completes = %d, want 0", len(completes))
 	}
 }

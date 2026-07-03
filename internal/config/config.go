@@ -58,6 +58,21 @@ type DrivesConfig struct {
 	MinDistanceMiles float64
 	EndDebounce      time.Duration
 	GeocodeTimeout   time.Duration
+
+	// StallTimeout ends an active drive when telemetry keeps flowing
+	// but no movement (speed, new route point, odometer advance) has
+	// been observed for this long. Guards against a missed gear=P
+	// frame leaving a drive open while the parked car streams idle
+	// telemetry (MYR-160). Must exceed plausible in-drive stops
+	// (drive-thrus, rail crossings).
+	StallTimeout time.Duration
+
+	// MaxDriveDuration is a hard cap on the age of an active drive.
+	// A backstop for the pathological case where movement keeps being
+	// (mis)observed indefinitely; any legitimate drive this long is
+	// split into two rows rather than risking a stuck-open row
+	// (MYR-160).
+	MaxDriveDuration time.Duration
 }
 
 // WebSocketConfig holds parameters for the client-facing WebSocket server.

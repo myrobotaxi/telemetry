@@ -59,6 +59,8 @@ type fileDrivesConfig struct {
 	MinDistanceMiles float64  `json:"min_distance_miles"`
 	EndDebounce      Duration `json:"end_debounce"`
 	GeocodeTimeout   Duration `json:"geocode_timeout"`
+	StallTimeout     Duration `json:"stall_timeout"`
+	MaxDriveDuration Duration `json:"max_drive_duration"`
 }
 
 type fileWebSocketConfig struct {
@@ -209,6 +211,8 @@ func buildConfig(fc *fileConfig) *Config {
 			MinDistanceMiles: fc.Drives.MinDistanceMiles,
 			EndDebounce:      fc.Drives.EndDebounce.Dur(),
 			GeocodeTimeout:   fc.Drives.GeocodeTimeout.Dur(),
+			StallTimeout:     fc.Drives.StallTimeout.Dur(),
+			MaxDriveDuration: fc.Drives.MaxDriveDuration.Dur(),
 		},
 		websocket: WebSocketConfig{
 			HeartbeatInterval:     fc.WebSocket.HeartbeatInterval.Dur(),

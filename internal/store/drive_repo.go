@@ -101,6 +101,22 @@ func (r *DriveRepo) Create(ctx context.Context, drive DriveRecord) error {
 	return nil
 }
 
+// Delete removes a Drive row outright. Called by the writer when the
+// drive detector discards a micro-drive (MYR-160) — the row created on
+// drive.started must not linger as a stuck-open drive. Deleting a row
+// that was never created (e.g. the VIN lookup failed on drive.started)
+// affects zero rows and is intentionally not an error.
+func (r *DriveRepo) Delete(ctx context.Context, driveID string) error {
+	start := time.Now()
+	_, err := r.pool.Exec(ctx, queryDriveDelete, driveID)
+	r.metrics.ObserveQueryDuration("drive.delete", time.Since(start).Seconds())
+	if err != nil {
+		r.metrics.IncQueryError("drive.delete")
+		return fmt.Errorf("DriveRepo.Delete(%s): %w", driveID, err)
+	}
+	return nil
+}
+
 // AppendRoutePoints appends route points to the drive's routePoints
 // JSON array. Uses PostgreSQL jsonb_concat (||) to avoid
 // read-modify-write of the (potentially large) array.

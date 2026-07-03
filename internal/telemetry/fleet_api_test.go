@@ -470,10 +470,10 @@ func TestDefaultFieldConfig(t *testing.T) {
 		{FleetFieldGpsHeading, 5, false, 0},
 		{FleetFieldGear, 1, false, 0},
 		{FleetFieldDetailedChargeState, 30, false, 0},
-		{FleetFieldOdometer, 60, false, 0},
+		{FleetFieldOdometer, 15, false, 0},
 		{FleetFieldDestinationName, 1, false, 0},
-		{FleetFieldMilesSinceReset, 60, true, 1},
-		{FleetFieldFSDMilesSinceReset, 60, true, 1},
+		{FleetFieldMilesSinceReset, 15, true, 1},
+		{FleetFieldFSDMilesSinceReset, 15, true, 1},
 	}
 
 	for _, tt := range spotChecks {
@@ -508,33 +508,48 @@ func TestDefaultFieldConfig(t *testing.T) {
 }
 
 // TestDefaultFieldConfig_MileageCountersResend verifies the cumulative
-// "miles since reset" counters carry a ResendIntervalSeconds (MYR-155).
-// Without it, these delta-gated fields go silent while parked, so a
-// server that (re)starts during a parked window never receives an FSD
-// value until the car drives a full mile — leaving the drive detector
-// with no FSD baseline for the first post-restart drive (records 0).
+// counters carry a ResendIntervalSeconds (MYR-155) at the tightened
+// 15s cadence (MYR-158). Without the resend, these delta-gated fields
+// go silent while parked, so a server that (re)starts during a parked
+// window never receives a value until the car drives a full mile —
+// leaving the drive detector with no baseline for the first
+// post-restart drive. The 15s cadence keeps the per-drive start/end
+// baselines within ~15s of the true drive boundaries.
 func TestDefaultFieldConfig_MileageCountersResend(t *testing.T) {
 	t.Parallel()
 
 	fields := DefaultFieldConfig()
 
-	for _, name := range []string{FleetFieldMilesSinceReset, FleetFieldFSDMilesSinceReset} {
-		t.Run(name, func(t *testing.T) {
+	tests := []struct {
+		name      string
+		wantDelta bool
+	}{
+		// Tesla requires minimum_delta >= 1 on the mileage counters;
+		// Odometer carries no delta gate.
+		{FleetFieldMilesSinceReset, true},
+		{FleetFieldFSDMilesSinceReset, true},
+		{FleetFieldOdometer, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			fc, ok := fields[name]
+			fc, ok := fields[tt.name]
 			if !ok {
-				t.Fatalf("field %q not found in default config", name)
+				t.Fatalf("field %q not found in default config", tt.name)
 			}
 			if fc.ResendIntervalSeconds == nil {
 				t.Fatalf("field %q must set ResendIntervalSeconds so the value re-emits "+
-					"while parked / after reconnect (MYR-155)", name)
+					"while parked / after reconnect (MYR-155)", tt.name)
 			}
-			if *fc.ResendIntervalSeconds != 60 {
-				t.Errorf("resend_interval_seconds = %d, want 60", *fc.ResendIntervalSeconds)
+			if *fc.ResendIntervalSeconds != 15 {
+				t.Errorf("resend_interval_seconds = %d, want 15 (MYR-158)", *fc.ResendIntervalSeconds)
 			}
-			// The delta gate must remain so live driving still emits on change.
-			if fc.MinimumDelta == nil || *fc.MinimumDelta != 1 {
-				t.Errorf("minimum_delta must stay 1 mile alongside the resend interval")
+			if fc.IntervalSeconds != 15 {
+				t.Errorf("interval_seconds = %d, want 15 (MYR-158)", fc.IntervalSeconds)
+			}
+			if tt.wantDelta && (fc.MinimumDelta == nil || *fc.MinimumDelta != 1) {
+				t.Errorf("minimum_delta must stay 1 mile alongside the resend interval (Tesla API constraint)")
 			}
 		})
 	}

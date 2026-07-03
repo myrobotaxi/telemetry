@@ -82,6 +82,16 @@ func (rb *routeBuffer) add(driveID string, pt RoutePointRecord) bool {
 	return len(rb.buffers[driveID]) >= rb.cfg.FlushSize
 }
 
+// discard drops any buffered points for a drive without persisting
+// them. Used when the drive detector discards a micro-drive (MYR-160):
+// the Drive row is about to be deleted, so flushing the points would
+// resurrect data for a dead drive.
+func (rb *routeBuffer) discard(driveID string) {
+	rb.mu.Lock()
+	delete(rb.buffers, driveID)
+	rb.mu.Unlock()
+}
+
 // flushDrive writes all buffered points for a single drive to the database
 // and removes them from the buffer.
 func (rb *routeBuffer) flushDrive(ctx context.Context, driveID string) {

@@ -89,6 +89,38 @@ func (w *Writer) handleDriveUpdated() events.Handler {
 	}
 }
 
+// handleDriveDiscarded returns an event handler that deletes the Drive
+// row for a micro-drive the detector discarded (MYR-160). The row was
+// created on drive.started; without this cleanup it would linger with
+// endTime unset — a stuck-open drive that the startup reconciler would
+// keep closing with zero stats on every deploy. Buffered route points
+// are dropped first so a later flush cannot resurrect data for the
+// deleted row.
+func (w *Writer) handleDriveDiscarded() events.Handler {
+	return func(event events.Event) {
+		evt, ok := event.Payload.(events.DriveDiscardedEvent)
+		if !ok {
+			w.logger.Error("unexpected payload type for drive.discarded",
+				slog.String("event_id", event.ID),
+			)
+			return
+		}
+
+		opCtx, cancel := context.WithTimeout(context.Background(), driveOpTimeout)
+		defer cancel()
+
+		w.routeBuf.discard(evt.DriveID)
+
+		if err := w.drives.Delete(opCtx, evt.DriveID); err != nil {
+			w.logger.Warn("failed to delete discarded micro-drive record",
+				slog.String("drive_id", evt.DriveID),
+				slog.String("vin", redactVIN(evt.VIN)),
+				slog.String("error", err.Error()),
+			)
+		}
+	}
+}
+
 // handleDriveEnded returns an event handler that completes a drive record,
 // flushes any remaining buffered route points, and sets the vehicle status
 // to parked. If a geocoder is configured, it reverse geocodes the end

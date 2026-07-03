@@ -148,14 +148,21 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		FleetFieldClimateKeeperMode:    {IntervalSeconds: 60},
 
 		// Vehicle state — low frequency
-		FleetFieldOdometer:    {IntervalSeconds: 60},
+		//
+		// Odometer runs on the tighter 15s counter cadence (MYR-158):
+		// drive distance derives from the odometer delta (MYR-157), so
+		// the start/end baselines must be sampled close to the true
+		// drive boundaries or the final stretch of every drive is
+		// missed. The resend re-warms the cache after a parked-window
+		// (re)connect, mirroring the mileage counters below.
+		FleetFieldOdometer:    {IntervalSeconds: 15, ResendIntervalSeconds: intPtr(15)},
 		FleetFieldVehicleName: {IntervalSeconds: 300}, // Received for potential sync but NOT broadcast to SDK clients (MYR-30). SDK name comes from DB Vehicle.name.
 		FleetFieldCarType:     {IntervalSeconds: 300},
 		FleetFieldVersion:     {IntervalSeconds: 300},
 		FleetFieldLocked:      {IntervalSeconds: 30},
 		FleetFieldSentryMode:  {IntervalSeconds: 30},
 
-		// Safety / ADAS — low frequency.
+		// Safety / ADAS.
 		//
 		// MYR-155: these two are cumulative "miles since reset" counters
 		// gated by MinimumDelta (1 mile), so they ONLY emit while the value
@@ -167,8 +174,16 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		// ResendIntervalSeconds forces a periodic re-emit even when
 		// unchanged — exactly the "server that misses the initial emission"
 		// case the file header calls out — so the cache (and the snapshot)
-		// re-warm within a minute of any reconnect, before a drive begins.
-		FleetFieldMilesSinceReset:    {IntervalSeconds: 60, MinimumDelta: &oneMile, ResendIntervalSeconds: intPtr(60)},
-		FleetFieldFSDMilesSinceReset: {IntervalSeconds: 60, MinimumDelta: &oneMile, ResendIntervalSeconds: intPtr(60)},
+		// re-warm quickly after any reconnect, before a drive begins.
+		//
+		// MYR-158: cadence tightened 60s → 15s (with Odometer above) so
+		// per-drive absolute FSD-miles/distance baselines are sampled
+		// within ~15s of the true drive boundaries instead of up to
+		// ~60s away. MinimumDelta MUST stay 1 — Tesla requires
+		// minimum_delta >= 1 for mileage fields, so cadence is the only
+		// tunable lever. NOTE: takes effect per vehicle only after a
+		// fleet-wide config re-push (POST /api/fleet-config/{vin}).
+		FleetFieldMilesSinceReset:    {IntervalSeconds: 15, MinimumDelta: &oneMile, ResendIntervalSeconds: intPtr(15)},
+		FleetFieldFSDMilesSinceReset: {IntervalSeconds: 15, MinimumDelta: &oneMile, ResendIntervalSeconds: intPtr(15)},
 	}
 }

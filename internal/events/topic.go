@@ -30,6 +30,15 @@ const (
 	// that a vehicle has completed a drive. The payload is DriveEndedEvent.
 	TopicDriveEnded Topic = "drive.ended"
 
+	// TopicDriveDiscarded is published when the drive detector drops an
+	// active drive via the micro-drive filter (too short / too little
+	// distance). The writer creates the Drive row on drive.started, so
+	// without this signal a discarded micro-drive leaks an open row
+	// with endTime unset (MYR-160). The payload is DriveDiscardedEvent;
+	// the store subscriber deletes the row. Internal-only — never
+	// broadcast to WS clients.
+	TopicDriveDiscarded Topic = "drive.discarded"
+
 	// TopicVehicleDeleted is published when a Vehicle row is deleted from
 	// the Prisma-owned "Vehicle" table (sourced from a Postgres
 	// LISTEN/NOTIFY channel; see internal/store/notify_listener.go). The

@@ -96,6 +96,15 @@ func validateDrives(d DrivesConfig) []string {
 	if d.GeocodeTimeout <= 0 {
 		errs = append(errs, "drives.geocode_timeout: must be positive")
 	}
+	if d.StallTimeout <= 0 {
+		errs = append(errs, "drives.stall_timeout: must be positive")
+	}
+	if d.MaxDriveDuration <= 0 {
+		errs = append(errs, "drives.max_drive_duration: must be positive")
+	}
+	if d.StallTimeout <= d.EndDebounce {
+		errs = append(errs, "drives.stall_timeout: must exceed drives.end_debounce")
+	}
 	return errs
 }
 

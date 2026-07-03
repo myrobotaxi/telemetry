@@ -25,7 +25,9 @@
     "min_duration": "2m",
     "min_distance_miles": 0.1,
     "end_debounce": "30s",
-    "geocode_timeout": "5s"
+    "geocode_timeout": "5s",
+    "stall_timeout": "15m",
+    "max_drive_duration": "12h"
   },
   "websocket": {
     "heartbeat_interval": "15s",

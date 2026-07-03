@@ -11,6 +11,8 @@ func (NoopDetectorMetrics) IncDriveEnded()                {}
 func (NoopDetectorMetrics) IncMicroDriveDiscarded()        {}
 func (NoopDetectorMetrics) IncDebounceCancelled()          {}
 func (NoopDetectorMetrics) IncWatchdogEnded()              {}
+func (NoopDetectorMetrics) IncStallEnded()                 {}
+func (NoopDetectorMetrics) IncDurationCapEnded()           {}
 func (NoopDetectorMetrics) ObserveDriveDuration(float64)   {}
 func (NoopDetectorMetrics) ObserveDriveDistance(float64)   {}
 func (NoopDetectorMetrics) SetActiveVehicles(int)          {}

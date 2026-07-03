@@ -983,6 +983,11 @@ func TestNewEvent_AllPayloadTypes(t *testing.T) {
 			payload:   DriveEndedEvent{VIN: "TEST", DriveID: "d1"},
 			wantTopic: TopicDriveEnded,
 		},
+		{
+			name:      "DriveDiscardedEvent",
+			payload:   DriveDiscardedEvent{VIN: "TEST", DriveID: "d1"},
+			wantTopic: TopicDriveDiscarded,
+		},
 	}
 
 	for _, tt := range tests {

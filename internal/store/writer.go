@@ -24,6 +24,7 @@ type drivePersister interface {
 	Create(ctx context.Context, drive DriveRecord) error
 	Complete(ctx context.Context, driveID string, stats DriveCompletion) error
 	AppendRoutePoints(ctx context.Context, driveID string, points []RoutePointRecord) error
+	Delete(ctx context.Context, driveID string) error
 }
 
 // WriterConfig holds tunable parameters for the Writer's batch flush behavior.
@@ -186,7 +187,16 @@ func (w *Writer) Start(ctx context.Context) error {
 		return fmt.Errorf("Writer.Start: subscribe drive.ended: %w", err)
 	}
 
-	w.subs = []events.Subscription{telSub, startSub, updatedSub, endSub}
+	discardedSub, err := w.bus.Subscribe(events.TopicDriveDiscarded, w.handleDriveDiscarded())
+	if err != nil {
+		_ = w.bus.Unsubscribe(telSub)
+		_ = w.bus.Unsubscribe(startSub)
+		_ = w.bus.Unsubscribe(updatedSub)
+		_ = w.bus.Unsubscribe(endSub)
+		return fmt.Errorf("Writer.Start: subscribe drive.discarded: %w", err)
+	}
+
+	w.subs = []events.Subscription{telSub, startSub, updatedSub, endSub, discardedSub}
 
 	// #nosec G118 -- cancel is deferred in the goroutine and also stored in w.cancel for Stop()
 	tickCtx, cancel := context.WithCancel(ctx)

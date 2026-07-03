@@ -23,6 +23,16 @@ type DetectorMetrics interface {
 	// MYR-139 R3a.
 	IncWatchdogEnded()
 
+	// IncStallEnded increments the count of drives ended by the stall
+	// condition: telemetry kept flowing but no movement was observed
+	// for StallTimeout (missed gear=P frame while the parked car
+	// streamed idle fields). MYR-160.
+	IncStallEnded()
+
+	// IncDurationCapEnded increments the count of drives ended by the
+	// MaxDriveDuration backstop. MYR-160.
+	IncDurationCapEnded()
+
 	// ObserveDriveDuration records the duration of a completed drive.
 	ObserveDriveDuration(seconds float64)
 

@@ -107,19 +107,15 @@ type activeDrive struct {
 	lastSOC        float64 // most recent SOC for EndChargeLevel
 	lastEnergy     float64 // most recent energyRemaining for EnergyDelta
 
-	// reconciled is true when this drive was reattached from a DB row
-	// orphaned by a previous restart (MYR-146). endDrive bypasses the
-	// micro-drive filter for reconciled drives: with no resumed
-	// telemetry, calculateStats returns Duration=0, Distance=0, which
-	// the prod-default filter (MinDuration=2m, MinDistanceMiles=0.1)
-	// would otherwise discard -- leaving the open DB row forever and
-	// reconciling it again on the next restart. Closing those rows is
-	// the whole point of reconciliation, so we publish DriveEndedEvent
-	// unconditionally for them. Cleared once real telemetry arrives
-	// (see handleDriving), so a reconciled drive that survives the
-	// restart and accumulates legitimate route data is filtered
-	// normally on its real end transition.
-	reconciled bool
+	// startedWall and lastMovementAt are wall-clock (Detector.now)
+	// timestamps backing the watchdog's stall and duration-cap end
+	// conditions (MYR-160). startedAt/lastTimestamp carry vehicle
+	// event times, which cannot safely be compared against the
+	// watchdog's clock. lastMovementAt advances whenever the drive
+	// shows real motion: a positive speed sample, a new route point,
+	// or an odometer increase.
+	startedWall    time.Time
+	lastMovementAt time.Time
 }
 
 // resetToIdle resets the vehicle state to idle. The caller must hold s.mu.
