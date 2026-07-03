@@ -126,6 +126,18 @@ func (s *Server) HandleFunc(pattern string, handler http.HandlerFunc) {
 	s.clientMux.HandleFunc(pattern, handler)
 }
 
+// ClientHandler returns the client-facing mux carrying every REST route
+// and WebSocket handler registered via HandleFunc / SetClientHandler.
+// It exists as a test seam so the composition root's route surface can
+// be exercised in-process (httptest) without binding a port or calling
+// Start, and so the handler can be embedded behind a reverse proxy in
+// other hosting contexts. The returned handler does NOT include the
+// request-logging middleware — callers that need it wrap the result
+// themselves; tests assert on route mounting, not logging.
+func (s *Server) ClientHandler() http.Handler {
+	return s.clientMux
+}
+
 // Start begins serving on all three ports. It blocks until ctx is
 // cancelled or one of the servers returns a fatal error. On context
 // cancellation it initiates a graceful shutdown with a fixed timeout.
