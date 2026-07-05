@@ -351,10 +351,10 @@ func TestFleetConfigHandler_ServeHTTP(t *testing.T) {
 
 func TestFleetConfigHandler_TeslaTokenPassedToFleetAPI(t *testing.T) {
 	const (
-		validVIN       = "5YJ3E1EA1PF000001"
-		userID         = "user-123"
-		teslaToken     = "tesla-oauth-real-token" //nolint:gosec // test fixture, not a real credential
-		successBody    = `{"response":{"updated_vehicles":1,"skipped_vehicles":{}}}`
+		validVIN    = "5YJ3E1EA1PF000001"
+		userID      = "user-123"
+		teslaToken  = "tesla-oauth-real-token" //nolint:gosec // test fixture, not a real credential
+		successBody = `{"response":{"updated_vehicles":1,"skipped_vehicles":{}}}`
 	)
 
 	// Capture the Authorization header sent to the Fleet API.
@@ -440,6 +440,147 @@ func TestFleetConfigHandler_TeslaTokenNoExpiry(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("status code: got %d, want %d (token with no expiry should succeed)", rec.Code, http.StatusOK)
+	}
+}
+
+func TestFleetConfigHandler_Status(t *testing.T) {
+	const (
+		validVIN  = "5YJ3E1EA1PF000001"
+		userID    = "user-123"
+		authToken = "valid-token"
+	)
+
+	futureExp := time.Now().Add(300 * 24 * time.Hour).Unix()
+	pastExp := time.Now().Add(-24 * time.Hour).Unix()
+
+	syncedFuture := fmt.Sprintf(`{"response":{"synced":true,"config":{"hostname":"telemetry.example.com","port":443,"exp":%d}}}`, futureExp)
+	syncedExpired := fmt.Sprintf(`{"response":{"synced":true,"config":{"hostname":"h","port":443,"exp":%d}}}`, pastExp)
+	notSynced := `{"response":{"synced":false,"config":null}}`
+	syncedNoExp := `{"response":{"synced":true,"config":{"hostname":"h","port":443}}}`
+
+	tests := []struct {
+		name          string
+		vin           string
+		authHeader    string
+		fleetStatus   int
+		fleetBody     string
+		wantStatus    int
+		wantError     string
+		wantSynced    bool
+		wantExpired   bool
+		wantHasExpiry bool
+	}{
+		{
+			name: "synced with future expiry", vin: validVIN, authHeader: "Bearer " + authToken,
+			fleetStatus: http.StatusOK, fleetBody: syncedFuture,
+			wantStatus: http.StatusOK, wantSynced: true, wantHasExpiry: true,
+		},
+		{
+			name: "synced but expired config", vin: validVIN, authHeader: "Bearer " + authToken,
+			fleetStatus: http.StatusOK, fleetBody: syncedExpired,
+			wantStatus: http.StatusOK, wantSynced: true, wantExpired: true, wantHasExpiry: true,
+		},
+		{
+			name: "not synced, no config", vin: validVIN, authHeader: "Bearer " + authToken,
+			fleetStatus: http.StatusOK, fleetBody: notSynced,
+			wantStatus: http.StatusOK, wantSynced: false, wantHasExpiry: false,
+		},
+		{
+			name: "synced but Tesla omitted exp", vin: validVIN, authHeader: "Bearer " + authToken,
+			fleetStatus: http.StatusOK, fleetBody: syncedNoExp,
+			wantStatus: http.StatusOK, wantSynced: true, wantHasExpiry: false,
+		},
+		{
+			name: "invalid VIN", vin: "SHORT", authHeader: "Bearer " + authToken,
+			fleetStatus: http.StatusOK, fleetBody: notSynced,
+			wantStatus: http.StatusBadRequest, wantError: "invalid VIN",
+		},
+		{
+			name: "fleet API error", vin: validVIN, authHeader: "Bearer " + authToken,
+			fleetStatus: http.StatusInternalServerError, fleetBody: `{"error":"boom"}`,
+			wantStatus: http.StatusBadGateway, wantError: "fleet API error",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fleetSrv := stubFleetServer(t, tt.fleetStatus, tt.fleetBody)
+			t.Cleanup(fleetSrv.Close)
+
+			handler := NewFleetConfigHandler(
+				&stubTokenValidator{userID: userID},
+				&stubVehicleOwner{ownerID: userID},
+				validTeslaToken(),
+				newTestFleetClient(fleetSrv.URL),
+				EndpointConfig{Hostname: "telemetry.example.com", Port: 443},
+				discardLogger(),
+			)
+
+			mux := http.NewServeMux()
+			mux.Handle("GET /api/fleet-config/{vin}", handler)
+
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/fleet-config/"+tt.vin, nil)
+			if tt.authHeader != "" {
+				req.Header.Set("Authorization", tt.authHeader)
+			}
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status: got %d, want %d", rec.Code, tt.wantStatus)
+			}
+			if tt.wantError != "" {
+				var errResp wserrors.ErrorEnvelope
+				if err := json.NewDecoder(rec.Body).Decode(&errResp); err != nil {
+					t.Fatalf("decode error response: %v", err)
+				}
+				if !strings.Contains(errResp.Error.Message, tt.wantError) {
+					t.Errorf("error message: got %q, want substring %q", errResp.Error.Message, tt.wantError)
+				}
+				return
+			}
+
+			var resp fleetConfigStatusResponse
+			if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+				t.Fatalf("decode status response: %v", err)
+			}
+			if resp.Synced != tt.wantSynced {
+				t.Errorf("synced: got %v, want %v", resp.Synced, tt.wantSynced)
+			}
+			if resp.Expired != tt.wantExpired {
+				t.Errorf("expired: got %v, want %v", resp.Expired, tt.wantExpired)
+			}
+			if hasExpiry := resp.ExpiresAt != ""; hasExpiry != tt.wantHasExpiry {
+				t.Errorf("has expiry: got %v, want %v (expiresAt=%q)", hasExpiry, tt.wantHasExpiry, resp.ExpiresAt)
+			}
+			if tt.wantHasExpiry && resp.DaysRemaining == nil {
+				t.Error("expected daysRemaining to be set when expiry is present")
+			}
+		})
+	}
+}
+
+func TestFleetConfigHandler_MethodNotAllowed(t *testing.T) {
+	handler := NewFleetConfigHandler(
+		&stubTokenValidator{userID: "user-123"},
+		&stubVehicleOwner{ownerID: "user-123"},
+		validTeslaToken(),
+		newTestFleetClient(stubFleetServer(t, http.StatusOK, `{"response":{"synced":true}}`).URL),
+		EndpointConfig{Hostname: "telemetry.example.com", Port: 443},
+		discardLogger(),
+	)
+
+	// Register without a method so ServeHTTP's own dispatch handles the verb.
+	mux := http.NewServeMux()
+	mux.Handle("/api/fleet-config/{vin}", handler)
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPut, "/api/fleet-config/5YJ3E1EA1PF000001", nil)
+	req.Header.Set("Authorization", "Bearer valid-token")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status: got %d, want %d", rec.Code, http.StatusMethodNotAllowed)
 	}
 }
 
