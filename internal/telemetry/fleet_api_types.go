@@ -49,6 +49,28 @@ type FleetConfigResult struct {
 	SkippedVehicles map[string]string `json:"skipped_vehicles"`
 }
 
+// FleetConfigStatusResponse wraps the payload of GET
+// /api/1/vehicles/{vin}/fleet_telemetry_config.
+type FleetConfigStatusResponse struct {
+	Response FleetConfigStatus `json:"response"`
+}
+
+// FleetConfigStatus is the vehicle's current telemetry-config state as
+// reported by Tesla. Synced is always present; Config is echoed back with
+// the applied settings. Exp is best-effort — Tesla documents Synced but not
+// that it echoes exp, so callers must treat a nil Exp as "unknown".
+type FleetConfigStatus struct {
+	Synced bool                    `json:"synced"`
+	Config *FleetConfigStatusInner `json:"config"`
+}
+
+// FleetConfigStatusInner is the subset of the echoed config we surface.
+type FleetConfigStatusInner struct {
+	Hostname string `json:"hostname"`
+	Port     int    `json:"port"`
+	Exp      *int64 `json:"exp"`
+}
+
 // FleetErrorsResponse wraps the list of telemetry errors returned
 // by GET /api/1/vehicles/{vin}/fleet_telemetry_errors.
 type FleetErrorsResponse struct {

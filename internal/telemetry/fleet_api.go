@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	neturl "net/url"
 	"time"
 )
 
@@ -143,7 +144,7 @@ func (c *FleetAPIClient) GetTelemetryErrors(
 		return nil, fmt.Errorf("GetTelemetryErrors: invalid VIN %q (must be 17 characters)", redactVIN(vin))
 	}
 
-	url := c.baseURL + "/api/1/vehicles/" + vin + "/fleet_telemetry_errors"
+	url := c.baseURL + "/api/1/vehicles/" + neturl.PathEscape(vin) + "/fleet_telemetry_errors"
 
 	c.logger.Debug("fetching telemetry errors",
 		slog.String("vin", redactVIN(vin)),
@@ -167,6 +168,39 @@ func (c *FleetAPIClient) GetTelemetryErrors(
 	return &result, nil
 }
 
+// GetTelemetryConfig retrieves a vehicle's current fleet telemetry config
+// state from the Fleet API — chiefly the "synced" flag (whether the vehicle
+// has received and applied a config). The token must be a valid OAuth2
+// Bearer token for the fleet owner.
+func (c *FleetAPIClient) GetTelemetryConfig(
+	ctx context.Context,
+	token string,
+	vin string,
+) (*FleetConfigStatusResponse, error) {
+	if token == "" {
+		return nil, fmt.Errorf("GetTelemetryConfig: auth token is required")
+	}
+	if len(vin) != vinLength {
+		return nil, fmt.Errorf("GetTelemetryConfig: invalid VIN %q (must be 17 characters)", redactVIN(vin))
+	}
+
+	url := c.baseURL + "/api/1/vehicles/" + neturl.PathEscape(vin) + "/fleet_telemetry_config"
+
+	c.logger.Debug("fetching telemetry config status", slog.String("vin", redactVIN(vin)))
+
+	respBody, err := c.doWithRetry(ctx, http.MethodGet, url, token, nil)
+	if err != nil {
+		return nil, fmt.Errorf("GetTelemetryConfig(%s): %w", redactVIN(vin), err)
+	}
+
+	var result FleetConfigStatusResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("GetTelemetryConfig(%s): decode response: %w", redactVIN(vin), err)
+	}
+
+	return &result, nil
+}
+
 // doWithRetry executes an HTTP request with retry logic for rate
 // limiting (429) and server errors (5xx).
 func (c *FleetAPIClient) doWithRetry(
@@ -186,7 +220,11 @@ func (c *FleetAPIClient) doWithRetry(
 			)
 		}
 
-		req, err := http.NewRequestWithContext(ctx, method, url, newBodyReader(body))
+		// #nosec G704 -- SSRF taint: url's scheme+host is always the fixed
+		// Fleet API base (config, not user input); callers only interpolate
+		// validated, PathEscape'd VINs as path segments, so the request
+		// target host is never attacker-controlled.
+		req, err := http.NewRequestWithContext(ctx, method, url, newBodyReader(body)) //nolint:gosec // G704: host is fixed config — see #nosec note above
 		if err != nil {
 			return nil, fmt.Errorf("create request: %w", err)
 		}
@@ -196,7 +234,9 @@ func (c *FleetAPIClient) doWithRetry(
 			req.Header.Set("Content-Type", "application/json")
 		}
 
-		resp, err := c.httpClient.Do(req)
+		// #nosec G704 -- request target host is the fixed Fleet API base
+		// (see note above); no attacker control of scheme/host.
+		resp, err := c.httpClient.Do(req) //nolint:gosec // G704: host is fixed config
 		if err != nil {
 			lastErr = fmt.Errorf("http request: %w", err)
 			// Network errors are not retried — they are likely transient
