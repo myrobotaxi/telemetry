@@ -232,7 +232,7 @@ Per-site audit (REST surface in `internal/telemetry/`, WS surface in `internal/w
 | [`vehicle_status_handler.go`](../../internal/telemetry/vehicle_status_handler.go) — vehicle ownership mismatch | 403 | `ErrCodeVehicleNotOwned` | Caller's `userID` ≠ vehicle's `ownerID` |
 | [`vehicle_status_handler.go`](../../internal/telemetry/vehicle_status_handler.go) — DB lookup error | 500 | `ErrCodeInternalError` | `GetVehicleOwner` returns non-`ErrNotFound` |
 | [`vehicle_status_mask.go`](../../internal/telemetry/vehicle_status_mask.go) — role resolution error | 500 | `ErrCodeInternalError` | `ResolveRole` returns error |
-| [`fleet_config_handler.go`](../../internal/telemetry/fleet_config_handler.go) — wrong method | 405 | `ErrCodeInvalidRequest` | `r.Method != POST` |
+| [`fleet_config_handler.go`](../../internal/telemetry/fleet_config_handler.go) — wrong method | 405 | `ErrCodeInvalidRequest` | Method is neither `GET` (config status) nor `POST` (re-push) |
 | [`fleet_config_handler.go`](../../internal/telemetry/fleet_config_handler.go) — invalid VIN | 400 | `ErrCodeInvalidRequest` | Malformed `{vin}` path param |
 | [`fleet_config_handler.go`](../../internal/telemetry/fleet_config_handler.go) — missing/invalid Authorization | 401 | `ErrCodeAuthFailed` | Header omitted or `ValidateToken` fails |
 | [`fleet_config_handler.go`](../../internal/telemetry/fleet_config_handler.go) — vehicle ownership mismatch | 403 | `ErrCodeVehicleNotOwned` | Caller's `userID` ≠ vehicle's `ownerID` |

@@ -56,23 +56,34 @@ func NewFleetConfigHandler(
 	return h
 }
 
-// ServeHTTP handles the fleet config push request.
+// ServeHTTP routes GET (status) and POST (re-push) for
+// /api/fleet-config/{vin}.
 func (h *FleetConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	switch r.Method {
+	case http.MethodPost:
+		h.handlePush(w, r)
+	case http.MethodGet:
+		h.handleStatus(w, r)
+	default:
 		h.writeError(w, http.StatusMethodNotAllowed, wserrors.ErrCodeInvalidRequest, "method not allowed")
-		return
 	}
+}
 
+// authorize validates the VIN and caller JWT, checks vehicle ownership, and
+// resolves the caller's (auto-refreshed) Tesla token — the common front
+// half of both the push and status paths. On any failure it writes the
+// error response and returns ok=false.
+func (h *FleetConfigHandler) authorize(w http.ResponseWriter, r *http.Request) (string, TeslaToken, bool) {
 	vin := r.PathValue("vin")
 	if len(vin) != vinLength {
 		h.writeError(w, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest, "invalid VIN: must be 17 characters")
-		return
+		return "", TeslaToken{}, false
 	}
 
 	token := extractBearerToken(r)
 	if token == "" {
 		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed, "missing Authorization header")
-		return
+		return "", TeslaToken{}, false
 	}
 
 	ctx := r.Context()
@@ -84,17 +95,29 @@ func (h *FleetConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			slog.String("error", err.Error()),
 		)
 		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed, "invalid or expired token")
-		return
+		return "", TeslaToken{}, false
 	}
 
 	if !h.verifyOwnership(ctx, w, vin, userID) {
-		return
+		return "", TeslaToken{}, false
 	}
 
 	teslaTok, ok := h.resolveTeslaToken(ctx, w, userID)
 	if !ok {
+		return "", TeslaToken{}, false
+	}
+
+	return vin, teslaTok, true
+}
+
+// handlePush handles POST /api/fleet-config/{vin} — (re)pushes the telemetry
+// config to the vehicle via the Fleet API proxy.
+func (h *FleetConfigHandler) handlePush(w http.ResponseWriter, r *http.Request) {
+	vin, teslaTok, ok := h.authorize(w, r)
+	if !ok {
 		return
 	}
+	ctx := r.Context()
 
 	var ca *string
 	if h.endpoint.CA != "" {
@@ -137,6 +160,57 @@ func (h *FleetConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Status: "configured",
 		VIN:    redactVIN(vin),
 	})
+}
+
+// fleetConfigStatusResponse is the GET /api/fleet-config/{vin} body. Synced
+// comes straight from Tesla. The expiry fields are populated only when Tesla
+// echoes the config's `exp` (undocumented but often present); when it does
+// not, ExpiresAt is empty and DaysRemaining is nil, and the UI falls back to
+// the Synced flag to convey "streaming vs not".
+type fleetConfigStatusResponse struct {
+	VIN           string `json:"vin"`
+	Synced        bool   `json:"synced"`
+	Hostname      string `json:"hostname,omitempty"`
+	Port          int    `json:"port,omitempty"`
+	ExpiresAt     string `json:"expiresAt,omitempty"` // RFC3339; empty if exp unknown
+	Expired       bool   `json:"expired"`
+	DaysRemaining *int   `json:"daysRemaining,omitempty"` // nil if exp unknown
+}
+
+// handleStatus handles GET /api/fleet-config/{vin} — reports the vehicle's
+// current telemetry-config state (Tesla's synced flag plus best-effort
+// expiry) so the UI can show whether a re-push is needed.
+func (h *FleetConfigHandler) handleStatus(w http.ResponseWriter, r *http.Request) {
+	vin, teslaTok, ok := h.authorize(w, r)
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+
+	status, err := h.fleet.GetTelemetryConfig(ctx, teslaTok.AccessToken, vin)
+	if err != nil {
+		h.handleFleetAPIError(w, vin, err)
+		return
+	}
+
+	resp := fleetConfigStatusResponse{
+		VIN:    redactVIN(vin),
+		Synced: status.Response.Synced,
+	}
+	if cfg := status.Response.Config; cfg != nil {
+		resp.Hostname = cfg.Hostname
+		resp.Port = cfg.Port
+		if cfg.Exp != nil {
+			expiresAt := time.Unix(*cfg.Exp, 0).UTC()
+			remaining := time.Until(expiresAt)
+			days := int(remaining.Hours() / 24)
+			resp.ExpiresAt = expiresAt.Format(time.RFC3339)
+			resp.Expired = remaining <= 0
+			resp.DaysRemaining = &days
+		}
+	}
+
+	h.writeJSON(w, http.StatusOK, resp)
 }
 
 // verifyOwnership checks that userID owns the vehicle identified by vin.
