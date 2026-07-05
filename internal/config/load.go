@@ -20,13 +20,14 @@ type fileConfig struct {
 	Proxy     fileProxyConfig     `json:"proxy"`
 
 	// Populated from environment, not JSON.
-	databaseURL      string
-	authSecret       string
-	mapboxToken      string
-	teslaPublicKey   string
-	fleetTelemetryCA string
-	teslaClientID    string
-	teslaClientSec   string
+	databaseURL          string
+	authSecret           string
+	mapboxToken          string
+	teslaPublicKey       string
+	fleetTelemetryCA     string
+	teslaClientID        string
+	teslaClientSec       string
+	certMonitorEndpoints []string
 }
 
 type fileServerConfig struct {
@@ -123,7 +124,7 @@ func applyEnvOverrides(fc *fileConfig) error {
 		missing = append(missing, "AUTH_SECRET")
 	}
 
-	fc.mapboxToken = os.Getenv("MAPBOX_TOKEN")             // optional
+	fc.mapboxToken = os.Getenv("MAPBOX_TOKEN")            // optional
 	fc.teslaPublicKey = os.Getenv("TESLA_PUBLIC_KEY")     // optional
 	fc.fleetTelemetryCA = os.Getenv("FLEET_TELEMETRY_CA") // optional: PEM CA cert
 	fc.teslaClientID = os.Getenv("AUTH_TESLA_ID")         // optional: enables token refresh
@@ -159,6 +160,14 @@ func applyEnvOverrides(fc *fileConfig) error {
 	// signal "explicitly empty" (fail-closed). Per NFR-3.22 and MYR-17.
 	if v, ok := os.LookupEnv("WEBSOCKET_ALLOWED_ORIGINS"); ok {
 		fc.WebSocket.AllowedOrigins = parseOriginList(v)
+	}
+
+	// TLS_MONITOR_ENDPOINTS is a comma-separated list of host:port
+	// addresses the endpoint cert monitor probes (e.g.
+	// "telemetry.myrobotaxi.app:443,telemetry.myrobotaxi.app:4443").
+	// Unset/empty disables the monitor.
+	if v, ok := os.LookupEnv("TLS_MONITOR_ENDPOINTS"); ok {
+		fc.certMonitorEndpoints = parseOriginList(v)
 	}
 
 	if len(missing) > 0 {
@@ -235,6 +244,9 @@ func buildConfig(fc *fileConfig) *Config {
 		teslaOAuth: TeslaOAuthConfig{
 			ClientID:     fc.teslaClientID,
 			ClientSecret: fc.teslaClientSec,
+		},
+		monitoring: MonitoringConfig{
+			CertEndpoints: fc.certMonitorEndpoints,
 		},
 		mapboxToken:    fc.mapboxToken,
 		teslaPublicKey: fc.teslaPublicKey,

@@ -1,0 +1,64 @@
+# TLS certificate expiry + reachability alerts (MYR-188).
+#
+# These fire on the gauges emitted by the EndpointCertMonitor
+# (internal/telemetry/cert_endpoint_monitor.go), which TLS-dials each
+# endpoint in TLS_MONITOR_ENDPOINTS and reports the SERVED leaf's expiry —
+# covering both the app-terminated mTLS cert (443) and the Fly-managed
+# client cert (4443) that no on-disk file check can see.
+#
+# Thresholds are non-overlapping so a single cert fires exactly one expiry
+# alert at a time, escalating warning → critical → page as it ages.
+groups:
+  - name: tls-certificates
+    rules:
+      - alert: TLSCertExpiryWarning
+        expr: |
+          telemetry_tls_endpoint_cert_expiry_days_remaining >= 14
+          and telemetry_tls_endpoint_cert_expiry_days_remaining < 30
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "TLS cert on {{ $labels.endpoint }} expires in {{ $value | humanize }}d"
+          description: >-
+            The certificate served at {{ $labels.endpoint }} has under 30 days
+            of validity left. Renew it per docs/tls-certificates.md before it
+            drops into the critical window.
+
+      - alert: TLSCertExpiryCritical
+        expr: |
+          telemetry_tls_endpoint_cert_expiry_days_remaining >= 7
+          and telemetry_tls_endpoint_cert_expiry_days_remaining < 14
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "TLS cert on {{ $labels.endpoint }} expires in {{ $value | humanize }}d"
+          description: >-
+            The certificate served at {{ $labels.endpoint }} expires in under
+            14 days. Renew now — see docs/tls-certificates.md.
+
+      - alert: TLSCertExpiryUrgent
+        expr: telemetry_tls_endpoint_cert_expiry_days_remaining < 7
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "TLS cert on {{ $labels.endpoint }} expires in {{ $value | humanize }}d (or already expired)"
+          description: >-
+            The certificate served at {{ $labels.endpoint }} expires in under 7
+            days (a negative value means it has already expired and customer
+            traffic is broken). Renew immediately — docs/tls-certificates.md.
+
+      - alert: TLSEndpointUnreachable
+        expr: telemetry_tls_endpoint_cert_reachable == 0
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "TLS endpoint {{ $labels.endpoint }} unreachable for 15m"
+          description: >-
+            The cert monitor could not complete a TLS probe of
+            {{ $labels.endpoint }} for 15 minutes. The endpoint may be down, or
+            TLS termination there may be failing (e.g. a missing/expired cert
+            that aborts the handshake before a leaf is presented).
