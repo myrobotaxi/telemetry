@@ -104,6 +104,24 @@ func startPlaintextGauges(
 	go routeBlobGauge.Run(ctx)
 }
 
+// startCertEndpointMonitor wires the endpoint TLS certificate monitor,
+// which TLS-dials each configured host:port and exposes the served leaf's
+// expiry as Prometheus gauges. Unlike the file-based monitor it sees certs
+// terminated outside this process (notably the Fly-managed cert on the
+// client WebSocket port) — the blind spot behind the MYR-188 outage. When
+// no endpoints are configured (TLS_MONITOR_ENDPOINTS unset) it is a no-op.
+func startCertEndpointMonitor(ctx context.Context, reg prometheus.Registerer, endpoints []string, logger *slog.Logger) {
+	if len(endpoints) == 0 {
+		logger.Info("tls endpoint cert monitor disabled (set TLS_MONITOR_ENDPOINTS to enable)")
+		return
+	}
+	monitor := telemetry.NewEndpointCertMonitor(telemetry.EndpointCertMonitorConfig{
+		Endpoints: endpoints,
+	}, reg, logger.With(slog.String("component", "cert-endpoint-monitor")))
+	go monitor.Run(ctx)
+	logger.Info("tls endpoint cert monitor started", slog.Any("endpoints", endpoints))
+}
+
 // startPoolStatsCollector spawns a background goroutine that polls
 // db.CollectPoolStats every interval and exits when ctx cancels.
 // CollectPoolStats reads pgxpool.Stat() and pushes the values into the

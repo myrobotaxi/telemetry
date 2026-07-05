@@ -223,6 +223,13 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	// refreshes on its own goroutine until the rollouts complete. See
 	// startPlaintextGauges in wiring.go.
 	startPlaintextGauges(ctx, reg, db.Pool(), accountTokenGaugeInterval, vehicleGPSGaugeInterval, routeBlobGaugeInterval, logger)
+
+	// --- TLS endpoint cert monitor (MYR-188) ---
+	// Probes the served leaf cert on each configured public endpoint so an
+	// impending expiry pages BEFORE it takes down customer traffic —
+	// including the Fly-terminated 4443 cert that no file monitor can see.
+	startCertEndpointMonitor(ctx, reg, cfg.Monitoring().CertEndpoints, logger)
+
 	// --- Audit sidecar (MYR-77) ---
 	// Best-effort S3 mirror of every AuditLog INSERT.
 	// No-op when AUDIT_SIDECAR_BUCKET is empty (local dev).
@@ -340,4 +347,3 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	logger.Info("telemetry-server stopped cleanly")
 	return nil
 }
-
