@@ -58,13 +58,18 @@ func validTeslaToken() *stubTeslaTokenProvider {
 
 // stubFleetServer starts an httptest.Server that returns predefined responses.
 // This lets us test the handler end-to-end through the real FleetAPIClient.
+// The server is closed on test cleanup, so callers must NOT Close it again
+// (double Close panics) — including the inline `stubFleetServer(t, ...).URL`
+// callers that would otherwise leak.
 func stubFleetServer(t *testing.T, statusCode int, body string) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(statusCode)
 		fmt.Fprint(w, body)
 	}))
+	t.Cleanup(srv.Close)
+	return srv
 }
 
 func discardLogger() *slog.Logger {
@@ -283,7 +288,6 @@ func TestFleetConfigHandler_ServeHTTP(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Start a stub Fleet API server for each test case.
 			fleetSrv := stubFleetServer(t, tt.fleetStatus, tt.fleetBody)
-			t.Cleanup(fleetSrv.Close)
 
 			fleetClient := newTestFleetClient(fleetSrv.URL)
 
@@ -505,7 +509,6 @@ func TestFleetConfigHandler_Status(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fleetSrv := stubFleetServer(t, tt.fleetStatus, tt.fleetBody)
-			t.Cleanup(fleetSrv.Close)
 
 			handler := NewFleetConfigHandler(
 				&stubTokenValidator{userID: userID},
@@ -553,8 +556,13 @@ func TestFleetConfigHandler_Status(t *testing.T) {
 			if hasExpiry := resp.ExpiresAt != ""; hasExpiry != tt.wantHasExpiry {
 				t.Errorf("has expiry: got %v, want %v (expiresAt=%q)", hasExpiry, tt.wantHasExpiry, resp.ExpiresAt)
 			}
-			if tt.wantHasExpiry && resp.DaysRemaining == nil {
-				t.Error("expected daysRemaining to be set when expiry is present")
+			// daysRemaining is set only when expiry is known AND not expired
+			// (nil once expired so the UI branches on `expired`).
+			switch {
+			case tt.wantHasExpiry && !tt.wantExpired && resp.DaysRemaining == nil:
+				t.Error("expected daysRemaining to be set when expiry is present and not expired")
+			case tt.wantExpired && resp.DaysRemaining != nil:
+				t.Errorf("expected daysRemaining nil when expired, got %d", *resp.DaysRemaining)
 			}
 		})
 	}
@@ -581,6 +589,31 @@ func TestFleetConfigHandler_MethodNotAllowed(t *testing.T) {
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("status: got %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestFleetConfigHandler_StatusEnforcesOwnership(t *testing.T) {
+	// GET shares authorize() with POST; guard that a non-owner is rejected
+	// on the GET path so a future refactor can't regress it.
+	handler := NewFleetConfigHandler(
+		&stubTokenValidator{userID: "user-123"},
+		&stubVehicleOwner{ownerID: "someone-else"},
+		validTeslaToken(),
+		newTestFleetClient(stubFleetServer(t, http.StatusOK, `{"response":{"synced":true}}`).URL),
+		EndpointConfig{Hostname: "telemetry.example.com", Port: 443},
+		discardLogger(),
+	)
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /api/fleet-config/{vin}", handler)
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/fleet-config/5YJ3E1EA1PF000001", nil)
+	req.Header.Set("Authorization", "Bearer valid-token")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("GET status: got %d, want %d (ownership must be enforced)", rec.Code, http.StatusForbidden)
 	}
 }
 
