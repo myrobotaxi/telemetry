@@ -193,8 +193,13 @@ func (m *EndpointCertMonitor) probeExpiry(ctx context.Context, endpoint string) 
 	dialer := &tls.Dialer{
 		NetDialer: &net.Dialer{Timeout: m.dialTimeout},
 		Config: &tls.Config{
-			ServerName:         host, // SNI — Fly serves the right cert per hostname
-			InsecureSkipVerify: true, //nolint:gosec // G402: we read the served cert's expiry; an expired/invalid cert must be inspected, not rejected
+			ServerName: host, // SNI — Fly serves the right cert per hostname
+			// #nosec G402 -- this is a monitoring probe: we read the served
+			// cert's expiry, so an expired/invalid/mismatched cert MUST be
+			// inspected, not rejected. A validating dial would fail the
+			// handshake and defeat the entire purpose. (//nolint covers the
+			// golangci-lint gosec pass; #nosec covers the standalone gosec CI job.)
+			InsecureSkipVerify: true, //nolint:gosec // G402: intentional — see #nosec note above
 			MinVersion:         tls.VersionTLS12,
 			VerifyConnection:   capture,
 		},
