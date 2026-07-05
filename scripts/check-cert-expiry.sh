@@ -14,18 +14,26 @@ set -euo pipefail
 #   --certs-dir DIR     Certificate directory (default: ./certs)
 #   --warn-days N       Warning threshold in days (default: 30)
 #   --cert FILE         Check a specific certificate file instead of the directory
+#   --endpoint HOST:PORT  Check the cert SERVED at a live TLS endpoint (repeatable).
+#                         Reads the leaf the server actually presents — covers
+#                         TLS terminated outside the app (e.g. the Fly-managed
+#                         4443 cert) that no file check can see. Works against
+#                         the mTLS 443 port too (the server sends its cert
+#                         before aborting the client-cert-less handshake).
 #   --json              Output results as JSON (for monitoring integration)
 #   --help              Show this help message
 #
 # Exit codes:
 #   0 — All certificates are valid and not expiring soon
-#   1 — Error (missing files, invalid certs, etc.)
+#   1 — Error (missing files, invalid certs, unreachable endpoint, etc.)
 #   2 — One or more certificates expire within the warning threshold
 #
 # Examples:
 #   ./scripts/check-cert-expiry.sh
 #   ./scripts/check-cert-expiry.sh --warn-days 14 --json
 #   ./scripts/check-cert-expiry.sh --cert /etc/ssl/server.crt
+#   ./scripts/check-cert-expiry.sh --endpoint telemetry.myrobotaxi.app:443 \
+#                                  --endpoint telemetry.myrobotaxi.app:4443
 
 readonly SCRIPT_NAME="$(basename "$0")"
 
@@ -34,6 +42,7 @@ CERTS_DIR="./certs"
 WARN_DAYS=30
 SPECIFIC_CERT=""
 JSON_OUTPUT=false
+declare -a ENDPOINTS=()
 
 # Tracking for exit code.
 EXIT_CODE=0
@@ -128,6 +137,35 @@ check_cert() {
     fi
 }
 
+# Check the certificate a live TLS endpoint actually serves. Fetches the
+# leaf via `openssl s_client` (which prints the server cert even when an
+# mTLS server later aborts the handshake for want of a client cert) and
+# reuses check_cert for the expiry math and thresholds.
+check_endpoint() {
+    local endpoint="$1"
+    local host="${endpoint%%:*}"
+
+    if [[ "$endpoint" != *:* || -z "$host" || "$endpoint" == "${host}:" ]]; then
+        error "Invalid endpoint (want HOST:PORT): $endpoint"
+        EXIT_CODE=1
+        return
+    fi
+
+    local tmp
+    tmp="$(mktemp)"
+
+    if ! echo | openssl s_client -connect "$endpoint" -servername "$host" 2>/dev/null \
+        | openssl x509 -outform pem >"$tmp" 2>/dev/null || [[ ! -s "$tmp" ]]; then
+        error "Failed to fetch certificate from $endpoint (TLS handshake failed or no cert served)"
+        EXIT_CODE=1
+        rm -f "$tmp"
+        return
+    fi
+
+    check_cert "$tmp" "$endpoint"
+    rm -f "$tmp"
+}
+
 # ─── Argument parsing ─────────────────────────────────────────────────
 
 parse_args() {
@@ -146,6 +184,10 @@ parse_args() {
                 ;;
             --cert)
                 SPECIFIC_CERT="${2:?--cert requires a value}"
+                shift 2
+                ;;
+            --endpoint)
+                ENDPOINTS+=("${2:?--endpoint requires a HOST:PORT value}")
                 shift 2
                 ;;
             --json)
@@ -174,9 +216,15 @@ main() {
         die "openssl is not installed."
     fi
 
-    if [[ -n "$SPECIFIC_CERT" ]]; then
-        # Check a single cert.
-        check_cert "$SPECIFIC_CERT" "$(basename "$SPECIFIC_CERT")"
+    if [[ ${#ENDPOINTS[@]} -gt 0 || -n "$SPECIFIC_CERT" ]]; then
+        # Explicit targets: live endpoints and/or a single cert file. When
+        # either is given we do NOT also scan the certs dir.
+        for endpoint in "${ENDPOINTS[@]}"; do
+            check_endpoint "$endpoint"
+        done
+        if [[ -n "$SPECIFIC_CERT" ]]; then
+            check_cert "$SPECIFIC_CERT" "$(basename "$SPECIFIC_CERT")"
+        fi
     else
         # Check all certs in the directory.
         if [[ ! -d "$CERTS_DIR" ]]; then
