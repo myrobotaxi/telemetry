@@ -18,8 +18,20 @@ type Config struct {
 	auth           AuthConfig
 	proxy          ProxyConfig
 	teslaOAuth     TeslaOAuthConfig
+	monitoring     MonitoringConfig
 	mapboxToken    string
 	teslaPublicKey string
+}
+
+// MonitoringConfig holds observability probe settings.
+type MonitoringConfig struct {
+	// CertEndpoints is the list of host:port addresses the endpoint TLS
+	// certificate monitor probes on a schedule (see EndpointCertMonitor).
+	// It covers certs terminated outside the app process — notably the
+	// Fly-managed cert on the client WebSocket port, which the file-based
+	// monitor cannot see. Empty disables the monitor. Populated from the
+	// TLS_MONITOR_ENDPOINTS env var (comma-separated).
+	CertEndpoints []string
 }
 
 // ServerConfig holds port bindings for the three HTTP listeners.
@@ -139,6 +151,10 @@ func (c *Config) Proxy() ProxyConfig { return c.proxy }
 // TeslaOAuth returns the Tesla OAuth2 application credentials. When
 // ClientID is empty, automatic token refresh is disabled.
 func (c *Config) TeslaOAuth() TeslaOAuthConfig { return c.teslaOAuth }
+
+// Monitoring returns the observability probe configuration. When
+// CertEndpoints is empty, the endpoint TLS cert monitor is disabled.
+func (c *Config) Monitoring() MonitoringConfig { return c.monitoring }
 
 // MapboxToken returns the Mapbox API token. Empty string means geocoding
 // is disabled.
