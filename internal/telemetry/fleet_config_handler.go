@@ -56,23 +56,34 @@ func NewFleetConfigHandler(
 	return h
 }
 
-// ServeHTTP handles the fleet config push request.
+// ServeHTTP routes GET (status) and POST (re-push) for
+// /api/fleet-config/{vin}.
 func (h *FleetConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	switch r.Method {
+	case http.MethodPost:
+		h.handlePush(w, r)
+	case http.MethodGet:
+		h.handleStatus(w, r)
+	default:
 		h.writeError(w, http.StatusMethodNotAllowed, wserrors.ErrCodeInvalidRequest, "method not allowed")
-		return
 	}
+}
 
+// authorize validates the VIN and caller JWT, checks vehicle ownership, and
+// resolves the caller's (auto-refreshed) Tesla token — the common front
+// half of both the push and status paths. On any failure it writes the
+// error response and returns ok=false.
+func (h *FleetConfigHandler) authorize(w http.ResponseWriter, r *http.Request) (string, TeslaToken, bool) {
 	vin := r.PathValue("vin")
 	if len(vin) != vinLength {
 		h.writeError(w, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest, "invalid VIN: must be 17 characters")
-		return
+		return "", TeslaToken{}, false
 	}
 
 	token := extractBearerToken(r)
 	if token == "" {
 		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed, "missing Authorization header")
-		return
+		return "", TeslaToken{}, false
 	}
 
 	ctx := r.Context()
@@ -84,17 +95,29 @@ func (h *FleetConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			slog.String("error", err.Error()),
 		)
 		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed, "invalid or expired token")
-		return
+		return "", TeslaToken{}, false
 	}
 
 	if !h.verifyOwnership(ctx, w, vin, userID) {
-		return
+		return "", TeslaToken{}, false
 	}
 
 	teslaTok, ok := h.resolveTeslaToken(ctx, w, userID)
 	if !ok {
+		return "", TeslaToken{}, false
+	}
+
+	return vin, teslaTok, true
+}
+
+// handlePush handles POST /api/fleet-config/{vin} — (re)pushes the telemetry
+// config to the vehicle via the Fleet API proxy.
+func (h *FleetConfigHandler) handlePush(w http.ResponseWriter, r *http.Request) {
+	vin, teslaTok, ok := h.authorize(w, r)
+	if !ok {
 		return
 	}
+	ctx := r.Context()
 
 	var ca *string
 	if h.endpoint.CA != "" {

@@ -128,45 +128,6 @@ func (c *FleetAPIClient) PushTelemetryConfig(
 	return &result, nil
 }
 
-// GetTelemetryErrors retrieves recent telemetry connection errors for a
-// vehicle from the Fleet API. Useful for diagnosing why a vehicle is
-// not sending telemetry.
-func (c *FleetAPIClient) GetTelemetryErrors(
-	ctx context.Context,
-	token string,
-	vin string,
-) (*FleetErrorsResponse, error) {
-	if token == "" {
-		return nil, fmt.Errorf("GetTelemetryErrors: auth token is required")
-	}
-	if len(vin) != 17 {
-		return nil, fmt.Errorf("GetTelemetryErrors: invalid VIN %q (must be 17 characters)", redactVIN(vin))
-	}
-
-	url := c.baseURL + "/api/1/vehicles/" + vin + "/fleet_telemetry_errors"
-
-	c.logger.Debug("fetching telemetry errors",
-		slog.String("vin", redactVIN(vin)),
-	)
-
-	respBody, err := c.doWithRetry(ctx, http.MethodGet, url, token, nil)
-	if err != nil {
-		return nil, fmt.Errorf("GetTelemetryErrors(%s): %w", redactVIN(vin), err)
-	}
-
-	var result FleetErrorsResponse
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, fmt.Errorf("GetTelemetryErrors(%s): decode response: %w", redactVIN(vin), err)
-	}
-
-	c.logger.Debug("telemetry errors retrieved",
-		slog.String("vin", redactVIN(vin)),
-		slog.Int("count", len(result.Response.Errors)),
-	)
-
-	return &result, nil
-}
-
 // doWithRetry executes an HTTP request with retry logic for rate
 // limiting (429) and server errors (5xx).
 func (c *FleetAPIClient) doWithRetry(
@@ -186,7 +147,12 @@ func (c *FleetAPIClient) doWithRetry(
 			)
 		}
 
-		req, err := http.NewRequestWithContext(ctx, method, url, newBodyReader(body))
+		// #nosec G107 G704 -- SSRF taint (reported as G704 by the pinned
+		// gosec; G107 is the classic URL-taint id): url's scheme+host is
+		// always the fixed Fleet API base (config, not user input); callers
+		// only interpolate validated, PathEscape'd VINs as path segments, so
+		// the request target host is never attacker-controlled.
+		req, err := http.NewRequestWithContext(ctx, method, url, newBodyReader(body)) //nolint:gosec // host is fixed config — see #nosec note above
 		if err != nil {
 			return nil, fmt.Errorf("create request: %w", err)
 		}
@@ -196,7 +162,9 @@ func (c *FleetAPIClient) doWithRetry(
 			req.Header.Set("Content-Type", "application/json")
 		}
 
-		resp, err := c.httpClient.Do(req)
+		// #nosec G107 G704 -- request target host is the fixed Fleet API
+		// base (see note above); no attacker control of scheme/host.
+		resp, err := c.httpClient.Do(req) //nolint:gosec // host is fixed config
 		if err != nil {
 			lastErr = fmt.Errorf("http request: %w", err)
 			// Network errors are not retried — they are likely transient

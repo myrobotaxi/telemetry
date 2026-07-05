@@ -384,7 +384,8 @@ func setupFleetConfigEndpoint(
 	)
 
 	srv.HandleFunc("POST /api/fleet-config/{vin}", fleetHandler.ServeHTTP)
-	logger.Info("fleet config push endpoint enabled",
+	srv.HandleFunc("GET /api/fleet-config/{vin}", fleetHandler.ServeHTTP)
+	logger.Info("fleet config endpoints enabled (GET status + POST re-push)",
 		slog.String("proxy_url", cfg.Proxy().URL),
 	)
 }
