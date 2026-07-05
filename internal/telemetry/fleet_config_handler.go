@@ -117,8 +117,13 @@ func (h *FleetConfigHandler) handlePush(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	ctx := r.Context()
+	h.pushForVIN(r.Context(), w, vin, teslaTok)
+}
 
+// pushForVIN builds and sends the telemetry config for an already-resolved,
+// already-authorized VIN. Shared by the VIN-keyed path (handlePush) and the
+// vehicleId-keyed path (VehicleFleetConfigHandler).
+func (h *FleetConfigHandler) pushForVIN(ctx context.Context, w http.ResponseWriter, vin string, teslaTok TeslaToken) {
 	var ca *string
 	if h.endpoint.CA != "" {
 		ca = &h.endpoint.CA

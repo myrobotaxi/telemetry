@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"context"
 	"net/http"
 	"time"
 )
@@ -28,8 +29,13 @@ func (h *FleetConfigHandler) handleStatus(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	ctx := r.Context()
+	h.writeStatusForVIN(r.Context(), w, vin, teslaTok)
+}
 
+// writeStatusForVIN fetches and writes the config status for an
+// already-resolved, already-authorized VIN. Shared by the VIN-keyed path
+// (handleStatus) and the vehicleId-keyed path (VehicleFleetConfigHandler).
+func (h *FleetConfigHandler) writeStatusForVIN(ctx context.Context, w http.ResponseWriter, vin string, teslaTok TeslaToken) {
 	status, err := h.fleet.GetTelemetryConfig(ctx, teslaTok.AccessToken, vin)
 	if err != nil {
 		h.handleFleetAPIError(w, vin, err)

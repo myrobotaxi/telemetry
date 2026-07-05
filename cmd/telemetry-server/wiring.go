@@ -280,7 +280,7 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 	)
 	deps.srv.HandleFunc("GET /api/drives/{driveId}", driveDetailHandler.ServeHTTP)
 
-	setupFleetConfigEndpoint(deps.cfg, deps.srv, deps.authenticator, deps.vinCache, deps.accountRepo, deps.logger)
+	setupFleetConfigEndpoint(deps.cfg, deps.srv, deps.authenticator, deps.vinCache, deps.accountRepo, deps.vehicleRepo, deps.logger)
 
 	// Mounted when resolveDebugFieldsGate says so — either because the
 	// server is running with --dev (token optional) or because an operator
@@ -339,6 +339,7 @@ func setupFleetConfigEndpoint(
 	authenticator ws.Authenticator,
 	vinCache *store.VINCache,
 	accountRepo *store.AccountRepo,
+	vehicleRepo *store.VehicleRepo,
 	logger *slog.Logger,
 ) {
 	if cfg.Proxy().URL == "" || cfg.Proxy().FleetTelemetryHostname == "" {
@@ -385,7 +386,18 @@ func setupFleetConfigEndpoint(
 
 	srv.HandleFunc("POST /api/fleet-config/{vin}", fleetHandler.ServeHTTP)
 	srv.HandleFunc("GET /api/fleet-config/{vin}", fleetHandler.ServeHTTP)
-	logger.Info("fleet config endpoints enabled (GET status + POST re-push)",
+
+	// vehicleId-keyed variant for browser clients, which never receive a
+	// full VIN (P0-masked). Resolves vehicleId→VIN server-side.
+	vehicleFleetHandler := telemetry.NewVehicleFleetConfigHandler(
+		fleetHandler,
+		&vehicleSnapshotAdapter{repo: vehicleRepo},
+		logger.With(slog.String("component", "vehicle-fleet-config")),
+	)
+	srv.HandleFunc("GET /api/fleet-config/vehicle/{vehicleId}", vehicleFleetHandler.ServeHTTP)
+	srv.HandleFunc("POST /api/fleet-config/vehicle/{vehicleId}", vehicleFleetHandler.ServeHTTP)
+
+	logger.Info("fleet config endpoints enabled (VIN + vehicleId, GET status + POST re-push)",
 		slog.String("proxy_url", cfg.Proxy().URL),
 	)
 }
