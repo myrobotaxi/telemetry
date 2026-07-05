@@ -2,6 +2,11 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+# Alerting/recording rules. tls-cert.rules.yml (MYR-188) pages on TLS certs
+# approaching expiry using the EndpointCertMonitor gauges.
+rule_files:
+  - "alerts/*.rules.yml"
+
 scrape_configs:
   - job_name: telemetry-server
     static_configs:
