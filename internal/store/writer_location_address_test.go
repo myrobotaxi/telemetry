@@ -109,6 +109,43 @@ func TestScheduleLocationGeocode_FirstFlushFires(t *testing.T) {
 	}
 }
 
+// TestScheduleLocationGeocode_EmptyPlaceName verifies MYR-206's Result
+// carrying an empty PlaceName (address-only match — no POI within the
+// geocoder's distance threshold) still produces a Vehicle row write:
+// LocationName is set to the empty string (the documented
+// vehicle-state.schema.json sentinel for "no geocode available", NOT
+// omitted from the update) while LocationAddr carries the resolved
+// street address.
+func TestScheduleLocationGeocode_EmptyPlaceName(t *testing.T) {
+	vehicles := &mockVehicleUpdater{}
+	geo := &stubGeocoder{
+		results: []geocode.Result{{PlaceName: "", Address: "4220 Tributary Wy"}},
+	}
+	w := newLocAddrTestWriter(t, vehicles, geo)
+
+	update := &VehicleUpdate{
+		Latitude:    floatPtr(33.086131),
+		Longitude:   floatPtr(-96.852202),
+		LastUpdated: time.Now(),
+	}
+	w.scheduleLocationGeocode(testVIN, update)
+
+	awaitGeocodeCalls(t, geo, 1)
+	awaitVehicleWrites(t, vehicles, 1)
+	w.geocodeWG.Wait()
+
+	writes := vehicles.getTelemetryWrites()
+	if len(writes) != 1 {
+		t.Fatalf("vehicle writes = %d, want 1", len(writes))
+	}
+	if writes[0].Update.LocationName == nil || *writes[0].Update.LocationName != "" {
+		t.Errorf("LocationName = %v, want empty string (no POI within threshold)", ptrVal(writes[0].Update.LocationName))
+	}
+	if writes[0].Update.LocationAddr == nil || *writes[0].Update.LocationAddr != "4220 Tributary Wy" {
+		t.Errorf("LocationAddr = %v, want %q", ptrVal(writes[0].Update.LocationAddr), "4220 Tributary Wy")
+	}
+}
+
 // TestScheduleLocationGeocode_DebouncedFlushes drives each branch of the
 // debounce decision via a single table: the cache is pre-seeded with an
 // anchor entry, the scheduler is invoked once, and the test asserts
