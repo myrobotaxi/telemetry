@@ -88,11 +88,37 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 		{"drive detail (§7.3)", "/api/drives/clmno9876543210zyxw0001"},
 		{"drive route (§7.4)", "/api/drives/clmno9876543210zyxw0001/route"},
 		{"vehicle status", "/api/vehicle-status/5YJ3E1EA1PF000001"},
+		// MYR-174: rider-facing ride-request surface. GET routes are
+		// exercised here (an unauthenticated GET must not 404); the POST
+		// create/cancel routes are asserted separately below.
+		{"ride requests list (MYR-174)", "/api/ride-requests"},
+		{"ride request detail (MYR-174)", "/api/ride-requests/crr0123456789abcdef0123456789abcd"},
 	}
 
 	for _, rt := range routes {
 		t.Run(rt.name, func(t *testing.T) {
 			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, rt.path, nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code == http.StatusNotFound {
+				t.Fatalf("route %q returned 404 — handler not mounted. Body: %s", rt.path, rec.Body.String())
+			}
+		})
+	}
+
+	// MYR-174 POST routes: create + cancel. An unauthenticated POST must
+	// fail the bearer gate (401), never 404 (unmounted).
+	postRoutes := []struct {
+		name string
+		path string
+	}{
+		{"ride request create (MYR-174)", "/api/ride-requests"},
+		{"ride request cancel (MYR-174)", "/api/ride-requests/crr0123456789abcdef0123456789abcd/cancel"},
+	}
+	for _, rt := range postRoutes {
+		t.Run(rt.name, func(t *testing.T) {
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, rt.path, nil)
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
 
