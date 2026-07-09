@@ -201,6 +201,37 @@ Each element in the `routePoints` array is a `RoutePointRecord`:
 | `createdAt` | `DateTime` | P0 | No | Yes | Non-sensitive timestamp |
 | `updatedAt` | `DateTime` | P0 | No | Yes | Non-sensitive timestamp |
 
+### 1.9 go_ride_requests table (Go-owned, MYR-173)
+
+The P10 ride-hailing aggregate (contracts `schemas/ride-request.schema.json`; FR-9.3 list-envelope conventions, NFR-3.9 tiers, NFR-3.23 encryption). First Go-owned feature table — created by `internal/store/migrations/0002_ride_requests.up.sql` under the CG-DL-9 `go_` namespace; the Next.js app's ORM never touches it.
+
+| Column | Type | Tier | Encrypt | Log-safe | Rationale |
+|--------|------|------|---------|----------|-----------|
+| `id` | `TEXT` (cuid) | P0 | No | Yes | Opaque internal identifier |
+| `rider_id` | `TEXT` | P0 | No | Yes | User cuid — opaque identifier |
+| `owner_id` | `TEXT` | P0 | No | Yes | User cuid — opaque identifier |
+| `vehicle_id` | `TEXT` | P0 | No | Yes | Vehicle cuid — opaque identifier |
+| `pickup_lat_enc` | `TEXT` (ciphertext) | P1 | **Yes** (encrypt-only) | No | GPS coordinate — NFR-3.23. New table: no plaintext column, no dual-write rollout |
+| `pickup_lng_enc` | `TEXT` (ciphertext) | P1 | **Yes** (encrypt-only) | No | GPS coordinate — NFR-3.23 |
+| `pickup_label` | `TEXT` | P1 | No | No | Place name — reveals location (same rationale as `Drive.startLocation`) |
+| `pickup_address` | `TEXT?` | P1 | No | No | Street address — reveals location |
+| `dropoff_lat_enc` | `TEXT` (ciphertext) | P1 | **Yes** (encrypt-only) | No | GPS coordinate — NFR-3.23 |
+| `dropoff_lng_enc` | `TEXT` (ciphertext) | P1 | **Yes** (encrypt-only) | No | GPS coordinate — NFR-3.23 |
+| `dropoff_label` | `TEXT` | P1 | No | No | Place name — reveals destination |
+| `dropoff_address` | `TEXT?` | P1 | No | No | Street address — reveals destination |
+| `status` | `TEXT` (enum, CHECK) | P0 | No | Yes | Lifecycle enum: requested/accepted/declined/enroute/arrived/completed/cancelled |
+| `passenger_name` | `TEXT?` | P1 | No | No | PII — booked-for passenger's name |
+| `passenger_phone` | `TEXT?` | P1 | No | No | PII — booked-for passenger's mobile (tracking-link SMS target). Never logged |
+| `scheduled_for` | `TIMESTAMPTZ?` | P0 | No | Yes | Reservation instant — no PII without the (P1) places |
+| `reschedule_proposed_for` | `TIMESTAMPTZ?` | P0 | No | Yes | Proposed new pickup instant |
+| `reschedule_status` | `TEXT?` (enum, CHECK) | P0 | No | Yes | Sub-state enum: requested/confirmed/declined |
+| `accepted_at` | `TIMESTAMPTZ?` | P0 | No | Yes | Non-sensitive timestamp |
+| `completed_at` | `TIMESTAMPTZ?` | P0 | No | Yes | Non-sensitive timestamp |
+| `created_at` | `TIMESTAMPTZ` | P0 | No | Yes | Non-sensitive timestamp |
+| `updated_at` | `TIMESTAMPTZ` | P0 | No | Yes | Non-sensitive timestamp |
+
+> **Encrypt-only coordinates (no dual-write).** Unlike the MYR-63/64 rollouts, `go_ride_requests` is a brand-new table: coordinates are written exclusively as AES-256-GCM ciphertext (`internal/store/ride_request_scan.go`, reusing the `vehicle_gps_encryption.go` float codec). There are no plaintext coordinate columns, no backfill tool, and no `*_plaintext_remaining_total` gauge. `RideRequestRepo` therefore requires an `Encryptor` at construction (panics on nil) and treats decrypt failure as a hard read error — there is no fallback column to fall back to.
+
 ---
 
 ## 2. Redaction rules by tier
@@ -265,6 +296,10 @@ Per NFR-3.23, AES-256-GCM column-level encryption is applied to the following co
 | `Vehicle` | `originLongitude` | `Float` | `Text` (base64 ciphertext) | Nav origin longitude |
 | `Vehicle` | `navRouteCoordinates` | `Json` | `Text` (base64 ciphertext) | Route polyline coordinate array |
 | `Drive` | `routePoints` | `Json` | `Text` (base64 ciphertext) | Full GPS trail for drive playback |
+| `go_ride_requests` | `pickup_lat_enc` | `Float` (logical) | `Text` (base64 ciphertext) | Ride pickup latitude — encrypt-only, no plaintext column (MYR-173) |
+| `go_ride_requests` | `pickup_lng_enc` | `Float` (logical) | `Text` (base64 ciphertext) | Ride pickup longitude — encrypt-only |
+| `go_ride_requests` | `dropoff_lat_enc` | `Float` (logical) | `Text` (base64 ciphertext) | Ride drop-off latitude — encrypt-only |
+| `go_ride_requests` | `dropoff_lng_enc` | `Float` (logical) | `Text` (base64 ciphertext) | Ride drop-off longitude — encrypt-only |
 
 ### 3.2 P1 columns NOT encrypted (rationale)
 
@@ -287,6 +322,12 @@ These P1 columns are sensitive and must never appear in logs, but are NOT encryp
 | `Invite` | `email` | Prisma-owned; disk encryption sufficient |
 | `TripStop` | `name` | Prisma-owned; disk encryption sufficient |
 | `TripStop` | `address` | Prisma-owned; disk encryption sufficient |
+| `go_ride_requests` | `pickup_label` | Place name, not coordinate data (same rationale as `Drive.startLocation`) |
+| `go_ride_requests` | `pickup_address` | Street address, not coordinate-precision data |
+| `go_ride_requests` | `dropoff_label` | Place name, not coordinate data |
+| `go_ride_requests` | `dropoff_address` | Street address, not coordinate-precision data |
+| `go_ride_requests` | `passenger_name` | Display name; disk encryption sufficient (same rationale as `User.name`) |
+| `go_ride_requests` | `passenger_phone` | PII, never logged; disk encryption sufficient today — promote to app-level encryption if threat modeling changes |
 
 > **Design decision:** Application-level encryption is reserved for columns where a database breach would expose precise geolocation trails or credential material. Human-readable location strings (place names, addresses) are protected by Supabase disk-level encryption and the P1 log-redaction rules. If threat modeling changes (e.g., multi-tenant deployment, regulatory requirements), these columns can be promoted to app-level encryption by adding them to the AES-256-GCM scope.
 
@@ -420,13 +461,13 @@ The `contract-guard` agent/CI check enforces the following rules derived from th
 
 | Tier | Count | Description |
 |------|-------|-------------|
-| P0 | 85 | Public — timestamps, opaque IDs, aggregate stats, feature flags, enums |
-| P1 | 26 | Sensitive — GPS coordinates, location names/addresses, OAuth tokens, PII, route data |
+| P0 | 97 | Public — timestamps, opaque IDs, aggregate stats, feature flags, enums |
+| P1 | 36 | Sensitive — GPS coordinates, location names/addresses, OAuth tokens, PII, route data |
 | P2 | 0 | Access-logged — reserved for future use |
 
-> **Count audit trail.** The P0 count was bumped from 83 → 85 by [MYR-11](https://linear.app/myrobotaxi/issue/MYR-11) when it added `Vehicle.chargeState` (Tesla proto field **179** `DetailedChargeState`, enum — see DV-19 for the 2026-04-23 empirical finding that switched the source from proto 2 to proto 179) and `Vehicle.timeToFull` (Tesla proto field 43, `Float` **hours (decimal)**) to the v1 charge atomic group. Both fields are P0 because they describe charge state, not identity or location. See §1.3 Vehicle table and `vehicle-state-schema.md` §2.2 for the wire contract. The `timeToFull` unit was empirically verified as hours (1.0667h capture) on 2026-04-22 — [DV-17 RESOLVED](https://linear.app/myrobotaxi/issue/MYR-25#comment-4f1dcee9-ab10-4039-acc5-9e7ef25c3762). Future count changes MUST add a one-line entry here so the total is auditable without `git blame`.
+> **Count audit trail.** The P0 count was bumped from 83 → 85 by [MYR-11](https://linear.app/myrobotaxi/issue/MYR-11) when it added `Vehicle.chargeState` (Tesla proto field **179** `DetailedChargeState`, enum — see DV-19 for the 2026-04-23 empirical finding that switched the source from proto 2 to proto 179) and `Vehicle.timeToFull` (Tesla proto field 43, `Float` **hours (decimal)**) to the v1 charge atomic group. Both fields are P0 because they describe charge state, not identity or location. See §1.3 Vehicle table and `vehicle-state-schema.md` §2.2 for the wire contract. The `timeToFull` unit was empirically verified as hours (1.0667h capture) on 2026-04-22 — [DV-17 RESOLVED](https://linear.app/myrobotaxi/issue/MYR-25#comment-4f1dcee9-ab10-4039-acc5-9e7ef25c3762). Future count changes MUST add a one-line entry here so the total is auditable without `git blame`. P0 85 → 97 and P1 26 → 36 by MYR-173: the new Go-owned `go_ride_requests` table (§1.9) adds 12 P0 columns (ids, status enums, timestamps), 4 P1 encrypted coordinate columns (encrypt-only, §3.1), and 6 P1 log-redaction-only columns (place labels/addresses + booked-for passenger name/phone, §3.2).
 
-### P1 fields requiring AES-256-GCM encryption (11 columns)
+### P1 fields requiring AES-256-GCM encryption (15 columns)
 
 1. `Account.access_token`
 2. `Account.refresh_token`
@@ -439,8 +480,12 @@ The `contract-guard` agent/CI check enforces the following rules derived from th
 9. `Vehicle.originLongitude`
 10. `Vehicle.navRouteCoordinates`
 11. `Drive.routePoints`
+12. `go_ride_requests.pickup_lat_enc`
+13. `go_ride_requests.pickup_lng_enc`
+14. `go_ride_requests.dropoff_lat_enc`
+15. `go_ride_requests.dropoff_lng_enc`
 
-### P1 fields with log-redaction only (no app-level encryption, 15 columns)
+### P1 fields with log-redaction only (no app-level encryption, 21 columns)
 
 1. `User.name`
 2. `User.email`
@@ -457,3 +502,9 @@ The `contract-guard` agent/CI check enforces the following rules derived from th
 13. `Invite.email`
 14. `TripStop.name`
 15. `TripStop.address`
+16. `go_ride_requests.pickup_label`
+17. `go_ride_requests.pickup_address`
+18. `go_ride_requests.dropoff_label`
+19. `go_ride_requests.dropoff_address`
+20. `go_ride_requests.passenger_name`
+21. `go_ride_requests.passenger_phone`
