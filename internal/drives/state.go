@@ -75,6 +75,20 @@ type vehicleState struct {
 	lastOdometer  float64
 	odometerKnown bool
 
+	// lastSOC caches the most recent state-of-charge value seen for this
+	// vehicle, including while idle (mirrors lastFSDMiles/lastOdometer).
+	// socKnown reports whether a plausible (non-zero) value has been
+	// observed. The charge atomic group streams on a slower cadence than
+	// gear, so the gear-change frame that starts a drive frequently lacks
+	// SOC; without a cache startDrive recorded startChargeLevel=0 while
+	// endChargeLevel captured correctly, producing a nonsense "0% -> 75%,
+	// -75% used" summary (MYR-207). SOC does not change while parked, so
+	// the last idle sample is the correct drive-start charge. Only
+	// non-zero values are cached: a literal 0 is the protobuf/zero-value
+	// default we are guarding against, never a plausible parked charge.
+	lastSOC  float64
+	socKnown bool
+
 	// lastTelemetryAt records the wall-clock time of the most recently
 	// received telemetry event for this vehicle (any field, gear-bearing
 	// or not). The end-condition watchdog uses this to detect drives
@@ -93,6 +107,7 @@ type activeDrive struct {
 	speedSum       float64 // running sum for average calculation
 	speedCount     int     // number of speed samples
 	startCharge    float64 // SOC at drive start (percent)
+	startChargeSet bool    // true once startCharge holds a real observed value (MYR-207)
 	startOdometer  float64 // odometer at drive start (miles)
 	startEnergy    float64 // energyRemaining at drive start (kWh)
 	startFSDMiles  float64 // fsdMilesSinceReset baseline for this drive
