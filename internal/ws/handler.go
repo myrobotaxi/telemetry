@@ -122,6 +122,16 @@ func (h *Hub) handleUpgrade(w http.ResponseWriter, r *http.Request, auth Authent
 		return
 	}
 
+	// Unicast an initial snapshot for every vehicle this client is
+	// auto-subscribed to at handshake time (MYR-137). This covers the
+	// pre-MYR-46 SDK path, which never sends an explicit `subscribe`
+	// frame and would otherwise wait indefinitely for live Tesla
+	// telemetry to learn model/year/color/etc. Explicit subscribers
+	// (MYR-46+) get their snapshot from handleSubscribeFrame instead.
+	for _, vehicleID := range client.vehicleIDs {
+		h.sendSnapshot(r.Context(), client, vehicleID, cfg.WriteTimeout)
+	}
+
 	ctx, cancel := context.WithCancel(r.Context())
 
 	g, gctx := errgroup.WithContext(ctx)

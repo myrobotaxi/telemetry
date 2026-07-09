@@ -91,6 +91,11 @@ func (c *Client) handleSubscribeFrame(ctx context.Context, raw json.RawMessage, 
 		slog.String("user_id", c.userID),
 		slog.String("vehicle_id", p.VehicleID),
 	)
+
+	// Unicast the persisted snapshot for this vehicle so the client sees
+	// model/year/color/estimatedRange/fsdMilesSinceReset immediately,
+	// rather than waiting on the next live Tesla frame (MYR-137).
+	c.hub.sendSnapshot(ctx, c, p.VehicleID, writeTimeout)
 	return true
 }
 
