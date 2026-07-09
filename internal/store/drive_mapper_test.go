@@ -33,8 +33,15 @@ func TestMapDriveStarted(t *testing.T) {
 	if record.StartTime != "2026-03-17T14:30:00Z" {
 		t.Errorf("StartTime = %q, want %q", record.StartTime, "2026-03-17T14:30:00Z")
 	}
-	if record.StartLocation != "33.097500,-96.821400" {
-		t.Errorf("StartLocation = %q, want %q", record.StartLocation, "33.097500,-96.821400")
+	// StartLocation is intentionally left empty by mapDriveStarted even
+	// though the event carries non-zero GPS: it is populated later by
+	// writer_drives.go's handleDriveStarted from the geocoder's
+	// Result.PlaceName, and must default to "" (not a raw "lat,lng"
+	// string) so a disabled/failed geocode leaves the wire-contract
+	// "not geocoded yet" sentinel intact. See TestWriter_DriveStarted_*
+	// in writer_drives_test.go for the geocoder-wired behavior.
+	if record.StartLocation != "" {
+		t.Errorf("StartLocation = %q, want empty (geocoder not yet consulted in mapDriveStarted)", record.StartLocation)
 	}
 	if record.EndTime != "" {
 		t.Errorf("EndTime = %q, want empty", record.EndTime)
@@ -68,8 +75,10 @@ func TestMapDriveCompletion(t *testing.T) {
 	if completion.EndTime != "2026-03-17T15:15:00Z" {
 		t.Errorf("EndTime = %q, want %q", completion.EndTime, "2026-03-17T15:15:00Z")
 	}
-	if completion.EndLocation != "33.110000,-96.830000" {
-		t.Errorf("EndLocation = %q, want %q", completion.EndLocation, "33.110000,-96.830000")
+	// EndLocation is intentionally left empty by mapDriveCompletion for
+	// the same reason StartLocation is in TestMapDriveStarted above.
+	if completion.EndLocation != "" {
+		t.Errorf("EndLocation = %q, want empty (geocoder not yet consulted in mapDriveCompletion)", completion.EndLocation)
 	}
 	if completion.DistanceMiles != 12.5 {
 		t.Errorf("DistanceMiles = %f, want 12.5", completion.DistanceMiles)
@@ -183,49 +192,6 @@ func TestMapRoutePoints(t *testing.T) {
 			}
 			if r.Timestamp != "2026-03-17T14:31:00Z" {
 				t.Errorf("Timestamp = %q, want %q", r.Timestamp, "2026-03-17T14:31:00Z")
-			}
-		})
-	}
-}
-
-func TestFormatLocation(t *testing.T) {
-	tests := []struct {
-		name string
-		loc  events.Location
-		want string
-	}{
-		{
-			name: "valid coordinates",
-			loc:  events.Location{Latitude: 33.097500, Longitude: -96.821400},
-			want: "33.097500,-96.821400",
-		},
-		{
-			name: "zero lat and lng treated as unset",
-			loc:  events.Location{Latitude: 0, Longitude: 0},
-			want: "",
-		},
-		{
-			name: "zero lat with nonzero lng is valid",
-			loc:  events.Location{Latitude: 0, Longitude: -96.821400},
-			want: "0.000000,-96.821400",
-		},
-		{
-			name: "nonzero lat with zero lng is valid",
-			loc:  events.Location{Latitude: 33.097500, Longitude: 0},
-			want: "33.097500,0.000000",
-		},
-		{
-			name: "negative coordinates",
-			loc:  events.Location{Latitude: -33.8688, Longitude: 151.2093},
-			want: "-33.868800,151.209300",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := formatLocation(tt.loc)
-			if got != tt.want {
-				t.Errorf("formatLocation(%+v) = %q, want %q", tt.loc, got, tt.want)
 			}
 		})
 	}
