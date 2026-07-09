@@ -277,6 +277,11 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 		logger.With(slog.String("component", "ws")),
 		ws.NoopHubMetrics{},
 		ws.WithMaskAudit(auditEmitter, auditMetrics),
+		// MYR-137: unicast a per-atomic-group snapshot to a client on
+		// subscribe so model/year/color/estimatedRange/fsdMilesSinceReset
+		// (already persisted per MYR-24) reach the WS wire immediately
+		// instead of only via the REST snapshot endpoint.
+		ws.WithVehicleSnapshotReader(&wsVehicleSnapshotAdapter{repo: vehicleRepo}),
 	)
 	defer hub.Stop()
 

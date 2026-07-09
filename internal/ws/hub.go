@@ -29,12 +29,31 @@ type Hub struct {
 	// frameSeq input. sync.Map keyed by vehicleID -> *atomic.Uint64
 	// so the per-vehicle increment is lock-free on the hot path.
 	frameCounters sync.Map
+
+	// snapshots loads the persisted vehicle row so the hub can unicast
+	// an initial vehicle_update (or several — one per atomic group, see
+	// snapshot.go) to a client the moment it subscribes, before any live
+	// Tesla telemetry has arrived on this connection (MYR-137). Nil
+	// disables the feature — sendSnapshot becomes a no-op — which is the
+	// default in tests that don't configure WithVehicleSnapshotReader.
+	snapshots VehicleSnapshotReader
 }
 
 // HubOption configures optional Hub behavior. Following the v1 SDK
 // pattern (cmd/telemetry-server/main.go's WithMask), options are
 // composable, idempotent, and default to a quiet no-op when omitted.
 type HubOption func(*Hub)
+
+// WithVehicleSnapshotReader attaches the persisted-vehicle-row reader
+// used to unicast an initial snapshot to a client on subscribe (MYR-137,
+// snapshot.go). Omitting this option leaves h.snapshots nil, which makes
+// sendSnapshot a no-op — the hub falls back to the pre-MYR-137 behavior
+// of only ever broadcasting live telemetry.
+func WithVehicleSnapshotReader(reader VehicleSnapshotReader) HubOption {
+	return func(h *Hub) {
+		h.snapshots = reader
+	}
+}
 
 // NewHub creates a Hub ready to accept client registrations.
 func NewHub(logger *slog.Logger, metrics HubMetrics, opts ...HubOption) *Hub {
