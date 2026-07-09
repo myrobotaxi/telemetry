@@ -149,6 +149,54 @@ func TestRideRequestHandler_AcceptDecline(t *testing.T) {
 	}
 }
 
+// TestRideRequestHandler_Accept_DispatchExactlyOnce seals the double-accept
+// (owner double-tap / two devices) semantics: the WINNING guarded write
+// publishes the ride.accepted dispatch seam exactly once; a LOSING accept —
+// whose pre-check read still saw `requested` but whose guarded write found
+// the row already accepted — 409s and publishes nothing. Together: one
+// dispatch event per accept, never two, regardless of interleaving.
+func TestRideRequestHandler_Accept_DispatchExactlyOnce(t *testing.T) {
+	const owner = rideOtherUsr
+
+	t.Run("winner publishes the seam exactly once", func(t *testing.T) {
+		store := &fakeRideStore{getRec: fixtureRideData(owner, rideStatusRequested)}
+		pub := &fakeRidePublisher{}
+		h := newRideHandler(store, &stubVehicleSnapshotReader{}, pub, owner)
+		rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/accept", "", rideAuthOK)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+		}
+		dispatches := 0
+		for _, ev := range pub.events {
+			if _, ok := ev.Payload.(events.RideAcceptedEvent); ok {
+				dispatches++
+			}
+		}
+		if dispatches != 1 {
+			t.Fatalf("dispatch seam published %d times, want exactly 1", dispatches)
+		}
+		if store.updateCalls != 1 || len(store.updatedFrom) != 1 || store.updatedFrom[0] != rideStatusRequested {
+			t.Errorf("guarded write: calls=%d from=%v", store.updateCalls, store.updatedFrom)
+		}
+	})
+
+	t.Run("loser 409s and publishes nothing", func(t *testing.T) {
+		// Pre-check read sees `requested`; by write time a concurrent accept
+		// already landed (fake: guard evaluates against updated.Status).
+		store := &fakeRideStore{
+			getRec:  fixtureRideData(owner, rideStatusRequested),
+			updated: fixtureRideData(owner, rideStatusAccepted),
+		}
+		pub := &fakeRidePublisher{}
+		h := newRideHandler(store, &stubVehicleSnapshotReader{}, pub, owner)
+		rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/accept", "", rideAuthOK)
+		assertErrEnvelope(t, rec, http.StatusConflict, wserrors.ErrCodeConflict)
+		if len(pub.events) != 0 {
+			t.Fatalf("losing accept must publish no events (no double dispatch), got %d", len(pub.events))
+		}
+	})
+}
+
 // TestRideRequestHandler_Accept_DispatchSeamPayload asserts the ride.accepted
 // event carries everything MYR-176 needs for the Tesla navigation_request:
 // both places (with address flattening), the booked-for passenger contact,
