@@ -305,6 +305,17 @@ func (d *Detector) handleTelemetry(te events.VehicleTelemetryEvent) {
 		state.odometerKnown = true
 	}
 
+	// Cache SOC the same way (MYR-207) so startDrive can seed
+	// startChargeLevel from the last-known charge — the gear-change frame
+	// that starts a drive frequently lacks the charge atomic group, which
+	// otherwise persisted startChargeLevel=0. Only cache non-zero values:
+	// a literal 0 is exactly the zero-value default we are guarding
+	// against, never a plausible parked charge.
+	if soc, ok := extractFloatField(te.Fields, telemetry.FieldSOC); ok && soc > 0 {
+		state.lastSOC = soc
+		state.socKnown = true
+	}
+
 	switch state.status {
 	case StatusIdle:
 		d.handleIdle(state, vin, te)
