@@ -74,14 +74,27 @@ type RideRequestListPage struct {
 	HasMore bool
 }
 
+// ErrRideStatusConflict is returned by RideRequestStore.UpdateStatusFrom
+// when the row exists but its current status is outside the allowed-from
+// set — the transition lost a race or was illegal to begin with. The
+// handlers map it to HTTP 409 conflict. The cmd adapter translates
+// store.ErrRideRequestConflict into this sentinel so the handler layer
+// stays decoupled from internal/store.
+var ErrRideStatusConflict = errors.New("ride request status conflict")
+
 // RideRequestStore is the persistence surface the ride-request handlers
 // need. Implemented by rideRequestStoreAdapter in cmd/telemetry-server over
-// store.RideRequestRepo. MYR-174 uses Create/GetByID/UpdateStatus/
+// store.RideRequestRepo. MYR-174 uses Create/GetByID/UpdateStatusFrom/
 // ListByRiderPage; MYR-175 (owner API) adds ListByOwnerPage.
 type RideRequestStore interface {
 	Create(ctx context.Context, in RideRequestCreateInput) (RideRequestData, error)
 	GetByID(ctx context.Context, id string) (RideRequestData, error)
-	UpdateStatus(ctx context.Context, id, status string) (RideRequestData, error)
+	// UpdateStatusFrom atomically transitions the ride to `to` ONLY when
+	// its current status is in `from` (single guarded UPDATE — the
+	// MYR-174/175 check-then-write race fix). Misses return
+	// ErrRideStatusConflict (row exists, status outside `from`) or an
+	// sdk.ErrNotFound-wrapping error (row gone).
+	UpdateStatusFrom(ctx context.Context, id string, from []string, to string) (RideRequestData, error)
 	ListByRiderPage(ctx context.Context, riderID string, cursor RideRequestListCursor, limit int) (RideRequestListPage, error)
 	ListByOwnerPage(ctx context.Context, ownerID string, status *string, cursor RideRequestListCursor, limit int) (RideRequestListPage, error)
 }

@@ -96,6 +96,29 @@ const queryRideRequestUpdateStatus = `UPDATE go_ride_requests SET
 WHERE id = $1
 RETURNING ` + rideRequestColumns
 
+// queryRideRequestUpdateStatusFrom is the GUARDED transition variant
+// (MYR-174/175 check-then-write race fix): identical timestamp-stamping
+// semantics to queryRideRequestUpdateStatus, but the row only matches when
+// its CURRENT status is in the caller's allowed-from set ($3, text[]).
+// Concurrent conflicting transitions therefore serialize in the database —
+// exactly one UPDATE matches; the loser affects zero rows and the repo maps
+// that to ErrRideRequestConflict (or ErrRideRequestNotFound when the id is
+// unknown). This guard is what makes the ride.accepted dispatch event
+// exactly-once per accept: only the winning write's caller publishes.
+const queryRideRequestUpdateStatusFrom = `UPDATE go_ride_requests SET
+	status = $2,
+	accepted_at = CASE
+		WHEN $2 = 'accepted' AND accepted_at IS NULL THEN NOW()
+		ELSE accepted_at
+	END,
+	completed_at = CASE
+		WHEN $2 = 'completed' AND completed_at IS NULL THEN NOW()
+		ELSE completed_at
+	END,
+	updated_at = NOW()
+WHERE id = $1 AND status = ANY($3)
+RETURNING ` + rideRequestColumns
+
 // queryRideRequestProposeReschedule opens (or replaces) a reschedule
 // negotiation: records the rider's proposed pickup time and flips the
 // sub-state to 'requested' (shared-screens.jsx ScheduledRideSheet — the

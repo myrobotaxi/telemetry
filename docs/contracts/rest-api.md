@@ -1339,6 +1339,7 @@ The main `RideRequestStatus` lifecycle is monotonic; the reschedule negotiation 
 | `completed` (terminal) | `409` | `409` | `409` | `409` | `409` | `409` |
 | `cancelled` (terminal) | `409` | `409` | `409` | `409` | `409` | `409` |
 
+- **Atomicity / race semantics (MYR-174/175):** every transition executes as a single guarded UPDATE (`WHERE id = … AND status = ANY(<legal-from>)` — `store.RideRequestRepo.UpdateStatusFrom`), so concurrent conflicting mutations serialize in the database: **exactly one wins; every loser receives `409 conflict`** even if its pre-check read saw a legal state (e.g. rider-cancel racing owner-decline, or an owner double-tapping accept from two devices). The WS `ride_status_changed` frame and the `ride.accepted` dispatch event are published only by the winning write — the dispatch seam is exactly-once per accept by construction.
 - **MYR-174 (this story)** implements only the two `→ cancelled` transitions. Cancel from `enroute`/`arrived` (ride in progress) and from any terminal state is `409` — cancel is legal only from `{requested, accepted}`.
 - **MYR-175** adds `requested → accepted` / `requested → declined` (owner).
 - **MYR-176/177** own the `accepted → enroute → arrived → completed` dispatch/live-tracking transitions; until they land, those endpoints do not exist and the states are unreachable from the server.

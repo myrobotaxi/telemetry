@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/myrobotaxi/telemetry/internal/store"
@@ -43,9 +44,20 @@ func (a *rideRequestStoreAdapter) GetByID(ctx context.Context, id string) (telem
 	return fromStoreRideRequest(rec), nil
 }
 
-func (a *rideRequestStoreAdapter) UpdateStatus(ctx context.Context, id, status string) (telemetry.RideRequestData, error) {
-	rec, err := a.repo.UpdateStatus(ctx, id, store.RideRequestStatus(status))
+// UpdateStatusFrom delegates to the repo's guarded single-statement
+// transition (MYR-174/175 race fix) and translates the store conflict
+// sentinel into the handler layer's telemetry.ErrRideStatusConflict.
+// sdk.ErrNotFound-wrapping errors pass through untouched.
+func (a *rideRequestStoreAdapter) UpdateStatusFrom(ctx context.Context, id string, from []string, to string) (telemetry.RideRequestData, error) {
+	fromStatuses := make([]store.RideRequestStatus, 0, len(from))
+	for _, s := range from {
+		fromStatuses = append(fromStatuses, store.RideRequestStatus(s))
+	}
+	rec, err := a.repo.UpdateStatusFrom(ctx, id, fromStatuses, store.RideRequestStatus(to))
 	if err != nil {
+		if errors.Is(err, store.ErrRideRequestConflict) {
+			return telemetry.RideRequestData{}, fmt.Errorf("update ride request status: %w", telemetry.ErrRideStatusConflict)
+		}
 		return telemetry.RideRequestData{}, fmt.Errorf("update ride request status: %w", err)
 	}
 	return fromStoreRideRequest(rec), nil

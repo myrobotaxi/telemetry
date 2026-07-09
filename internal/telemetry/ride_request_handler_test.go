@@ -32,6 +32,8 @@ type fakeRideStore struct {
 	updateErr    error
 	updatedID    string
 	updatedState string
+	updatedFrom  []string
+	updateCalls  int
 
 	riderPage RideRequestListPage
 	riderErr  error
@@ -69,17 +71,38 @@ func (f *fakeRideStore) GetByID(_ context.Context, _ string) (RideRequestData, e
 	return f.getRec, nil
 }
 
-func (f *fakeRideStore) UpdateStatus(_ context.Context, id, status string) (RideRequestData, error) {
+// UpdateStatusFrom mimics the guarded store transition: it enforces the
+// allowed-from set against getRec's status (as the DB would against the
+// live row), so a fixture whose status is outside `from` yields
+// ErrRideStatusConflict even when the handler's pre-check was bypassed or
+// raced. updateErr (when set) short-circuits everything.
+func (f *fakeRideStore) UpdateStatusFrom(_ context.Context, id string, from []string, to string) (RideRequestData, error) {
+	f.updateCalls++
 	f.updatedID = id
-	f.updatedState = status
+	f.updatedState = to
+	f.updatedFrom = from
 	if f.updateErr != nil {
 		return RideRequestData{}, f.updateErr
+	}
+	current := f.getRec.Status
+	if f.updated.ID != "" {
+		current = f.updated.Status
+	}
+	legal := false
+	for _, s := range from {
+		if s == current {
+			legal = true
+			break
+		}
+	}
+	if !legal {
+		return RideRequestData{}, fmt.Errorf("update ride request status: %w", ErrRideStatusConflict)
 	}
 	rec := f.updated
 	if rec.ID == "" {
 		rec = f.getRec
 	}
-	rec.Status = status
+	rec.Status = to
 	return rec, nil
 }
 
@@ -359,6 +382,32 @@ func TestRideRequestHandler_Cancel(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRideRequestHandler_Cancel_GuardWinsRace simulates the check-then-write
+// race: the pre-check read sees `requested` (legal), but by write time the
+// row moved to a state outside the allowed-from set (e.g. the owner declined
+// concurrently). The guarded UpdateStatusFrom must refuse — the loser gets
+// 409 conflict and publishes NO ride_status_changed event.
+func TestRideRequestHandler_Cancel_GuardWinsRace(t *testing.T) {
+	readRec := fixtureRideData(rideUserID, rideStatusRequested) // pre-check passes
+	writeRec := fixtureRideData(rideUserID, rideStatusDeclined) // guard sees the concurrent decline
+	store := &fakeRideStore{getRec: readRec, updated: writeRec}
+	pub := &fakeRidePublisher{}
+	h := newRideHandler(store, &stubVehicleSnapshotReader{}, pub, rideUserID)
+
+	rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/cancel", "", rideAuthOK)
+
+	assertErrEnvelope(t, rec, http.StatusConflict, wserrors.ErrCodeConflict)
+	if store.updateCalls != 1 {
+		t.Errorf("expected exactly one guarded write attempt, got %d", store.updateCalls)
+	}
+	if len(store.updatedFrom) != 2 || store.updatedFrom[0] != rideStatusRequested || store.updatedFrom[1] != rideStatusAccepted {
+		t.Errorf("guard allowed-from set: %v", store.updatedFrom)
+	}
+	if len(pub.events) != 0 {
+		t.Errorf("losing transition must publish no events, got %d", len(pub.events))
 	}
 }
 

@@ -144,31 +144,54 @@ func (h *RideRequestHandler) ServeCancel(w http.ResponseWriter, r *http.Request)
 	}
 
 	if !cancellableFrom(rec.Status) {
+		// Friendly fast-path message; the guarded write below is what
+		// actually decides under concurrency.
 		h.writeError(w, http.StatusConflict, wserrors.ErrCodeConflict, "ride request cannot be cancelled from status "+rec.Status)
 		return
 	}
 
-	h.applyTransition(ctx, w, rec, rideStatusCancelled)
+	updated, ok := h.mutateStatus(ctx, w, rec, rideCancellableFrom, rideStatusCancelled)
+	if !ok {
+		return
+	}
+	h.writeJSON(w, http.StatusOK, toRideRequestWire(updated))
 }
 
-// applyTransition persists a status change, publishes the summary
-// ride_status_changed event, and writes the updated RideRequest. Shared by
-// cancel (MYR-174) and accept/decline (MYR-175).
-func (h *RideRequestHandler) applyTransition(ctx context.Context, w http.ResponseWriter, rec RideRequestData, status string) {
-	updated, err := h.store.UpdateStatus(ctx, rec.ID, status)
+// rideCancellableFrom is the allowed-from set for a rider cancel; must stay
+// in lockstep with cancellableFrom and the rest-api.md §7.8 matrix.
+var rideCancellableFrom = []string{rideStatusRequested, rideStatusAccepted}
+
+// mutateStatus persists a status change ATOMICALLY via the store's guarded
+// UpdateStatusFrom — a single UPDATE with `WHERE status = ANY(from)` — so a
+// check-then-write race (rider-cancel vs owner-decline, owner double-accept)
+// resolves in the database: exactly one caller wins; the loser gets a 409
+// conflict here even if its pre-check read passed. Only the winning call
+// publishes the ride_status_changed summary event (and, for accept, the
+// ride.accepted dispatch seam at the call site) — exactly-once by
+// construction. Does NOT write the success response; the caller does. On
+// failure writes the error envelope and returns ok=false. Shared by cancel
+// (MYR-174) and accept/decline (MYR-175).
+func (h *RideRequestHandler) mutateStatus(ctx context.Context, w http.ResponseWriter, rec RideRequestData, from []string, to string) (RideRequestData, bool) {
+	updated, err := h.store.UpdateStatusFrom(ctx, rec.ID, from, to)
 	if err != nil {
-		if errors.Is(err, sdk.ErrNotFound) {
-			// Raced with a delete between GetByID and UpdateStatus.
+		switch {
+		case errors.Is(err, ErrRideStatusConflict):
+			// Lost the transition race (or the pre-check read was stale):
+			// the row's current status left the allowed-from set between
+			// our read and the guarded write.
+			h.writeError(w, http.StatusConflict, wserrors.ErrCodeConflict, "ride request cannot transition to "+to+" from its current status")
+		case errors.Is(err, sdk.ErrNotFound):
+			// Raced with a delete between GetByID and the guarded write.
 			h.writeError(w, http.StatusNotFound, wserrors.ErrCodeNotFound, "ride request not found")
-			return
+		default:
+			h.logger.Error("ride-request transition: store failed",
+				slog.String("ride_request_id", rec.ID),
+				slog.String("status", to),
+				slog.String("error", err.Error()),
+			)
+			h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
 		}
-		h.logger.Error("ride-request transition: store failed",
-			slog.String("ride_request_id", rec.ID),
-			slog.String("status", status),
-			slog.String("error", err.Error()),
-		)
-		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
-		return
+		return RideRequestData{}, false
 	}
 
 	h.publish(ctx, events.RideStatusChangedEvent{
@@ -181,7 +204,7 @@ func (h *RideRequestHandler) applyTransition(ctx context.Context, w http.Respons
 		UpdatedAt:        updated.UpdatedAt,
 	})
 
-	h.writeJSON(w, http.StatusOK, toRideRequestWire(updated))
+	return updated, true
 }
 
 // cancellableFrom reports whether a rider cancel is legal from the given
