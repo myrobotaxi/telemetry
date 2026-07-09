@@ -53,6 +53,30 @@ WHERE owner_id = $1 AND status = $2
 ORDER BY created_at DESC, id DESC
 LIMIT $3`
 
+// Cursor (keyset) variants for the paginated HTTP surface (MYR-174/175).
+// The (created_at, id) row-value comparison resumes strictly after the
+// prior page's last row under the same (created_at DESC, id DESC) ordering,
+// so pagination is stable across concurrent inserts (contracts
+// RideRequestsListResponse.nextCursor). The HTTP layer over-fetches limit+1
+// to drive hasMore without a COUNT — mirrors the drives-list cursor.
+const queryRideRequestsByRiderCursor = `SELECT ` + rideRequestColumns + `
+FROM go_ride_requests
+WHERE rider_id = $1 AND (created_at, id) < ($2, $3)
+ORDER BY created_at DESC, id DESC
+LIMIT $4`
+
+const queryRideRequestsByOwnerCursor = `SELECT ` + rideRequestColumns + `
+FROM go_ride_requests
+WHERE owner_id = $1 AND (created_at, id) < ($2, $3)
+ORDER BY created_at DESC, id DESC
+LIMIT $4`
+
+const queryRideRequestsByOwnerAndStatusCursor = `SELECT ` + rideRequestColumns + `
+FROM go_ride_requests
+WHERE owner_id = $1 AND status = $2 AND (created_at, id) < ($3, $4)
+ORDER BY created_at DESC, id DESC
+LIMIT $5`
+
 // queryRideRequestUpdateStatus persists a lifecycle transition with its
 // timestamp side-effects in one statement: entering 'accepted' stamps
 // accepted_at, entering 'completed' stamps completed_at (each only on
