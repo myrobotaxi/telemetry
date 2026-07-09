@@ -39,6 +39,29 @@ const (
 	// broadcast to WS clients.
 	TopicDriveDiscarded Topic = "drive.discarded"
 
+	// TopicRideRequestCreated is published when a rider creates a ride
+	// request (P10 ride-hailing, MYR-174). The payload is
+	// RideRequestCreatedEvent. The WS broadcaster subscribes and unicasts
+	// a summary `ride_request_created` frame to the two parties (rider +
+	// vehicle owner) only.
+	TopicRideRequestCreated Topic = "ride.request.created"
+
+	// TopicRideStatusChanged is published on every ride-request lifecycle
+	// mutation — rider cancel (MYR-174), owner accept/decline (MYR-175),
+	// dispatch progress (MYR-176), reschedule sub-state (MYR-192). The
+	// payload is RideStatusChangedEvent. The WS broadcaster subscribes and
+	// unicasts a summary `ride_status_changed` frame to the rider + owner.
+	TopicRideStatusChanged Topic = "ride.status.changed"
+
+	// TopicRideAccepted is the dispatch seam (MYR-175): published once when
+	// an owner accepts a ride request, carrying the pickup/dropoff places
+	// and passenger contact MYR-176 needs to build the Tesla
+	// navigation_request push. Internal-only — never broadcast to WS
+	// clients (the WS accept signal travels on TopicRideStatusChanged as a
+	// summary). No subscriber exists until MYR-176 lands; the bus tolerates
+	// zero subscribers.
+	TopicRideAccepted Topic = "ride.accepted"
+
 	// TopicVehicleDeleted is published when a Vehicle row is deleted from
 	// the Prisma-owned "Vehicle" table (sourced from a Postgres
 	// LISTEN/NOTIFY channel; see internal/store/notify_listener.go). The
