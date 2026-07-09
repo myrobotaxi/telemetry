@@ -16,6 +16,12 @@ var (
 	// Wraps sdk.ErrNotFound so callers can use errors.Is(err, sdk.ErrNotFound).
 	ErrDriveNotFound = fmt.Errorf("drive %w", sdk.ErrNotFound)
 
+	// ErrRideRequestNotFound is returned when a ride-request lookup (or a
+	// conditional update, e.g. resolving a reschedule that was never
+	// proposed) matches no row.
+	// Wraps sdk.ErrNotFound so callers can use errors.Is(err, sdk.ErrNotFound).
+	ErrRideRequestNotFound = fmt.Errorf("ride request %w", sdk.ErrNotFound)
+
 	// ErrTeslaTokenNotFound is returned when no Tesla OAuth token exists
 	// for a user in the Prisma-owned Account table.
 	// Wraps sdk.ErrNotFound so callers can use errors.Is(err, sdk.ErrNotFound).
