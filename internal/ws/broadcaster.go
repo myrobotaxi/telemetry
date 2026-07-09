@@ -60,6 +60,10 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 		{events.TopicDriveUpdated, b.makeHandler(b.handleDriveUpdated)},
 		{events.TopicDriveEnded, b.makeHandler(b.handleDriveEnded)},
 		{events.TopicConnectivity, b.makeHandler(b.handleConnectivity)},
+		// Ride-hailing summary frames (MYR-174), unicast to the two
+		// parties — no VIN resolution needed (see ride_broadcast.go).
+		{events.TopicRideRequestCreated, b.makeHandler(b.handleRideRequestCreated)},
+		{events.TopicRideStatusChanged, b.makeHandler(b.handleRideStatusChanged)},
 	}
 
 	for _, th := range subscriptions {

@@ -80,6 +80,14 @@ const (
 	// client's subscribe.sinceSeq request because the gap is too large.
 	// PLANNED, blocked on DV-02 (envelope sequence numbers).
 	ErrCodeSnapshotRequired ErrorCode = "snapshot_required"
+	// ErrCodeConflict is REST 409 (MYR-174) — a ride-request state
+	// mutation is illegal from the row's current lifecycle state (e.g.
+	// cancelling a completed ride, accepting a cancelled one). REST-only:
+	// the WS transport never emits it (schemas/ws-messages.schema.json
+	// ErrorPayload.code notes conflict is REST-only). SDK consumers branch
+	// on the typed code and surface the transition as rejected, never
+	// auto-retrying the same mutation.
+	ErrCodeConflict ErrorCode = "conflict"
 )
 
 // AllCodes returns every ErrorCode defined in this package, in catalog
@@ -98,6 +106,7 @@ func AllCodes() []ErrorCode {
 		ErrCodeInternalError,
 		ErrCodeServiceUnavailable,
 		ErrCodeSnapshotRequired,
+		ErrCodeConflict,
 	}
 }
 

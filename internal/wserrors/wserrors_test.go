@@ -34,6 +34,7 @@ var reachabilityMatrix = []reachability{
 	{code: ErrCodeNotFound, scenario: "internal/telemetry/vehicle_status_handler_test.go (REST 404 unknown vehicle)"},
 	{code: ErrCodeVehicleNotOwned, scenario: "internal/telemetry/vehicle_status_handler_test.go (REST 403 ownership mismatch)"},
 	{code: ErrCodeInternalError, scenario: "internal/telemetry/vehicle_status_handler_test.go (REST 500 lookup failure)"},
+	{code: ErrCodeConflict, scenario: "internal/telemetry/ride_request_handler_test.go (REST 409 illegal lifecycle transition)"},
 	{code: ErrCodeRateLimited, scenario: "internal/ws/handler_ratelimit_test.go (HTTP 429 envelope on upgrade)"},
 	{code: ErrCodePermissionDenied, skipUntil: "DV-07 — emitted alongside MYR-46 per-vehicle subscribe"},
 	{code: ErrCodeServiceUnavailable, skipUntil: "REST-only forward-compatibility code; not yet emitted (rest-api.md §4.1.1.a)"},

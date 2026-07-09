@@ -202,6 +202,7 @@ The REST catalog is a superset of the WebSocket catalog in [`websocket-protocol.
 | `vehicle_not_owned` | 403 | Shared (WS + REST, PLANNED on WS per DV-07) | Implemented on REST (MYR-47); PLANNED on WS per DV-07 | Surface to UI; do not auto-retry the same vehicleId. | Specific case of `permission_denied` for a vehicle-scoped endpoint whose `vehicleId` path param is not in the caller's ownership set. |
 | `not_found` | 404 | **REST-only** | Implemented (MYR-47) | Surface to UI; do not retry. The resource either does not exist or is filtered out by ownership / role mask. | Unknown `vehicleId`, `driveId`, or `inviteId`. The SDK cannot distinguish "never existed" from "revoked access" -- this is intentional, so the server never leaks the existence of resources the caller cannot see. |
 | `invalid_request` | 400 | **REST-only** | Implemented (MYR-47) | Surface to UI as a developer error; do not retry. | Request body, path params, or query string failed server-side validation (malformed cursor, `limit` out of range, malformed email on invite creation, etc.). |
+| `conflict` | 409 | **REST-only** | Implemented (MYR-174) | Surface to UI; **do not auto-retry the same mutation** — the ride is not in a state that permits it. | A ride-request state mutation is illegal from the row's current lifecycle state (e.g. cancelling a `completed` ride, accepting a `cancelled` one). The legal-transition matrix is §7.8. Member of the shared `ErrorPayload.code` enum for single-union SDK typing, but never emitted over the WS transport. |
 | `rate_limited` | 429 | Shared (WS + REST) | Implemented for WS pre-auth per-IP cap (MYR-47); REST per-user request cap PLANNED (DV-22); WS post-auth per-user cap PLANNED (DV-08) | Auto-retry with extended backoff (§4.1.2). SDK MAY set `Retry-After` header as backoff hint. | Two distinct caps share the same typed code. WS emits `rate_limited` with `subCode: device_cap` for **concurrent-session cap** breaches (too many simultaneous WebSocket connections per user, see `websocket-protocol.md` §6.1.1 and DV-08). REST emits `rate_limited` (no sub-code in v1) for **request-rate cap** breaches (>120 req/min per authenticated user, see §4.1.2 and DV-22). Consumers distinguish the two via the carrier transport and the presence of `subCode`. |
 | `internal_error` | 500 | Shared (WS + REST) | Implemented on REST (MYR-47); PLANNED on WS | Auto-retry with exponential backoff (NFR-3.10 curve from `websocket-protocol.md` §7.1), cap at 3 REST attempts before surfacing. | Catch-all for unexpected server failures: panics, DB errors, downstream timeouts. |
 | `service_unavailable` | 503 | **REST-only, PLANNED** | PLANNED (DV-21) | Auto-retry with exponential backoff; honor `Retry-After` header if present. | Reserved for maintenance windows and graceful-shutdown states. The server MAY return `503` during rolling deployments; v1 does not yet emit this code. Added to the REST catalog so SDK consumers can write forward-compatible handlers. |
@@ -209,8 +210,9 @@ The REST catalog is a superset of the WebSocket catalog in [`websocket-protocol.
 
 ##### 4.1.1.a REST-only codes added to the shared catalog
 
-Three codes are REST-only extensions of the shared catalog: `not_found`, `invalid_request`, and `service_unavailable`.
+Four codes are REST-only extensions of the shared catalog: `not_found`, `invalid_request`, `service_unavailable`, and `conflict` (MYR-174).
 
+- `conflict` (HTTP 409) is emitted only over REST when a ride-request lifecycle mutation is illegal from the row's current state (§7.8 transition matrix). It has no WS analogue because the ride-request mutations are request-oriented REST endpoints; the WS transport carries only the summary `ride_status_changed` broadcast of a *successful* transition. It is a member of the shared `ErrorPayload.code` enum (added by MYR-174) so the SDK's `CoreError` union stays one enum across transports; the schema enum description marks it REST-only-on-the-wire.
 - `not_found` is not emitted over the WebSocket because the WS path enforces ownership via silent filtering in `Hub.Broadcast` (see `websocket-protocol.md` §4.5) -- a client simply does not receive frames for vehicles it does not own, and there is no equivalent "the resource does not exist" signal because the WS is stream-oriented, not request-oriented. On REST, every vehicle-scoped path param MUST return `404 not_found` for unknown IDs.
 - `invalid_request` exists only because REST accepts structured request bodies and query params that can be malformed independently of auth. The WS protocol has no v1 client->server frames that take structured payloads beyond `auth`, so malformed-body errors cannot arise there.
 - `service_unavailable` is RESERVED for the REST contract so the SDK can write forward-compatible handlers before the server begins emitting it during maintenance windows.
@@ -248,6 +250,17 @@ Per-site audit (REST surface in `internal/telemetry/`, WS surface in `internal/w
 | [`handler.go`](../../internal/ws/handler.go) — auth failed | WS frame | `ErrCodeAuthFailed` | `ValidateToken` rejects after upgrade |
 | [`handler.go`](../../internal/ws/handler.go) — auth timeout | WS frame | `ErrCodeAuthTimeout` | Client did not send `auth` within `AuthTimeout` |
 | [`handler.go`](../../internal/ws/handler.go) — `GetUserVehicles` failure | WS frame | `ErrCodeAuthFailed` | DB failure when loading vehicle ownership |
+| [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — missing/invalid Authorization | 401 | `ErrCodeAuthFailed` | Header omitted or `ValidateToken` fails |
+| [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — malformed/unknown-field body, bad place, out-of-range coord, bad `scheduledFor`, bad `limit`/`cursor` | 400 | `ErrCodeInvalidRequest` | Create body / list query failed validation (`additionalProperties:false`) |
+| [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — vehicle not found on create | 404 | `ErrCodeNotFound` | `GetByID` returns `sdk.ErrNotFound` |
+| [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — vehicle access denied on create | 403 | `ErrCodeVehicleNotOwned` | Caller's `userID` ≠ vehicle's owner (v1 owner-only access; §7.8) |
+| [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — unknown / non-party ride | 404 | `ErrCodeNotFound` | `GetByID` miss, or caller is neither rider nor owner (no existence leak) |
+| [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — owner attempts cancel (rider-only) | 403 | `ErrCodePermissionDenied` | A party, but wrong role for the action |
+| [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — illegal lifecycle transition | 409 | `ErrCodeConflict` | Cancel from a non-`{requested,accepted}` state (§7.8) |
+| [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — store failure | 500 | `ErrCodeInternalError` | DB error on create / status update / list |
+| [`ride_request_owner_handler.go`](../../internal/telemetry/ride_request_owner_handler.go) — rider attempts accept/decline (owner-only) | 403 | `ErrCodePermissionDenied` | A party, but wrong role for the decision |
+| [`ride_request_owner_handler.go`](../../internal/telemetry/ride_request_owner_handler.go) — accept/decline from a non-`requested` state | 409 | `ErrCodeConflict` | Illegal lifecycle transition (§7.8 matrix) |
+| [`ride_request_owner_handler.go`](../../internal/telemetry/ride_request_owner_handler.go) — incoming feed store failure | 500 | `ErrCodeInternalError` | DB error on the owner list |
 
 Sites NOT in this audit (intentional carve-outs):
 
@@ -309,6 +322,8 @@ ORDER BY startTime DESC, id DESC
 ```
 
 Ordering by `startTime DESC` alone is ambiguous when multiple drives share the same millisecond boundary (rare but possible when a simulator replay creates bulk records). The secondary `id DESC` tiebreaker is a compound key that guarantees a total order, which is required for cursor stability -- a cursor encodes `(startTime, id)` so pagination can resume from a known position without skipping or repeating items.
+
+The ride-request list endpoints (§7.8) use the same total-order shape over their own timestamp: `ORDER BY createdAt DESC, id DESC`, with the cursor encoding `(createdAt, id)`. The keyset resume predicate is `(created_at, id) < (:cursorCreatedAt, :cursorId)` — a Postgres row-value comparison over the same compound key — so pagination is stable across concurrent inserts. `createdAt` travels inside the opaque cursor as an RFC 3339 nanosecond string and round-trips losslessly into the `timestamptz` comparison.
 
 Drives older than 365 days are pruned by the background retention job per NFR-3.27 (see [`data-lifecycle.md`](data-lifecycle.md) §5). A paginated scan that started before a prune and resumed after it will observe items disappearing from the tail of the list -- this is acceptable. `hasMore` and `nextCursor` continue to reflect the current state of the table.
 
@@ -504,6 +519,15 @@ No contract changes are required for the new role's wire shape (the REST respons
 | `DELETE` | `/api/invites/{inviteId}` | Revoke invite | Bearer + owner of invite's vehicle | FR-5.3 |
 | `DELETE` | `/api/users/me` | Delete own account + all data | Bearer (self only) | FR-10.1, FR-10.2, NFR-3.29 |
 | `GET` | `/api/users/me/export` | GDPR Art. 15 / 20 portability export of every Prisma row owned by the caller | Bearer (self only) | FR-10, NFR-3.29 |
+| `POST` | `/api/ride-requests` | Create a ride request (P10 ride-hailing) | Bearer + vehicle access | FR-9.3, NFR-3.21, NFR-3.23 |
+| `GET` | `/api/ride-requests` | Rider's own ride-request history (paginated) | Bearer (self as rider) | FR-9.1, FR-9.3 |
+| `GET` | `/api/ride-requests/incoming` | Owner's feed of open (`requested`) ride requests across their vehicles (paginated) | Bearer (self as owner) | FR-9.1, FR-9.3 |
+| `GET` | `/api/ride-requests/{id}` | Single ride-request detail | Bearer + party (rider or owner) | FR-9.3 |
+| `POST` | `/api/ride-requests/{id}/cancel` | Rider cancels a requested/accepted ride | Bearer (rider) | FR-9.3 |
+| `POST` | `/api/ride-requests/{id}/accept` | Owner accepts a `requested` ride (emits the MYR-176 dispatch seam) | Bearer (owner) | FR-9.3 |
+| `POST` | `/api/ride-requests/{id}/decline` | Owner declines a `requested` ride | Bearer (owner) | FR-9.3 |
+
+The `POST`/`GET /api/ride-requests[...]` rows (§7.8) are the P10 ride-hailing surface: the four rider-facing endpoints are mounted as of MYR-174 and the three owner-facing endpoints (incoming feed + accept/decline) as of MYR-175. The dispatch/live-tracking transitions remain with MYR-176/177 and the reschedule endpoints with MYR-192.
 
 `GET /api/vehicles` (§7.0) is mounted by the Go server as of MYR-91 (2026-05-10). `GET /api/vehicles/{vehicleId}/snapshot` (§7.1) and `GET /api/vehicles/{vehicleId}/drives` (§7.2) are mounted as of MYR-133 (2026-06-03). `GET /api/drives/{driveId}/route` (§7.4) is mounted as of PR #260 (DV-20), and `GET /api/drives/{driveId}` (§7.3) as of MYR-130 (2026-07-02) — DV-20 is fully RESOLVED (see §10). `GET /api/users/me/export` (and the §7.6 / §7.5 endpoints) is served by the Next.js app per §10 DV-23 and is NOT in scope for the Go server's DV-20 mount.
 
@@ -1271,6 +1295,85 @@ Per the §4.1 error envelope:
 
 ---
 
+### 7.8 Ride requests (P10 ride-hailing)
+
+> **Anchored:** FR-9.1, FR-9.3, NFR-3.21, NFR-3.23.
+> **Schema:** [`schemas/ride-request.schema.json`](schemas/ride-request.schema.json) — `RideRequest`, `RideRequestCreateRequest`, `RideRequestsListResponse`.
+> **Persisted:** Go-owned `go_ride_requests` table (pickup/dropoff coordinates AES-256-GCM encrypt-only — [`data-classification.md`](data-classification.md) §1.9).
+> **Reactive pair:** the WS `ride_request_created` / `ride_status_changed` summary frames ([`websocket-protocol.md`](websocket-protocol.md) §4.7–4.8), unicast to the two parties only.
+
+The rider-facing surface (mounted as of **MYR-174**) plus the owner-facing surface (incoming feed + accept/decline, mounted as of **MYR-175**). All endpoints validate a bearer token first (`401 auth_failed` on missing/invalid) and return the `RideRequest` object (`$defs.RideRequest`) as a bare object on the single-resource paths, or the `RideRequestsListResponse` envelope on the list path. Field names/enums are byte-for-byte the schema.
+
+#### Authorization model (v1 enforced vs deferred)
+
+- **Create** derives `ownerId` from the target vehicle's owner and enforces a **vehicle-access check identical to `/snapshot` and `/drives`**: the caller must be able to see the vehicle (v1: `vehicle.userId == caller`). So in v1 a rider may only request a ride on a vehicle they own, and `ownerId == riderId`. **Broader shared-viewer requests (rider ≠ owner) are DEFERRED to the app-side sharing tiers**: they light up automatically when the server's vehicle-access set gains the viewer-merge pathway (`GetUserVehicles`, PLANNED MYR-91) — no change to this handler is required, only a wider access set. Unknown vehicle → `404 not_found`; visible-but-not-accessible → `403 vehicle_not_owned`.
+- **Detail (`GET {id}`)** is **party-only**: rider OR vehicle owner. A caller who is neither gets `404 not_found` (not `403`) so the server never confirms the existence of a ride the caller has no relation to.
+- **Cancel** is **rider-only**. The owner is a party but cannot cancel → `403 permission_denied`. A non-party → `404`.
+- **Accept / decline** are **owner-only**. The rider is a party but cannot decide → `403 permission_denied`. A non-party → `404`. (MYR-175)
+- **Incoming feed** is scoped to the authenticated owner (`owner_id == JWT sub`) — no cross-owner reads are expressible. (MYR-175)
+- `riderId` is always the JWT `sub` (never client-supplied); `id`, `status`, and all timestamps are server-assigned.
+
+#### `POST /api/ride-requests`
+
+Body is `RideRequestCreateRequest` (`vehicleId`, `pickup`, `dropoff` required; `passengerName`, `passengerPhone`, `scheduledFor` optional). The body is decoded **strictly** — unknown keys are `400 invalid_request` (schema `additionalProperties:false`). `pickup`/`dropoff` are validated as `RidePlace` (lat ∈ [-90,90], lng ∈ [-180,180], non-empty `label`). Responds **`201 Created`** with the full `RideRequest` and unicasts `ride_request_created` to the rider + owner.
+
+Errors: `400 invalid_request` (malformed/unknown-field body, bad place, bad `scheduledFor`), `401 auth_failed`, `403 vehicle_not_owned`, `404 not_found` (unknown vehicle), `500 internal_error`.
+
+#### `GET /api/ride-requests`
+
+The authenticated rider's own requests, newest first, cursor-paginated per §4.2 (`limit` default 20, max 100; opaque `cursor`). Returns the `RideRequestsListResponse` envelope (`items` always present — `[]` never `null`; `nextCursor` null on the final page). Ordering `createdAt DESC, id DESC` (§4.2.2).
+
+Errors: `400 invalid_request` (`limit` out of range / malformed `cursor`), `401 auth_failed`, `500 internal_error`.
+
+#### `GET /api/ride-requests/{id}`
+
+Party-only (rider or vehicle owner). Returns the bare `RideRequest`. Errors: `401 auth_failed`, `404 not_found` (unknown id OR non-party — indistinguishable), `500 internal_error`.
+
+#### `POST /api/ride-requests/{id}/cancel`
+
+Rider-only. Legal only from `requested` or `accepted` → `cancelled`; any other current status is `409 conflict`. Responds `200 OK` with the updated `RideRequest` and unicasts `ride_status_changed`. Errors: `401 auth_failed`, `403 permission_denied` (owner/non-rider party), `404 not_found` (unknown id / non-party), `409 conflict` (illegal transition), `500 internal_error`.
+
+#### `GET /api/ride-requests/incoming`
+
+The owner's feed of **open** requests across their vehicles — status `requested` only, covering BOTH the on-demand and scheduled variants (a scheduled request is `requested` with `scheduledFor` set, not a separate status; the owner sheet forks on `scheduledFor` presence). Newest first, cursor-paginated per §4.2 with the same `RideRequestsListResponse` envelope and `(createdAt, id)` cursor as the rider list. Decided rows (accepted/declined/…) leave the feed by construction.
+
+Errors: `400 invalid_request` (`limit` out of range / malformed `cursor`), `401 auth_failed`, `500 internal_error`.
+
+> **Routing note:** the literal `/incoming` segment takes precedence over the `GET /api/ride-requests/{id}` wildcard in Go's `ServeMux`, so both routes coexist; a regression test pins this.
+
+#### `POST /api/ride-requests/{id}/accept`
+
+Owner-only. Legal only from `requested` → `accepted`; any other current status is `409 conflict`. Responds `200 OK` with the updated `RideRequest` (now carrying `acceptedAt`, stamped first-entry-only by the store) and unicasts `ride_status_changed` to both parties. **Dispatch seam (MYR-176):** a successful accept also publishes an internal `ride.accepted` event on the process event bus carrying the pickup/dropoff places and the booked-for passenger contact — the input MYR-176 subscribes to for the Tesla `navigation_request` push. The event is internal-only: it never reaches the WS broadcast path, and no Tesla call happens on this endpoint.
+
+Errors: `401 auth_failed`, `403 permission_denied` (rider/non-owner party), `404 not_found` (unknown id / non-party), `409 conflict`, `500 internal_error`.
+
+#### `POST /api/ride-requests/{id}/decline`
+
+Owner-only. Legal only from `requested` → `declined`; any other current status is `409 conflict`. Responds `200 OK` with the updated `RideRequest` and unicasts `ride_status_changed`. Same error catalog as accept (minus the dispatch seam).
+
+#### Lifecycle transition matrix
+
+The main `RideRequestStatus` lifecycle is monotonic; the reschedule negotiation is a separate sub-state (`rescheduleStatus`, MYR-192). Every mutation endpoint enforces legality in the **handler** (the store stays a dumb persistence layer) and rejects an illegal transition with `409 conflict`. Rows are the current status; a cell names the endpoint that performs the transition (and the story that owns it), or `409` when no legal transition exists from that state.
+
+| From \ To | `accepted` | `declined` | `enroute` | `arrived` | `completed` | `cancelled` |
+|-----------|-----------|-----------|-----------|-----------|-------------|-------------|
+| `requested` | `accept` (owner, MYR-175) | `decline` (owner, MYR-175) | `409` | `409` | `409` | `cancel` (rider, MYR-174) |
+| `accepted` | — | `409` | dispatch (MYR-176) | `409` | `409` | `cancel` (rider, MYR-174) |
+| `enroute` | `409` | `409` | — | live-tracking (MYR-177) | `409` | `409` |
+| `arrived` | `409` | `409` | `409` | — | live-tracking (MYR-177) | `409` |
+| `declined` (terminal) | `409` | `409` | `409` | `409` | `409` | `409` |
+| `completed` (terminal) | `409` | `409` | `409` | `409` | `409` | `409` |
+| `cancelled` (terminal) | `409` | `409` | `409` | `409` | `409` | `409` |
+
+- **Atomicity / race semantics (MYR-174/175):** every transition executes as a single guarded UPDATE (`WHERE id = … AND status = ANY(<legal-from>)` — `store.RideRequestRepo.UpdateStatusFrom`), so concurrent conflicting mutations serialize in the database: **exactly one wins; every loser receives `409 conflict`** even if its pre-check read saw a legal state (e.g. rider-cancel racing owner-decline, or an owner double-tapping accept from two devices). The WS `ride_status_changed` frame and the `ride.accepted` dispatch event are published only by the winning write — the dispatch seam is exactly-once per accept by construction.
+- **MYR-174 (this story)** implements only the two `→ cancelled` transitions. Cancel from `enroute`/`arrived` (ride in progress) and from any terminal state is `409` — cancel is legal only from `{requested, accepted}`.
+- **MYR-175** implements `requested → accepted` / `requested → declined` (owner-only endpoints above). Accepting or declining a ride already past `requested` — including one the rider cancelled while the owner sheet was open — is the race the `409` protects.
+- **Reschedule confirm/decline (owner)** is NOT part of MYR-175: the rider-side propose endpoint (`ProposeReschedule`) has no HTTP surface yet, so an owner resolve endpoint would be unreachable dead code. The whole reschedule negotiation (propose + resolve, `rescheduleStatus` sub-state) ships together in **MYR-192**; the store layer (`ResolveReschedule`) is already in place.
+- **MYR-176/177** own the `accepted → enroute → arrived → completed` dispatch/live-tracking transitions; until they land, those endpoints do not exist and the states are unreachable from the server.
+- Every transition that succeeds emits a `ride_status_changed` summary frame to the two parties.
+
+---
+
 ## 8. Resource schemas
 
 The canonical v1 `VehicleState` schema is [`schemas/vehicle-state.schema.json`](schemas/vehicle-state.schema.json). The REST snapshot endpoint returns that shape directly via `$ref` in the OpenAPI spec -- it is NOT re-declared.
@@ -1342,6 +1445,8 @@ Same as [`websocket-protocol.md`](websocket-protocol.md) §10 divergence managem
 
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-07-09 | **Mounted the owner-facing ride-request surface — P10 ride-hailing ([MYR-175](https://linear.app/myrobotaxi/issue/MYR-175), stacked on MYR-174).** §7.8 extended with `GET /api/ride-requests/incoming` (owner's open-`requested` feed — on-demand + scheduled variants — same envelope + `(createdAt, id)` cursor as the rider list; literal segment wins over the `{id}` wildcard, regression-tested) and `POST /api/ride-requests/{id}/accept` / `/decline` (owner-only; legal only from `requested`, everything else `409 conflict` per the §7.8 matrix — matrix note updated from planned to implemented). Accept publishes the internal `ride.accepted` **dispatch seam** event (pickup/dropoff places + booked-for passenger contact) that MYR-176 subscribes to for the Tesla `navigation_request` push — internal-only, never broadcast, no Tesla calls in this story. Both decisions unicast `ride_status_changed` to the two parties. **Reschedule confirm/decline deliberately deferred to MYR-192**: the rider-side propose endpoint has no HTTP surface yet, so an owner resolve endpoint would be unreachable; the store's `ResolveReschedule` is in place. §6 catalog + §4.1.1.b emission audit extended (`permission_denied` rider-attempts-decision row, `conflict` owner-decision row). Implementation: `internal/telemetry/ride_request_owner_handler.go`, `mutateStatus` refactor in `ride_request_handler.go`, routes in `cmd/telemetry-server/wiring.go`. No schema changes. | go-engineer |
+| 2026-07-09 | **Mounted the rider-facing ride-request surface — P10 ride-hailing ([MYR-174](https://linear.app/myrobotaxi/issue/MYR-174)).** New §7.8: `POST /api/ride-requests` (create; strict `additionalProperties:false` body, derives `ownerId` + vehicle-access check identical to `/snapshot`, `201` + full `RideRequest`), `GET /api/ride-requests` (rider's own cursor-paginated list — `createdAt DESC, id DESC`, keyset cursor over `(createdAt, id)`; §4.2.2 updated), `GET /api/ride-requests/{id}` (party-only; non-party → `404` to avoid existence leak), `POST /api/ride-requests/{id}/cancel` (rider-only; `requested`/`accepted` → `cancelled`, else `409 conflict`). Added the full lifecycle **transition matrix** (§7.8) including the MYR-175 accept/decline and MYR-176/177 dispatch rows (unimplemented transitions return `409`). New shared-catalog code **`conflict`** (HTTP 409; §4.1.1, §4.1.1.a) — REST-only, added to `wserrors` + the reachability matrix; never emitted over WS. §6 endpoint catalog + §4.1.1.b emission audit extended. **Authorization enforced vs deferred:** v1 requires the caller to own the vehicle (so `ownerId == riderId`); broader shared-viewer requests (rider ≠ owner) are deferred to the app-side sharing tiers and light up when `GetUserVehicles` gains viewer-merge (PLANNED MYR-91) with no handler change. Reactive pair is the WS `ride_request_created` / `ride_status_changed` summary frames (websocket-protocol.md §4.7–4.8), per-party unicast. Implementation: `internal/telemetry/ride_request_{types,wire,handler,read_handler}.go`, `internal/store/ride_request_repo_page.go`, `internal/ws/{ride_broadcast.go,hub.go SendToUsers}`, `internal/events/ride_events.go`, wired in `cmd/telemetry-server`. No `ride-request.schema.json` change — the shapes landed in contracts v0.9.0. | go-engineer |
 | 2026-07-02 | **Mounted `GET /api/drives/{driveId}` on the Go server — DV-20 fully RESOLVED ([MYR-130](https://linear.app/myrobotaxi/issue/MYR-130)).** Closes the last unmounted DV-20 endpoint (drive detail, FR-3.4). Implemented in `internal/telemetry/drive_detail_handler.go` + `drive_detail_types.go`, backed by the wide `DriveRepo.GetByID` read (appropriate for a detail endpoint) via a new `driveDetailAdapter` in `cmd/telemetry-server/adapters.go`; wired at `GET /api/drives/{driveId}` in `wiring.go` with the same bearer-auth + ownership (`VehicleRepo.GetByID`) + role-based `DriveDetail` mask flow as the drive-route endpoint. Response is the `DriveDetail` object per §7.3 / §8 — every FR-3.4 field EXCEPT `routePoints` (served by §7.4). Error catalog: 400 `invalid_request` (empty driveId), 401 `auth_failed`, 403 `vehicle_not_owned`, 404 `not_found`, 500 `internal_error`. **Mask/OpenAPI drift fix:** `date` (required in the OpenAPI `DriveDetail` component and present in the §7.3 / fixture bodies) was missing from the §5.2.3 mask allow-list — masking would have stripped it and broken conformance; `driveDetailFields` in `internal/mask/tables.go` and the §5.2.3 table are updated in lockstep to include `date` (P0). Added `Server.ClientHandler()` accessor (`internal/server/server.go`) and a route-surface regression test (`cmd/telemetry-server/wiring_routes_test.go`) that asserts every SDK-contract REST route is mounted (unauthenticated request returns 401/400, never 404). §2.1 DV-20 callout, §6 endpoint-catalog status note, and the §10 DV-20 row flip to RESOLVED. No wire-shape / envelope / OpenAPI changes beyond the additive `date` mask fix — the DriveDetail contract was locked at MYR-12. | go-engineer |
 | 2026-06-07 | **`GET /api/vehicles/{vehicleId}/drives` items now include `fsdMiles` / `fsdPercentage` ([MYR-152](https://linear.app/myrobotaxi/issue/MYR-152)).** §5.2.2 mask table extended with the two P0 FSD stats (owner + viewer both see them — they already appear on `DriveDetail`); §7.2 response example updated to show a drive with FSD usage and a second drive with `0`. Unlike the location fields, both are **always present** (non-nullable, default `0`). OpenAPI `DriveSummary` schema gains `fsdMiles` + `fsdPercentage` (`required`, `x-classification: P0`), matching their `DriveDetail` siblings; the schema description no longer lists them among omitted fields. Additive, non-breaking → minor contract bump. Implementation: `internal/store/queries.go` `driveSummarySelectColumns` extended; `internal/store/drive_repo_list.go` `DriveSummaryRow` + `scanDriveSummaryRow` extended; `internal/telemetry/vehicle_drives_types.go` `DriveListItem` + `driveSummary` + `toMaskMap` + `buildDriveSummary` extended; `internal/mask/tables.go` `driveSummaryFields` extended; `cmd/telemetry-server/adapters.go` `driveListerAdapter` extended. No store-write-path changes — `DriveRepo.Create` / `Complete` already populate the columns. Pairs with [MYR-151](https://linear.app/myrobotaxi/issue/MYR-151) (FSD baseline fix) which makes the values non-zero. | go-engineer |
 | 2026-06-06 | **`GET /api/vehicles/{vehicleId}/drives` items now include `startLocation` / `startAddress` / `endLocation` / `endAddress` ([MYR-145](https://linear.app/myrobotaxi/issue/MYR-145)).** §5.2.2 mask table extended with the four P1 location fields (owner + viewer both see them — consistent with the FR-5.1 sharing use case already in effect for `DriveDetail`). §7.2 response example updated to show one drive with all four fields populated and a second drive with all four omitted, illustrating the nullable-on-the-wire convention: the handler drops the key entirely when the underlying Drive column is empty (drive still in progress, zero-GPS at start, or reverse-geocode failure) rather than emitting `""` or `null`. OpenAPI `DriveSummary` schema gains the four optional properties with the same `x-classification: P1` annotation as their `DriveDetail` siblings. Lean-projection rule is preserved: `routePoints` / `energyUsedKwh` / `fsdMiles` / `fsdPercentage` / `interventions` remain drive-detail-only. Implementation: `internal/store/queries.go` `driveSummarySelectColumns` extended; `internal/store/drive_repo_list.go` `DriveSummaryRow` + `scanDriveSummaryRow` extended; `internal/telemetry/vehicle_drives_types.go` `DriveListItem` + `driveSummary` + `toMaskMap` extended; `internal/mask/tables.go` `driveSummaryFields` extended; `cmd/telemetry-server/adapters.go` `driveListerAdapter` extended. No store-write-path changes — `DriveRepo.Create` / `Complete` already populate the four columns. No cursor / ordering / OpenAPI envelope shape changes. | go-engineer |

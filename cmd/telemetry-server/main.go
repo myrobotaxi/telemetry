@@ -201,6 +201,11 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 	driveRepo := store.NewDriveRepoWithEncryption(db.Pool(), storeMetrics, encryptor, logger.With(slog.String("component", "drive-repo")))
 	accountRepo := store.NewAccountRepo(db.Pool(), encryptor)
 
+	// MYR-173/174: ride-request repo. go_ride_requests stores pickup/dropoff
+	// coordinates encrypt-only, so the Encryptor is mandatory (the
+	// constructor panics on nil). Backs the P10 ride-hailing REST surface.
+	rideRepo := store.NewRideRequestRepo(db.Pool(), storeMetrics, encryptor)
+
 	// --- Drive detector ---
 	// MYR-146: reconciler reads open Drive rows on Start so a Fly
 	// redeploy mid-drive doesn't leave forever-active rows. The
@@ -331,6 +336,7 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 		vinCache:       vinCache,
 		vehicleRepo:    vehicleRepo,
 		driveRepo:      driveRepo,
+		rideRepo:       rideRepo,
 		accountRepo:    accountRepo,
 		auditEmitter:   auditEmitter,
 		auditMetrics:   auditMetrics,

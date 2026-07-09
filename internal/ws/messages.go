@@ -20,6 +20,13 @@ const (
 	msgTypeHeartbeat     = "heartbeat"
 	msgTypeError         = "error"
 
+	// Ride-hailing server->client frames (P10, MYR-174). Summary-only
+	// payloads unicast to the two parties (rider + vehicle owner). Canonical
+	// shapes: RideRequestCreatedPayload / RideStatusChangedPayload in
+	// schemas/ws-messages.schema.json.
+	msgTypeRideRequestCreated = "ride_request_created"
+	msgTypeRideStatusChanged  = "ride_status_changed"
+
 	// Client->server control frames added by MYR-46 (DV-07). The contract
 	// catalog lives in websocket-protocol.md §5; payload shapes are
 	// canonical in schemas/ws-messages.schema.json (Subscribe-, Unsubscribe-,
@@ -104,6 +111,34 @@ type connectivityPayload struct {
 	VehicleID string `json:"vehicleId"`
 	Online    bool   `json:"online"`
 	Timestamp string `json:"timestamp"`
+}
+
+// rideRequestCreatedPayload is the server-to-client summary frame
+// announcing a new ride request (P10, MYR-174). Schema:
+// RideRequestCreatedPayload in schemas/ws-messages.schema.json. Unicast to
+// the rider and vehicle-owner connections only. ScheduledFor is omitted
+// (omitempty) for an on-demand ("Now") request. Full record (pickup/dropoff
+// places, passenger) is fetched via GET /api/ride-requests/{id}.
+type rideRequestCreatedPayload struct {
+	RideRequestID string  `json:"rideRequestId"`
+	VehicleID     string  `json:"vehicleId"`
+	RiderID       string  `json:"riderId"`
+	Status        string  `json:"status"`
+	ScheduledFor  *string `json:"scheduledFor,omitempty"`
+	Timestamp     string  `json:"timestamp"`
+}
+
+// rideStatusChangedPayload is the server-to-client summary frame announcing
+// a mutation of an existing ride request (P10, MYR-174). Schema:
+// RideStatusChangedPayload in schemas/ws-messages.schema.json. Unicast to
+// the rider and vehicle-owner connections only. RescheduleStatus is omitted
+// (omitempty) when the ride has no reschedule history.
+type rideStatusChangedPayload struct {
+	RideRequestID    string  `json:"rideRequestId"`
+	VehicleID        string  `json:"vehicleId"`
+	Status           string  `json:"status"`
+	RescheduleStatus *string `json:"rescheduleStatus,omitempty"`
+	Timestamp        string  `json:"timestamp"`
 }
 
 // subscribePayload is the client-to-server request to (re)assert

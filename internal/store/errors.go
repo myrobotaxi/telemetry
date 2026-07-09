@@ -16,6 +16,19 @@ var (
 	// Wraps sdk.ErrNotFound so callers can use errors.Is(err, sdk.ErrNotFound).
 	ErrDriveNotFound = fmt.Errorf("drive %w", sdk.ErrNotFound)
 
+	// ErrRideRequestNotFound is returned when a ride-request lookup (or a
+	// conditional update, e.g. resolving a reschedule that was never
+	// proposed) matches no row.
+	// Wraps sdk.ErrNotFound so callers can use errors.Is(err, sdk.ErrNotFound).
+	ErrRideRequestNotFound = fmt.Errorf("ride request %w", sdk.ErrNotFound)
+
+	// ErrRideRequestConflict is returned by UpdateStatusFrom when the row
+	// exists but its current status is not in the caller's allowed-from set
+	// — the transition lost a race (or was illegal to begin with). The HTTP
+	// layer maps it to 409 conflict (rest-api.md §7.8). Deliberately does
+	// NOT wrap sdk.ErrNotFound.
+	ErrRideRequestConflict = errors.New("ride request status conflict")
+
 	// ErrTeslaTokenNotFound is returned when no Tesla OAuth token exists
 	// for a user in the Prisma-owned Account table.
 	// Wraps sdk.ErrNotFound so callers can use errors.Is(err, sdk.ErrNotFound).
