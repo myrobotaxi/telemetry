@@ -308,14 +308,14 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 	}
 }
 
-// setupRideRequestEndpoints wires the rider-facing ride-request REST surface
-// (P10 ride-hailing, MYR-174). The store adapter binds store.RideRequestRepo
-// (the pickup/dropoff GPS encrypt/decrypt boundary); the bus is the
-// RideEventPublisher — the WS broadcaster turns the published created/
-// status-changed events into summary frames unicast to the two parties
-// (rider + owner). The vehicles reader supplies the create-time vehicle
-// access check + ownerId derivation. The owner-facing surface (incoming
-// feed, accept/decline) is added by MYR-175.
+// setupRideRequestEndpoints wires the ride-request REST surface: the
+// rider-facing endpoints (P10 ride-hailing, MYR-174) plus the owner-facing
+// incoming feed + accept/decline (MYR-175). The store adapter binds
+// store.RideRequestRepo (the pickup/dropoff GPS encrypt/decrypt boundary);
+// the bus is the RideEventPublisher — the WS broadcaster turns the published
+// created/status-changed events into summary frames unicast to the two
+// parties (rider + owner). The vehicles reader supplies the create-time
+// vehicle access check + ownerId derivation.
 func setupRideRequestEndpoints(deps httpRouteDeps, vehicles telemetry.VehicleSnapshotReader) {
 	rideHandler := telemetry.NewRideRequestHandler(
 		deps.authenticator,
@@ -328,6 +328,14 @@ func setupRideRequestEndpoints(deps httpRouteDeps, vehicles telemetry.VehicleSna
 	deps.srv.HandleFunc("GET /api/ride-requests", rideHandler.ServeList)
 	deps.srv.HandleFunc("GET /api/ride-requests/{id}", rideHandler.ServeGet)
 	deps.srv.HandleFunc("POST /api/ride-requests/{id}/cancel", rideHandler.ServeCancel)
+
+	// MYR-175: owner-facing surface. The literal /incoming segment takes
+	// precedence over the {id} wildcard in Go's ServeMux, so both routes
+	// coexist. Accept additionally publishes the ride.accepted dispatch
+	// seam MYR-176 subscribes to for the Tesla navigation_request push.
+	deps.srv.HandleFunc("GET /api/ride-requests/incoming", rideHandler.ServeIncoming)
+	deps.srv.HandleFunc("POST /api/ride-requests/{id}/accept", rideHandler.ServeAccept)
+	deps.srv.HandleFunc("POST /api/ride-requests/{id}/decline", rideHandler.ServeDecline)
 }
 
 // setupTeslaTLS configures mTLS on the Tesla port. Without it, Tesla

@@ -93,6 +93,7 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 		// create/cancel routes are asserted separately below.
 		{"ride requests list (MYR-174)", "/api/ride-requests"},
 		{"ride request detail (MYR-174)", "/api/ride-requests/crr0123456789abcdef0123456789abcd"},
+		{"ride requests incoming feed (MYR-175)", "/api/ride-requests/incoming"},
 	}
 
 	for _, rt := range routes {
@@ -115,6 +116,8 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 	}{
 		{"ride request create (MYR-174)", "/api/ride-requests"},
 		{"ride request cancel (MYR-174)", "/api/ride-requests/crr0123456789abcdef0123456789abcd/cancel"},
+		{"ride request accept (MYR-175)", "/api/ride-requests/crr0123456789abcdef0123456789abcd/accept"},
+		{"ride request decline (MYR-175)", "/api/ride-requests/crr0123456789abcdef0123456789abcd/decline"},
 	}
 	for _, rt := range postRoutes {
 		t.Run(rt.name, func(t *testing.T) {

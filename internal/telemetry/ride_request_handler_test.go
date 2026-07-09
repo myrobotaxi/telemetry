@@ -42,6 +42,15 @@ type fakeRideStore struct {
 		cursor RideRequestListCursor
 		limit  int
 	}
+
+	ownerPage RideRequestListPage
+	ownerErr  error
+	ownerCall struct {
+		id     string
+		status *string
+		cursor RideRequestListCursor
+		limit  int
+	}
 }
 
 func (f *fakeRideStore) Create(_ context.Context, in RideRequestCreateInput) (RideRequestData, error) {
@@ -116,8 +125,15 @@ func (f *fakeRideStore) ListByRiderPage(_ context.Context, riderID string, curso
 	return f.riderPage, nil
 }
 
-func (f *fakeRideStore) ListByOwnerPage(_ context.Context, _ string, _ *string, _ RideRequestListCursor, _ int) (RideRequestListPage, error) {
-	return RideRequestListPage{}, nil
+func (f *fakeRideStore) ListByOwnerPage(_ context.Context, ownerID string, status *string, cursor RideRequestListCursor, limit int) (RideRequestListPage, error) {
+	f.ownerCall.id = ownerID
+	f.ownerCall.status = status
+	f.ownerCall.cursor = cursor
+	f.ownerCall.limit = limit
+	if f.ownerErr != nil {
+		return RideRequestListPage{}, f.ownerErr
+	}
+	return f.ownerPage, nil
 }
 
 // fakeRidePublisher captures every published event so tests can assert the
@@ -160,6 +176,11 @@ func rideMux(h *RideRequestHandler) *http.ServeMux {
 	mux.HandleFunc("GET /api/ride-requests", h.ServeList)
 	mux.HandleFunc("GET /api/ride-requests/{id}", h.ServeGet)
 	mux.HandleFunc("POST /api/ride-requests/{id}/cancel", h.ServeCancel)
+	// Owner surface (MYR-175) — mirrors the production wiring, including the
+	// literal-vs-wildcard coexistence of /incoming and /{id}.
+	mux.HandleFunc("GET /api/ride-requests/incoming", h.ServeIncoming)
+	mux.HandleFunc("POST /api/ride-requests/{id}/accept", h.ServeAccept)
+	mux.HandleFunc("POST /api/ride-requests/{id}/decline", h.ServeDecline)
 	return mux
 }
 
