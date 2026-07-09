@@ -717,6 +717,225 @@ func TestDetector_FSDMilesAcrossCadenceMismatch(t *testing.T) {
 	}
 }
 
+// TestDetector_StartChargeAcrossCadenceMismatch is the MYR-207 regression
+// test. The charge atomic group streams on a slower cadence than gear, so the
+// gear-change frame that starts a drive frequently carries no SOC. The
+// detector must seed startChargeLevel from the last-known charge cached while
+// idle rather than persisting 0 (which produced the nonsense "0% -> 75%,
+// -75% used" drive summaries on production). endChargeLevel behaviour must be
+// unchanged. Two scenarios: charge arrives late in the drive, and charge never
+// arrives during the drive at all.
+func TestDetector_StartChargeAcrossCadenceMismatch(t *testing.T) {
+	t.Run("charge arrives late in drive", func(t *testing.T) {
+		bus := testBus()
+		defer bus.Close(context.Background())
+
+		cfg := testConfig()
+		cfg.EndDebounce = 20 * time.Millisecond
+		cfg.MinDuration = 0
+		cfg.MinDistanceMiles = 0
+
+		d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{}, nil)
+		if err := d.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() { _ = d.Stop() }()
+
+		startedCh := subscribeTopic(t, bus, events.TopicDriveStarted)
+		endedCh := subscribeTopic(t, bus, events.TopicDriveEnded)
+
+		now := time.Now()
+
+		// Idle charge tick: the vehicle reports SOC=75 while parked. This is
+		// the last-known charge the next drive should seed its start from.
+		idleFields := map[string]events.TelemetryValue{
+			string(telemetry.FieldGear): {StringVal: ptr("P")},
+			string(telemetry.FieldSOC):  {FloatVal: ptr(75.0)},
+		}
+		publishTelemetry(t, bus, telemetryEvent("VIN_SOC", now, idleFields))
+
+		// Drive starts on a gear-change frame that carries NO SOC field — the
+		// realistic case given the gear/charge cadence mismatch.
+		startFields := map[string]events.TelemetryValue{
+			string(telemetry.FieldGear):     {StringVal: ptr("D")},
+			string(telemetry.FieldSpeed):    {FloatVal: ptr(0.0)},
+			string(telemetry.FieldLocation): {LocationVal: &events.Location{Latitude: 33.0, Longitude: -96.0}},
+		}
+		publishTelemetry(t, bus, telemetryEvent("VIN_SOC", now.Add(1*time.Second), startFields))
+		if _, ok := waitForEvent(startedCh); !ok {
+			t.Fatal("timed out waiting for DriveStartedEvent")
+		}
+
+		// A later in-drive frame finally carries an updated SOC value.
+		midFields := map[string]events.TelemetryValue{
+			string(telemetry.FieldGear):     {StringVal: ptr("D")},
+			string(telemetry.FieldSpeed):    {FloatVal: ptr(60.0)},
+			string(telemetry.FieldLocation): {LocationVal: &events.Location{Latitude: 33.2, Longitude: -96.2}},
+			string(telemetry.FieldSOC):      {FloatVal: ptr(70.0)},
+		}
+		publishTelemetry(t, bus, telemetryEvent("VIN_SOC", now.Add(61*time.Second), midFields))
+
+		stopFields := map[string]events.TelemetryValue{
+			string(telemetry.FieldGear):     {StringVal: ptr("P")},
+			string(telemetry.FieldSpeed):    {FloatVal: ptr(0.0)},
+			string(telemetry.FieldLocation): {LocationVal: &events.Location{Latitude: 33.3, Longitude: -96.3}},
+			string(telemetry.FieldSOC):      {FloatVal: ptr(70.0)},
+		}
+		publishTelemetry(t, bus, telemetryEvent("VIN_SOC", now.Add(120*time.Second), stopFields))
+
+		evt, ok := waitForEvent(endedCh)
+		if !ok {
+			t.Fatal("timed out waiting for DriveEndedEvent")
+		}
+		stats := evt.Payload.(events.DriveEndedEvent).Stats
+
+		// Start charge is the pre-drive last-known value (75), NOT the late
+		// in-drive sample (70) and NOT a zero-value default. Before the fix
+		// this was 0 because the gear-change start frame carried no SOC.
+		if stats.StartChargeLevel != 75 {
+			t.Errorf("StartChargeLevel: got %d, want 75", stats.StartChargeLevel)
+		}
+		// End charge behaviour is unchanged: the most recent in-drive SOC.
+		if stats.EndChargeLevel != 70 {
+			t.Errorf("EndChargeLevel: got %d, want 70", stats.EndChargeLevel)
+		}
+	})
+
+	t.Run("charge never arrives during drive", func(t *testing.T) {
+		bus := testBus()
+		defer bus.Close(context.Background())
+
+		cfg := testConfig()
+		cfg.EndDebounce = 20 * time.Millisecond
+		cfg.MinDuration = 0
+		cfg.MinDistanceMiles = 0
+
+		d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{}, nil)
+		if err := d.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() { _ = d.Stop() }()
+
+		startedCh := subscribeTopic(t, bus, events.TopicDriveStarted)
+		endedCh := subscribeTopic(t, bus, events.TopicDriveEnded)
+
+		now := time.Now()
+
+		// Idle charge tick establishes the last-known charge (62).
+		idleFields := map[string]events.TelemetryValue{
+			string(telemetry.FieldGear): {StringVal: ptr("P")},
+			string(telemetry.FieldSOC):  {FloatVal: ptr(62.0)},
+		}
+		publishTelemetry(t, bus, telemetryEvent("VIN_SOC2", now, idleFields))
+
+		// Entire drive carries no SOC field at all.
+		startFields := map[string]events.TelemetryValue{
+			string(telemetry.FieldGear):     {StringVal: ptr("D")},
+			string(telemetry.FieldSpeed):    {FloatVal: ptr(0.0)},
+			string(telemetry.FieldLocation): {LocationVal: &events.Location{Latitude: 33.0, Longitude: -96.0}},
+		}
+		publishTelemetry(t, bus, telemetryEvent("VIN_SOC2", now.Add(1*time.Second), startFields))
+		if _, ok := waitForEvent(startedCh); !ok {
+			t.Fatal("timed out waiting for DriveStartedEvent")
+		}
+
+		midFields := map[string]events.TelemetryValue{
+			string(telemetry.FieldGear):     {StringVal: ptr("D")},
+			string(telemetry.FieldSpeed):    {FloatVal: ptr(55.0)},
+			string(telemetry.FieldLocation): {LocationVal: &events.Location{Latitude: 33.2, Longitude: -96.2}},
+		}
+		publishTelemetry(t, bus, telemetryEvent("VIN_SOC2", now.Add(61*time.Second), midFields))
+
+		stopFields := map[string]events.TelemetryValue{
+			string(telemetry.FieldGear):     {StringVal: ptr("P")},
+			string(telemetry.FieldSpeed):    {FloatVal: ptr(0.0)},
+			string(telemetry.FieldLocation): {LocationVal: &events.Location{Latitude: 33.3, Longitude: -96.3}},
+		}
+		publishTelemetry(t, bus, telemetryEvent("VIN_SOC2", now.Add(120*time.Second), stopFields))
+
+		evt, ok := waitForEvent(endedCh)
+		if !ok {
+			t.Fatal("timed out waiting for DriveEndedEvent")
+		}
+		stats := evt.Payload.(events.DriveEndedEvent).Stats
+
+		// With no in-drive SOC ever, both start and end fall back to the
+		// pre-drive last-known charge (62) — a plausible, non-zero summary
+		// rather than the "0% -> 0%" the bug produced.
+		if stats.StartChargeLevel != 62 {
+			t.Errorf("StartChargeLevel: got %d, want 62", stats.StartChargeLevel)
+		}
+		if stats.EndChargeLevel != 62 {
+			t.Errorf("EndChargeLevel: got %d, want 62", stats.EndChargeLevel)
+		}
+	})
+
+	t.Run("cold start seeds from first in-drive sample", func(t *testing.T) {
+		bus := testBus()
+		defer bus.Close(context.Background())
+
+		cfg := testConfig()
+		cfg.EndDebounce = 20 * time.Millisecond
+		cfg.MinDuration = 0
+		cfg.MinDistanceMiles = 0
+
+		d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{}, nil)
+		if err := d.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() { _ = d.Stop() }()
+
+		startedCh := subscribeTopic(t, bus, events.TopicDriveStarted)
+		endedCh := subscribeTopic(t, bus, events.TopicDriveEnded)
+
+		now := time.Now()
+
+		// No idle charge tick: the detector has never seen SOC for this
+		// vehicle (e.g. first drive after a restart). The start frame also
+		// carries no SOC.
+		startFields := map[string]events.TelemetryValue{
+			string(telemetry.FieldGear):     {StringVal: ptr("D")},
+			string(telemetry.FieldSpeed):    {FloatVal: ptr(0.0)},
+			string(telemetry.FieldLocation): {LocationVal: &events.Location{Latitude: 33.0, Longitude: -96.0}},
+		}
+		publishTelemetry(t, bus, telemetryEvent("VIN_SOC3", now, startFields))
+		if _, ok := waitForEvent(startedCh); !ok {
+			t.Fatal("timed out waiting for DriveStartedEvent")
+		}
+
+		// First in-drive SOC sample seeds the start charge lazily.
+		midFields := map[string]events.TelemetryValue{
+			string(telemetry.FieldGear):     {StringVal: ptr("D")},
+			string(telemetry.FieldSpeed):    {FloatVal: ptr(55.0)},
+			string(telemetry.FieldLocation): {LocationVal: &events.Location{Latitude: 33.2, Longitude: -96.2}},
+			string(telemetry.FieldSOC):      {FloatVal: ptr(58.0)},
+		}
+		publishTelemetry(t, bus, telemetryEvent("VIN_SOC3", now.Add(61*time.Second), midFields))
+
+		stopFields := map[string]events.TelemetryValue{
+			string(telemetry.FieldGear):     {StringVal: ptr("P")},
+			string(telemetry.FieldSpeed):    {FloatVal: ptr(0.0)},
+			string(telemetry.FieldLocation): {LocationVal: &events.Location{Latitude: 33.3, Longitude: -96.3}},
+			string(telemetry.FieldSOC):      {FloatVal: ptr(54.0)},
+		}
+		publishTelemetry(t, bus, telemetryEvent("VIN_SOC3", now.Add(120*time.Second), stopFields))
+
+		evt, ok := waitForEvent(endedCh)
+		if !ok {
+			t.Fatal("timed out waiting for DriveEndedEvent")
+		}
+		stats := evt.Payload.(events.DriveEndedEvent).Stats
+
+		// Start charge is the first in-drive sample (58), not 0.
+		if stats.StartChargeLevel != 58 {
+			t.Errorf("StartChargeLevel: got %d, want 58", stats.StartChargeLevel)
+		}
+		if stats.EndChargeLevel != 54 {
+			t.Errorf("EndChargeLevel: got %d, want 54", stats.EndChargeLevel)
+		}
+	})
+}
+
 func TestDetector_DisconnectEndsDrive(t *testing.T) {
 	bus := testBus()
 	defer bus.Close(context.Background())
