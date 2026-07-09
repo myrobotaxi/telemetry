@@ -325,8 +325,12 @@ This section is the wire-level catalog. Field-level types, units, nullability, a
 | `connectivity` | server->client | [`broadcaster.go:handleConnectivity`](../../internal/ws/broadcaster.go) | n/a | none directly (informational; see §4.4) | [`fixtures/websocket/connectivity.{online,offline}.json`](fixtures/README.md) |
 | `heartbeat` | server->client | [`heartbeat.go:RunHeartbeat`](../../internal/ws/heartbeat.go) | n/a | resets SDK liveness watchdog (§7.4.1) | [`fixtures/websocket/heartbeat.json`](fixtures/README.md) |
 | `error` | server->client | [`handler.go:sendError`](../../internal/ws/handler.go) | n/a | `connecting -> disconnected` or `connecting -> error` (C-4 / C-5) | [`fixtures/websocket/error.{auth_failed,auth_timeout}.json`](fixtures/README.md) |
+| `ride_request_created` | server->client | [`ride_broadcast.go:handleRideRequestCreated`](../../internal/ws/ride_broadcast.go) | n/a | none (P10 ride-hailing; see §4.7) | `ride_request_created.json` (planned) |
+| `ride_status_changed` | server->client | [`ride_broadcast.go:handleRideStatusChanged`](../../internal/ws/ride_broadcast.go) | n/a | none (P10 ride-hailing; see §4.8) | `ride_status_changed.json` (planned) |
 
 All fixture files are authored in [`fixtures/`](fixtures/) -- see [`fixtures/README.md`](fixtures/README.md) for the complete index. DV-05 is **RESOLVED** by MYR-13.
+
+> **Per-party delivery (ride-hailing frames).** The two `ride_*` frames are NOT vehicle-scoped like the telemetry/drive frames — they are **per-party unicast**: delivered only to the connections of the ride's two parties (the requesting **rider** and the vehicle **owner**), by user id, via [`Hub.SendToUsers`](../../internal/ws/hub.go). A vehicle-keyed `Hub.Broadcast` would leak the ride to every other shared viewer of that vehicle, so ride frames deliberately do not use the §4.5 ownership-filter path. Both frames are **summary-only** (same rationale as `drive_ended`/DV-11): they carry ids + status + enough to badge the right card; the pickup/dropoff places and booked-for passenger (P1) are NEVER on the broadcast — clients refetch `GET /api/ride-requests/{id}` for the full record.
 
 ### 4.1 `vehicle_update`
 
@@ -670,6 +674,69 @@ The mask matrix is the **same matrix used by the REST handler layer** (`rest-api
 
 **Empty-payload suppression.** If a role's mask projection yields a payload with no remaining fields (every field in the original frame was masked away), the hub MUST omit the frame for that role rather than send an empty `vehicle_update`. Sending an empty broadcast would leak "something happened on this vehicle" to a viewer who shouldn't even know the field existed.
 
+### 4.7 `ride_request_created`
+
+> **Anchored:** FR-9.3, NFR-3.21.
+> **Schema:** [`schemas/ws-messages.schema.json#/$defs/RideRequestCreatedPayload`](schemas/ws-messages.schema.json)
+> **Fixture:** `ride_request_created.json` (planned)
+
+Announces a new ride request (P10 ride-hailing, MYR-174). **Per-party unicast** (see the delivery note under the §4 catalog) to the requesting rider and the vehicle owner. **Summary-only** — the full record (pickup/dropoff places, passenger, timestamps) is fetched via REST `GET /api/ride-requests/{id}`.
+
+```jsonc
+{
+  "type": "ride_request_created",
+  "payload": {
+    "rideRequestId": "crr0123456789abcdef0123456789abcd",
+    "vehicleId": "clxyz1234567890abcdef",
+    "riderId": "clrider1234567890abcdef",
+    "status": "requested",
+    "scheduledFor": "2026-06-18T16:00:00Z",
+    "timestamp": "2026-06-15T16:12:00Z"
+  }
+}
+```
+
+| Field | Type | Classification | Notes |
+|-------|------|----------------|-------|
+| `rideRequestId` | `string` | **P0** | Opaque ride-request cuid; input to `GET /api/ride-requests/{id}`. |
+| `vehicleId` | `string` | **P0** | Vehicle the ride was requested on — lets the owner client badge the right car without a fetch. |
+| `riderId` | `string` | **P1** | Requesting rider's user cuid. Both recipients already know their own id; the owner uses this to attribute the request after the detail fetch resolves the display name. |
+| `status` | `string` (enum) | **P0** | Lifecycle status at creation — always `requested` today; typed as the full `RideRequestStatus` enum so future create-time states never break the frame. |
+| `scheduledFor` | `string` (ISO 8601 UTC) | **P0** | OPTIONAL — omitted for an on-demand ("Now") request. The owner sheet's now-vs-scheduled fork is its primary rendering decision. |
+| `timestamp` | `string` (ISO 8601 UTC) | **P0** | Row-creation time (`created_at`). |
+
+Source: [`internal/ws/ride_broadcast.go:handleRideRequestCreated`](../../internal/ws/ride_broadcast.go). Published by the ride-request create handler ([`internal/telemetry/ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go)) onto the `ride.request.created` event topic; the broadcaster unicasts to `[riderId, ownerId]`.
+
+### 4.8 `ride_status_changed`
+
+> **Anchored:** FR-9.3, NFR-3.21.
+> **Schema:** [`schemas/ws-messages.schema.json#/$defs/RideStatusChangedPayload`](schemas/ws-messages.schema.json)
+> **Fixture:** `ride_status_changed.json` (planned)
+
+Announces a mutation of an existing ride request (P10 ride-hailing): a main-lifecycle transition (rider cancel — MYR-174; owner accept/decline — MYR-175; dispatch progress — MYR-176) or a reschedule sub-state change (MYR-192). **Per-party unicast** to the rider and vehicle owner. **Summary-only** — clients needing the updated `scheduledFor`/timestamps refetch `GET /api/ride-requests/{id}`.
+
+```jsonc
+{
+  "type": "ride_status_changed",
+  "payload": {
+    "rideRequestId": "crr0123456789abcdef0123456789abcd",
+    "vehicleId": "clxyz1234567890abcdef",
+    "status": "cancelled",
+    "timestamp": "2026-06-15T16:14:30Z"
+  }
+}
+```
+
+| Field | Type | Classification | Notes |
+|-------|------|----------------|-------|
+| `rideRequestId` | `string` | **P0** | Opaque ride-request cuid. |
+| `vehicleId` | `string` | **P0** | |
+| `status` | `string` (enum) | **P0** | Main lifecycle status AFTER the mutation. On a reschedule-only mutation this is unchanged from the previous frame — consumers key on `(status, rescheduleStatus)` as a pair. |
+| `rescheduleStatus` | `string` (enum) | **P0** | OPTIONAL — omitted when the ride has no reschedule history. Present-and-`requested` is the rider's "reschedule requested / waiting to re-confirm" moment (MYR-192). |
+| `timestamp` | `string` (ISO 8601 UTC) | **P0** | Mutation time (the row's `updated_at`). |
+
+Source: [`internal/ws/ride_broadcast.go:handleRideStatusChanged`](../../internal/ws/ride_broadcast.go). Published by the ride-request handlers onto the `ride.status.changed` event topic on every transition; the broadcaster unicasts to `[riderId, ownerId]`.
+
 ---
 
 ## 5. Client -> server message catalog
@@ -806,6 +873,7 @@ Per FR-7.1, consumer SDKs MUST map `code` to typed error values and branch on th
 | `rate_limited` | **Implemented for pre-auth per-IP cap** ([`handler.go`](../../internal/ws/handler.go) emits the typed REST envelope on HTTP 429 — MYR-47); **PLANNED** for the post-auth per-user breach (DV-08) | server->client (per-user breach, paired with close 4003) OR HTTP 429 on upgrade (per-IP breach) | Auto-retry with **extended** backoff -- see pseudocode below. | Caller-facing signal: a concurrent-connection cap was breached. Per-user breach (post-auth, close 4003) and per-IP breach (pre-auth, HTTP 429) are both surfaced to the caller as the same typed error `rate_limited`; the SDK may inspect the underlying transport status for diagnostic logging but MUST NOT branch consumer-visible behavior on it. See §1.3 for the cap defaults, enforcement points, and the `rate_limited.device_cap` sub-code for the per-user breach. |
 | `internal_error` | **PLANNED** | server->client | Auto-retry with backoff | Catch-all for unexpected server failures during a live session. |
 | `snapshot_required` | **PLANNED** (DV-02) | server->client | Run the reconnect sequence (§7.2): re-fetch REST snapshot and restart live stream. | Server cannot satisfy the client's `subscribe.sinceSeq` request because the gap is too large. Requires DV-02 (`seq`) to ship. |
+| `conflict` | **REST-only** (MYR-174) — the WS transport never emits it. | n/a (REST 409) | n/a for WS | Member of the shared `ErrorPayload.code` enum for single-union SDK typing (same rationale as `not_found`/`invalid_request`). Emitted only over REST as HTTP 409 when a ride-request state mutation is illegal from the row's current lifecycle state (see [`rest-api.md`](rest-api.md) §7.8 transition matrix). |
 
 The PLANNED codes are reserved in the AsyncAPI spec and JSON Schemas today so SDKs can match against them once the server emits them. The schema enum is the canonical list -- when a new code is added, the enum, this table, and the contract-guard rules MUST all be updated in the same PR.
 
@@ -1073,6 +1141,7 @@ Read this legend before scanning the catalogue. A row's **Status** column classi
 
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-07-09 | **MYR-174: ride-hailing summary frames `ride_request_created` + `ride_status_changed` (P10).** Added §4 catalog rows, §4.7/§4.8 frame references, and the per-party delivery note. Both frames are **per-party unicast** (rider + vehicle owner, by user id via the new `Hub.SendToUsers`), NOT the §4.5 vehicle-ownership-filter path — a vehicle-keyed broadcast would leak the ride to other shared viewers. Both are **summary-only** (ids + status + `scheduledFor`/`rescheduleStatus`; pickup/dropoff/passenger P1 stay off the wire, clients refetch REST detail — same rationale as `drive_ended`/DV-11). Published by the ride-request handlers (`internal/telemetry/ride_request_handler.go`) onto the `ride.request.created` / `ride.status.changed` event topics; `internal/ws/ride_broadcast.go` marshals + unicasts. Also added a §6.1.1 catalog row for the shared-enum `conflict` code (REST-only; never emitted over WS). No change to the canonical `ws-messages.schema.json` (the payloads landed there in contracts v0.9.0). | go-engineer |
 | 2026-07-08 | **MYR-137: `Hub.sendSnapshot` unicasts a persisted-state snapshot on subscribe — DV-20 added and RESOLVED in the same PR.** Root cause: MYR-24 (2026-04-23) loaded `model`/`year`/`color`/`fsdMilesSinceReset` (and the pre-existing `estimatedRange`) into `store.Vehicle` and the REST `/snapshot` response, but no code path in `internal/ws/` ever read the DB row back out — `handleSubscribeFrame` only mutated the subscription set and `handleUpgrade` never queried the DB between `auth_ok` and starting the pumps. The live broadcast path only ever translates fields present on an *incoming Tesla telemetry event*, and `model`/`year`/`color` have no Tesla source at all (DB-only catalog fields), so a WS-only consumer that never calls the REST endpoint saw them as permanently absent. Fix: new `internal/ws/snapshot.go` adds `Hub.sendSnapshot`, wired from both `handleUpgrade` (pre-MYR-46 auto-subscribed clients) and `handleSubscribeFrame` (explicit `subscribe` / re-subscribe). It fetches the row via a new consumer-site `VehicleSnapshotReader` interface (`wsVehicleSnapshotAdapter` in `cmd/telemetry-server/adapters_snapshot.go`, wrapping the existing `store.VehicleRepo.GetByID`) and unicasts the result as one `vehicle_update` per atomic group present (`navigation`, `charge`, `gps`, `gear`) plus one for the ungrouped individual fields — never combined into a single frame, preserving the §3.2 "at most one atomic group per frame" rule. Because `chargeLevel` and `estimatedRange` are both members of `groupCharge` and are read from the same row, they always land in the same frame by construction. A snapshot fetch error is logged and skipped (non-fatal), matching the existing `VINResolver` failure posture elsewhere in the broadcast path. No wire-shape change — `vehicle_update`'s envelope and per-field types are unchanged; this closes a broadcast-assembly gap, not a schema gap. Added §5.2 prose describing the new behavior alongside the existing REST-snapshot-on-reconnect flow (§7.2/§7.3), which remains the SDK's documented cold-load source. | go-engineer |
 | 2026-04-13 | Initial full draft (closed PR #166): handshake, envelope, server->client and client->server catalogs, error/close-code matrix, heartbeat/reconnect/snapshot semantics, AsyncAPI 3.0 spec, sibling JSON Schemas, §10 open questions. Authored by a general-purpose agent role-playing `sdk-architect`; closed by the user for re-do with the real subagent. | general-purpose (role-played) |
 | 2026-04-13 | **Authoritative rewrite by the registered `sdk-architect` subagent.** (1) Corrected the anchored-requirements table: fixed FR-8.1/FR-8.2 labels, added FR-7.3, NFR-3.9, NFR-3.12, NFR-3.13 anchors. (2) Fixed the `MaxConnectionsPerIP` wiring claim: it is **not** populated by `main.go` today, so the per-IP cap is unwired. Recorded as DV-08. (3) Added the `charge`/`gps`/`gear` non-accumulator server flow explanation to §3.2 (only nav has a dedicated debounce). (4) Replaced §10 "open questions" with a formal "Code ↔ spec divergences" catalogue with stable DV-NN IDs and divergence-management rules. (5) Added new divergences: DV-03 (`chargeState`), DV-04 (`timeToFull`), DV-06 (`auth_timeout` close-code conflation), DV-10 (`speed` ungrouped), DV-11 (`drive_ended` FR-3.4 scope split), DV-12 (`duration` string format), DV-13 (`tripStartTime`). (6) Tightened §6.1.1 to separate today/planned + reconnect policy columns, added `snapshot_required` reserved code. (7) Added forward-compat open-object rule to §3.1 for FR-1.3. | sdk-architect |
