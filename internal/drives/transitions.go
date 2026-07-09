@@ -114,6 +114,14 @@ func accumulateDriveCounters(drive *activeDrive, te events.VehicleTelemetryEvent
 	}
 
 	if soc, ok := extractFloatField(te.Fields, telemetry.FieldSOC); ok {
+		// Lazily seed the start charge from the first in-drive SOC sample
+		// when it was cold at drive start (no cached idle value) — better
+		// than persisting 0. Mirrors the FSD/odometer baseline (MYR-157,
+		// MYR-207).
+		if !drive.startChargeSet && soc > 0 {
+			drive.startCharge = soc
+			drive.startChargeSet = true
+		}
 		drive.lastSOC = soc
 	}
 
@@ -138,10 +146,21 @@ func (d *Detector) startDrive(state *vehicleState, vin string, te events.Vehicle
 		startLoc = *state.lastLocation
 	}
 
-	// Snapshot initial values from the event.
-	var startCharge float64
-	if soc, ok := extractFloatField(te.Fields, telemetry.FieldSOC); ok {
+	// Seed the start charge (SOC %) from the last-known value cached for
+	// this vehicle (including while idle), preferring a fresh non-zero SOC
+	// on the triggering frame. The gear-change frame that starts a drive
+	// often lacks the charge atomic group; without this seed
+	// startChargeLevel persisted as 0 while endChargeLevel captured
+	// correctly, yielding a nonsense "0% -> 75%" summary (MYR-207). SOC
+	// does not change while parked, so the last idle sample is the correct
+	// drive-start charge. If neither source has a value, the baseline stays
+	// unset and accumulateDriveCounters lazily captures it from the first
+	// in-drive SOC sample (mirrors the FSD/odometer baseline, MYR-157).
+	startCharge := state.lastSOC
+	startChargeSet := state.socKnown
+	if soc, ok := extractFloatField(te.Fields, telemetry.FieldSOC); ok && soc > 0 {
 		startCharge = soc
+		startChargeSet = true
 	}
 
 	var startEnergy float64
@@ -165,6 +184,7 @@ func (d *Detector) startDrive(state *vehicleState, vin string, te events.Vehicle
 		startLocation:       startLoc,
 		maxSpeed:            0,
 		startCharge:         startCharge,
+		startChargeSet:      startChargeSet,
 		startOdometer:       state.lastOdometer,
 		lastOdometer:        state.lastOdometer,
 		odometerBaselineSet: state.odometerKnown,
