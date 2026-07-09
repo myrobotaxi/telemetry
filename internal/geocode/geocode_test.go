@@ -144,6 +144,236 @@ func TestMapboxGeocoder_ReverseGeocode(t *testing.T) {
 			},
 		},
 		{
+			// MYR-206: POI within threshold beats a neighborhood feature
+			// — the POI tier is strictly above the neighborhood tier.
+			name:       "POI within threshold beats neighborhood",
+			statusCode: http.StatusOK,
+			body: `{
+				"features": [
+					{
+						"text": "Whole Foods Market",
+						"place_name": "Whole Foods Market, 525 N Lamar Blvd, Austin, TX 78703",
+						"place_type": ["poi"],
+						"center": [-97.7430, 30.2672]
+					},
+					{
+						"text": "525 N Lamar Blvd",
+						"place_name": "525 N Lamar Blvd, Austin, TX 78703",
+						"place_type": ["address"],
+						"center": [-97.7431, 30.2672]
+					},
+					{
+						"text": "Old West Austin",
+						"place_name": "Old West Austin, Austin, Texas",
+						"place_type": ["neighborhood"],
+						"center": [-97.7550, 30.2800]
+					}
+				]
+			}`,
+			wantResult: &Result{
+				PlaceName: "Whole Foods Market",
+				Address:   "525 N Lamar Blvd, Austin, TX 78703",
+			},
+		},
+		{
+			// MYR-206: order-independence — the neighborhood feature is
+			// listed FIRST in the response array, before a qualifying
+			// POI. The tier ranking must still pick the POI: candidates
+			// are collected per tier and resolved afterwards, so array
+			// order between tiers is irrelevant.
+			name:       "neighborhood listed before qualifying POI, POI still wins",
+			statusCode: http.StatusOK,
+			body: `{
+				"features": [
+					{
+						"text": "Old West Austin",
+						"place_name": "Old West Austin, Austin, Texas",
+						"place_type": ["neighborhood"],
+						"center": [-97.7550, 30.2800]
+					},
+					{
+						"text": "525 N Lamar Blvd",
+						"place_name": "525 N Lamar Blvd, Austin, TX 78703",
+						"place_type": ["address"],
+						"center": [-97.7431, 30.2672]
+					},
+					{
+						"text": "Whole Foods Market",
+						"place_name": "Whole Foods Market, 525 N Lamar Blvd, Austin, TX 78703",
+						"place_type": ["poi"],
+						"center": [-97.7430, 30.2672]
+					}
+				]
+			}`,
+			wantResult: &Result{
+				PlaceName: "Whole Foods Market",
+				Address:   "525 N Lamar Blvd, Austin, TX 78703",
+			},
+		},
+		{
+			// MYR-206: the residential case this fallback exists for —
+			// no POI within walking range, but Mapbox returns the
+			// containing neighborhood. PlaceName uses the neighborhood's
+			// text; the neighborhood's centroid distance is irrelevant
+			// (containment, not proximity).
+			name:       "no POI in range, neighborhood fallback used",
+			statusCode: http.StatusOK,
+			body: `{
+				"features": [
+					{
+						"text": "Far Away Cafe",
+						"place_name": "Far Away Cafe, 999 Elsewhere St, Austin, TX",
+						"place_type": ["poi"],
+						"center": [-97.7431, 30.2690]
+					},
+					{
+						"text": "100 Tributary Way",
+						"place_name": "100 Tributary Way, Austin, TX 78703",
+						"place_type": ["address"],
+						"center": [-97.7431, 30.2672]
+					},
+					{
+						"text": "Preston Highlands",
+						"place_name": "Preston Highlands, Dallas, Texas",
+						"place_type": ["neighborhood"],
+						"center": [-97.7600, 30.2900]
+					}
+				]
+			}`,
+			wantResult: &Result{
+				PlaceName: "Preston Highlands",
+				Address:   "100 Tributary Way, Austin, TX 78703",
+			},
+		},
+		{
+			// MYR-206: no POI and no neighborhood — PlaceName stays
+			// empty (clients fall back to the address). Locality-level
+			// features must NOT be promoted into PlaceName: a bare city
+			// name renders "Dallas → Dallas" on intra-city drives.
+			name:       "no POI, no neighborhood, locality never used",
+			statusCode: http.StatusOK,
+			body: `{
+				"features": [
+					{
+						"text": "100 Tributary Way",
+						"place_name": "100 Tributary Way, Austin, TX 78703",
+						"place_type": ["address"],
+						"center": [-97.7431, 30.2672]
+					},
+					{
+						"text": "Dallas",
+						"place_name": "Dallas, Texas, United States",
+						"place_type": ["locality"],
+						"center": [-96.7970, 32.7767]
+					},
+					{
+						"text": "Dallas",
+						"place_name": "Dallas, Texas, United States",
+						"place_type": ["place"],
+						"center": [-96.7970, 32.7767]
+					}
+				]
+			}`,
+			wantResult: &Result{
+				PlaceName: "",
+				Address:   "100 Tributary Way, Austin, TX 78703",
+			},
+		},
+		{
+			// MYR-206: locality present alongside a neighborhood — the
+			// neighborhood is used and the locality text is ignored,
+			// regardless of array order (locality listed first here).
+			name:       "locality listed before neighborhood, neighborhood used",
+			statusCode: http.StatusOK,
+			body: `{
+				"features": [
+					{
+						"text": "Dallas",
+						"place_name": "Dallas, Texas, United States",
+						"place_type": ["locality"],
+						"center": [-96.7970, 32.7767]
+					},
+					{
+						"text": "Highland Park",
+						"place_name": "Highland Park, Dallas, Texas",
+						"place_type": ["neighborhood"],
+						"center": [-96.8000, 32.8300]
+					},
+					{
+						"text": "100 Tributary Way",
+						"place_name": "100 Tributary Way, Austin, TX 78703",
+						"place_type": ["address"],
+						"center": [-97.7431, 30.2672]
+					}
+				]
+			}`,
+			wantResult: &Result{
+				PlaceName: "Highland Park",
+				Address:   "100 Tributary Way, Austin, TX 78703",
+			},
+		},
+		{
+			// MYR-206: a feature dual-tagged ["neighborhood","locality"]
+			// is excluded from the neighborhood tier — locality text
+			// must never leak into PlaceName under ANY input, so an
+			// ambiguous dual-tagged feature loses to the empty floor.
+			name:       "dual-tagged neighborhood+locality excluded from PlaceName",
+			statusCode: http.StatusOK,
+			body: `{
+				"features": [
+					{
+						"text": "Dallas",
+						"place_name": "Dallas, Texas, United States",
+						"place_type": ["neighborhood", "locality"],
+						"center": [-96.7970, 32.7767]
+					},
+					{
+						"text": "100 Tributary Way",
+						"place_name": "100 Tributary Way, Austin, TX 78703",
+						"place_type": ["address"],
+						"center": [-97.7431, 30.2672]
+					}
+				]
+			}`,
+			wantResult: &Result{
+				PlaceName: "",
+				Address:   "100 Tributary Way, Austin, TX 78703",
+			},
+		},
+		{
+			// MYR-206: multiple neighborhood features — the first one in
+			// Mapbox's relevance order wins within the tier, mirroring
+			// the "multiple POIs, first qualifying wins" rule above.
+			name:       "multiple neighborhoods, first wins",
+			statusCode: http.StatusOK,
+			body: `{
+				"features": [
+					{
+						"text": "Preston Highlands",
+						"place_name": "Preston Highlands, Dallas, Texas",
+						"place_type": ["neighborhood"],
+						"center": [-96.8000, 33.0000]
+					},
+					{
+						"text": "Preston Trail",
+						"place_name": "Preston Trail, Dallas, Texas",
+						"place_type": ["neighborhood"],
+						"center": [-96.8100, 33.0100]
+					},
+					{
+						"text": "100 Tributary Way",
+						"place_name": "100 Tributary Way, Austin, TX 78703",
+						"place_type": ["address"],
+						"center": [-97.7431, 30.2672]
+					}
+				]
+			}`,
+			wantResult: &Result{
+				PlaceName: "Preston Highlands",
+				Address:   "100 Tributary Way, Austin, TX 78703",
+			},
+		},
+		{
 			// API returns zero features — preserved ErrNoResult
 			// behavior so callers (writer_drives, writer_location_address)
 			// can treat it as a soft-fail and skip persistence.
@@ -300,8 +530,14 @@ func TestMapboxGeocoder_RequestFormat(t *testing.T) {
 	if !strings.Contains(capturedPath, "limit=5") {
 		t.Errorf("expected limit=5 in URL, got: %s", capturedPath)
 	}
-	if !strings.Contains(capturedPath, "types=poi,address") {
-		t.Errorf("expected types=poi,address in URL, got: %s", capturedPath)
+	if !strings.Contains(capturedPath, "types=poi,address,neighborhood") {
+		t.Errorf("expected types=poi,address,neighborhood in URL, got: %s", capturedPath)
+	}
+	// Locality/place (city-level) types must never be requested — their
+	// text is banned from PlaceName (see buildResult), so requesting
+	// them only wastes candidate slots in the limit=5 window.
+	if strings.Contains(capturedPath, "locality") || strings.Contains(capturedPath, "place,") {
+		t.Errorf("city-level types must not be requested, got: %s", capturedPath)
 	}
 	t.Logf("captured path: %s", capturedPath)
 }
