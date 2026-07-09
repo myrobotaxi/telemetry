@@ -53,6 +53,30 @@ WHERE owner_id = $1 AND status = $2
 ORDER BY created_at DESC, id DESC
 LIMIT $3`
 
+// Cursor (keyset) variants for the paginated HTTP surface (MYR-174/175).
+// The (created_at, id) row-value comparison resumes strictly after the
+// prior page's last row under the same (created_at DESC, id DESC) ordering,
+// so pagination is stable across concurrent inserts (contracts
+// RideRequestsListResponse.nextCursor). The HTTP layer over-fetches limit+1
+// to drive hasMore without a COUNT — mirrors the drives-list cursor.
+const queryRideRequestsByRiderCursor = `SELECT ` + rideRequestColumns + `
+FROM go_ride_requests
+WHERE rider_id = $1 AND (created_at, id) < ($2, $3)
+ORDER BY created_at DESC, id DESC
+LIMIT $4`
+
+const queryRideRequestsByOwnerCursor = `SELECT ` + rideRequestColumns + `
+FROM go_ride_requests
+WHERE owner_id = $1 AND (created_at, id) < ($2, $3)
+ORDER BY created_at DESC, id DESC
+LIMIT $4`
+
+const queryRideRequestsByOwnerAndStatusCursor = `SELECT ` + rideRequestColumns + `
+FROM go_ride_requests
+WHERE owner_id = $1 AND status = $2 AND (created_at, id) < ($3, $4)
+ORDER BY created_at DESC, id DESC
+LIMIT $5`
+
 // queryRideRequestUpdateStatus persists a lifecycle transition with its
 // timestamp side-effects in one statement: entering 'accepted' stamps
 // accepted_at, entering 'completed' stamps completed_at (each only on
@@ -70,6 +94,29 @@ const queryRideRequestUpdateStatus = `UPDATE go_ride_requests SET
 	END,
 	updated_at = NOW()
 WHERE id = $1
+RETURNING ` + rideRequestColumns
+
+// queryRideRequestUpdateStatusFrom is the GUARDED transition variant
+// (MYR-174/175 check-then-write race fix): identical timestamp-stamping
+// semantics to queryRideRequestUpdateStatus, but the row only matches when
+// its CURRENT status is in the caller's allowed-from set ($3, text[]).
+// Concurrent conflicting transitions therefore serialize in the database —
+// exactly one UPDATE matches; the loser affects zero rows and the repo maps
+// that to ErrRideRequestConflict (or ErrRideRequestNotFound when the id is
+// unknown). This guard is what makes the ride.accepted dispatch event
+// exactly-once per accept: only the winning write's caller publishes.
+const queryRideRequestUpdateStatusFrom = `UPDATE go_ride_requests SET
+	status = $2,
+	accepted_at = CASE
+		WHEN $2 = 'accepted' AND accepted_at IS NULL THEN NOW()
+		ELSE accepted_at
+	END,
+	completed_at = CASE
+		WHEN $2 = 'completed' AND completed_at IS NULL THEN NOW()
+		ELSE completed_at
+	END,
+	updated_at = NOW()
+WHERE id = $1 AND status = ANY($3)
 RETURNING ` + rideRequestColumns
 
 // queryRideRequestProposeReschedule opens (or replaces) a reschedule

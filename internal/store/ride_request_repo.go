@@ -145,6 +145,48 @@ func (r *RideRequestRepo) UpdateStatus(ctx context.Context, id string, status Ri
 	return rec, nil
 }
 
+// UpdateStatusFrom is the GUARDED transition (MYR-174/175 race fix): it
+// persists the same stamped status change as UpdateStatus, but only when
+// the row's CURRENT status is in `from` — a single-statement
+// `WHERE id = $1 AND status = ANY($3)` so concurrent conflicting mutations
+// serialize in the database and exactly one wins. The HTTP handlers use
+// this for every lifecycle transition; only the winning call may publish
+// the WS / dispatch events (exactly-once ride.accepted seam).
+//
+// On a zero-row match the miss is disambiguated with a follow-up read (the
+// guard's correctness does not depend on it): an unknown id returns
+// ErrRideRequestNotFound, an existing row whose status is outside `from`
+// returns ErrRideRequestConflict.
+func (r *RideRequestRepo) UpdateStatusFrom(ctx context.Context, id string, from []RideRequestStatus, to RideRequestStatus) (RideRequestRecord, error) {
+	fromStrs := make([]string, 0, len(from))
+	for _, s := range from {
+		fromStrs = append(fromStrs, string(s))
+	}
+
+	start := time.Now()
+	row := r.pool.QueryRow(ctx, queryRideRequestUpdateStatusFrom, id, string(to), fromStrs)
+	rec, err := r.scanRideRequest(row)
+	r.metrics.ObserveQueryDuration("ride_request.update_status_from", time.Since(start).Seconds())
+	if err == nil {
+		return rec, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		r.metrics.IncQueryError("ride_request.update_status_from")
+		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.UpdateStatusFrom(%s): %w", id, err)
+	}
+
+	// Zero rows: not-found vs status-conflict. The follow-up read is purely
+	// diagnostic — whatever it observes, the guarded write above already
+	// refused the transition.
+	if _, getErr := r.GetByID(ctx, id); getErr != nil {
+		if errors.Is(getErr, ErrRideRequestNotFound) {
+			return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.UpdateStatusFrom(%s): %w", id, ErrRideRequestNotFound)
+		}
+		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.UpdateStatusFrom(%s): disambiguate miss: %w", id, getErr)
+	}
+	return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.UpdateStatusFrom(%s -> %s): %w", id, to, ErrRideRequestConflict)
+}
+
 // ProposeReschedule records the rider's proposed new pickup time and opens
 // the reschedule negotiation (RescheduleStatus 'requested' — the owner is
 // asked to re-confirm; MYR-192). The main Status is untouched: the design

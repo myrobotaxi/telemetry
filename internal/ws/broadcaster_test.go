@@ -288,8 +288,10 @@ func TestBroadcaster_Stop_Unsubscribes(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	if len(b.subs) != 5 {
-		t.Fatalf("expected 5 subscriptions, got %d", len(b.subs))
+	// telemetry + driveStarted + driveUpdated + driveEnded + connectivity
+	// (5) plus the two ride-hailing topics (MYR-174) = 7.
+	if len(b.subs) != 7 {
+		t.Fatalf("expected 7 subscriptions, got %d", len(b.subs))
 	}
 
 	if err := b.Stop(); err != nil {

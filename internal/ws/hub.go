@@ -135,6 +135,46 @@ func (h *Hub) Broadcast(vehicleID string, msg []byte) {
 	}
 }
 
+// SendToUsers unicasts a message to every connected client whose
+// authenticated userID is in userIDs, regardless of vehicle authorization.
+// It is the delivery primitive for the ride-hailing frames (MYR-174):
+// ride_request_created / ride_status_changed are addressed to the two
+// PARTIES of a ride (rider + vehicle owner) by user id, NOT by vehicleID —
+// a vehicle-keyed Broadcast would leak the ride to every other shared
+// viewer of that vehicle. Membership is checked against a small local set
+// so a two-element userIDs slice stays O(clients). Slow clients whose send
+// buffers are full have their oldest message dropped (drop-oldest policy,
+// same as Broadcast).
+func (h *Hub) SendToUsers(userIDs []string, msg []byte) {
+	if len(userIDs) == 0 {
+		return
+	}
+	targets := make(map[string]struct{}, len(userIDs))
+	for _, id := range userIDs {
+		if id != "" {
+			targets[id] = struct{}{}
+		}
+	}
+	if len(targets) == 0 {
+		return
+	}
+
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	for client := range h.clients {
+		if _, ok := targets[client.userID]; !ok {
+			continue
+		}
+		if dropped := client.enqueue(msg); dropped {
+			h.metrics.IncMessagesDropped()
+			h.logger.Debug("dropped message for slow client",
+				slog.String("user_id", client.userID),
+			)
+		}
+	}
+}
+
 // BroadcastAll sends a message to all connected clients regardless of
 // vehicle authorization. Used for heartbeats.
 func (h *Hub) BroadcastAll(msg []byte) {
