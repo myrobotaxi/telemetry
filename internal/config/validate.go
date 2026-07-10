@@ -17,6 +17,7 @@ func validate(cfg *Config) error {
 	errs = append(errs, validateDrives(cfg.drives)...)
 	errs = append(errs, validateWebSocket(cfg.websocket)...)
 	errs = append(errs, validateAuth(cfg.auth)...)
+	errs = append(errs, validateIdentity(cfg.identity)...)
 
 	if len(errs) > 0 {
 		return fmt.Errorf("config.Validate: %w:\n  %s",
@@ -135,6 +136,30 @@ func validateAuth(a AuthConfig) []string {
 	}
 	if a.TokenAudience == "" {
 		errs = append(errs, "auth.token_audience: must not be empty")
+	}
+	return errs
+}
+
+// validateIdentity checks the identity-module operational knobs. The secrets
+// (ES256 key, Apple client id) are optional — an absent key simply disables
+// the module — so they are NOT required here; the keystore validates the PEM
+// at load time. Only the always-defaulted numeric knobs are range-checked.
+func validateIdentity(i IdentityConfig) []string {
+	var errs []string
+	if i.AccessTokenTTL <= 0 {
+		errs = append(errs, "identity.access_token_ttl: must be positive")
+	}
+	if i.RefreshTokenTTL <= 0 {
+		errs = append(errs, "identity.refresh_token_ttl: must be positive")
+	}
+	if i.RefreshTokenTTL <= i.AccessTokenTTL {
+		errs = append(errs, "identity.refresh_token_ttl: must exceed identity.access_token_ttl")
+	}
+	if i.AuthRateLimitPerMinute < 1 {
+		errs = append(errs, fmt.Sprintf("identity.auth_rate_limit_per_minute: %d must be >= 1", i.AuthRateLimitPerMinute))
+	}
+	if i.AuthRateLimitBurst < 1 {
+		errs = append(errs, fmt.Sprintf("identity.auth_rate_limit_burst: %d must be >= 1", i.AuthRateLimitBurst))
 	}
 	return errs
 }

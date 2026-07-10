@@ -16,6 +16,7 @@ type Config struct {
 	drives         DrivesConfig
 	websocket      WebSocketConfig
 	auth           AuthConfig
+	identity       IdentityConfig
 	proxy          ProxyConfig
 	teslaOAuth     TeslaOAuthConfig
 	monitoring     MonitoringConfig
@@ -103,6 +104,43 @@ type AuthConfig struct {
 	TokenAudience string
 }
 
+// IdentityConfig holds settings for the internal/identity module (MYR-193,
+// ADR-001): native Sign in with Apple, ES256 access-token minting, and
+// rotating refresh tokens. Secrets (the ES256 private key) come from the
+// environment; the operational knobs (TTLs, rate limit) come from the JSON
+// file. The module is ENABLED at wiring time when an ES256 signing key is
+// available (a config key in prod, or an ephemeral dev key) AND an Apple
+// client id is configured.
+type IdentityConfig struct {
+	// ES256PrivateKeyPEM is the PKCS#8 PEM of the P-256 private key used to
+	// sign access tokens. Secret — from AUTH_ES256_PRIVATE_KEY(_B64). Empty
+	// means "no static key"; in --dev the wiring generates an ephemeral one.
+	ES256PrivateKeyPEM string
+
+	// AppleClientID is the expected `aud` on Apple identity tokens — the
+	// native app's Service/Bundle id (APPLE_NATIVE_CLIENT_ID,
+	// e.g. app.myrobotaxi.ios). Empty disables the Apple sign-in endpoint.
+	AppleClientID string
+
+	// BootstrapEmailToCUID is a config-seeded first-sign-in override
+	// (AUTH_APPLE_BOOTSTRAP) mapping a verified email to an existing user
+	// CUID, so a known user's first Apple sign-in binds to the right CUID
+	// even if email-match would miss (e.g. Apple private-relay address).
+	BootstrapEmailToCUID map[string]string
+
+	// AccessTokenTTL is the lifetime of a minted ES256 access token (~1h).
+	AccessTokenTTL time.Duration
+
+	// RefreshTokenTTL is the sliding refresh-family lifetime (~90d): each
+	// rotation issues a refresh token expiring now + RefreshTokenTTL.
+	RefreshTokenTTL time.Duration
+
+	// AuthRateLimitPerMinute is the per-IP request cap on the /api/auth/*
+	// endpoints (brute-force protection). Burst is AuthRateLimitBurst.
+	AuthRateLimitPerMinute int
+	AuthRateLimitBurst     int
+}
+
 // ProxyConfig holds settings for the Tesla Fleet API proxy (tesla-http-proxy).
 // All fields are optional — when URL is empty, the fleet config push endpoint
 // is disabled.
@@ -143,6 +181,9 @@ func (c *Config) WebSocket() WebSocketConfig { return c.websocket }
 
 // Auth returns the authentication configuration.
 func (c *Config) Auth() AuthConfig { return c.auth }
+
+// Identity returns the identity-module configuration (MYR-193, ADR-001).
+func (c *Config) Identity() IdentityConfig { return c.identity }
 
 // Proxy returns the Tesla Fleet API proxy configuration. When URL is empty,
 // the fleet config push feature is unavailable.
