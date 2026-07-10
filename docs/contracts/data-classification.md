@@ -234,6 +234,50 @@ The P10 ride-hailing aggregate (contracts `schemas/ride-request.schema.json`; FR
 
 > **Wire surface (MYR-174).** The rider-facing REST endpoints (`rest-api.md` §7.8) return the full `RideRequest` object — including the decrypted P1 `pickup`/`dropoff` coordinates + labels and the P1 passenger name/phone — but only to a **party** (rider or vehicle owner), over TLS, transported plaintext at the crypto boundary exactly like the vehicle-GPS REST paths (NFR-3.25). The reactive WS frames (`ride_request_created` / `ride_status_changed`, `websocket-protocol.md` §4.7–4.8) are **summary-only** and deliberately carry **none** of the P1 place/passenger data: they emit the P0 ids/status/timestamps plus the P1 `riderId` (an opaque user cuid, same tier + handling as `AuthOkPayload.userId`) and are **per-party unicast** (`Hub.SendToUsers`, never a vehicle-keyed broadcast). So the encrypted coordinates and PII never leave the server on the broadcast path — clients that need them refetch the party-only REST detail. Error-message construction on this surface uses opaque ids only (Rule CG-DC-2); the `409 conflict` / `404 not_found` reasons carry a status string or an id, never a coordinate/label/name.
 
+### 1.10 go_users table (Go-owned, MYR-193)
+
+Apple-native users minted by the identity module (ADR-001) who have no legacy Prisma `"User"` row. Created by `internal/store/migrations/0003_identity.up.sql` under the CG-DL-9 `go_` namespace.
+
+| Column | Type | Tier | Encrypt | Log-safe | Rationale |
+|--------|------|------|---------|----------|-----------|
+| `id` | `TEXT` (cuid) | P0 | No | Yes | User cuid — opaque internal identifier |
+| `email` | `TEXT?` | P1 | No | No | PII — verified email captured at first sign-in (nullable when Apple hides it) |
+| `name` | `TEXT?` | P1 | No | No | PII — display name from first sign-in |
+| `created_at` | `TIMESTAMPTZ` | P0 | No | Yes | Non-sensitive timestamp |
+| `updated_at` | `TIMESTAMPTZ` | P0 | No | Yes | Non-sensitive timestamp |
+
+### 1.11 go_identity_apple table (Go-owned, MYR-193)
+
+The authoritative `apple_sub -> user_id` binding, written once on first sign-in and reused verbatim thereafter (ADR-001 §4). Same `0003` migration.
+
+| Column | Type | Tier | Encrypt | Log-safe | Rationale |
+|--------|------|------|---------|----------|-----------|
+| `apple_sub` | `TEXT` | P0 | No | Yes | Apple's stable pseudonymous subject id — opaque, not PII |
+| `user_id` | `TEXT` (cuid) | P0 | No | Yes | Resolved user cuid (Prisma `"User".id` or `go_users.id`) — opaque |
+| `email` | `TEXT?` | P1 | No | No | PII — email captured at first sign-in |
+| `name` | `TEXT?` | P1 | No | No | PII — name captured at first sign-in |
+| `created_at` | `TIMESTAMPTZ` | P0 | No | Yes | Non-sensitive timestamp |
+| `last_login_at` | `TIMESTAMPTZ` | P0 | No | Yes | Non-sensitive timestamp |
+
+### 1.12 go_refresh_tokens table (Go-owned, MYR-193)
+
+Hash-only refresh-token store with single-use rotation and family reuse-detection (ADR-001 §5). Same `0003` migration. **The raw refresh token is never persisted** — only its SHA-256 digest — and access tokens are not stored at all.
+
+| Column | Type | Tier | Encrypt | Log-safe | Rationale |
+|--------|------|------|---------|----------|-----------|
+| `token_hash` | `TEXT` (sha256 hex) | P1 | No | No | Lookup key for a bearer credential — never logged. Storing only the one-way hash IS the protection (like a password hash), so no additional app-level encryption |
+| `family_id` | `TEXT` (cuid) | P0 | No | Yes | Rotation-lineage id — opaque |
+| `user_id` | `TEXT` (cuid) | P0 | No | Yes | Owning user cuid — opaque |
+| `issued_at` | `TIMESTAMPTZ` | P0 | No | Yes | Non-sensitive timestamp |
+| `expires_at` | `TIMESTAMPTZ` | P0 | No | Yes | Non-sensitive timestamp |
+| `rotated_from` | `TEXT?` (sha256 hex) | P1 | No | No | Previous token hash in the chain — same tier as `token_hash` |
+| `rotated_to` | `TEXT?` (sha256 hex) | P1 | No | No | Successor token hash — same tier as `token_hash` |
+| `revoked` | `BOOLEAN` | P0 | No | Yes | Non-sensitive flag |
+| `revoked_at` | `TIMESTAMPTZ?` | P0 | No | Yes | Non-sensitive timestamp |
+| `reason` | `TEXT?` (enum) | P0 | No | Yes | Lifecycle enum: `rotated`/`revoked`/`reuse_detected` |
+
+> **Token secrecy (MYR-193).** The ES256 access token and the raw refresh token are **P1** (credentials, same tier as `AuthPayload.token`). Neither is stored server-side (access tokens are stateless; refresh tokens are stored only as a SHA-256 hash). The identity module's auth audit trail (`slog`, ADR-001 §6) records the event + opaque user/family ids only — never an email, name, raw token, or token hash. The `/api/auth/*` error envelopes carry a generic `auth_failed` / `invalid_request` message with no PII and no reuse/linkage oracle (Rule CG-DC-2).
+
 ---
 
 ## 2. Redaction rules by tier

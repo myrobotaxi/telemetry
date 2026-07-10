@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -17,6 +18,7 @@ type fileConfig struct {
 	Drives    fileDrivesConfig    `json:"drives"`
 	WebSocket fileWebSocketConfig `json:"websocket"`
 	Auth      fileAuthConfig      `json:"auth"`
+	Identity  fileIdentityConfig  `json:"identity"`
 	Proxy     fileProxyConfig     `json:"proxy"`
 
 	// Populated from environment, not JSON.
@@ -28,6 +30,11 @@ type fileConfig struct {
 	teslaClientID        string
 	teslaClientSec       string
 	certMonitorEndpoints []string
+
+	// Identity module secrets/identifiers (env, not JSON).
+	es256PrivateKeyPEM string
+	appleClientID      string
+	appleBootstrap     map[string]string
 }
 
 type fileServerConfig struct {
@@ -77,6 +84,13 @@ type fileAuthConfig struct {
 	TokenAudience string `json:"token_audience"`
 }
 
+type fileIdentityConfig struct {
+	AccessTokenTTL         Duration `json:"access_token_ttl"`
+	RefreshTokenTTL        Duration `json:"refresh_token_ttl"`
+	AuthRateLimitPerMinute int      `json:"auth_rate_limit_per_minute"`
+	AuthRateLimitBurst     int      `json:"auth_rate_limit_burst"`
+}
+
 type fileProxyConfig struct {
 	URL                    string `json:"url"`
 	FleetTelemetryHostname string `json:"fleet_telemetry_hostname"`
@@ -106,6 +120,7 @@ func applyDefaults(fc *fileConfig) {
 	applyDrivesDefaults(&fc.Drives)
 	applyWebSocketDefaults(&fc.WebSocket)
 	applyAuthDefaults(&fc.Auth)
+	applyIdentityDefaults(&fc.Identity)
 	applyProxyDefaults(&fc.Proxy)
 }
 
@@ -129,6 +144,16 @@ func applyEnvOverrides(fc *fileConfig) error {
 	fc.fleetTelemetryCA = os.Getenv("FLEET_TELEMETRY_CA") // optional: PEM CA cert
 	fc.teslaClientID = os.Getenv("AUTH_TESLA_ID")         // optional: enables token refresh
 	fc.teslaClientSec = os.Getenv("AUTH_TESLA_SECRET")    // optional: enables token refresh
+
+	// Identity module (MYR-193, ADR-001). All optional: absent = module
+	// disabled (the server stays a pure token VALIDATOR, HS256-only).
+	keyPEM, err := readES256KeyEnv()
+	if err != nil {
+		return err
+	}
+	fc.es256PrivateKeyPEM = keyPEM
+	fc.appleClientID = os.Getenv("APPLE_NATIVE_CLIENT_ID")   // expected aud on Apple id tokens
+	fc.appleBootstrap = parseKVMap(os.Getenv("AUTH_APPLE_BOOTSTRAP")) // email=cuid[,email=cuid]
 
 	// Database env var overrides.
 	if v := os.Getenv("DATABASE_DISABLE_PREPARED_STATEMENTS"); v == "true" || v == "1" {
@@ -174,6 +199,50 @@ func applyEnvOverrides(fc *fileConfig) error {
 		return fmt.Errorf("config.Load: %w: %v", ErrMissingRequired, missing)
 	}
 	return nil
+}
+
+// readES256KeyEnv reads the identity module's ES256 private key from the
+// environment. AUTH_ES256_PRIVATE_KEY holds the raw PKCS#8 PEM;
+// AUTH_ES256_PRIVATE_KEY_B64 holds the same PEM base64-encoded (the Fly /
+// container convention — a single env line with no embedded newlines). The
+// raw form wins if both are set. Returns "" (no key) when neither is set.
+func readES256KeyEnv() (string, error) {
+	if raw := os.Getenv("AUTH_ES256_PRIVATE_KEY"); raw != "" {
+		return raw, nil
+	}
+	b64 := os.Getenv("AUTH_ES256_PRIVATE_KEY_B64")
+	if b64 == "" {
+		return "", nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
+	if err != nil {
+		return "", fmt.Errorf("config.Load: decode AUTH_ES256_PRIVATE_KEY_B64: %w: %w", ErrInvalidValue, err)
+	}
+	return string(decoded), nil
+}
+
+// parseKVMap parses a "k=v,k=v" list into a map. Whitespace around keys and
+// values is trimmed; empty or malformed (no "=") entries are dropped. Keys
+// are lower-cased so email lookups are case-insensitive. Returns nil for an
+// empty input so an unset var yields a nil (disabled) map.
+func parseKVMap(raw string) map[string]string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	out := make(map[string]string)
+	for _, pair := range strings.Split(raw, ",") {
+		k, v, ok := strings.Cut(pair, "=")
+		k = strings.ToLower(strings.TrimSpace(k))
+		v = strings.TrimSpace(v)
+		if !ok || k == "" || v == "" {
+			continue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // parseOriginList splits a comma-separated origin pattern list, trims
@@ -234,6 +303,15 @@ func buildConfig(fc *fileConfig) *Config {
 			Secret:        fc.authSecret,
 			TokenIssuer:   fc.Auth.TokenIssuer,
 			TokenAudience: fc.Auth.TokenAudience,
+		},
+		identity: IdentityConfig{
+			ES256PrivateKeyPEM:     fc.es256PrivateKeyPEM,
+			AppleClientID:          fc.appleClientID,
+			BootstrapEmailToCUID:   fc.appleBootstrap,
+			AccessTokenTTL:         fc.Identity.AccessTokenTTL.Dur(),
+			RefreshTokenTTL:        fc.Identity.RefreshTokenTTL.Dur(),
+			AuthRateLimitPerMinute: fc.Identity.AuthRateLimitPerMinute,
+			AuthRateLimitBurst:     fc.Identity.AuthRateLimitBurst,
 		},
 		proxy: ProxyConfig{
 			URL:                    fc.Proxy.URL,

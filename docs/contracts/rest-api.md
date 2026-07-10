@@ -140,6 +140,13 @@ The server's REST middleware MUST:
 
 The entire REST auth middleware is PLANNED; no REST auth middleware exists in the current server -- see §10 DV-19.
 
+**Dual-algorithm validation (MYR-193, ADR-001).** As of MYR-193 the single `Authenticator` accepts tokens signed with EITHER algorithm, pinned per token by the header `alg` + `kid` with a strict allowlist:
+
+- **HS256** — the legacy shared-secret tokens minted by the Next.js app / testbench with `AUTH_SECRET` (unchanged; the whole live app depends on them).
+- **ES256** — the new asymmetric access tokens minted by the Go server's own identity module (`internal/identity`), verified against the local keypair's public keys resolved by the token's `kid`. The public keys are published at `GET /api/auth/.well-known/jwks.json` (§7.10).
+
+Both carry `iss=myrobotaxi`, `aud=telemetry`, `sub=<user CUID>`, so issuer/audience/expiry checks are identical across algorithms. The key callback is type-driven — an HMAC-typed token only ever receives the shared secret, an ECDSA-typed token only ever receives an EC public key — so algorithm-confusion attacks (e.g. signing an HS256 token with the published ES256 public key as the HMAC key) are rejected. The fail-closed user-existence check (§3.2 step 4, FR-10.1) now accepts a `sub` present in EITHER the Prisma `"User"` table OR the Go-owned `go_users` table (Apple-native users have no legacy Prisma row).
+
 ### 3.3 Auth failure and retry (FR-6.2)
 
 When the SDK receives an HTTP response whose status code is `401`:
@@ -285,6 +292,8 @@ When the cap is breached the server returns `429 rate_limited` with the standard
 The REST rate limit is **independent** of the WebSocket `MaxConnectionsPerUser` per-user concurrent-connection cap (WS DV-08). A user may have 5 open WebSocket sessions AND 120 REST requests/min simultaneously. This is intentional: the two limits protect different exhaustion modes (concurrent holdings vs request flood).
 
 Unlike the WebSocket `rate_limited` error, REST `rate_limited` in v1 does **not** emit a `subCode: device_cap` -- `device_cap` is specific to the per-user concurrent-connection cap on the WS path. REST rate-limit breaches surface to the UI as a generic "too many requests" signal; per-device UX messaging is not part of v1 REST.
+
+**Pre-auth cap on `/api/auth/*` (MYR-193, IMPLEMENTED).** The identity endpoints (§7.10) cannot use the per-user cap above — they run *before* a user is authenticated. They are instead protected by a **per-IP token-bucket** limit (default 30 req/min, burst 10; configurable via `identity.auth_rate_limit_per_minute` / `identity.auth_rate_limit_burst`), keyed on the leftmost `X-Forwarded-For` entry (the edge appends). On breach the server returns `429 rate_limited` with a `Retry-After` header — the same envelope and SDK backoff behaviour as above. This guards the sign-in / refresh surface against credential spraying and refresh-token brute force.
 
 ### 4.2 Pagination
 
@@ -531,8 +540,14 @@ No contract changes are required for the new role's wire shape (the REST respons
 | `POST` | `/api/ride-requests/{id}/accept` | Owner accepts a `requested` ride (emits the MYR-176 dispatch seam) | Bearer (owner) | FR-9.3 |
 | `POST` | `/api/ride-requests/{id}/decline` | Owner declines a `requested` ride | Bearer (owner) | FR-9.3 |
 | `POST` | `/api/vehicles/{vehicleId}/command/{name}` | Send a Tesla vehicle command (P11 actuation + P10 dispatch) | Bearer + owner of vehicleId | FR-11.x, NFR-3.21 |
+| `POST` | `/api/auth/apple` | Native Sign in with Apple → ES256 access + refresh pair | None (pre-auth; per-IP rate-limited) | FR-6.1, MYR-193 |
+| `POST` | `/api/auth/refresh` | Single-use refresh-token rotation | Refresh token in body (pre-auth; per-IP rate-limited) | FR-6.2, MYR-193 |
+| `POST` | `/api/auth/revoke` | Revoke a refresh-token family (sign-out) | Refresh token in body (pre-auth; per-IP rate-limited) | MYR-193 |
+| `GET` | `/api/auth/.well-known/jwks.json` | Public ES256 verification keys (JWKS) | None (public) | MYR-193 |
 
 The `POST`/`GET /api/ride-requests[...]` rows (§7.8) are the P10 ride-hailing surface: the four rider-facing endpoints are mounted as of MYR-174 and the three owner-facing endpoints (incoming feed + accept/decline) as of MYR-175. The dispatch/live-tracking transitions remain with MYR-176/177 and the reschedule endpoints with MYR-192.
+
+The `/api/auth/*` rows (§7.10) are the identity module's auth surface (MYR-193, ADR-001 `docs/architecture/adr-001-identity-module.md`): native Sign in with Apple, ES256 access-token minting with a published JWKS, and rotating refresh tokens. Unlike every other row, these are **pre-authentication** endpoints (they mint or rotate the very credential the others require), so they are not Bearer-gated — they are protected by a per-IP token-bucket rate limit instead (§4.1.2).
 
 `GET /api/vehicles` (§7.0) is mounted by the Go server as of MYR-91 (2026-05-10). `GET /api/vehicles/{vehicleId}/snapshot` (§7.1) and `GET /api/vehicles/{vehicleId}/drives` (§7.2) are mounted as of MYR-133 (2026-06-03). `GET /api/drives/{driveId}/route` (§7.4) is mounted as of PR #260 (DV-20), and `GET /api/drives/{driveId}` (§7.3) as of MYR-130 (2026-07-02) — DV-20 is fully RESOLVED (see §10). `GET /api/users/me/export` (and the §7.6 / §7.5 endpoints) is served by the Next.js app per §10 DV-23 and is NOT in scope for the Go server's DV-20 mount.
 
@@ -1464,6 +1479,97 @@ The VIN is redacted to the last 4 (P0 rule; the full VIN never leaves the server
 #### Pre-pairing behavior (MYR-115 not yet done)
 
 Until the owner pairs the virtual key, every **signer-required** command resolves to `403 key_not_paired`. The endpoint is always mounted (never a 404) and nothing crashes when the proxy/key is absent; when `TESLA_PROXY_URL` is unset the server logs a clear "signing disabled" line at startup and returns `key_not_paired`.
+### 7.10 Authentication (identity module — MYR-193)
+
+> **Anchored:** FR-6.1, FR-6.2, MYR-193. Design record: `docs/architecture/adr-001-identity-module.md`.
+
+The identity module (`internal/identity`) is the server's own token issuer. These endpoints are **pre-authentication** (no Bearer header) and are protected by a per-IP rate limit (§4.1.2). All bodies are `application/json`. Errors use the standard envelope (§4.1); auth failures collapse to `401 auth_failed` with a generic message — there is no reuse/linkage oracle and no PII in any error.
+
+The endpoints are mounted only when an ES256 signing key is configured (`AUTH_ES256_PRIVATE_KEY`); `POST /api/auth/apple` additionally requires `APPLE_NATIVE_CLIENT_ID` and otherwise returns `404 not_found`.
+
+#### 7.10.1 `POST /api/auth/apple`
+
+Validate a native Sign in with Apple identity token and issue a token pair.
+
+**Request**
+
+```
+POST /api/auth/apple
+Content-Type: application/json
+```
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `identityToken` | string | Yes | The Apple identity token (JWT) from `ASAuthorizationAppleIDCredential.identityToken`. |
+| `fullName` | string | No | Apple returns the name only on the first authorization; the client forwards it so it can be persisted on first sign-in. |
+| `email` | string | No | Advisory only — the server links on the token's verified-email claim, never this field. |
+| `nonce` | string | No | If present, must equal the token's `nonce` claim. |
+
+Server validation: RS256 signature against Apple's JWKS (`https://appleid.apple.com/auth/keys`, cached with `kid` rotation), `iss=https://appleid.apple.com`, `aud=APPLE_NATIVE_CLIENT_ID`, `exp`/`iat`. The user is resolved (and bound on first sign-in) per ADR-001 §4: existing `apple_sub` binding → config bootstrap override → verified-email match against `"User"` → fresh `go_users` mint.
+
+**Response — 200 OK**
+
+```json
+{
+  "accessToken": "<ES256 JWT>",
+  "expiresIn": 3600,
+  "refreshToken": "<opaque>",
+  "user": { "id": "cmmgr4b1p0005l104ifpctlg8", "name": "Ada Lovelace", "email": "ada@example.com" }
+}
+```
+
+| Field | Type | Classification | Notes |
+|-------|------|----------------|-------|
+| `accessToken` | string | P1 | ES256 JWT, `sub`=user CUID, `iss=myrobotaxi`, `aud=telemetry`, ~1h. Use as the Bearer token everywhere else. |
+| `expiresIn` | integer | P0 | Access-token lifetime in seconds. |
+| `refreshToken` | string | P1 | Opaque single-use token; store securely (Keychain), send only to `/api/auth/refresh` \| `/revoke`. |
+| `user.id` | string | P0 | User CUID. |
+| `user.name` / `user.email` | string | P1 | Present when known; omitted otherwise. |
+
+**Response — error**
+
+| HTTP | `error.code` | When |
+|------|--------------|------|
+| 400 | `invalid_request` | Missing `identityToken`, malformed / unknown-field body |
+| 401 | `auth_failed` | Apple token invalid (signature/iss/aud/exp/nonce) |
+| 404 | `not_found` | Apple sign-in not enabled (`APPLE_NATIVE_CLIENT_ID` unset) |
+| 429 | `rate_limited` | Per-IP cap exceeded |
+
+#### 7.10.2 `POST /api/auth/refresh`
+
+Rotate a refresh token (single-use). Presenting a spent or revoked token is treated as theft: the whole family is revoked (`401`).
+
+**Request** — `{ "refreshToken": "<opaque>" }`
+
+**Response — 200 OK** — same shape as §7.9.1 (a fresh `accessToken` + a new `refreshToken`; `user` carries at least `id`). The previous refresh token is now invalid.
+
+**Response — error**
+
+| HTTP | `error.code` | When |
+|------|--------------|------|
+| 400 | `invalid_request` | Missing `refreshToken` / malformed body |
+| 401 | `auth_failed` | Unknown, expired, spent, or revoked token (reuse revokes the family) |
+| 429 | `rate_limited` | Per-IP cap exceeded |
+
+#### 7.10.3 `POST /api/auth/revoke`
+
+Revoke the refresh-token family a token belongs to (sign-out on this device lineage).
+
+**Request** — `{ "refreshToken": "<opaque>" }`
+
+**Response — 204 No Content** — always, for a well-formed request, whether or not the token existed (no existence oracle). `400 invalid_request` for a missing field; `429 rate_limited` on cap breach.
+
+#### 7.10.4 `GET /api/auth/.well-known/jwks.json`
+
+Public JSON Web Key Set (RFC 7517) of the ES256 verification keys. Public, cacheable (`Cache-Control: public, max-age=3600`). Consumers resolve an access token's `kid` header to a key here to verify the signature.
+
+**Response — 200 OK**
+
+```json
+{ "keys": [ { "kty": "EC", "crv": "P-256", "x": "<b64url>", "y": "<b64url>", "use": "sig", "alg": "ES256", "kid": "<thumbprint>" } ] }
+```
+
+All JWKS fields are P0 (public by definition). The `kid` is the RFC 7638 thumbprint of the key.
 
 ---
 

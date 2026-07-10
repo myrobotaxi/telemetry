@@ -37,10 +37,12 @@ Migration SQL files live in `internal/store/migrations/`:
 
 ```
 internal/store/migrations/
-  0001_init.up.sql      — bootstraps _telemetry_server_meta (placeholder)
-  0001_init.down.sql    — drops _telemetry_server_meta
-  NNNN_<name>.up.sql    — future migrations (sequential, zero-padded)
-  NNNN_<name>.down.sql  — rollback for each migration
+  0001_init.up.sql          — bootstraps _telemetry_server_meta (placeholder)
+  0001_init.down.sql        — drops _telemetry_server_meta
+  0002_ride_requests.up.sql — go_ride_requests (P10 ride-hailing, MYR-173)
+  0003_identity.up.sql      — go_users / go_identity_apple / go_refresh_tokens (MYR-193, ADR-001)
+  NNNN_<name>.up.sql        — future migrations (sequential, zero-padded)
+  NNNN_<name>.down.sql      — rollback for each migration
 ```
 
 The `migrationFiles` embed.FS in `internal/store/migrations.go` compiles all `*.sql` files into the binary at build time. No external migration files are required at runtime.

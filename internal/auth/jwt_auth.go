@@ -27,12 +27,15 @@ var (
 // the Prisma-owned "Vehicle" table.
 const queryUserVehicleIDs = `SELECT "id" FROM "Vehicle" WHERE "userId" = $1`
 
-// queryUserExists is a slim row-existence probe against the
-// Prisma-owned "User" table, used by the FR-10.1 fail-closed JWT
-// existence check (data-lifecycle.md §3.5, MYR-73). SELECT 1 + LIMIT
-// 1 lets Postgres short-circuit on the primary-key index without
-// pulling any data columns.
-const queryUserExists = `SELECT 1 FROM "User" WHERE "id" = $1 LIMIT 1`
+// queryUserExists is a slim row-existence probe used by the FR-10.1
+// fail-closed JWT existence check (data-lifecycle.md §3.5, MYR-73). A user
+// is "live" if a row exists in EITHER the Prisma-owned "User" table (web /
+// Google users) OR the Go-owned go_users table (Apple-native users minted by
+// the identity module, MYR-193 — they have no legacy Prisma row). Both EXISTS
+// sub-probes hit a primary-key index, so this stays a microsecond lookup.
+// The query returns one row when the user exists and zero rows otherwise, so
+// UserExists's pgx.ErrNoRows handling is unchanged.
+const queryUserExists = `SELECT 1 WHERE EXISTS (SELECT 1 FROM "User" WHERE "id" = $1) OR EXISTS (SELECT 1 FROM go_users WHERE "id" = $1)`
 
 // queryVehicleOwnerByID fetches the owning user ID for a vehicle. Used
 // by ResolveRole to determine whether the caller is the owner of the
@@ -44,12 +47,15 @@ const queryVehicleOwnerByID = `SELECT "userId" FROM "Vehicle" WHERE "id" = $1`
 // user's vehicle IDs from the database. It caches vehicle lookups to
 // avoid hitting the DB on every WebSocket reconnect.
 type JWTAuthenticator struct {
-	secret           []byte
-	issuer           string
-	audience         string
-	cache            *vehicleCache
-	ownerLookup      vehicleOwnerLookup
-	userExistsCache  *userExistenceCache
+	secret          []byte
+	issuer          string
+	audience        string
+	cache           *vehicleCache
+	ownerLookup     vehicleOwnerLookup
+	userExistsCache *userExistenceCache
+	// es256 optionally verifies ES256 tokens minted by the identity module
+	// (ADR-001 §3). Nil => HS256-only (legacy behaviour, unchanged).
+	es256 ES256KeyResolver
 }
 
 // Compile-time interface check.
@@ -71,13 +77,15 @@ type vehicleOwnerLookup interface {
 	GetVehicleOwnerByID(ctx context.Context, vehicleID string) (ownerID string, err error)
 }
 
-// NewJWTAuthenticator creates an authenticator that verifies HS256 JWTs
-// using the given secret and queries the pool for vehicle ownership.
-// Issuer and audience are validated if non-empty.
-func NewJWTAuthenticator(secret, issuer, audience string, pool *pgxpool.Pool) *JWTAuthenticator {
+// NewJWTAuthenticator creates an authenticator that verifies JWTs using the
+// given HS256 secret and queries the pool for vehicle ownership. Issuer and
+// audience are validated if non-empty. Pass WithES256Resolver to additionally
+// accept ES256 tokens minted by the identity module (ADR-001 §3); without it
+// the validator is HS256-only and unchanged.
+func NewJWTAuthenticator(secret, issuer, audience string, pool *pgxpool.Pool, opts ...Option) *JWTAuthenticator {
 	querier := &pgVehicleQuerier{pool: pool}
 	existenceQuerier := &pgUserExistenceQuerier{pool: pool}
-	return &JWTAuthenticator{
+	a := &JWTAuthenticator{
 		secret:          []byte(secret),
 		issuer:          issuer,
 		audience:        audience,
@@ -85,16 +93,22 @@ func NewJWTAuthenticator(secret, issuer, audience string, pool *pgxpool.Pool) *J
 		ownerLookup:     querier,
 		userExistsCache: newUserExistenceCache(existenceQuerier, userExistenceTTL),
 	}
+	for _, opt := range opts {
+		opt(a)
+	}
+	return a
 }
 
-// ValidateToken parses and verifies an HS256 JWT, checks expiration, and
-// returns the user ID from the "sub" claim.
+// ValidateToken parses and verifies a JWT — legacy HS256 (shared secret) or,
+// when an ES256 resolver is configured, ES256 (identity-module keypair,
+// resolved by `kid`) — with the algorithm pinned per token (ADR-001 §3). It
+// checks issuer/audience/expiry and returns the user ID from the "sub" claim.
 func (a *JWTAuthenticator) ValidateToken(ctx context.Context, token string) (string, error) {
 	if token == "" {
 		return "", fmt.Errorf("auth.ValidateToken: %w", ErrInvalidToken)
 	}
 
-	opts := []jwt.ParserOption{jwt.WithValidMethods([]string{"HS256"})}
+	opts := []jwt.ParserOption{jwt.WithValidMethods(a.validMethods())}
 	if a.issuer != "" {
 		opts = append(opts, jwt.WithIssuer(a.issuer))
 	}
@@ -102,12 +116,7 @@ func (a *JWTAuthenticator) ValidateToken(ctx context.Context, token string) (str
 		opts = append(opts, jwt.WithAudience(a.audience))
 	}
 
-	parsed, err := jwt.Parse(token, func(t *jwt.Token) (any, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
-		}
-		return a.secret, nil
-	}, opts...)
+	parsed, err := jwt.Parse(token, a.keyFunc, opts...)
 
 	if err != nil {
 		return "", fmt.Errorf("auth.ValidateToken: %w: %w", ErrInvalidToken, err)

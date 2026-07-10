@@ -95,6 +95,27 @@ func applyAuthDefaults(a *fileAuthConfig) {
 	}
 }
 
+func applyIdentityDefaults(i *fileIdentityConfig) {
+	if i.AccessTokenTTL.Dur() == 0 {
+		// 1h access-token lifetime (ADR-001 §5, MYR-193). Short enough that a
+		// leaked access token is bounded; the refresh token (sliding 90d)
+		// carries the long-lived session.
+		i.AccessTokenTTL = Duration{d: time.Hour}
+	}
+	if i.RefreshTokenTTL.Dur() == 0 {
+		// 90d sliding refresh-family life — each rotation re-anchors it.
+		i.RefreshTokenTTL = Duration{d: 90 * 24 * time.Hour}
+	}
+	if i.AuthRateLimitPerMinute == 0 {
+		// Per-IP cap on /api/auth/*: brute-force protection on the
+		// pre-authentication surface. 30/min ≈ 0.5 req/s sustained.
+		i.AuthRateLimitPerMinute = 30
+	}
+	if i.AuthRateLimitBurst == 0 {
+		i.AuthRateLimitBurst = 10
+	}
+}
+
 func applyProxyDefaults(p *fileProxyConfig) {
 	if p.FleetTelemetryPort == 0 {
 		p.FleetTelemetryPort = 443
