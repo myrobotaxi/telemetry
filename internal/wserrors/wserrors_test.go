@@ -36,7 +36,10 @@ var reachabilityMatrix = []reachability{
 	{code: ErrCodeInternalError, scenario: "internal/telemetry/vehicle_status_handler_test.go (REST 500 lookup failure)"},
 	{code: ErrCodeConflict, scenario: "internal/telemetry/ride_request_handler_test.go (REST 409 illegal lifecycle transition)"},
 	{code: ErrCodeRateLimited, scenario: "internal/ws/handler_ratelimit_test.go (HTTP 429 envelope on upgrade)"},
-	{code: ErrCodePermissionDenied, skipUntil: "DV-07 — emitted alongside MYR-46 per-vehicle subscribe"},
+	{code: ErrCodePermissionDenied, scenario: "internal/commands/executor_test.go (scope gating + Tesla-rejected), internal/telemetry/vehicle_command_handler_test.go"},
+	{code: ErrCodeKeyNotPaired, scenario: "internal/commands/executor_test.go (transport disabled + not-paired outcome)"},
+	{code: ErrCodeVehicleAsleep, scenario: "internal/commands/executor_test.go (wake+retry budget exhausted)"},
+	{code: ErrCodeCommandFailed, scenario: "internal/commands/executor_test.go (result:false + counter-error exhausted)"},
 	{code: ErrCodeServiceUnavailable, skipUntil: "REST-only forward-compatibility code; not yet emitted (rest-api.md §4.1.1.a)"},
 	{code: ErrCodeSnapshotRequired, skipUntil: "DV-02 — envelope sequence numbers"},
 }

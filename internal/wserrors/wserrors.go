@@ -90,6 +90,35 @@ const (
 	ErrCodeConflict ErrorCode = "conflict"
 )
 
+// Vehicle-command codes added by MYR-180 (Tesla signed vehicle-command
+// proxy). All three are REST-only on the wire — the WS transport is
+// stream-oriented and never carries command requests. They are members
+// of the shared enum so the SDK's CoreError union stays one enum across
+// transports (rest-api.md §4.1.1, §7.9). See docs/operations/vehicle-commands.md.
+const (
+	// ErrCodeKeyNotPaired is REST 403 — a signed vehicle command cannot be
+	// executed because the application's virtual key is not enrolled on the
+	// vehicle (owner has not completed the tesla.com/_ak/<domain> pairing,
+	// MYR-115), or the command-signing transport is not configured. Terminal:
+	// the SDK surfaces it to the UI and prompts the owner to pair; it MUST
+	// NOT auto-retry. This is the default pre-pairing outcome for every
+	// signer-required command.
+	ErrCodeKeyNotPaired ErrorCode = "key_not_paired"
+	// ErrCodeVehicleAsleep is REST 503 — the target vehicle was asleep or
+	// offline and did not come online within the executor's bounded
+	// wake+retry budget. Transient: the SDK auto-retries with backoff
+	// (rest-api.md §7.9 wake policy). Callers that receive OK never see this
+	// code — the executor wakes and retries internally first.
+	ErrCodeVehicleAsleep ErrorCode = "vehicle_asleep"
+	// ErrCodeCommandFailed is REST 502 — the vehicle or the Fleet API
+	// rejected or failed the command for a non-scope, non-pairing reason
+	// (result:false with a vehicle-side reason, a session/counter error that
+	// survived re-handshake, or an upstream Fleet/proxy failure). Terminal
+	// for the operation; the SDK surfaces the failure. Collapses the several
+	// vehicle-side failure modes into one typed code in v1.
+	ErrCodeCommandFailed ErrorCode = "command_failed"
+)
+
 // AllCodes returns every ErrorCode defined in this package, in catalog
 // order. Used by the reachability test to iterate the closed enum and
 // assert each code is in either the implemented or the documented-as-
@@ -107,6 +136,9 @@ func AllCodes() []ErrorCode {
 		ErrCodeServiceUnavailable,
 		ErrCodeSnapshotRequired,
 		ErrCodeConflict,
+		ErrCodeKeyNotPaired,
+		ErrCodeVehicleAsleep,
+		ErrCodeCommandFailed,
 	}
 }
 

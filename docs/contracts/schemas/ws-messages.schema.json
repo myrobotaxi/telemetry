@@ -213,7 +213,7 @@
       "properties": {
         "code": {
           "type": "string",
-          "description": "Stable typed error code. Shared enum across the WebSocket and REST transports so the SDK's CoreError is a single union (rest-api.md §4.1.1, §4.1.1.a; ws catalog websocket-protocol.md §6.1.1). Consumer SDKs map these to typed errors per FR-7.1 and MUST NOT string-match on the sibling `message` field. WS emits today: `auth_failed`, `auth_timeout`; the remaining WS values are PLANNED (divergences DV-02 / DV-07 / DV-08 in websocket-protocol.md §10). `not_found` and `invalid_request` are REST-only on the wire (the WS path enforces ownership via silent filtering and has no structured request bodies, rest-api.md §4.1.1.a) but are members of this shared enum by mandate so the SDK union is one enum across transports — they are NOT a WS drift (DV-20 enum slice). `service_unavailable` is intentionally NOT in this enum: it is REST-only and the WS 503 analogue is a close code, not a typed frame (rest-api.md:258); the SDK declares it as a REST-only variant on its side. `rate_limited` has two carriers: (a) HTTP 429 on the WS upgrade (per-IP, pre-auth) and (b) an `error` frame paired with WS close 4003 (per-user, post-auth) — the SDK treats both as the same typed error with the extended backoff in websocket-protocol.md §6.1.1 / §7.1.",
+          "description": "Stable typed error code. Shared enum across the WebSocket and REST transports so the SDK's CoreError is a single union (rest-api.md §4.1.1, §4.1.1.a; ws catalog websocket-protocol.md §6.1.1). Consumer SDKs map these to typed errors per FR-7.1 and MUST NOT string-match on the sibling `message` field. WS emits today: `auth_failed`, `auth_timeout`; the remaining WS values are PLANNED (divergences DV-02 / DV-07 / DV-08 in websocket-protocol.md §10). `not_found` and `invalid_request` are REST-only on the wire (the WS path enforces ownership via silent filtering and has no structured request bodies, rest-api.md §4.1.1.a) but are members of this shared enum by mandate so the SDK union is one enum across transports — they are NOT a WS drift (DV-20 enum slice). `service_unavailable` is intentionally NOT in this enum: it is REST-only and the WS 503 analogue is a close code, not a typed frame (rest-api.md:258); the SDK declares it as a REST-only variant on its side. `rate_limited` has two carriers: (a) HTTP 429 on the WS upgrade (per-IP, pre-auth) and (b) an `error` frame paired with WS close 4003 (per-user, post-auth) — the SDK treats both as the same typed error with the extended backoff in websocket-protocol.md §6.1.1 / §7.1. `key_not_paired`, `vehicle_asleep`, and `command_failed` are REST-only on the wire (MYR-180 vehicle-command surface, rest-api.md §4.1.1 / §7.9): the WS transport is stream-oriented and carries no command requests. They are members of this shared enum so the SDK CoreError union stays one enum across transports.",
           "enum": [
             "auth_failed",
             "auth_timeout",
@@ -223,7 +223,10 @@
             "internal_error",
             "snapshot_required",
             "not_found",
-            "invalid_request"
+            "invalid_request",
+            "key_not_paired",
+            "vehicle_asleep",
+            "command_failed"
           ],
           "x-classification": "P0"
         },
