@@ -9,19 +9,20 @@ import "time"
 // Config holds the fully-validated, immutable application configuration.
 // All access is through getter methods — there are no exported setters.
 type Config struct {
-	server         ServerConfig
-	tls            TLSConfig
-	database       DatabaseConfig
-	telemetry      TelemetryConfig
-	drives         DrivesConfig
-	websocket      WebSocketConfig
-	auth           AuthConfig
-	identity       IdentityConfig
-	proxy          ProxyConfig
-	teslaOAuth     TeslaOAuthConfig
-	monitoring     MonitoringConfig
-	mapboxToken    string
-	teslaPublicKey string
+	server          ServerConfig
+	tls             TLSConfig
+	database        DatabaseConfig
+	telemetry       TelemetryConfig
+	drives          DrivesConfig
+	websocket       WebSocketConfig
+	auth            AuthConfig
+	identity        IdentityConfig
+	proxy           ProxyConfig
+	teslaOAuth      TeslaOAuthConfig
+	monitoring      MonitoringConfig
+	mapboxToken     string
+	teslaPublicKey  string
+	dispatchEnabled bool
 }
 
 // MonitoringConfig holds observability probe settings.
@@ -204,6 +205,12 @@ func (c *Config) MapboxToken() string { return c.mapboxToken }
 // TeslaPublicKey returns the PEM-encoded public key for the Tesla
 // .well-known endpoint. Empty string disables the endpoint.
 func (c *Config) TeslaPublicKey() string { return c.teslaPublicKey }
+
+// DispatchEnabled is the MYR-176 nav-dispatch kill-switch. When false the
+// dispatcher records every accepted ride as `skipped` and pushes no nav to
+// the vehicle. Defaults to true; set DISPATCH_ENABLED=false to disable
+// without a deploy.
+func (c *Config) DispatchEnabled() bool { return c.dispatchEnabled }
 
 // Load reads configuration from the JSON file at configPath, overlays
 // environment variable overrides, applies defaults for missing optional

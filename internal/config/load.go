@@ -30,6 +30,7 @@ type fileConfig struct {
 	teslaClientID        string
 	teslaClientSec       string
 	certMonitorEndpoints []string
+	dispatchEnabled      bool
 
 	// Identity module secrets/identifiers (env, not JSON).
 	es256PrivateKeyPEM string
@@ -163,6 +164,14 @@ func applyEnvOverrides(fc *fileConfig) error {
 	// Proxy env var overrides.
 	if v := os.Getenv("TESLA_PROXY_URL"); v != "" {
 		fc.Proxy.URL = v
+	}
+
+	// DISPATCH_ENABLED is the MYR-176 nav-dispatch kill-switch. Defaults to
+	// true (dispatch on) — set to "false" or "0" to disable nav pushes to the
+	// vehicle without a deploy. Any other value (incl. unset) leaves it on.
+	fc.dispatchEnabled = true
+	if v := os.Getenv("DISPATCH_ENABLED"); v == "false" || v == "0" {
+		fc.dispatchEnabled = false
 	}
 
 	// TLS env vars override JSON values.
@@ -326,7 +335,8 @@ func buildConfig(fc *fileConfig) *Config {
 		monitoring: MonitoringConfig{
 			CertEndpoints: fc.certMonitorEndpoints,
 		},
-		mapboxToken:    fc.mapboxToken,
-		teslaPublicKey: fc.teslaPublicKey,
+		mapboxToken:     fc.mapboxToken,
+		teslaPublicKey:  fc.teslaPublicKey,
+		dispatchEnabled: fc.dispatchEnabled,
 	}
 }
