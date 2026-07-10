@@ -207,15 +207,19 @@ The REST catalog is a superset of the WebSocket catalog in [`websocket-protocol.
 | `internal_error` | 500 | Shared (WS + REST) | Implemented on REST (MYR-47); PLANNED on WS | Auto-retry with exponential backoff (NFR-3.10 curve from `websocket-protocol.md` §7.1), cap at 3 REST attempts before surfacing. | Catch-all for unexpected server failures: panics, DB errors, downstream timeouts. |
 | `service_unavailable` | 503 | **REST-only, PLANNED** | PLANNED (DV-21) | Auto-retry with exponential backoff; honor `Retry-After` header if present. | Reserved for maintenance windows and graceful-shutdown states. The server MAY return `503` during rolling deployments; v1 does not yet emit this code. Added to the REST catalog so SDK consumers can write forward-compatible handlers. |
 | `snapshot_required` | -- | **WS-only** (close code 4005 + error frame) | PLANNED (DV-02) | n/a for REST | WS-only. REST has no analogue because REST is already the snapshot channel (the "fall back to snapshot fetch" signal IS a REST call). Listed here for completeness; REST clients never receive this code. |
+| `key_not_paired` | 403 | **REST-only** | Implemented (MYR-180) | Surface to UI; **do not auto-retry** — needs owner action. | The application's virtual key is not enrolled on the vehicle (owner has not completed the `tesla.com/_ak/<domain>` pairing, MYR-115), or the command-signing transport is not configured. This is the default outcome for every signer-required command in §7.9 until pairing happens. The SDK prompts the owner to pair. |
+| `vehicle_asleep` | 503 | **REST-only** | Implemented (MYR-180) | Auto-retry with backoff (§4.1.2 curve). SDK MAY honor `Retry-After`. | The target vehicle was asleep/offline and did not come online within the executor's bounded wake+retry budget (§7.9). Transient — the executor already woke + retried internally before surfacing this. |
+| `command_failed` | 502 | **REST-only** | Implemented (MYR-180) | Surface to UI; do not blindly auto-retry (the vehicle rejected the action). | A vehicle command (§7.9) failed for a non-scope, non-pairing reason: the vehicle returned `result:false`, a signing-session/counter error survived re-handshake, or the Fleet API/proxy failed. Collapses the several vehicle-side failure modes into one typed code in v1. |
 
 ##### 4.1.1.a REST-only codes added to the shared catalog
 
-Four codes are REST-only extensions of the shared catalog: `not_found`, `invalid_request`, `service_unavailable`, and `conflict` (MYR-174).
+Seven codes are REST-only extensions of the shared catalog: `not_found`, `invalid_request`, `service_unavailable`, `conflict` (MYR-174), and `key_not_paired` / `vehicle_asleep` / `command_failed` (MYR-180).
 
 - `conflict` (HTTP 409) is emitted only over REST when a ride-request lifecycle mutation is illegal from the row's current state (§7.8 transition matrix). It has no WS analogue because the ride-request mutations are request-oriented REST endpoints; the WS transport carries only the summary `ride_status_changed` broadcast of a *successful* transition. It is a member of the shared `ErrorPayload.code` enum (added by MYR-174) so the SDK's `CoreError` union stays one enum across transports; the schema enum description marks it REST-only-on-the-wire.
 - `not_found` is not emitted over the WebSocket because the WS path enforces ownership via silent filtering in `Hub.Broadcast` (see `websocket-protocol.md` §4.5) -- a client simply does not receive frames for vehicles it does not own, and there is no equivalent "the resource does not exist" signal because the WS is stream-oriented, not request-oriented. On REST, every vehicle-scoped path param MUST return `404 not_found` for unknown IDs.
 - `invalid_request` exists only because REST accepts structured request bodies and query params that can be malformed independently of auth. The WS protocol has no v1 client->server frames that take structured payloads beyond `auth`, so malformed-body errors cannot arise there.
 - `service_unavailable` is RESERVED for the REST contract so the SDK can write forward-compatible handlers before the server begins emitting it during maintenance windows.
+- `key_not_paired`, `vehicle_asleep`, and `command_failed` are the MYR-180 vehicle-command codes (§7.9). They are REST-only because the WS transport is stream-oriented and carries no command requests — there is no WS surface on which a command could be issued or rejected. They are members of the shared enum (added by MYR-180) so the SDK's `CoreError` union stays one enum across transports; the schema enum description marks them REST-only-on-the-wire.
 
 Both `not_found` and `invalid_request` are now members of the shared `ErrorPayload.code` enum in [`schemas/ws-messages.schema.json`](schemas/ws-messages.schema.json) (added by MYR-98, the DV-20 enum slice) even though the WS never emits them, so the SDK's `CoreError` union is a single enum across both transports. This is not a drift -- the WS contract explicitly lists them as "REST-only" in the catalog description and the schema enum description marks them REST-only-on-the-wire. The shared-enum subCode `reauth_required` was added in the same change (REST-only; see §4.1). DV-20's remaining open scope is the endpoint-mounting work (§10), not the enum.
 
@@ -526,6 +530,7 @@ No contract changes are required for the new role's wire shape (the REST respons
 | `POST` | `/api/ride-requests/{id}/cancel` | Rider cancels a requested/accepted ride | Bearer (rider) | FR-9.3 |
 | `POST` | `/api/ride-requests/{id}/accept` | Owner accepts a `requested` ride (emits the MYR-176 dispatch seam) | Bearer (owner) | FR-9.3 |
 | `POST` | `/api/ride-requests/{id}/decline` | Owner declines a `requested` ride | Bearer (owner) | FR-9.3 |
+| `POST` | `/api/vehicles/{vehicleId}/command/{name}` | Send a Tesla vehicle command (P11 actuation + P10 dispatch) | Bearer + owner of vehicleId | FR-11.x, NFR-3.21 |
 
 The `POST`/`GET /api/ride-requests[...]` rows (§7.8) are the P10 ride-hailing surface: the four rider-facing endpoints are mounted as of MYR-174 and the three owner-facing endpoints (incoming feed + accept/decline) as of MYR-175. The dispatch/live-tracking transitions remain with MYR-176/177 and the reschedule endpoints with MYR-192.
 
@@ -1374,6 +1379,94 @@ The main `RideRequestStatus` lifecycle is monotonic; the reschedule negotiation 
 
 ---
 
+### 7.9 `POST /api/vehicles/{vehicleId}/command/{name}` (Tesla vehicle commands)
+
+> **Anchored:** FR-11.x (vehicle actuation), NFR-3.21 (ownership enforcement), NFR-3.22 (TLS in transit). Implemented by MYR-180.
+
+#### Purpose
+
+The owner-only actuation surface. It sends a signed Tesla Fleet vehicle command (lock, climate, charge, trunk, remote start, horn, lights) or an unsigned navigation/dispatch command to the caller's vehicle. It is the foundation for P11 (per-command issues MYR-181–183) and P10 dispatch (MYR-176 uses `navigation_gps_request`).
+
+#### Transport / architecture
+
+Modern Fleet API vehicle commands require end-to-end command signing with a virtual key the owner enrolls in the car. The server does **not** embed the signing library in-process: it forwards commands to the **tesla-http-proxy sidecar** it already runs for `fleet_telemetry_config` pushes (`TESLA_PROXY_URL`). The proxy signs signer-required commands with the P-256 virtual key (which lives ONLY in the proxy's config, never in this process) and forwards unsigned commands (`navigation_request`) straight to the Fleet API. Session caching, re-handshake, and wake are the proxy's job. Full decision record + ops runbook: [`docs/operations/vehicle-commands.md`](../operations/vehicle-commands.md).
+
+#### Request
+
+```
+POST /api/vehicles/{vehicleId}/command/{name} HTTP/1.1
+Host: api.myrobotaxi.com
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{ ...command parameters (may be empty)... }
+```
+
+- `{vehicleId}` is the cuid (NOT the VIN); the server resolves it to the VIN server-side.
+- `{name}` is the command name (identical to the Tesla Fleet command name).
+- The body is the command's typed parameters; parameterless commands take an empty body.
+
+#### Command catalog
+
+| `{name}` | Scope | Signed | Params |
+|----------|-------|--------|--------|
+| `door_lock` | `vehicle_cmds` | yes | — |
+| `door_unlock` | `vehicle_cmds` | yes | — |
+| `auto_conditioning_start` | `vehicle_cmds` | yes | — |
+| `auto_conditioning_stop` | `vehicle_cmds` | yes | — |
+| `set_temps` | `vehicle_cmds` | yes | `driver_temp` (°C, required), `passenger_temp` (°C, optional; mirrors driver) |
+| `charge_start` | `vehicle_charging_cmds` | yes | — |
+| `charge_stop` | `vehicle_charging_cmds` | yes | — |
+| `set_charge_limit` | `vehicle_charging_cmds` | yes | `percent` (int 50–100) |
+| `actuate_trunk` | `vehicle_cmds` | yes | `which_trunk` (`"front"` \| `"rear"`) |
+| `remote_start_drive` | `vehicle_cmds` | yes | — |
+| `honk_horn` | `vehicle_cmds` | yes | — |
+| `flash_lights` | `vehicle_cmds` | yes | — |
+| `navigation_gps_request` | `vehicle_cmds` | no | `lat`, `lon` (required), `order` (int, default 1) — the lat/long dispatch command (MYR-176) |
+| `navigation_request` | `vehicle_cmds` | no | `value` (string address or maps URL) — text/share destination |
+
+There is no `vehicle_remote_start` Fleet scope (that is the legacy Owner API); `remote_start_drive` is a `vehicle_cmds` command. `navigation_request`/`navigation_gps_request` are UNSIGNED: Tesla processes them server-side, so the proxy forwards them to the Fleet API rather than signing them.
+
+#### Scope gating
+
+Each command maps to a Fleet OAuth scope. The server parses the granted scopes from the owner's Tesla access-token JWT (`scp` claim). If the token demonstrably lacks the required scope, the server returns `403 permission_denied` **without calling Tesla**. If the scopes cannot be parsed, enforcement is deferred to Tesla.
+
+#### Wake + session policy
+
+If the vehicle is asleep/offline the executor issues a wake and retries the command with a bounded budget (default: 3 wake+retry attempts, ~2 s backoff each). If the budget is exhausted it returns the transient `503 vehicle_asleep`, which the SDK retries with backoff. A signing-session counter/anti-replay error triggers one silent re-handshake retry (the proxy owns the session cache); a second counter error surfaces as `502 command_failed`.
+
+#### Rate limiting
+
+Per-vehicle command cooldown (token bucket, default ~1 command / 2 s with a small burst). Breaches return `429 rate_limited` with `Retry-After`.
+
+#### Success response — `200 OK`
+
+```json
+{ "status": "applied", "command": "door_lock", "vin": "***0001" }
+```
+
+The VIN is redacted to the last 4 (P0 rule; the full VIN never leaves the server). Command parameters (e.g. navigation coordinates, P1) are never persisted and never logged.
+
+#### Errors
+
+| HTTP | code | Cause |
+|------|------|-------|
+| 400 | `invalid_request` | Unknown command name, malformed body, or a parameter that failed validation (bad range, wrong type). |
+| 401 | `auth_failed` | Missing/invalid caller bearer token, or the owner's Tesla token is expired and cannot be refreshed. |
+| 403 | `vehicle_not_owned` | Caller is not the vehicle's owner. |
+| 403 | `permission_denied` | The owner's Tesla token lacks the command's scope (preflight), or Tesla rejected for access. |
+| 403 | `key_not_paired` | Virtual key not enrolled on the vehicle (pre-pairing default), or signing transport not configured. |
+| 404 | `not_found` | Unknown `vehicleId`. |
+| 429 | `rate_limited` | Per-vehicle command cooldown breached. |
+| 502 | `command_failed` | Vehicle returned `result:false`, counter error survived re-handshake, or Fleet/proxy failure. |
+| 503 | `vehicle_asleep` | Vehicle did not wake within the retry budget (retry with backoff). |
+
+#### Pre-pairing behavior (MYR-115 not yet done)
+
+Until the owner pairs the virtual key, every **signer-required** command resolves to `403 key_not_paired`. The endpoint is always mounted (never a 404) and nothing crashes when the proxy/key is absent; when `TESLA_PROXY_URL` is unset the server logs a clear "signing disabled" line at startup and returns `key_not_paired`.
+
+---
+
 ## 8. Resource schemas
 
 The canonical v1 `VehicleState` schema is [`schemas/vehicle-state.schema.json`](schemas/vehicle-state.schema.json). The REST snapshot endpoint returns that shape directly via `$ref` in the OpenAPI spec -- it is NOT re-declared.
@@ -1445,6 +1538,7 @@ Same as [`websocket-protocol.md`](websocket-protocol.md) §10 divergence managem
 
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-07-10 | **Mounted the Tesla vehicle-command surface — P11 actuation + P10 dispatch foundation ([MYR-180](https://linear.app/myrobotaxi/issue/MYR-180)).** New §7.9 `POST /api/vehicles/{vehicleId}/command/{name}` (owner-only): a signed Tesla Fleet vehicle-command proxy seeded with the P11 commands (door_lock/unlock, auto_conditioning_start/stop, set_temps, charge_start/stop, set_charge_limit, actuate_trunk, remote_start_drive, honk_horn, flash_lights) and the P10 dispatch commands (navigation_gps_request for lat/long + navigation_request for text/share). §6 catalog gains a row; §7.9 documents the command catalog, scope gating, wake+session policy, per-vehicle cooldown, and pre-pairing behavior. Three new **REST-only** shared-catalog codes — `key_not_paired` (403), `vehicle_asleep` (503, transient), `command_failed` (502) — added to §4.1.1, §4.1.1.a, `wserrors`, the reachability matrix, and the `schemas/ws-messages.schema.json` `ErrorPayload.code` enum (REST-only-on-the-wire); `permission_denied` flips from PLANNED to Implemented (scope gating). **Transport decision:** the server reuses the tesla-http-proxy sidecar it already runs for `fleet_telemetry_config` (`TESLA_PROXY_URL`) rather than embedding the vehicle-command library in-process — the P-256 command key stays ONLY in the proxy config, never in this process (decision record + ops runbook: [`../operations/vehicle-commands.md`](../operations/vehicle-commands.md)). **Merge-safe before pairing (MYR-115):** the route is always mounted, every signer-required command resolves to `key_not_paired` until the owner pairs, and startup never crashes when the proxy/key is absent. Implementation: `internal/commands/` (registry, executor with wake/counter retry, scope parsing, ProxyTransport), `internal/telemetry/vehicle_command_handler.go` (+ token/cooldown), wired in `cmd/telemetry-server/wiring.go`. No stored-data / data-classification change (command params are transit-only, never persisted; VIN redacted, params never logged). | go-engineer |
 | 2026-07-09 | **Mounted the owner-facing ride-request surface — P10 ride-hailing ([MYR-175](https://linear.app/myrobotaxi/issue/MYR-175), stacked on MYR-174).** §7.8 extended with `GET /api/ride-requests/incoming` (owner's open-`requested` feed — on-demand + scheduled variants — same envelope + `(createdAt, id)` cursor as the rider list; literal segment wins over the `{id}` wildcard, regression-tested) and `POST /api/ride-requests/{id}/accept` / `/decline` (owner-only; legal only from `requested`, everything else `409 conflict` per the §7.8 matrix — matrix note updated from planned to implemented). Accept publishes the internal `ride.accepted` **dispatch seam** event (pickup/dropoff places + booked-for passenger contact) that MYR-176 subscribes to for the Tesla `navigation_request` push — internal-only, never broadcast, no Tesla calls in this story. Both decisions unicast `ride_status_changed` to the two parties. **Reschedule confirm/decline deliberately deferred to MYR-192**: the rider-side propose endpoint has no HTTP surface yet, so an owner resolve endpoint would be unreachable; the store's `ResolveReschedule` is in place. §6 catalog + §4.1.1.b emission audit extended (`permission_denied` rider-attempts-decision row, `conflict` owner-decision row). Implementation: `internal/telemetry/ride_request_owner_handler.go`, `mutateStatus` refactor in `ride_request_handler.go`, routes in `cmd/telemetry-server/wiring.go`. No schema changes. | go-engineer |
 | 2026-07-09 | **Mounted the rider-facing ride-request surface — P10 ride-hailing ([MYR-174](https://linear.app/myrobotaxi/issue/MYR-174)).** New §7.8: `POST /api/ride-requests` (create; strict `additionalProperties:false` body, derives `ownerId` + vehicle-access check identical to `/snapshot`, `201` + full `RideRequest`), `GET /api/ride-requests` (rider's own cursor-paginated list — `createdAt DESC, id DESC`, keyset cursor over `(createdAt, id)`; §4.2.2 updated), `GET /api/ride-requests/{id}` (party-only; non-party → `404` to avoid existence leak), `POST /api/ride-requests/{id}/cancel` (rider-only; `requested`/`accepted` → `cancelled`, else `409 conflict`). Added the full lifecycle **transition matrix** (§7.8) including the MYR-175 accept/decline and MYR-176/177 dispatch rows (unimplemented transitions return `409`). New shared-catalog code **`conflict`** (HTTP 409; §4.1.1, §4.1.1.a) — REST-only, added to `wserrors` + the reachability matrix; never emitted over WS. §6 endpoint catalog + §4.1.1.b emission audit extended. **Authorization enforced vs deferred:** v1 requires the caller to own the vehicle (so `ownerId == riderId`); broader shared-viewer requests (rider ≠ owner) are deferred to the app-side sharing tiers and light up when `GetUserVehicles` gains viewer-merge (PLANNED MYR-91) with no handler change. Reactive pair is the WS `ride_request_created` / `ride_status_changed` summary frames (websocket-protocol.md §4.7–4.8), per-party unicast. Implementation: `internal/telemetry/ride_request_{types,wire,handler,read_handler}.go`, `internal/store/ride_request_repo_page.go`, `internal/ws/{ride_broadcast.go,hub.go SendToUsers}`, `internal/events/ride_events.go`, wired in `cmd/telemetry-server`. No `ride-request.schema.json` change — the shapes landed in contracts v0.9.0. | go-engineer |
 | 2026-07-02 | **Mounted `GET /api/drives/{driveId}` on the Go server — DV-20 fully RESOLVED ([MYR-130](https://linear.app/myrobotaxi/issue/MYR-130)).** Closes the last unmounted DV-20 endpoint (drive detail, FR-3.4). Implemented in `internal/telemetry/drive_detail_handler.go` + `drive_detail_types.go`, backed by the wide `DriveRepo.GetByID` read (appropriate for a detail endpoint) via a new `driveDetailAdapter` in `cmd/telemetry-server/adapters.go`; wired at `GET /api/drives/{driveId}` in `wiring.go` with the same bearer-auth + ownership (`VehicleRepo.GetByID`) + role-based `DriveDetail` mask flow as the drive-route endpoint. Response is the `DriveDetail` object per §7.3 / §8 — every FR-3.4 field EXCEPT `routePoints` (served by §7.4). Error catalog: 400 `invalid_request` (empty driveId), 401 `auth_failed`, 403 `vehicle_not_owned`, 404 `not_found`, 500 `internal_error`. **Mask/OpenAPI drift fix:** `date` (required in the OpenAPI `DriveDetail` component and present in the §7.3 / fixture bodies) was missing from the §5.2.3 mask allow-list — masking would have stripped it and broken conformance; `driveDetailFields` in `internal/mask/tables.go` and the §5.2.3 table are updated in lockstep to include `date` (P0). Added `Server.ClientHandler()` accessor (`internal/server/server.go`) and a route-surface regression test (`cmd/telemetry-server/wiring_routes_test.go`) that asserts every SDK-contract REST route is mounted (unauthenticated request returns 401/400, never 404). §2.1 DV-20 callout, §6 endpoint-catalog status note, and the §10 DV-20 row flip to RESOLVED. No wire-shape / envelope / OpenAPI changes beyond the additive `date` mask fix — the DriveDetail contract was locked at MYR-12. | go-engineer |
