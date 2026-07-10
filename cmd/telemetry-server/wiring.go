@@ -151,11 +151,18 @@ func startPoolStatsCollector(ctx context.Context, db *store.DB, interval time.Du
 
 // setupAuthenticator returns a NoopAuthenticator in dev mode (accepts any
 // token) or a JWTAuthenticator wired against the auth secret + DB pool in
-// production mode.
-func setupAuthenticator(cfg *config.Config, dbPool *pgxpool.Pool, devMode bool, logger *slog.Logger) ws.Authenticator {
+// production mode. When es256 is non-nil the validator additionally accepts
+// ES256 tokens minted by the identity module (ADR-001 §3, dual-alg); legacy
+// HS256 acceptance is unchanged either way.
+func setupAuthenticator(cfg *config.Config, dbPool *pgxpool.Pool, devMode bool, es256 auth.ES256KeyResolver, logger *slog.Logger) ws.Authenticator {
 	if devMode {
 		logger.Warn("dev mode enabled: WebSocket auth disabled, accepting any token")
 		return &ws.NoopAuthenticator{}
+	}
+	var opts []auth.Option
+	if es256 != nil {
+		opts = append(opts, auth.WithES256Resolver(es256))
+		logger.Info("ES256 access-token validation enabled (identity module keystore)")
 	}
 	logger.Info("JWT authentication enabled for WebSocket clients")
 	return auth.NewJWTAuthenticator(
@@ -163,6 +170,7 @@ func setupAuthenticator(cfg *config.Config, dbPool *pgxpool.Pool, devMode bool, 
 		cfg.Auth().TokenIssuer,
 		cfg.Auth().TokenAudience,
 		dbPool,
+		opts...,
 	)
 }
 

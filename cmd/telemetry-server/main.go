@@ -72,7 +72,7 @@ func main() {
 	}
 }
 
-func run() error { //nolint:funlen // composition root — sequential dependency wiring; helpers extracted to wiring.go
+func run() error { //nolint:funlen,cyclop // composition root — sequential dependency wiring; helpers extracted to wiring.go
 	// --- Flag parsing ---
 	var (
 		configPath = flag.String("config", "", "path to JSON configuration file")
@@ -308,8 +308,22 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 
 	go hub.RunHeartbeat(ctx, cfg.WebSocket().HeartbeatInterval)
 
+	// --- Identity module keystore (MYR-193, ADR-001) ---
+	// The ES256 signing keystore backs both access-token minting and the
+	// dual-alg validator's ES256 verification. Nil => module disabled
+	// (HS256-only). Built before the authenticator so its public-key resolver
+	// can be injected into JWT validation.
+	keystore, err := buildKeystore(cfg, *devMode, logger)
+	if err != nil {
+		return fmt.Errorf("building identity keystore: %w", err)
+	}
+	var es256Resolver auth.ES256KeyResolver
+	if keystore != nil {
+		es256Resolver = keystore
+	}
+
 	// --- Client authenticator ---
-	authenticator := setupAuthenticator(cfg, db.Pool(), *devMode, logger)
+	authenticator := setupAuthenticator(cfg, db.Pool(), *devMode, es256Resolver, logger)
 
 	// --- vehicle_deleted cleanup pipeline (FR-10.1 / data-lifecycle.md §3.5, MYR-73) ---
 	// Postgres LISTEN/NOTIFY goroutine + dispatcher that fans the event
@@ -344,6 +358,12 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 		originPatterns: originPatterns,
 		logger:         logger,
 	})
+
+	// --- Identity module endpoints (MYR-193, ADR-001) ---
+	// Native Sign in with Apple, ES256 access-token minting, refresh
+	// rotation, and the public JWKS at /api/auth/.well-known/jwks.json.
+	// No-op when the keystore is disabled.
+	setupIdentityEndpoints(cfg, srv, keystore, db.Pool(), logger)
 
 	// --- Tesla mTLS ---
 	if err := setupTeslaTLS(cfg, srv, logger); err != nil {
