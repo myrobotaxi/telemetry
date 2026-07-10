@@ -152,6 +152,16 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"id" TEXT PRIMARY KEY
 	);
 
+	-- go_users: the Go-owned identity table (migration 0003, MYR-193).
+	-- The JWTAuthenticator's FR-10.1 existence check probes a sub in
+	-- EITHER "User" OR go_users (Apple-native users have no Prisma row),
+	-- so the harness MUST provision both tables or every authenticated
+	-- request fails closed when the go_users EXISTS sub-probe hits a
+	-- missing relation. Minimal shape — the check only reads "id".
+	CREATE TABLE go_users (
+		"id" TEXT PRIMARY KEY
+	);
+
 	CREATE TABLE "Vehicle" (
 		"id"               TEXT PRIMARY KEY,
 		"userId"           TEXT NOT NULL,
@@ -470,6 +480,9 @@ func cleanTables(t *testing.T, pool *pgxpool.Pool) {
 	}
 	if _, err := pool.Exec(ctx, `DELETE FROM "User"`); err != nil {
 		t.Fatalf("clean User: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM go_users`); err != nil {
+		t.Fatalf("clean go_users: %v", err)
 	}
 }
 
