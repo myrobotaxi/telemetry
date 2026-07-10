@@ -290,3 +290,8 @@ curl -sI https://myrobotaxi.app/.well-known/appspecific/com.tesla.3p.public-key.
 For details on how telemetry data flows through the server, see:
 - [Architecture Overview](./architecture.md)
 - [Data Flow Documentation](./data-flow.md)
+
+For sending **vehicle commands** (lock, climate, charge, trunk, navigation)
+— the signed vehicle-command proxy, key management, and the virtual-key
+pairing runbook — see:
+- [Vehicle Commands Ops Runbook](./operations/vehicle-commands.md)

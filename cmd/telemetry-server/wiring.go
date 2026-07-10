@@ -16,6 +16,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/myrobotaxi/telemetry/internal/auth"
+	"github.com/myrobotaxi/telemetry/internal/commands"
 	"github.com/myrobotaxi/telemetry/internal/config"
 	"github.com/myrobotaxi/telemetry/internal/cryptox"
 	"github.com/myrobotaxi/telemetry/internal/events"
@@ -285,27 +286,34 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 
 	setupFleetConfigEndpoint(deps.cfg, deps.srv, deps.authenticator, deps.vinCache, deps.accountRepo, deps.vehicleRepo, deps.logger)
 
-	// Mounted when resolveDebugFieldsGate says so — either because the
-	// server is running with --dev (token optional) or because an operator
-	// has set DEBUG_FIELDS_TOKEN on a production instance to let
-	// `ops fields watch` stream real-Tesla frames. Auth is enforced by
-	// DebugFieldsHandler via the X-Debug-Token header / ?token= query
-	// param when APIKey is non-empty.
-	if deps.debugGate.Enabled {
-		debugHandler := telemetry.NewDebugFieldsHandler(
-			deps.bus,
-			deps.logger.With(slog.String("component", "debug-fields")),
-			telemetry.DebugFieldsConfig{
-				APIKey:         deps.debugGate.Token,
-				OriginPatterns: deps.originPatterns,
-			},
-		)
-		deps.srv.HandleFunc("GET /api/debug/fields", debugHandler.ServeHTTP)
-		deps.logger.Info("/api/debug/fields endpoint enabled",
-			slog.String("gate", deps.debugGate.Reason),
-			slog.Bool("token_required", deps.debugGate.Token != ""),
-		)
+	setupVehicleCommandEndpoint(deps, snapshotAdapter)
+
+	setupDebugFieldsEndpoint(deps)
+}
+
+// setupDebugFieldsEndpoint mounts GET /api/debug/fields when
+// resolveDebugFieldsGate says so — either because the server is running
+// with --dev (token optional) or because an operator has set
+// DEBUG_FIELDS_TOKEN on a production instance to let `ops fields watch`
+// stream real-Tesla frames. Auth is enforced by DebugFieldsHandler via the
+// X-Debug-Token header / ?token= query param when APIKey is non-empty.
+func setupDebugFieldsEndpoint(deps httpRouteDeps) {
+	if !deps.debugGate.Enabled {
+		return
 	}
+	debugHandler := telemetry.NewDebugFieldsHandler(
+		deps.bus,
+		deps.logger.With(slog.String("component", "debug-fields")),
+		telemetry.DebugFieldsConfig{
+			APIKey:         deps.debugGate.Token,
+			OriginPatterns: deps.originPatterns,
+		},
+	)
+	deps.srv.HandleFunc("GET /api/debug/fields", debugHandler.ServeHTTP)
+	deps.logger.Info("/api/debug/fields endpoint enabled",
+		slog.String("gate", deps.debugGate.Reason),
+		slog.Bool("token_required", deps.debugGate.Token != ""),
+	)
 }
 
 // setupRideRequestEndpoints wires the ride-request REST surface: the
@@ -433,6 +441,52 @@ func setupFleetConfigEndpoint(
 	logger.Info("fleet config endpoints enabled (VIN + vehicleId, GET status + POST re-push)",
 		slog.String("proxy_url", cfg.Proxy().URL),
 	)
+}
+
+// setupVehicleCommandEndpoint mounts POST /api/vehicles/{vehicleId}/command/{name}
+// (MYR-180). The signed-command transport reuses the tesla-http-proxy
+// sidecar (cfg.Proxy().URL) that fleet-config push already uses — the
+// P-256 command key lives ONLY in that proxy's config, never in this
+// process (decision record: docs/operations/vehicle-commands.md §1). The
+// route is ALWAYS mounted so the SDK sees a typed error, not a 404: when
+// no proxy is configured the transport is disabled and every signer-
+// required command resolves to key_not_paired.
+func setupVehicleCommandEndpoint(deps httpRouteDeps, vehicles telemetry.VehicleSnapshotReader) {
+	proxyURL := deps.cfg.Proxy().URL
+	transport := commands.NewProxyTransport(
+		proxyURL,
+		proxyHTTPClient(proxyURL, deps.logger),
+		deps.logger.With(slog.String("component", "command-transport")),
+	)
+	executor := commands.NewExecutor(transport, deps.logger.With(slog.String("component", "command-executor")))
+
+	var opts []telemetry.VehicleCommandOption
+	if deps.cfg.TeslaOAuth().ClientID != "" {
+		refresher := telemetry.NewTokenRefresher(telemetry.TeslaOAuthConfig{
+			ClientID:     deps.cfg.TeslaOAuth().ClientID,
+			ClientSecret: deps.cfg.TeslaOAuth().ClientSecret,
+		}, deps.logger.With(slog.String("component", "command-token-refresh")))
+		opts = append(opts, telemetry.WithCommandTokenRefresher(refresher, &teslaTokenUpdaterAdapter{repo: deps.accountRepo}))
+	}
+
+	handler := telemetry.NewVehicleCommandHandler(
+		deps.authenticator,
+		vehicles,
+		&teslaTokenAdapter{repo: deps.accountRepo},
+		executor,
+		deps.logger.With(slog.String("component", "vehicle-command")),
+		opts...,
+	)
+	deps.srv.HandleFunc("POST /api/vehicles/{vehicleId}/command/{name}", handler.ServeHTTP)
+
+	if transport.Enabled() {
+		deps.logger.Info("vehicle command endpoint enabled",
+			slog.String("proxy_url", proxyURL),
+			slog.Int("commands", len(executor.Registry().Names())),
+		)
+	} else {
+		deps.logger.Warn("vehicle command endpoint mounted but signing disabled: TESLA_PROXY_URL not set — signer-required commands return key_not_paired")
+	}
 }
 
 // buildTeslaTLS creates a TLS config for the Tesla mTLS port. It loads
