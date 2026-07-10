@@ -40,6 +40,23 @@ const (
 	RescheduleStatusDeclined  RescheduleStatus = "declined"
 )
 
+// DispatchStatus is the outcome of the MYR-176 nav-dispatch push that fires
+// once when an owner accepts a ride. It is an orthogonal annotation on the
+// row — NOT a member of RideRequestStatus (accepted stays accepted). A nil
+// *DispatchStatus on RideRequestRecord means dispatch has not resolved yet
+// (or the ride was never accepted).
+type DispatchStatus string
+
+const (
+	// DispatchStatusSent — the vehicle accepted the navigation_gps_request.
+	DispatchStatusSent DispatchStatus = "sent"
+	// DispatchStatusFailed — the push failed terminally or after exhausting
+	// the bounded retry budget; DispatchError carries the opaque reason code.
+	DispatchStatusFailed DispatchStatus = "failed"
+	// DispatchStatusSkipped — the push was not attempted (kill-switch off).
+	DispatchStatusSkipped DispatchStatus = "skipped"
+)
+
 // RidePlace is a pickup or drop-off point — contracts $defs.RidePlace.
 // Latitude/Longitude are P1 GPS coordinates: the repo encrypts them into
 // the *_enc columns on write and decrypts on read; they never touch the
@@ -81,4 +98,13 @@ type RideRequestRecord struct {
 	CompletedAt *time.Time
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+
+	// Dispatch outcome (MYR-176). All nil until the nav-dispatch push
+	// resolves. DispatchStatus/DispatchError are set by RecordDispatchOutcome;
+	// DispatchedAt is stamped at claim time by ClaimDispatch (it doubles as
+	// the exactly-once latch). DispatchError is nil unless DispatchStatus is
+	// 'failed'.
+	DispatchStatus *DispatchStatus
+	DispatchedAt   *time.Time
+	DispatchError  *string
 }

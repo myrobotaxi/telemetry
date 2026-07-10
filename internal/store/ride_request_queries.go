@@ -13,7 +13,8 @@ const rideRequestColumns = `id, rider_id, owner_id, vehicle_id,
 	dropoff_lat_enc, dropoff_lng_enc, dropoff_label, dropoff_address,
 	status, passenger_name, passenger_phone,
 	scheduled_for, reschedule_proposed_for, reschedule_status,
-	accepted_at, completed_at, created_at, updated_at`
+	accepted_at, completed_at, created_at, updated_at,
+	dispatch_status, dispatched_at, dispatch_error`
 
 const queryRideRequestInsert = `INSERT INTO go_ride_requests (
 	id, rider_id, owner_id, vehicle_id,
@@ -166,3 +167,24 @@ const queryRideRequestResolveReschedule = `UPDATE go_ride_requests SET
 	updated_at = NOW()
 WHERE id = $1 AND reschedule_status = 'requested'
 RETURNING ` + rideRequestColumns
+
+// queryRideRequestClaimDispatch is the MYR-176 exactly-once dispatch latch:
+// it stamps dispatched_at only when it is still NULL, so a re-delivered
+// ride.accepted event (or a concurrent second delivery) affects zero rows and
+// the dispatcher skips the duplicate nav push. RETURNING id lets the caller
+// distinguish "won the claim" (one row) from "already dispatched" (no rows).
+const queryRideRequestClaimDispatch = `UPDATE go_ride_requests SET
+	dispatched_at = NOW(),
+	updated_at = NOW()
+WHERE id = $1 AND dispatched_at IS NULL
+RETURNING id`
+
+// queryRideRequestRecordDispatch persists the resolved dispatch outcome
+// (status + opaque error code) after the claim. dispatch_error is NULL on
+// success/skip. The row is already claimed (dispatched_at set), so this is an
+// unconditional update by id.
+const queryRideRequestRecordDispatch = `UPDATE go_ride_requests SET
+	dispatch_status = $2,
+	dispatch_error = $3,
+	updated_at = NOW()
+WHERE id = $1`
