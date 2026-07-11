@@ -40,10 +40,40 @@ const (
 // Non-command failure codes recorded in dispatch_error when the pipeline
 // fails BEFORE (or instead of) a Tesla command. Command failures record the
 // typed wserrors code (key_not_paired, vehicle_asleep, …) verbatim.
+//
+// The standalone `// #nosec G101` lines below suppress gosec's hardcoded-
+// credential false positive: these are OPAQUE outcome codes surfaced in
+// logs + the P0 dispatch_error column, never credentials. gosec matches the
+// nosec directive on the line directly above the flagged const spec, so the
+// comment MUST stay standalone (a trailing `//nolint:gosec // #nosec` on the
+// same line is NOT honored by the standalone gosec scanner).
 const (
 	codeVehicleUnresolved = "vehicle_unresolved"
-	codeTokenUnavailable  = "token_unavailable" //nolint:gosec // #nosec G101 -- opaque outcome code, not a credential
-	codeCanceled          = "dispatch_canceled"
+	// #nosec G101 -- opaque outcome code, not a credential
+	codeTokenUnavailable = "token_unavailable"
+	// #nosec G101 -- opaque outcome code, not a credential
+	codeTokenExpired          = "token_expired"
+	codeTransportUnconfigured = "transport_unconfigured"
+	codeCanceled              = "dispatch_canceled"
+)
+
+// Permanent (non-retryable) resolution-failure sentinels. The cmd/ adapters
+// map the concrete telemetry/store sentinels (ErrTeslaTokenExpired,
+// ErrTeslaTokenUnavailable, store.ErrVehicleNotFound) onto these so the
+// dispatcher can classify a resolution failure as permanent WITHOUT importing
+// those packages (keeping the consumer-site interface boundary clean). Any
+// OTHER resolution error is treated as transient and retried under the
+// bounded policy.
+var (
+	// ErrTokenExpired — a token exists but is expired and cannot be
+	// refreshed; the owner must re-link. Recorded as token_expired.
+	ErrTokenExpired = errors.New("dispatch: tesla token expired")
+	// ErrTokenUnavailable — no token on file (account never linked).
+	// Recorded as token_unavailable.
+	ErrTokenUnavailable = errors.New("dispatch: tesla token unavailable")
+	// ErrVehicleNotFound — the vehicle row is gone; no VIN to resolve.
+	// Recorded as vehicle_unresolved.
+	ErrVehicleNotFound = errors.New("dispatch: vehicle not found")
 )
 
 // VehicleResolver resolves a vehicle cuid to its Tesla VIN. Implemented in
@@ -94,6 +124,10 @@ const (
 	defaultMaxRetries     = 2
 	defaultBackoff        = 2 * time.Second
 	defaultOverallTimeout = 2 * time.Minute
+	// recordTimeout bounds the detached outcome-write context. It is short
+	// and independent of the per-event ctx so a timeout outcome still
+	// persists even though the per-event ctx has already expired.
+	recordTimeout = 10 * time.Second
 )
 
 func (c Config) withDefaults() Config {
@@ -196,22 +230,108 @@ func (d *Dispatcher) process(ctx context.Context, ev events.RideAcceptedEvent) {
 		return
 	}
 
-	vin, err := d.vehicles.ResolveVIN(ctx, ev.VehicleID)
+	vin, code := d.resolveVIN(ctx, ev.VehicleID)
+	if code != nil {
+		d.record(ctx, ev, "", OutcomeFailed, code)
+		return
+	}
+
+	token, code := d.resolveToken(ctx, ev.OwnerID)
+	if code != nil {
+		d.record(ctx, ev, vin, OutcomeFailed, code)
+		return
+	}
+
+	outcome, ecode := d.executeWithRetry(ctx, vin, token, ev.Pickup)
+	d.record(ctx, ev, vin, outcome, ecode)
+}
+
+// resolveVIN resolves the vehicle's VIN under the bounded retry policy,
+// retrying transient failures. A permanent condition (ErrVehicleNotFound)
+// short-circuits. On failure it returns a non-nil error code; on success a
+// nil code and the VIN.
+func (d *Dispatcher) resolveVIN(ctx context.Context, vehicleID string) (vin string, errCode *string) {
+	vin, err := d.resolveWithRetry(ctx, func(c context.Context) (string, error) {
+		return d.vehicles.ResolveVIN(c, vehicleID)
+	})
 	if err != nil {
 		code := codeVehicleUnresolved
-		d.record(ctx, ev, "", OutcomeFailed, &code)
-		return
+		if isContextErr(err) {
+			code = codeCanceled
+		}
+		return "", &code
 	}
+	return vin, nil
+}
 
-	token, err := d.tokens.ResolveToken(ctx, ev.OwnerID)
+// resolveToken resolves the owner's Tesla access token under the bounded
+// retry policy. Permanent conditions short-circuit with a DISTINCT code:
+// token_expired (must re-link) vs token_unavailable (never linked). A
+// transient failure that exhausts the budget records token_unavailable (the
+// token could not be obtained); ctx cancellation records dispatch_canceled.
+func (d *Dispatcher) resolveToken(ctx context.Context, ownerID string) (token string, errCode *string) {
+	token, err := d.resolveWithRetry(ctx, func(c context.Context) (string, error) {
+		return d.tokens.ResolveToken(c, ownerID)
+	})
 	if err != nil {
-		code := codeTokenUnavailable
-		d.record(ctx, ev, vin, OutcomeFailed, &code)
-		return
+		code := tokenErrorCode(err)
+		return "", &code
 	}
+	return token, nil
+}
 
-	outcome, code := d.executeWithRetry(ctx, vin, token, ev.Pickup)
-	d.record(ctx, ev, vin, outcome, code)
+// resolveWithRetry runs fn under the bounded retry policy (MaxRetries extra
+// attempts with exponential backoff). It retries only transient errors:
+// a permanentResolution error, or a dead ctx, stops the loop immediately.
+func (d *Dispatcher) resolveWithRetry(ctx context.Context, fn func(context.Context) (string, error)) (string, error) {
+	attempts := d.cfg.MaxRetries + 1
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			if err := sleepCtx(ctx, backoffFor(d.cfg.Backoff, attempt)); err != nil {
+				return "", err
+			}
+		}
+		v, err := fn(ctx)
+		if err == nil {
+			return v, nil
+		}
+		lastErr = err
+		if permanentResolution(err) || ctx.Err() != nil {
+			return "", err
+		}
+	}
+	return "", lastErr
+}
+
+// permanentResolution reports whether a resolution error is a well-identified
+// permanent condition that no retry can fix.
+func permanentResolution(err error) bool {
+	return errors.Is(err, ErrTokenExpired) ||
+		errors.Is(err, ErrTokenUnavailable) ||
+		errors.Is(err, ErrVehicleNotFound)
+}
+
+// tokenErrorCode maps a failed token resolution to its opaque outcome code.
+func tokenErrorCode(err error) string {
+	switch {
+	case isContextErr(err):
+		return codeCanceled
+	case errors.Is(err, ErrTokenExpired):
+		return codeTokenExpired
+	case errors.Is(err, ErrTokenUnavailable):
+		return codeTokenUnavailable
+	default:
+		// Transient failure that exhausted the retry budget: the token could
+		// not be obtained, so it is effectively unavailable.
+		return codeTokenUnavailable
+	}
+}
+
+// isContextErr reports whether err is (or wraps) a context cancellation or
+// deadline — used to record dispatch_canceled rather than a resolution code.
+func isContextErr(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // executeWithRetry runs the navigation_gps_request under the bounded retry
@@ -244,8 +364,9 @@ func (d *Dispatcher) executeWithRetry(ctx context.Context, vin, token string, pi
 		if err == nil {
 			return OutcomeSent, nil
 		}
-		lastCode = codeOf(err)
-		if !retryable(lastCode) {
+		var retry bool
+		retry, lastCode = classifyCommandErr(err)
+		if !retry {
 			return OutcomeFailed, &lastCode
 		}
 	}
@@ -253,9 +374,35 @@ func (d *Dispatcher) executeWithRetry(ctx context.Context, vin, token string, pi
 	return OutcomeFailed, &lastCode
 }
 
+// classifyCommandErr decides whether a command error is worth another bounded
+// attempt and returns the opaque code to record. Retryability is the
+// executor's own signal (CommandError.Retryable) — a transient transport /
+// vehicle failure or asleep-after-wake. The unconfigured-transport sentinel is
+// a permanent misconfiguration: never retry it, and record a distinct code so
+// ops can tell it apart from a live command_failed 502. A non-typed error is
+// treated as a transient transport failure.
+func classifyCommandErr(err error) (retryable bool, code string) {
+	if errors.Is(err, commands.ErrTransportNotConfigured) {
+		return false, codeTransportUnconfigured
+	}
+	var cmdErr *commands.CommandError
+	if errors.As(err, &cmdErr) {
+		return cmdErr.Retryable, string(cmdErr.Code)
+	}
+	return true, string(wserrors.ErrCodeCommandFailed)
+}
+
 // record persists the outcome and emits the single per-attempt audit line.
+// The write runs on a context DETACHED from the per-event ctx (which bounds
+// the whole dispatch and may already be canceled/timed-out — precisely when
+// we most need to persist the outcome). Without WithoutCancel a timed-out
+// ride would stay claimed (dispatched_at set) with a NULL dispatch_status
+// forever; the startup reconciler would then have to clean it up. We keep the
+// ctx values but drop its deadline, adding our own short bound.
 func (d *Dispatcher) record(ctx context.Context, ev events.RideAcceptedEvent, vin string, outcome Outcome, code *string) {
-	if err := d.store.RecordDispatchOutcome(ctx, ev.RideRequestID, outcome, code); err != nil {
+	recCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+	defer cancel()
+	if err := d.store.RecordDispatchOutcome(recCtx, ev.RideRequestID, outcome, code); err != nil {
 		d.logger.Error("dispatch: failed to record outcome",
 			slog.String("ride_id", ev.RideRequestID),
 			slog.String("outcome", string(outcome)),
@@ -273,29 +420,6 @@ func (d *Dispatcher) record(ctx context.Context, ev events.RideAcceptedEvent, vi
 		attrs = append(attrs, slog.String("error_code", *code))
 	}
 	d.logger.Info("dispatch attempt", attrs...)
-}
-
-// codeOf extracts the typed command error code, defaulting to command_failed
-// for a non-typed error.
-func codeOf(err error) string {
-	var cmdErr *commands.CommandError
-	if errors.As(err, &cmdErr) {
-		return string(cmdErr.Code)
-	}
-	return string(wserrors.ErrCodeCommandFailed)
-}
-
-// retryable reports whether a command error code is worth another bounded
-// attempt: transient transport failures and asleep-after-wake exhaustion.
-// Everything else (key_not_paired, permission_denied, invalid_request,
-// internal_error) is terminal.
-func retryable(code string) bool {
-	switch code {
-	case string(wserrors.ErrCodeVehicleAsleep), string(wserrors.ErrCodeCommandFailed):
-		return true
-	default:
-		return false
-	}
 }
 
 // backoffFor grows the base backoff exponentially per retry attempt

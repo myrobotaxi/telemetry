@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -94,6 +95,12 @@ type dispatchVehicleResolverAdapter struct {
 func (a *dispatchVehicleResolverAdapter) ResolveVIN(ctx context.Context, vehicleID string) (string, error) {
 	v, err := a.repo.GetByID(ctx, vehicleID)
 	if err != nil {
+		// Translate the store's permanent not-found into the dispatch
+		// sentinel so the dispatcher short-circuits (no retry); anything else
+		// (DB hiccup) stays transient and is retried under the bounded policy.
+		if errors.Is(err, store.ErrVehicleNotFound) {
+			return "", fmt.Errorf("resolve vin for dispatch: %w: %w", dispatch.ErrVehicleNotFound, err)
+		}
 		return "", fmt.Errorf("resolve vin for dispatch: %w", err)
 	}
 	return v.VIN, nil
@@ -108,7 +115,19 @@ type dispatchTokenSourceAdapter struct {
 func (a *dispatchTokenSourceAdapter) ResolveToken(ctx context.Context, userID string) (string, error) {
 	tok, err := a.resolver.Resolve(ctx, userID)
 	if err != nil {
-		return "", fmt.Errorf("resolve tesla token for dispatch: %w", err)
+		// Translate the resolver's permanent conditions into the dispatch
+		// sentinels so the dispatcher (a) does not retry them and (b) records
+		// DISTINCT outcome codes: token_expired (must re-link) vs
+		// token_unavailable (never linked). Preserve the concrete cause via
+		// multi-%w for logs. Any other error stays transient (retried).
+		switch {
+		case errors.Is(err, telemetry.ErrTeslaTokenExpired):
+			return "", fmt.Errorf("resolve tesla token for dispatch: %w: %w", dispatch.ErrTokenExpired, err)
+		case errors.Is(err, telemetry.ErrTeslaTokenUnavailable):
+			return "", fmt.Errorf("resolve tesla token for dispatch: %w: %w", dispatch.ErrTokenUnavailable, err)
+		default:
+			return "", fmt.Errorf("resolve tesla token for dispatch: %w", err)
+		}
 	}
 	return tok.AccessToken, nil
 }

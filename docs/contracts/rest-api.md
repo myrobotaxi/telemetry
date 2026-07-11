@@ -1397,6 +1397,15 @@ When an owner accepts, the server asynchronously pushes the rider's **pickup** i
 
 Both fields are **optional and additive** (older clients ignore them); the internal failure reason code is not exposed on the wire. There is **no** new WS frame for dispatch — clients that render it refetch the REST detail after the `accepted` `ride_status_changed`.
 
+> **Internal failure reason codes (`dispatch_error`, server-side only — NOT on the wire).** When `dispatchStatus` is `"failed"` the server records an opaque reason code in the `dispatch_error` column (data-classification.md §1.9) for operability. The set is the typed command codes (`key_not_paired`, `permission_denied`, `vehicle_asleep`, `command_failed`, `invalid_request`, `internal_error`) plus dispatch-local codes:
+> - `vehicle_unresolved` — the vehicle's VIN could not be resolved (row gone, or transient lookup failure exhausted the bounded retry).
+> - `token_expired` — the owner has a Tesla token on file but it is expired and could not be refreshed; **the owner must re-link** their Tesla account. Distinct from `token_unavailable` so this actionable case is not conflated with "never linked".
+> - `token_unavailable` — no usable Tesla token could be obtained (account **never linked**, or a transient lookup failure exhausted retries).
+> - `transport_unconfigured` — the tesla-http-proxy command transport is not configured; a permanent misconfiguration (not retried).
+> - `dispatch_canceled` — the per-event context was canceled/timed out mid-resolution.
+>
+> Resolution steps (VIN + token) run under the same bounded retry policy as the command: transient failures are retried; only well-identified permanent conditions (`token_expired`, `token_unavailable` on a never-linked account, `vehicle_unresolved` not-found, `transport_unconfigured`) short-circuit.
+
 #### `POST /api/ride-requests/{id}/decline`
 
 Owner-only. Legal only from `requested` → `declined`; any other current status is `409 conflict`. Responds `200 OK` with the updated `RideRequest` and unicasts `ride_status_changed`. Same error catalog as accept (minus the dispatch seam).
