@@ -39,7 +39,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_go_users_email
 -- afterwards so a later email change can never re-point an Apple account.
 CREATE TABLE IF NOT EXISTS go_identity_apple (
     apple_sub     TEXT PRIMARY KEY,           -- Apple's stable subject ("sub" claim)
-    user_id       TEXT NOT NULL,              -- resolved CUID: a Prisma "User".id OR a go_users.id (no FK, CG-DL-9)
+    -- resolved CUID: legacy web-account id OR a go_users.id (no FK, CG-DL-9)
+    user_id       TEXT NOT NULL,
     email         TEXT,                        -- P1; email captured at first sign-in (nullable)
     name          TEXT,                        -- P1; name captured at first sign-in (nullable)
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -56,7 +57,8 @@ CREATE INDEX IF NOT EXISTS idx_go_identity_apple_user
 CREATE TABLE IF NOT EXISTS go_refresh_tokens (
     token_hash   TEXT PRIMARY KEY,            -- SHA-256 hex of the opaque refresh token
     family_id    TEXT NOT NULL,               -- rotation lineage; reuse-detection revokes the whole family
-    user_id      TEXT NOT NULL,               -- owning user cuid (no FK, CG-DL-9)
+    -- owning cuid (no FK, CG-DL-9)
+    user_id      TEXT NOT NULL,
     issued_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     expires_at   TIMESTAMPTZ NOT NULL,        -- sliding 90d: each rotation sets now + 90d
     rotated_from TEXT,                          -- token_hash this one replaced (NULL for the family root)
