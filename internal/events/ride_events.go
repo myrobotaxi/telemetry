@@ -39,9 +39,10 @@ type RideRequestCreatedEvent struct {
 	Status        string
 	// RequesterName is the requester's resolved display name (MYR-229), so
 	// the owner's client can label the incoming request without a detail
-	// fetch. Empty when the rider has no identity row (the frame omits it).
+	// fetch. Nil when the rider has no identity row (the frame omits it) —
+	// carried as a pointer, consistent with the adjacent optional fields.
 	// P1 PII — never logged.
-	RequesterName string
+	RequesterName *string
 	ScheduledFor  *time.Time
 	CreatedAt     time.Time
 }
@@ -63,9 +64,10 @@ type RideStatusChangedEvent struct {
 	Status        string
 	// RequesterName is the requester's resolved display name (MYR-229),
 	// carried so the owner's client keeps a stable requester label across
-	// lifecycle transitions. Empty when the rider has no identity row (the
-	// frame omits it). P1 PII — never logged.
-	RequesterName    string
+	// lifecycle transitions. Nil when the rider has no identity row (the
+	// frame omits it) — carried as a pointer, consistent with the adjacent
+	// optional fields. P1 PII — never logged.
+	RequesterName    *string
 	RescheduleStatus *string
 	UpdatedAt        time.Time
 }
