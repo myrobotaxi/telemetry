@@ -187,3 +187,76 @@ func TestHub_SendToUsers_TargetsAndDedups(t *testing.T) {
 func contains(payload json.RawMessage, key string) bool {
 	return bytes.Contains(payload, []byte(`"`+key+`"`))
 }
+
+// TestRideBroadcaster_Created_CarriesRequesterName asserts the created frame
+// carries requesterName when resolved and omits the key when the event's name
+// is empty (unresolved requester) — MYR-229.
+func TestRideBroadcaster_Created_CarriesRequesterName(t *testing.T) {
+	tests := []struct {
+		name        string
+		requester   string
+		wantPresent bool
+		wantValue   string
+	}{
+		{name: "resolved name present", requester: "Maya", wantPresent: true, wantValue: "Maya"},
+		{name: "empty name omitted", requester: "", wantPresent: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hub := NewHub(slog.Default(), NoopHubMetrics{})
+			t.Cleanup(hub.Stop)
+			rider := testClient(hub, "clrider")
+
+			b := newRideBroadcaster(hub)
+			b.handleRideRequestCreated(context.Background(), events.NewEvent(events.RideRequestCreatedEvent{
+				RideRequestID: "crr", VehicleID: "clveh", RiderID: "clrider", OwnerID: "clowner",
+				Status: "requested", RequesterName: tt.requester, CreatedAt: time.Now().UTC(),
+			}))
+
+			m := drainOne(t, rider)
+			if got := contains(m.Payload, "requesterName"); got != tt.wantPresent {
+				t.Fatalf("requesterName present=%v want %v (payload=%s)", got, tt.wantPresent, m.Payload)
+			}
+			if tt.wantPresent {
+				var p rideRequestCreatedPayload
+				if err := json.Unmarshal(m.Payload, &p); err != nil {
+					t.Fatalf("payload: %v", err)
+				}
+				if p.RequesterName == nil || *p.RequesterName != tt.wantValue {
+					t.Errorf("requesterName = %v want %q", p.RequesterName, tt.wantValue)
+				}
+			}
+		})
+	}
+}
+
+// TestRideBroadcaster_StatusChanged_CarriesRequesterName mirrors the above for
+// the status-changed frame (MYR-229).
+func TestRideBroadcaster_StatusChanged_CarriesRequesterName(t *testing.T) {
+	tests := []struct {
+		name        string
+		requester   string
+		wantPresent bool
+	}{
+		{name: "resolved name present", requester: "Maya", wantPresent: true},
+		{name: "empty name omitted", requester: "", wantPresent: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hub := NewHub(slog.Default(), NoopHubMetrics{})
+			t.Cleanup(hub.Stop)
+			rider := testClient(hub, "clrider")
+
+			b := newRideBroadcaster(hub)
+			b.handleRideStatusChanged(context.Background(), events.NewEvent(events.RideStatusChangedEvent{
+				RideRequestID: "crr", VehicleID: "clveh", RiderID: "clrider", OwnerID: "clowner",
+				Status: "accepted", RequesterName: tt.requester, UpdatedAt: time.Now().UTC(),
+			}))
+
+			m := drainOne(t, rider)
+			if got := contains(m.Payload, "requesterName"); got != tt.wantPresent {
+				t.Fatalf("requesterName present=%v want %v (payload=%s)", got, tt.wantPresent, m.Payload)
+			}
+		})
+	}
+}

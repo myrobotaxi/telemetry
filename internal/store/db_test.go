@@ -94,6 +94,15 @@ func isDockerRunning() bool {
 // createSchema reproduces the Prisma-owned tables for testing.
 func createSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	schema := `
+	-- Prisma-owned "User" table (minimal shape) — READ-ONLY here (CG-DL-9).
+	-- The ride-request requester-name resolution (MYR-229) reads name/email
+	-- from it by rider_id cuid; both columns are nullable in the Prisma schema.
+	CREATE TABLE "User" (
+		"id"    TEXT PRIMARY KEY,
+		"name"  TEXT,
+		"email" TEXT UNIQUE
+	);
+
 	CREATE TYPE "VehicleStatus" AS ENUM (
 		'driving', 'parked', 'charging', 'offline', 'in_service'
 	);
