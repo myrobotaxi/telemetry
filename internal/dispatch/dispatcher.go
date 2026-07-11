@@ -35,7 +35,7 @@ const (
 // typed wserrors code (key_not_paired, vehicle_asleep, …) verbatim.
 const (
 	codeVehicleUnresolved = "vehicle_unresolved"
-	codeTokenUnavailable  = "token_unavailable" //nolint:gosec // opaque outcome code, not a credential
+	codeTokenUnavailable  = "token_unavailable" //nolint:gosec // #nosec G101 -- opaque outcome code, not a credential
 	codeCanceled          = "dispatch_canceled"
 )
 
