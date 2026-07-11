@@ -23,10 +23,27 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/myrobotaxi/telemetry/internal/cryptox"
 )
+
+// pgUniqueViolation is the SQLSTATE Postgres raises when an INSERT/UPDATE
+// violates a unique constraint (unique_violation).
+const pgUniqueViolation = "23505"
+
+// isRideActiveViolation reports whether err is the partial-unique-index
+// rejection from migration 0004 — the rider already holds an OPEN instant
+// ride. Matches on BOTH the SQLSTATE and the constraint name so an unrelated
+// future unique constraint on the table is not misclassified as an
+// active-ride conflict.
+func isRideActiveViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) &&
+		pgErr.Code == pgUniqueViolation &&
+		pgErr.ConstraintName == constraintRideActiveInstant
+}
 
 // RideRequestRepo manages ride-request records. All coordinate columns are
 // AES-256-GCM ciphertext; the repo is the encrypt/decrypt boundary
@@ -97,6 +114,13 @@ func (r *RideRequestRepo) Create(ctx context.Context, req RideRequestRecord) (Ri
 	err = row.Scan(&req.CreatedAt, &req.UpdatedAt)
 	r.metrics.ObserveQueryDuration("ride_request.create", time.Since(start).Seconds())
 	if err != nil {
+		// The one-active-instant-ride guard (0004) losing the race is an
+		// expected outcome, not a query fault — surface the typed sentinel
+		// without incrementing the error counter (mirrors the guarded
+		// UpdateStatusFrom conflict path).
+		if isRideActiveViolation(err) {
+			return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.Create(rider %s): %w", req.RiderID, ErrRideRequestActive)
+		}
 		r.metrics.IncQueryError("ride_request.create")
 		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.Create(%s): %w", req.ID, err)
 	}
@@ -118,6 +142,27 @@ func (r *RideRequestRepo) GetByID(ctx context.Context, id string) (RideRequestRe
 	if err != nil {
 		r.metrics.IncQueryError("ride_request.get_by_id")
 		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.GetByID(%s): %w", id, err)
+	}
+	return rec, nil
+}
+
+// GetActiveInstantByRider returns the rider's single OPEN instant ride
+// request — the one row the partial unique index (0004) permits. OPEN = the
+// non-terminal lifecycle states; instant = no scheduledFor. Used by the
+// create handler to populate the 409 `ride_active` body so the client can
+// adopt the existing ride (MYR-230). Returns ErrRideRequestNotFound when the
+// rider has no open instant ride.
+func (r *RideRequestRepo) GetActiveInstantByRider(ctx context.Context, riderID string) (RideRequestRecord, error) {
+	start := time.Now()
+	row := r.pool.QueryRow(ctx, queryRideRequestActiveInstantByRider, riderID)
+	rec, err := r.scanRideRequest(row)
+	r.metrics.ObserveQueryDuration("ride_request.get_active_instant_by_rider", time.Since(start).Seconds())
+	if errors.Is(err, pgx.ErrNoRows) {
+		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.GetActiveInstantByRider(%s): %w", riderID, ErrRideRequestNotFound)
+	}
+	if err != nil {
+		r.metrics.IncQueryError("ride_request.get_active_instant_by_rider")
+		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.GetActiveInstantByRider(%s): %w", riderID, err)
 	}
 	return rec, nil
 }

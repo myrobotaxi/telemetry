@@ -29,6 +29,15 @@ var (
 	// NOT wrap sdk.ErrNotFound.
 	ErrRideRequestConflict = errors.New("ride request status conflict")
 
+	// ErrRideRequestActive is returned by Create when the rider already has
+	// an OPEN instant ride request and the partial unique index
+	// (uq_go_ride_requests_active_instant_rider, migration 0004) rejects the
+	// second INSERT with 23505. The HTTP layer maps it to 409 `ride_active`
+	// (rest-api.md §7.8) and fetches the existing open request (GetActive
+	// InstantByRider) for the response body. Deliberately does NOT wrap
+	// sdk.ErrNotFound — it is a conflict, not a missing resource.
+	ErrRideRequestActive = errors.New("ride request already active")
+
 	// ErrTeslaTokenNotFound is returned when no Tesla OAuth token exists
 	// for a user in the Prisma-owned Account table.
 	// Wraps sdk.ErrNotFound so callers can use errors.Is(err, sdk.ErrNotFound).

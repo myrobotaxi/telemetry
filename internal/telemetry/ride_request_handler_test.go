@@ -28,6 +28,19 @@ type fakeRideStore struct {
 	getRec RideRequestData
 	getErr error
 
+	// Active-instant guard (MYR-230). activeErr short-circuits; otherwise a
+	// zero-value activeRec (empty ID) is reported as "no open instant ride"
+	// (sdk.ErrNotFound) so create falls through, and a populated activeRec
+	// stands in for an existing open ride.
+	activeRec   RideRequestData
+	activeErr   error
+	activeCalls int
+	// activeAfterCreateOnly makes the guard MISS on the pre-check and only
+	// surface activeRec after Create ran — used to drive the DB race backstop
+	// (unique-index rejection re-read) deterministically.
+	activeAfterCreateOnly bool
+	createCalled          bool
+
 	updated      RideRequestData
 	updateErr    error
 	updatedID    string
@@ -55,6 +68,7 @@ type fakeRideStore struct {
 
 func (f *fakeRideStore) Create(_ context.Context, in RideRequestCreateInput) (RideRequestData, error) {
 	f.createdInput = in
+	f.createCalled = true
 	if f.createErr != nil {
 		return RideRequestData{}, f.createErr
 	}
@@ -78,6 +92,20 @@ func (f *fakeRideStore) GetByID(_ context.Context, _ string) (RideRequestData, e
 		return RideRequestData{}, f.getErr
 	}
 	return f.getRec, nil
+}
+
+func (f *fakeRideStore) GetActiveInstantByRider(_ context.Context, _ string) (RideRequestData, error) {
+	f.activeCalls++
+	if f.activeErr != nil {
+		return RideRequestData{}, f.activeErr
+	}
+	if f.activeAfterCreateOnly && !f.createCalled {
+		return RideRequestData{}, fmtNotFound()
+	}
+	if f.activeRec.ID == "" {
+		return RideRequestData{}, fmtNotFound()
+	}
+	return f.activeRec, nil
 }
 
 // UpdateStatusFrom mimics the guarded store transition: it enforces the
@@ -345,6 +373,116 @@ func TestRideRequestHandler_Create_HappyPath(t *testing.T) {
 	}
 	if ev.RideRequestID != rideID || ev.RiderID != rideUserID || ev.OwnerID != rideUserID {
 		t.Errorf("event fields: %+v", ev)
+	}
+}
+
+// --- One active ride per rider (MYR-230) ---
+
+const rideActiveInstantBody = `{"vehicleId":"` + rideVehicle + `","pickup":{"lat":37.79,"lng":-122.39,"label":"Home"},"dropoff":{"lat":37.77,"lng":-122.39,"label":"Caltrain"}}`
+
+// decodeRideActive decodes a 409 ride_active body and asserts the typed code.
+func decodeRideActive(t *testing.T, rec *httptest.ResponseRecorder) rideActiveErrorResponse {
+	t.Helper()
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status: got %d want 409. body=%s", rec.Code, rec.Body.String())
+	}
+	var body rideActiveErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode ride_active body: %v", err)
+	}
+	if body.Error.Code != wserrors.ErrCodeRideActive {
+		t.Fatalf("error.code: got %q want %q", body.Error.Code, wserrors.ErrCodeRideActive)
+	}
+	return body
+}
+
+// TestRideRequestHandler_Create_RideActive_PreCheck: an instant create while
+// an open instant ride already exists is refused 409 ride_active, carries the
+// existing ride under activeRideRequest for the client to adopt, and never
+// reaches Create (fast path).
+func TestRideRequestHandler_Create_RideActive_PreCheck(t *testing.T) {
+	existing := fixtureRideData(rideUserID, rideStatusAccepted)
+	store := &fakeRideStore{activeRec: existing}
+	pub := &fakeRidePublisher{}
+	h := newRideHandler(store, &stubVehicleSnapshotReader{row: fixtureSnapshotRow(rideUserID)}, pub, rideUserID)
+
+	rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests", rideActiveInstantBody, rideAuthOK)
+
+	body := decodeRideActive(t, rec)
+	if body.ActiveRideRequest.ID != existing.ID {
+		t.Errorf("activeRideRequest.id: got %q want %q", body.ActiveRideRequest.ID, existing.ID)
+	}
+	if body.ActiveRideRequest.Status != rideStatusAccepted {
+		t.Errorf("activeRideRequest.status: got %q", body.ActiveRideRequest.Status)
+	}
+	if store.createdInput.VehicleID != "" {
+		t.Error("Create must not run when the pre-check already found an open ride")
+	}
+	if len(pub.events) != 0 {
+		t.Errorf("no event should be published on a refused create, got %d", len(pub.events))
+	}
+}
+
+// TestRideRequestHandler_Create_RideActive_RaceBackstop: the pre-check MISSES
+// (no open ride yet) but a concurrent instant create wins the unique-index
+// race, so Create returns ErrRideActive. The handler must re-read the winner
+// and return the same 409 ride_active body — the DB is the authoritative
+// guard even when the pre-check passed.
+func TestRideRequestHandler_Create_RideActive_RaceBackstop(t *testing.T) {
+	winner := fixtureRideData(rideUserID, rideStatusRequested)
+	store := &fakeRideStore{
+		activeAfterCreateOnly: true,
+		activeRec:             winner,
+		createErr:             fmt.Errorf("create ride request: %w", ErrRideActive),
+	}
+	h := newRideHandler(store, &stubVehicleSnapshotReader{row: fixtureSnapshotRow(rideUserID)}, &fakeRidePublisher{}, rideUserID)
+
+	rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests", rideActiveInstantBody, rideAuthOK)
+
+	body := decodeRideActive(t, rec)
+	if body.ActiveRideRequest.ID != winner.ID {
+		t.Errorf("activeRideRequest.id: got %q want %q", body.ActiveRideRequest.ID, winner.ID)
+	}
+	if !store.createCalled {
+		t.Error("Create must be attempted after the pre-check missed")
+	}
+	if store.activeCalls != 2 {
+		t.Errorf("expected pre-check + backstop re-read = 2 active lookups, got %d", store.activeCalls)
+	}
+}
+
+// TestRideRequestHandler_Create_ScheduledExempt: a scheduled request is never
+// blocked by the active-instant guard — the pre-check is skipped entirely and
+// the create proceeds even when an open instant ride exists.
+func TestRideRequestHandler_Create_ScheduledExempt(t *testing.T) {
+	store := &fakeRideStore{
+		activeRec: fixtureRideData(rideUserID, rideStatusAccepted), // an open instant ride exists
+		created:   fixtureRideData(rideUserID, rideStatusRequested),
+	}
+	h := newRideHandler(store, &stubVehicleSnapshotReader{row: fixtureSnapshotRow(rideUserID)}, &fakeRidePublisher{}, rideUserID)
+
+	body := `{"vehicleId":"` + rideVehicle + `","pickup":{"lat":37.79,"lng":-122.39,"label":"Home"},"dropoff":{"lat":37.77,"lng":-122.39,"label":"Caltrain"},"scheduledFor":"2026-06-18T16:00:00Z"}`
+	rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests", body, rideAuthOK)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("scheduled create must be allowed: got %d. body=%s", rec.Code, rec.Body.String())
+	}
+	if store.activeCalls != 0 {
+		t.Errorf("scheduled create must skip the active-instant guard, got %d lookups", store.activeCalls)
+	}
+}
+
+// TestRideRequestHandler_Create_RideActive_PreCheckStoreError: a store failure
+// on the guard pre-check surfaces as 500, not a false ride_active.
+func TestRideRequestHandler_Create_RideActive_PreCheckStoreError(t *testing.T) {
+	store := &fakeRideStore{activeErr: errors.New("db down")}
+	h := newRideHandler(store, &stubVehicleSnapshotReader{row: fixtureSnapshotRow(rideUserID)}, &fakeRidePublisher{}, rideUserID)
+
+	rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests", rideActiveInstantBody, rideAuthOK)
+
+	assertErrEnvelope(t, rec, http.StatusInternalServerError, wserrors.ErrCodeInternalError)
+	if store.createCalled {
+		t.Error("Create must not run when the pre-check errored")
 	}
 }
 

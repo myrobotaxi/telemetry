@@ -99,13 +99,17 @@ func (h *RideRequestHandler) ServeCreate(w http.ResponseWriter, r *http.Request)
 	in.RiderID = userID
 	in.OwnerID = row.UserID
 
+	// One active ride per rider (MYR-230): an INSTANT request is refused
+	// while the rider already has an open instant ride. The fast-path
+	// pre-check runs here; the partial unique index (migration 0004) is the
+	// authoritative race backstop, applied to the Create error below.
+	if h.rejectIfRideActive(ctx, w, in) {
+		return
+	}
+
 	created, err := h.store.Create(ctx, in)
 	if err != nil {
-		h.logger.Error("ride-request create: store failed",
-			slog.String("vehicle_id", in.VehicleID),
-			slog.String("error", err.Error()),
-		)
-		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
+		h.handleCreateError(ctx, w, in, err)
 		return
 	}
 
@@ -120,6 +124,60 @@ func (h *RideRequestHandler) ServeCreate(w http.ResponseWriter, r *http.Request)
 	})
 
 	h.writeJSON(w, http.StatusCreated, toRideRequestWire(created))
+}
+
+// rejectIfRideActive is the one-active-instant-ride fast path (MYR-230). For
+// an INSTANT request it 409s `ride_active` (carrying the existing ride to
+// adopt) when the rider already has an open instant ride, or 500s on a lookup
+// failure — returning true in either case so ServeCreate stops. Scheduled
+// requests are EXEMPT (a future reservation is not an active ride) and always
+// pass through (returns false). The partial unique index stays the
+// authoritative race guard, enforced by handleCreateError.
+func (h *RideRequestHandler) rejectIfRideActive(ctx context.Context, w http.ResponseWriter, in RideRequestCreateInput) bool {
+	if in.ScheduledFor != nil {
+		return false
+	}
+	switch existing, err := h.store.GetActiveInstantByRider(ctx, in.RiderID); {
+	case err == nil:
+		h.writeRideActive(w, existing)
+		return true
+	case errors.Is(err, sdk.ErrNotFound):
+		return false // no open instant ride — proceed to create
+	default:
+		h.logger.Error("ride-request create: active-ride pre-check failed",
+			slog.String("user_id", in.RiderID),
+			slog.String("error", err.Error()),
+		)
+		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
+		return true
+	}
+}
+
+// handleCreateError maps a failed store.Create onto a response. ErrRideActive
+// (the unique-index race backstop refusing a concurrent second instant
+// create) re-reads the winning ride so the client adopts it, exactly as the
+// pre-check would; every other error is a 500.
+func (h *RideRequestHandler) handleCreateError(ctx context.Context, w http.ResponseWriter, in RideRequestCreateInput, err error) {
+	if errors.Is(err, ErrRideActive) {
+		if existing, gErr := h.store.GetActiveInstantByRider(ctx, in.RiderID); gErr == nil {
+			h.writeRideActive(w, existing)
+			return
+		}
+		// Extreme TOCTOU: the conflicting ride reached a terminal state
+		// between the rejected insert and this re-read. Surface the typed 409
+		// without a body rather than a generic failure; the SDK re-syncs its
+		// own list and may retry the create.
+		h.logger.Warn("ride-request create: active guard fired but open ride vanished",
+			slog.String("user_id", in.RiderID),
+		)
+		h.writeError(w, http.StatusConflict, wserrors.ErrCodeRideActive, "you already have an active ride request")
+		return
+	}
+	h.logger.Error("ride-request create: store failed",
+		slog.String("vehicle_id", in.VehicleID),
+		slog.String("error", err.Error()),
+	)
+	h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
 }
 
 // ServeCancel handles POST /api/ride-requests/{id}/cancel. Rider-only;
@@ -309,4 +367,19 @@ func (h *RideRequestHandler) writeJSON(w http.ResponseWriter, status int, v any)
 // writeError writes the REST error envelope (rest-api.md §4.1).
 func (h *RideRequestHandler) writeError(w http.ResponseWriter, status int, code wserrors.ErrorCode, msg string) {
 	wserrors.WriteErrorEnvelope(w, h.logger, status, code, msg)
+}
+
+// writeRideActive writes the 409 `ride_active` response (MYR-230): the
+// standard error envelope plus the rider's existing OPEN instant ride under
+// `activeRideRequest`, so the client adopts it into the pending/tracking UI.
+// The message carries no P1 value; the adopted ride's coordinates go only to
+// its own rider (a party, mirroring GET) and are never logged here.
+func (h *RideRequestHandler) writeRideActive(w http.ResponseWriter, existing RideRequestData) {
+	h.writeJSON(w, http.StatusConflict, rideActiveErrorResponse{
+		Error: wserrors.ErrorEnvelopeBody{
+			Code:    wserrors.ErrCodeRideActive,
+			Message: "you already have an active ride request",
+		},
+		ActiveRideRequest: toRideRequestWire(existing),
+	})
 }

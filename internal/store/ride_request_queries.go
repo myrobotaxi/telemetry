@@ -32,6 +32,28 @@ const queryRideRequestByID = `SELECT ` + rideRequestColumns + `
 FROM go_ride_requests
 WHERE id = $1`
 
+// constraintRideActiveInstant is the partial UNIQUE index name from
+// migration 0004. A 23505 (unique_violation) carrying this constraint on
+// INSERT means the rider already holds an OPEN instant ride — the repo maps
+// it to ErrRideRequestActive (MYR-230). Matching on the constraint name (not
+// just the SQLSTATE) keeps the mapping precise: a future unique constraint on
+// this table would not be misread as an active-ride conflict.
+const constraintRideActiveInstant = "uq_go_ride_requests_active_instant_rider"
+
+// queryRideRequestActiveInstantByRider fetches the rider's single OPEN
+// instant request, if any — the one row the partial unique index (0004)
+// permits. OPEN = the non-terminal lifecycle states; instant = scheduled_for
+// IS NULL. Returned so the 409 `ride_active` body can carry the existing
+// request for the client to adopt (MYR-230). LIMIT 1 is belt-and-suspenders:
+// the unique index already guarantees at most one match.
+const queryRideRequestActiveInstantByRider = `SELECT ` + rideRequestColumns + `
+FROM go_ride_requests
+WHERE rider_id = $1
+  AND scheduled_for IS NULL
+  AND status IN ('requested', 'accepted', 'enroute', 'arrived')
+ORDER BY created_at DESC, id DESC
+LIMIT 1`
+
 // Newest first, id as the tie-break — matches the contracts
 // RideRequestsListResponse ordering (createdAt DESC, id DESC) and the
 // idx_go_ride_requests_rider index.

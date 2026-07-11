@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/events"
+	"github.com/myrobotaxi/telemetry/internal/wserrors"
 )
 
 // Ride-request HTTP surface types (P10 ride-hailing, MYR-174). The wire
@@ -82,13 +83,31 @@ type RideRequestListPage struct {
 // stays decoupled from internal/store.
 var ErrRideStatusConflict = errors.New("ride request status conflict")
 
+// ErrRideActive is returned by RideRequestStore.Create when the rider
+// already has an OPEN instant ride request and the partial unique guard
+// (migration 0004) rejects the second insert. The create handler maps it to
+// HTTP 409 `ride_active` and fetches the existing open request (GetActive
+// InstantByRider) for the response body. The cmd adapter translates
+// store.ErrRideRequestActive into this sentinel so the handler layer stays
+// decoupled from internal/store.
+var ErrRideActive = errors.New("ride request already active")
+
 // RideRequestStore is the persistence surface the ride-request handlers
 // need. Implemented by rideRequestStoreAdapter in cmd/telemetry-server over
 // store.RideRequestRepo. MYR-174 uses Create/GetByID/UpdateStatusFrom/
 // ListByRiderPage; MYR-175 (owner API) adds ListByOwnerPage.
 type RideRequestStore interface {
+	// Create inserts a new ride request. Returns ErrRideActive when the
+	// rider already holds an OPEN instant ride (the one-active-ride guard,
+	// MYR-230) — the partial unique index arbitrates the race, so two
+	// concurrent instant creates never both succeed.
 	Create(ctx context.Context, in RideRequestCreateInput) (RideRequestData, error)
 	GetByID(ctx context.Context, id string) (RideRequestData, error)
+	// GetActiveInstantByRider returns the rider's single OPEN instant ride,
+	// or an sdk.ErrNotFound-wrapping error when none is open. The create
+	// handler uses it to populate the 409 `ride_active` body so the client
+	// can adopt the existing ride.
+	GetActiveInstantByRider(ctx context.Context, riderID string) (RideRequestData, error)
 	// UpdateStatusFrom atomically transitions the ride to `to` ONLY when
 	// its current status is in `from` (single guarded UPDATE — the
 	// MYR-174/175 check-then-write race fix). Misses return
@@ -159,6 +178,20 @@ type rideRequestWire struct {
 	CompletedAt           *string       `json:"completedAt,omitempty"`
 	CreatedAt             string        `json:"createdAt"`
 	UpdatedAt             string        `json:"updatedAt"`
+}
+
+// rideActiveErrorResponse is the 409 `ride_active` body (MYR-230). It carries
+// the standard REST error envelope PLUS the rider's existing OPEN instant
+// ride under `activeRideRequest` — the same RideRequest shape
+// GET /api/ride-requests/{id} returns — so the SDK can adopt it into the
+// pending/tracking UI instead of showing a decline or generic failure. The
+// nested `error` object stays byte-compatible with every other error
+// response (§4.1); `activeRideRequest` is an additive sibling emitted only
+// for this code. Coordinates in the adopted ride are P1 and returned only to
+// the ride's own rider (a party) — never logged (§4.1 rule 2).
+type rideActiveErrorResponse struct {
+	Error             wserrors.ErrorEnvelopeBody `json:"error"`
+	ActiveRideRequest rideRequestWire            `json:"activeRideRequest"`
 }
 
 // rideRequestsPageResponse is the RideRequestsListResponse envelope. Mirrors
