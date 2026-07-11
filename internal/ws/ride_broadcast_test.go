@@ -190,16 +190,17 @@ func contains(payload json.RawMessage, key string) bool {
 
 // TestRideBroadcaster_Created_CarriesRequesterName asserts the created frame
 // carries requesterName when resolved and omits the key when the event's name
-// is empty (unresolved requester) — MYR-229.
+// is nil (unresolved requester) — MYR-229.
 func TestRideBroadcaster_Created_CarriesRequesterName(t *testing.T) {
+	maya := "Maya"
 	tests := []struct {
 		name        string
-		requester   string
+		requester   *string
 		wantPresent bool
 		wantValue   string
 	}{
-		{name: "resolved name present", requester: "Maya", wantPresent: true, wantValue: "Maya"},
-		{name: "empty name omitted", requester: "", wantPresent: false},
+		{name: "resolved name present", requester: &maya, wantPresent: true, wantValue: "Maya"},
+		{name: "nil name omitted", requester: nil, wantPresent: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -233,13 +234,14 @@ func TestRideBroadcaster_Created_CarriesRequesterName(t *testing.T) {
 // TestRideBroadcaster_StatusChanged_CarriesRequesterName mirrors the above for
 // the status-changed frame (MYR-229).
 func TestRideBroadcaster_StatusChanged_CarriesRequesterName(t *testing.T) {
+	maya := "Maya"
 	tests := []struct {
 		name        string
-		requester   string
+		requester   *string
 		wantPresent bool
 	}{
-		{name: "resolved name present", requester: "Maya", wantPresent: true},
-		{name: "empty name omitted", requester: "", wantPresent: false},
+		{name: "resolved name present", requester: &maya, wantPresent: true},
+		{name: "nil name omitted", requester: nil, wantPresent: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

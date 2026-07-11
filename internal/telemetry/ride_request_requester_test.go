@@ -113,8 +113,8 @@ func TestRideRequestHandler_RequesterName_CreatedEvent(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected RideRequestCreatedEvent, got %T", pub.events[0].Payload)
 	}
-	if ev.RequesterName != "Maya" {
-		t.Errorf("created event RequesterName = %q want %q", ev.RequesterName, "Maya")
+	if ev.RequesterName == nil || *ev.RequesterName != "Maya" {
+		t.Errorf("created event RequesterName = %v want %q", deref(ev.RequesterName), "Maya")
 	}
 }
 
@@ -143,7 +143,15 @@ func TestRideRequestHandler_RequesterName_StatusChangedEvent(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected RideStatusChangedEvent, got %T", pub.events[0].Payload)
 	}
-	if ev.RequesterName != "Maya" {
-		t.Errorf("status-changed event RequesterName = %q want %q", ev.RequesterName, "Maya")
+	if ev.RequesterName == nil || *ev.RequesterName != "Maya" {
+		t.Errorf("status-changed event RequesterName = %v want %q", deref(ev.RequesterName), "Maya")
 	}
+}
+
+// deref renders an optional string pointer for test failure messages.
+func deref(s *string) string {
+	if s == nil {
+		return "<nil>"
+	}
+	return *s
 }

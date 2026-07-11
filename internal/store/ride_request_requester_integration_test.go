@@ -68,9 +68,10 @@ func TestRideRequestRepo_RequesterName_SingleRow(t *testing.T) {
 	}
 }
 
-// TestRideRequestRepo_RequesterName_ListBatch verifies the batched list lookup
-// resolves each row's requester independently and omits the name for a rider
-// with no "User" row — all in the single batched query the list path issues.
+// TestRideRequestRepo_RequesterName_ListBatch verifies the list path resolves
+// each row's requester independently via the inline requesterIdentitySelect
+// subselect and omits the name for a rider with no "User" row — all within the
+// single list query (no separate per-row or batched "User" lookup).
 func TestRideRequestRepo_RequesterName_ListBatch(t *testing.T) {
 	repo, _ := setupRideRequestRepo(t)
 	ctx := context.Background()
@@ -135,5 +136,35 @@ func TestRideRequestRepo_RequesterName_OnStatusChange(t *testing.T) {
 	}
 	if updated.RequesterName != "Katherine" {
 		t.Errorf("UpdateStatusFrom RequesterName = %q, want %q", updated.RequesterName, "Katherine")
+	}
+}
+
+// TestRideRequestRepo_RequesterName_MissingUserRowSucceeds is the fail-open
+// guard (MYR-229): a ride operation must NEVER fail because the rider's "User"
+// row is absent (deleted rider). Create and a guarded status transition both
+// succeed and simply omit RequesterName (empty string).
+func TestRideRequestRepo_RequesterName_MissingUserRowSucceeds(t *testing.T) {
+	repo, _ := setupRideRequestRepo(t)
+	ctx := context.Background()
+
+	// No seedUser: the rider has no "User" row at all.
+	rec := minimalRideRequest()
+	rec.RiderID = "clrider-no-user-row"
+	created, err := repo.Create(ctx, rec)
+	if err != nil {
+		t.Fatalf("Create must succeed with a missing User row: %v", err)
+	}
+	if created.RequesterName != "" {
+		t.Errorf("Create RequesterName = %q, want %q (omitted)", created.RequesterName, "")
+	}
+
+	updated, err := repo.UpdateStatusFrom(ctx, created.ID,
+		[]store.RideRequestStatus{store.RideRequestStatusRequested},
+		store.RideRequestStatusAccepted)
+	if err != nil {
+		t.Fatalf("UpdateStatusFrom must succeed with a missing User row: %v", err)
+	}
+	if updated.RequesterName != "" {
+		t.Errorf("UpdateStatusFrom RequesterName = %q, want %q (omitted)", updated.RequesterName, "")
 	}
 }
