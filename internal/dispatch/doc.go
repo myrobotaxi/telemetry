@@ -5,10 +5,12 @@
 // # Flow
 //
 //	events.RideAcceptedEvent (bus, from the owner-accept handler, MYR-175)
+//	  → hand off to a bounded worker pool (delivery returns immediately)
 //	  → ClaimDispatch (exactly-once latch on the ride row)
 //	  → resolve VIN (vehicleId → VIN) + owner Tesla token (refresh-on-expiry)
-//	  → commands.Executor.Execute("navigation_gps_request", {lat, lon, order:0})
+//	  → commands.Executor.Execute("navigation_gps_request", {lat, lon, order:1})
 //	  → RecordDispatchOutcome (sent | failed | skipped) + one audit log line
+//	    (persisted on a context detached from the per-event timeout)
 //
 // The dispatcher SUBSCRIBES to the internal ride.accepted seam; it never
 // touches the accept handler. navigation_gps_request is UNSIGNED (Tesla
@@ -21,10 +23,15 @@
 //   - Idempotent per ride: ClaimDispatch stamps dispatched_at only when NULL,
 //     so a re-delivered ride.accepted event finds the latch set and skips —
 //     nav is pushed at most once per ride.
-//   - Bounded retry: transport (command_failed) and asleep-after-wake-retries
-//     (vehicle_asleep) errors are retried with backoff up to MaxRetries;
-//     key_not_paired and permission_denied are terminal (→ failed with the
-//     code). The Executor already runs its own wake+retry on a single call.
+//   - Bounded retry: retryable command errors (transient command_failed,
+//     asleep-after-wake-retries) AND transient VIN/token resolution failures
+//     are retried with backoff up to MaxRetries; permanent conditions
+//     (key_not_paired, permission_denied, unconfigured transport, token
+//     expired/unavailable, vehicle not found) are terminal. The Executor also
+//     runs its own wake+retry on a single call.
+//   - Bounded concurrency: the bus delivers serially, so the handler hands
+//     each event to a worker pool (Config.MaxConcurrent) and returns at once —
+//     a slow dispatch never blocks delivery of the next accept.
 //   - Kill-switch: Config.Enabled=false records the outcome as `skipped`
 //     without any Tesla call, so the client can disable nav pushes via the
 //     DISPATCH_ENABLED env var with no code change.

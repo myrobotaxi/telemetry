@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/commands"
@@ -118,12 +119,18 @@ type Config struct {
 	// OverallTimeout bounds the whole per-event dispatch (claim → command →
 	// record), independent of the bus handler.
 	OverallTimeout time.Duration
+	// MaxConcurrent caps how many dispatches run at once. The bus delivers
+	// serially per subscriber; the handler hands each event off to a worker
+	// and returns immediately, so a slow dispatch (up to OverallTimeout)
+	// never blocks delivery of the next event. 0 gets the default.
+	MaxConcurrent int
 }
 
 const (
 	defaultMaxRetries     = 2
 	defaultBackoff        = 2 * time.Second
 	defaultOverallTimeout = 2 * time.Minute
+	defaultMaxConcurrent  = 4
 	// recordTimeout bounds the detached outcome-write context. It is short
 	// and independent of the per-event ctx so a timeout outcome still
 	// persists even though the per-event ctx has already expired.
@@ -140,6 +147,9 @@ func (c Config) withDefaults() Config {
 	if c.OverallTimeout <= 0 {
 		c.OverallTimeout = defaultOverallTimeout
 	}
+	if c.MaxConcurrent <= 0 {
+		c.MaxConcurrent = defaultMaxConcurrent
+	}
 	return c
 }
 
@@ -152,6 +162,9 @@ type Dispatcher struct {
 	store    OutcomeStore
 	cfg      Config
 	logger   *slog.Logger
+
+	sem chan struct{}  // concurrency cap for in-flight dispatches
+	wg  sync.WaitGroup // tracks in-flight dispatch goroutines
 }
 
 // New builds a Dispatcher. logger may be nil (a discard logger is used).
@@ -166,19 +179,25 @@ func New(
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(discardWriter{}, nil))
 	}
+	cfg = cfg.withDefaults()
 	return &Dispatcher{
 		vehicles: vehicles,
 		tokens:   tokens,
 		executor: executor,
 		store:    store,
-		cfg:      cfg.withDefaults(),
+		cfg:      cfg,
 		logger:   logger,
+		sem:      make(chan struct{}, cfg.MaxConcurrent),
 	}
 }
 
 // Subscribe registers the dispatcher on the ride.accepted topic. The bus runs
-// the handler in a dedicated per-subscriber goroutine with serial delivery,
-// so process needs no internal locking.
+// the handler in a dedicated per-subscriber goroutine with SERIAL delivery.
+// handle therefore hands each event off to a bounded worker pool and returns
+// immediately, so a slow dispatch (up to OverallTimeout) never blocks the bus
+// loop or the delivery of the next event. Each dispatch runs independently
+// (no shared mutable state; the store is the concurrency-safe seam), so the
+// pool needs no per-event locking.
 func (d *Dispatcher) Subscribe(bus events.Bus) (events.Subscription, error) {
 	sub, err := bus.Subscribe(events.TopicRideAccepted, d.handle)
 	if err != nil {
@@ -187,8 +206,15 @@ func (d *Dispatcher) Subscribe(bus events.Bus) (events.Subscription, error) {
 	return sub, nil
 }
 
-// handle is the events.Handler: type-asserts, bounds the work with a fresh
-// context (the bus handler carries none), and runs the pipeline.
+// Wait blocks until all in-flight dispatches finish. Call after unsubscribing
+// (bus.Close) on shutdown to drain cleanly; also used by tests.
+func (d *Dispatcher) Wait() { d.wg.Wait() }
+
+// handle is the events.Handler: it type-asserts and hands the event to a
+// worker goroutine, returning immediately so the bus's serial per-subscriber
+// loop is never blocked by a slow dispatch. Concurrency is capped by the sem
+// semaphore (acquired inside the worker, so handle does not block); the
+// per-event OverallTimeout still bounds each dispatch.
 func (d *Dispatcher) handle(evt events.Event) {
 	ev, ok := evt.Payload.(events.RideAcceptedEvent)
 	if !ok {
@@ -198,9 +224,18 @@ func (d *Dispatcher) handle(evt events.Event) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), d.cfg.OverallTimeout)
-	defer cancel()
-	d.process(ctx, ev)
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		// Acquire a worker slot (bounds concurrency to MaxConcurrent). This
+		// runs off the bus loop, so delivery has already returned.
+		d.sem <- struct{}{}
+		defer func() { <-d.sem }()
+
+		ctx, cancel := context.WithTimeout(context.Background(), d.cfg.OverallTimeout)
+		defer cancel()
+		d.process(ctx, ev)
+	}()
 }
 
 // process runs claim → (kill-switch | resolve → command) → record for one

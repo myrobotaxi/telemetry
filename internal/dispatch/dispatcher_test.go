@@ -545,6 +545,122 @@ func TestProcess_VINResolution(t *testing.T) {
 	}
 }
 
+// echoVehicleResolver returns the vehicleID as the VIN so a test can route
+// executor behavior per event.
+type echoVehicleResolver struct{}
+
+func (echoVehicleResolver) ResolveVIN(_ context.Context, id string) (string, error) { return id, nil }
+
+// controllableExecutor signals each call on started (with the request VIN)
+// and blocks on the per-VIN gate channel if one is present. A nil gate does
+// not block.
+type controllableExecutor struct {
+	mu      sync.Mutex
+	started chan string
+	gate    map[string]chan struct{}
+}
+
+func (c *controllableExecutor) Execute(_ context.Context, req commands.Request) (commands.Result, error) {
+	c.started <- req.VIN
+	c.mu.Lock()
+	g := c.gate[req.VIN]
+	c.mu.Unlock()
+	if g != nil {
+		<-g
+	}
+	return commands.Result{Command: req.Command, Applied: true}, nil
+}
+
+// concurrentStore grants every claim and records per-ride outcomes; safe for
+// concurrent dispatches (unlike fakeStore, which models a single ride).
+type concurrentStore struct {
+	mu       sync.Mutex
+	recorded map[string]recordCall
+}
+
+func (s *concurrentStore) ClaimDispatch(context.Context, string) (bool, error) { return true, nil }
+
+func (s *concurrentStore) RecordDispatchOutcome(_ context.Context, id string, status Outcome, code *string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rc := recordCall{status: status}
+	if code != nil {
+		rc.code = *code
+	}
+	s.recorded[id] = rc
+	return nil
+}
+
+func (s *concurrentStore) get(id string) (recordCall, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rc, ok := s.recorded[id]
+	return rc, ok
+}
+
+// TestHandle_ConcurrentDispatch_NoHeadOfLineBlocking proves the bus handler
+// hands each event to a worker and returns immediately, so a slow dispatch
+// does not delay another (finding 4). A "slow" dispatch blocks in the
+// executor; a "fast" dispatch delivered afterward must complete while the
+// slow one is still stuck.
+func TestHandle_ConcurrentDispatch_NoHeadOfLineBlocking(t *testing.T) {
+	slowGate := make(chan struct{})
+	exec := &controllableExecutor{
+		started: make(chan string, 2),
+		gate:    map[string]chan struct{}{"vehSLOWxxxx": slowGate},
+	}
+	st := &concurrentStore{recorded: map[string]recordCall{}}
+	d := New(
+		echoVehicleResolver{},
+		&fakeTokenSource{token: "tok"},
+		exec, st,
+		Config{Enabled: true, MaxRetries: 0, MaxConcurrent: 4, Backoff: time.Millisecond},
+		nil,
+	)
+
+	slow := events.RideAcceptedEvent{RideRequestID: "rideSLOW", VehicleID: "vehSLOWxxxx", OwnerID: "o", Pickup: events.RidePlace{Latitude: 1, Longitude: 2}}
+	fast := events.RideAcceptedEvent{RideRequestID: "rideFAST", VehicleID: "vehFASTxxxx", OwnerID: "o", Pickup: events.RidePlace{Latitude: 3, Longitude: 4}}
+
+	// Deliver the slow event; wait until its dispatch has entered the executor
+	// (and is now blocked on the gate).
+	d.handle(events.Event{ID: "a", Payload: slow})
+	if got := <-exec.started; got != "vehSLOWxxxx" {
+		t.Fatalf("first started = %q, want vehSLOWxxxx", got)
+	}
+
+	// Deliver the fast event; it must run and record even though slow is stuck.
+	d.handle(events.Event{ID: "b", Payload: fast})
+	if got := <-exec.started; got != "vehFASTxxxx" {
+		t.Fatalf("second started = %q, want vehFASTxxxx", got)
+	}
+
+	// Fast records its outcome while slow remains blocked (poll briefly).
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, ok := st.get("rideFAST"); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fast dispatch did not complete while slow was blocked (head-of-line blocking)")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, ok := st.get("rideSLOW"); ok {
+		t.Fatal("slow dispatch recorded before it was released")
+	}
+
+	// Release slow and drain.
+	close(slowGate)
+	d.Wait()
+
+	if rc, ok := st.get("rideSLOW"); !ok || rc.status != OutcomeSent {
+		t.Errorf("slow outcome = %+v (ok=%v), want sent", rc, ok)
+	}
+	if rc, ok := st.get("rideFAST"); !ok || rc.status != OutcomeSent {
+		t.Errorf("fast outcome = %+v (ok=%v), want sent", rc, ok)
+	}
+}
+
 func TestHandle_WrongPayloadType(t *testing.T) {
 	exec := &fakeExecutor{errs: []error{nil}}
 	st := &fakeStore{claimed: true}
