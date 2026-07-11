@@ -229,6 +229,9 @@ The P10 ride-hailing aggregate (contracts `schemas/ride-request.schema.json`; FR
 | `completed_at` | `TIMESTAMPTZ?` | P0 | No | Yes | Non-sensitive timestamp |
 | `created_at` | `TIMESTAMPTZ` | P0 | No | Yes | Non-sensitive timestamp |
 | `updated_at` | `TIMESTAMPTZ` | P0 | No | Yes | Non-sensitive timestamp |
+| `dispatch_status` | `TEXT?` (enum, CHECK) | P0 | No | Yes | Nav-dispatch outcome enum: sent/failed/skipped (MYR-176). Opaque, non-sensitive |
+| `dispatched_at` | `TIMESTAMPTZ?` | P0 | No | Yes | Nav-dispatch attempt instant + exactly-once claim latch (MYR-176) |
+| `dispatch_error` | `TEXT?` | P0 | No | Yes | Opaque nav-dispatch failure CODE — constructed from the typed command error / resolution sentinel only; never a coordinate/address/token/raw VIN (Rule CG-DC-2). Not exposed on the wire. Value set: the typed command codes (`key_not_paired`, `permission_denied`, `vehicle_asleep`, `command_failed`, `invalid_request`, `internal_error`) plus the dispatch-local codes `vehicle_unresolved`, `token_expired` (linked but expired — user must re-link), `token_unavailable` (never linked / could not obtain), `transport_unconfigured` (proxy not configured), `dispatch_canceled`, `dispatch_interrupted` (claimed but the process died pre-outcome; set by the startup reconciler) (MYR-176) |
 
 > **Encrypt-only coordinates (no dual-write).** Unlike the MYR-63/64 rollouts, `go_ride_requests` is a brand-new table: coordinates are written exclusively as AES-256-GCM ciphertext (`internal/store/ride_request_scan.go`, reusing the `vehicle_gps_encryption.go` float codec). There are no plaintext coordinate columns, no backfill tool, and no `*_plaintext_remaining_total` gauge. `RideRequestRepo` therefore requires an `Encryptor` at construction (panics on nil) and treats decrypt failure as a hard read error — there is no fallback column to fall back to.
 

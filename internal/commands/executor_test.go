@@ -122,6 +122,36 @@ func TestExecute_NavigationFailsWhenTransportDisabled(t *testing.T) {
 		Params: map[string]any{"value": "somewhere"}, Scopes: grantAll(),
 	})
 	wantCode(t, err, wserrors.ErrCodeCommandFailed)
+
+	// The unconfigured-transport failure is PERMANENT: it carries the
+	// ErrTransportNotConfigured sentinel and is non-retryable, so an async
+	// caller can short-circuit its retry budget (MYR-176 finding 7).
+	if !errors.Is(err, ErrTransportNotConfigured) {
+		t.Errorf("err = %v, want ErrTransportNotConfigured sentinel", err)
+	}
+	var cErr *CommandError
+	if asCommandError(err, &cErr) && cErr.Retryable {
+		t.Error("unconfigured-transport failure must not be retryable")
+	}
+}
+
+func TestExecute_TransportErrorIsRetryable(t *testing.T) {
+	// A transient transport error (proxy dialed but the call failed) IS
+	// retryable, distinct from the permanent unconfigured case above.
+	tr := &fakeTransport{enabled: true, cmdErr: errors.New("dial tcp: connection refused")}
+	e := newExec(tr)
+	_, err := e.Execute(context.Background(), Request{
+		VIN: "V", Command: "navigation_gps_request",
+		Params: map[string]any{"lat": 1.0, "lon": 2.0}, Scopes: grantAll(),
+	})
+	wantCode(t, err, wserrors.ErrCodeCommandFailed)
+	if errors.Is(err, ErrTransportNotConfigured) {
+		t.Error("a live transport error must not carry ErrTransportNotConfigured")
+	}
+	var cErr *CommandError
+	if asCommandError(err, &cErr) && !cErr.Retryable {
+		t.Error("a transient transport error must be retryable")
+	}
 }
 
 func TestExecute_HappyPathForwardsTeslaCommand(t *testing.T) {

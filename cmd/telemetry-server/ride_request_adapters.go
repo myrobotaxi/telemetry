@@ -131,6 +131,11 @@ func fromStoreRideRequest(rec store.RideRequestRecord) telemetry.RideRequestData
 		s := string(*rec.RescheduleStatus)
 		reschedule = &s
 	}
+	var dispatchStatus *string
+	if rec.DispatchStatus != nil {
+		s := string(*rec.DispatchStatus)
+		dispatchStatus = &s
+	}
 	return telemetry.RideRequestData{
 		ID:                    rec.ID,
 		RiderID:               rec.RiderID,
@@ -148,6 +153,8 @@ func fromStoreRideRequest(rec store.RideRequestRecord) telemetry.RideRequestData
 		CompletedAt:           rec.CompletedAt,
 		CreatedAt:             rec.CreatedAt,
 		UpdatedAt:             rec.UpdatedAt,
+		DispatchStatus:        dispatchStatus,
+		DispatchedAt:          rec.DispatchedAt,
 	}
 }
 

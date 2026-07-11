@@ -337,6 +337,14 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 	}
 	runNotifyListener(ctx, cfg.Database().URL, bus, logger)
 
+	// --- Nav-dispatch (MYR-176) ---
+	// Subscribes to the ride.accepted seam (published by the owner-accept
+	// handler) and pushes the rider's pickup into the vehicle's Tesla
+	// navigation via the command Executor. Gated by DISPATCH_ENABLED.
+	if err := setupNavDispatcher(ctx, cfg, bus, vehicleRepo, accountRepo, rideRepo, logger); err != nil {
+		return fmt.Errorf("setting up nav dispatcher: %w", err)
+	}
+
 	// --- HTTP server + route registration ---
 	srv := server.New(cfg.Server(), logger, db, reg, cfg.TeslaPublicKey())
 	originPatterns := resolveWSOriginPatterns(cfg.WebSocket().AllowedOrigins, *devMode, logger)

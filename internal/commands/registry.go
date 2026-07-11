@@ -150,8 +150,13 @@ func buildActuateTrunk(p map[string]any) ([]byte, error) {
 }
 
 // buildNavigationGPS marshals {lat, lon, order} for navigation_gps_request.
-// order defaults to 1 (first stop). This is the precise command for a
-// lat/long dispatch destination (MYR-176).
+// order is Tesla's 1-based remote-nav order integer: 1 REPLACES the current
+// trip (the destination becomes the active route), 2 prepends a stop, 3
+// appends a stop. It defaults to 1 (replace-trip) when the caller omits it —
+// the right choice for a single lat/long dispatch destination (MYR-176).
+// (Source: Tesla Fleet API navigation_gps_request remote-nav order semantics,
+// per the Teslemetry python-tesla-fleet-api client — "1 replaces the trip, 2
+// prepends a stop, 3 appends a stop".)
 func buildNavigationGPS(p map[string]any) ([]byte, error) {
 	lat, _, err := paramFloat(p, "lat", true)
 	if err != nil {

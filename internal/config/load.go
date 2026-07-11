@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -30,6 +31,7 @@ type fileConfig struct {
 	teslaClientID        string
 	teslaClientSec       string
 	certMonitorEndpoints []string
+	dispatchEnabled      bool
 
 	// Identity module secrets/identifiers (env, not JSON).
 	es256PrivateKeyPEM string
@@ -163,6 +165,20 @@ func applyEnvOverrides(fc *fileConfig) error {
 	// Proxy env var overrides.
 	if v := os.Getenv("TESLA_PROXY_URL"); v != "" {
 		fc.Proxy.URL = v
+	}
+
+	// DISPATCH_ENABLED is the MYR-176 nav-dispatch kill-switch. Defaults to
+	// true (dispatch on) when unset. When set it MUST be a strconv.ParseBool
+	// value (1/t/T/TRUE/true/True/0/f/F/FALSE/false/False); anything else is a
+	// config error and fails fast at startup (repo rule: validate config at
+	// startup — do not silently fall back to "on" on a typo like "no"/"off").
+	fc.dispatchEnabled = true
+	if v, ok := os.LookupEnv("DISPATCH_ENABLED"); ok {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("config.Load: %w: DISPATCH_ENABLED=%q is not a boolean", ErrInvalidValue, v)
+		}
+		fc.dispatchEnabled = enabled
 	}
 
 	// TLS env vars override JSON values.
@@ -326,7 +342,8 @@ func buildConfig(fc *fileConfig) *Config {
 		monitoring: MonitoringConfig{
 			CertEndpoints: fc.certMonitorEndpoints,
 		},
-		mapboxToken:    fc.mapboxToken,
-		teslaPublicKey: fc.teslaPublicKey,
+		mapboxToken:     fc.mapboxToken,
+		teslaPublicKey:  fc.teslaPublicKey,
+		dispatchEnabled: fc.dispatchEnabled,
 	}
 }

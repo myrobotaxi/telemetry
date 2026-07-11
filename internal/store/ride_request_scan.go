@@ -50,13 +50,14 @@ func (r *RideRequestRepo) decryptCoord(column, ciphertext string) (float64, erro
 // through unwrapped so callers can map it to ErrRideRequestNotFound.
 func (r *RideRequestRepo) scanRideRequest(row pgx.Row) (RideRequestRecord, error) {
 	var (
-		rec           RideRequestRecord
-		pickupLatEnc  string
-		pickupLngEnc  string
-		dropoffLatEnc string
-		dropoffLngEnc string
-		status        string
-		reschedStatus *string
+		rec            RideRequestRecord
+		pickupLatEnc   string
+		pickupLngEnc   string
+		dropoffLatEnc  string
+		dropoffLngEnc  string
+		status         string
+		reschedStatus  *string
+		dispatchStatus *string
 	)
 	err := row.Scan(
 		&rec.ID, &rec.RiderID, &rec.OwnerID, &rec.VehicleID,
@@ -65,6 +66,7 @@ func (r *RideRequestRepo) scanRideRequest(row pgx.Row) (RideRequestRecord, error
 		&status, &rec.PassengerName, &rec.PassengerPhone,
 		&rec.ScheduledFor, &rec.RescheduleProposedFor, &reschedStatus,
 		&rec.AcceptedAt, &rec.CompletedAt, &rec.CreatedAt, &rec.UpdatedAt,
+		&dispatchStatus, &rec.DispatchedAt, &rec.DispatchError,
 	)
 	if err != nil {
 		// %w keeps pgx.ErrNoRows visible to the callers' errors.Is mapping.
@@ -75,6 +77,10 @@ func (r *RideRequestRepo) scanRideRequest(row pgx.Row) (RideRequestRecord, error
 	if reschedStatus != nil {
 		rs := RescheduleStatus(*reschedStatus)
 		rec.RescheduleStatus = &rs
+	}
+	if dispatchStatus != nil {
+		ds := DispatchStatus(*dispatchStatus)
+		rec.DispatchStatus = &ds
 	}
 
 	if rec.Pickup.Latitude, err = r.decryptCoord("pickup_lat_enc", pickupLatEnc); err != nil {

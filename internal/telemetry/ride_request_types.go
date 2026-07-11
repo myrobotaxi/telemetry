@@ -59,6 +59,12 @@ type RideRequestData struct {
 	CompletedAt           *time.Time
 	CreatedAt             time.Time
 	UpdatedAt             time.Time
+
+	// Dispatch outcome (MYR-176). Nil until the nav-dispatch push resolves.
+	// Surfaced on the party-only detail payload (dispatchStatus/dispatchedAt);
+	// the internal error code is not exposed on the wire.
+	DispatchStatus *string
+	DispatchedAt   *time.Time
 }
 
 // RideRequestListCursor is the (createdAt, id) anchor the store resumes a
@@ -178,6 +184,10 @@ type rideRequestWire struct {
 	CompletedAt           *string       `json:"completedAt,omitempty"`
 	CreatedAt             string        `json:"createdAt"`
 	UpdatedAt             string        `json:"updatedAt"`
+	// Dispatch outcome (MYR-176) — optional, additive. Omitted until the
+	// nav-dispatch push resolves (ride-request.schema.json $defs.RideRequest).
+	DispatchStatus *string `json:"dispatchStatus,omitempty"`
+	DispatchedAt   *string `json:"dispatchedAt,omitempty"`
 }
 
 // rideActiveErrorResponse is the 409 `ride_active` body (MYR-230). It carries
