@@ -50,14 +50,17 @@ func (r *RideRequestRepo) decryptCoord(column, ciphertext string) (float64, erro
 // through unwrapped so callers can map it to ErrRideRequestNotFound.
 func (r *RideRequestRepo) scanRideRequest(row pgx.Row) (RideRequestRecord, error) {
 	var (
-		rec            RideRequestRecord
-		pickupLatEnc   string
-		pickupLngEnc   string
-		dropoffLatEnc  string
-		dropoffLngEnc  string
-		status         string
-		reschedStatus  *string
-		dispatchStatus *string
+		rec             RideRequestRecord
+		pickupLatEnc    string
+		pickupLngEnc    string
+		dropoffLatEnc   string
+		dropoffLngEnc   string
+		status          string
+		reschedStatus   *string
+		dispatchStatus  *string
+		requesterName   *string
+		requesterEmail  *string
+		requesterExists bool
 	)
 	err := row.Scan(
 		&rec.ID, &rec.RiderID, &rec.OwnerID, &rec.VehicleID,
@@ -67,6 +70,7 @@ func (r *RideRequestRepo) scanRideRequest(row pgx.Row) (RideRequestRecord, error
 		&rec.ScheduledFor, &rec.RescheduleProposedFor, &reschedStatus,
 		&rec.AcceptedAt, &rec.CompletedAt, &rec.CreatedAt, &rec.UpdatedAt,
 		&dispatchStatus, &rec.DispatchedAt, &rec.DispatchError,
+		&requesterName, &requesterEmail, &requesterExists,
 	)
 	if err != nil {
 		// %w keeps pgx.ErrNoRows visible to the callers' errors.Is mapping.
@@ -74,6 +78,12 @@ func (r *RideRequestRepo) scanRideRequest(row pgx.Row) (RideRequestRecord, error
 	}
 
 	rec.Status = RideRequestStatus(status)
+	// Requester display name (MYR-229): resolved from the same statement's
+	// inline "User" subselect. A missing rider row leaves RequesterName "" so
+	// the wire projections OMIT the field — a NULL identity NEVER fails a read.
+	if requesterExists {
+		rec.RequesterName = requesterDisplayName(requesterName, requesterEmail)
+	}
 	if reschedStatus != nil {
 		rs := RescheduleStatus(*reschedStatus)
 		rec.RescheduleStatus = &rs

@@ -95,15 +95,6 @@ func (r *RideRequestRepo) Create(ctx context.Context, req RideRequestRecord) (Ri
 		req.Status = RideRequestStatusRequested
 	}
 
-	// Resolve the requester's display name (MYR-229) BEFORE the INSERT: the
-	// rider id is already known, and resolving first means a "User" lookup
-	// failure fails the create cleanly instead of orphaning a committed row
-	// whose caller then sees a 500.
-	requesterName, err := r.requesterName(ctx, req.RiderID)
-	if err != nil {
-		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.Create(%s): %w", req.ID, err)
-	}
-
 	pickupLatEnc, pickupLngEnc, err := r.encryptPlace(req.Pickup)
 	if err != nil {
 		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.Create(%s): pickup: %w", req.ID, err)
@@ -114,13 +105,20 @@ func (r *RideRequestRepo) Create(ctx context.Context, req RideRequestRecord) (Ri
 	}
 
 	start := time.Now()
+	// The INSERT ... RETURNING resolves RequesterName inline via
+	// requesterIdentitySelect (MYR-229) — the requester name rides the same
+	// statement as the write, so there is no separate lookup and no
+	// after-commit failure window. A NULL/absent identity never fails Create.
+	var requesterName *string
+	var requesterEmail *string
+	var requesterExists bool
 	row := r.pool.QueryRow(ctx, queryRideRequestInsert,
 		req.ID, req.RiderID, req.OwnerID, req.VehicleID,
 		pickupLatEnc, pickupLngEnc, req.Pickup.Label, req.Pickup.Address,
 		dropoffLatEnc, dropoffLngEnc, req.Dropoff.Label, req.Dropoff.Address,
 		string(req.Status), req.PassengerName, req.PassengerPhone, req.ScheduledFor,
 	)
-	err = row.Scan(&req.CreatedAt, &req.UpdatedAt)
+	err = row.Scan(&req.CreatedAt, &req.UpdatedAt, &requesterName, &requesterEmail, &requesterExists)
 	r.metrics.ObserveQueryDuration("ride_request.create", time.Since(start).Seconds())
 	if err != nil {
 		// The one-active-instant-ride guard (0004) losing the race is an
@@ -135,7 +133,9 @@ func (r *RideRequestRepo) Create(ctx context.Context, req RideRequestRecord) (Ri
 	}
 	req.AcceptedAt, req.CompletedAt = nil, nil
 	req.RescheduleProposedFor, req.RescheduleStatus = nil, nil
-	req.RequesterName = requesterName
+	if requesterExists {
+		req.RequesterName = requesterDisplayName(requesterName, requesterEmail)
+	}
 	return req, nil
 }
 
@@ -151,9 +151,6 @@ func (r *RideRequestRepo) GetByID(ctx context.Context, id string) (RideRequestRe
 	}
 	if err != nil {
 		r.metrics.IncQueryError("ride_request.get_by_id")
-		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.GetByID(%s): %w", id, err)
-	}
-	if err := r.attachRequesterName(ctx, &rec); err != nil {
 		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.GetByID(%s): %w", id, err)
 	}
 	return rec, nil
@@ -177,9 +174,6 @@ func (r *RideRequestRepo) GetActiveInstantByRider(ctx context.Context, riderID s
 		r.metrics.IncQueryError("ride_request.get_active_instant_by_rider")
 		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.GetActiveInstantByRider(%s): %w", riderID, err)
 	}
-	if err := r.attachRequesterName(ctx, &rec); err != nil {
-		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.GetActiveInstantByRider(%s): %w", riderID, err)
-	}
 	return rec, nil
 }
 
@@ -201,9 +195,6 @@ func (r *RideRequestRepo) UpdateStatus(ctx context.Context, id string, status Ri
 	}
 	if err != nil {
 		r.metrics.IncQueryError("ride_request.update_status")
-		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.UpdateStatus(%s): %w", id, err)
-	}
-	if err := r.attachRequesterName(ctx, &rec); err != nil {
 		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.UpdateStatus(%s): %w", id, err)
 	}
 	return rec, nil
@@ -232,9 +223,6 @@ func (r *RideRequestRepo) UpdateStatusFrom(ctx context.Context, id string, from 
 	rec, err := r.scanRideRequest(row)
 	r.metrics.ObserveQueryDuration("ride_request.update_status_from", time.Since(start).Seconds())
 	if err == nil {
-		if nameErr := r.attachRequesterName(ctx, &rec); nameErr != nil {
-			return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.UpdateStatusFrom(%s): %w", id, nameErr)
-		}
 		return rec, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {

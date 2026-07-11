@@ -1,7 +1,8 @@
 // RideRequestRepo reschedule-negotiation writes (MYR-192). Split from
 // ride_request_repo.go so the accessor file stays within the 300-line budget;
-// both methods share the same scan + requester-name (MYR-229) enrichment as
-// the other single-row accessors.
+// both methods share the same scanRideRequest path as the other single-row
+// accessors, which resolves RequesterName inline (MYR-229) with no extra
+// lookup.
 
 package store
 
@@ -31,9 +32,6 @@ func (r *RideRequestRepo) ProposeReschedule(ctx context.Context, id string, prop
 		r.metrics.IncQueryError("ride_request.propose_reschedule")
 		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.ProposeReschedule(%s): %w", id, err)
 	}
-	if err := r.attachRequesterName(ctx, &rec); err != nil {
-		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.ProposeReschedule(%s): %w", id, err)
-	}
 	return rec, nil
 }
 
@@ -52,9 +50,6 @@ func (r *RideRequestRepo) ResolveReschedule(ctx context.Context, id string, conf
 	}
 	if err != nil {
 		r.metrics.IncQueryError("ride_request.resolve_reschedule")
-		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.ResolveReschedule(%s): %w", id, err)
-	}
-	if err := r.attachRequesterName(ctx, &rec); err != nil {
 		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.ResolveReschedule(%s): %w", id, err)
 	}
 	return rec, nil

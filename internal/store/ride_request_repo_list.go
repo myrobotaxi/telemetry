@@ -81,13 +81,8 @@ func (r *RideRequestRepo) list(ctx context.Context, op, query string, args ...an
 		r.metrics.IncQueryError(op)
 		return nil, fmt.Errorf("rows: %w", err)
 	}
-
-	// Enrich every row with the requester's display name (MYR-229) in a
-	// single batched "User" lookup — the list paths must not issue one query
-	// per row (no N+1).
-	if err := r.attachRequesterNames(ctx, recs); err != nil {
-		r.metrics.IncQueryError(op)
-		return nil, err
-	}
+	// Each row already carries RequesterName: scanRideRequest resolves it from
+	// the query's inline requesterIdentitySelect (MYR-229) — no separate
+	// lookup, so the list paths never issue a per-row or batched "User" query.
 	return recs, nil
 }
