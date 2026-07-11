@@ -49,12 +49,17 @@ func TestTeslaTokenResolver_ValidToken(t *testing.T) {
 }
 
 func TestTeslaTokenResolver_NoTokenOnFile(t *testing.T) {
-	prov := &fakeTokenProvider{err: errors.New("no account")}
+	cause := errors.New("no account")
+	prov := &fakeTokenProvider{err: cause}
 	r := NewTeslaTokenResolver(prov, nil)
 
 	_, err := r.Resolve(context.Background(), "user1")
 	if !errors.Is(err, ErrTeslaTokenUnavailable) {
 		t.Errorf("err = %v, want ErrTeslaTokenUnavailable", err)
+	}
+	// The underlying provider cause must be preserved (multi-%w), not swallowed.
+	if !errors.Is(err, cause) {
+		t.Errorf("err = %v, want the provider cause preserved", err)
 	}
 }
 
@@ -87,12 +92,17 @@ func TestTeslaTokenResolver_ExpiredRefreshes(t *testing.T) {
 }
 
 func TestTeslaTokenResolver_RefreshFails(t *testing.T) {
+	cause := errors.New("tesla down")
 	prov := &fakeTokenProvider{tok: TeslaToken{AccessToken: "old", RefreshToken: "r", ExpiresAt: time.Now().Add(-time.Minute)}}
-	ref := &fakeRefresher{err: errors.New("tesla down")}
+	ref := &fakeRefresher{err: cause}
 	r := NewTeslaTokenResolver(prov, nil, WithResolverRefresher(ref, nil))
 
 	_, err := r.Resolve(context.Background(), "user1")
 	if !errors.Is(err, ErrTeslaTokenExpired) {
 		t.Errorf("err = %v, want ErrTeslaTokenExpired", err)
+	}
+	// The refresher failure cause must be preserved (multi-%w).
+	if !errors.Is(err, cause) {
+		t.Errorf("err = %v, want the refresher cause preserved", err)
 	}
 }

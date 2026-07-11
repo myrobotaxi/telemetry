@@ -65,7 +65,10 @@ var (
 func (r *TeslaTokenResolver) Resolve(ctx context.Context, userID string) (TeslaToken, error) {
 	tok, err := r.tokens.GetTeslaToken(ctx, userID)
 	if err != nil {
-		return TeslaToken{}, fmt.Errorf("resolve tesla token: %w", ErrTeslaTokenUnavailable)
+		// Multi-%w (Go 1.20+): errors.Is still matches the sentinel, but the
+		// underlying provider error (DB failure, not-found, …) is preserved
+		// for logs and for the caller to inspect via errors.As.
+		return TeslaToken{}, fmt.Errorf("resolve tesla token: %w: %w", ErrTeslaTokenUnavailable, err)
 	}
 
 	if tok.ExpiresAt.IsZero() || !tok.ExpiresAt.Before(time.Now()) {
@@ -78,7 +81,8 @@ func (r *TeslaTokenResolver) Resolve(ctx context.Context, userID string) (TeslaT
 
 	refreshed, err := r.refresher.Refresh(ctx, tok.RefreshToken)
 	if err != nil {
-		return TeslaToken{}, fmt.Errorf("resolve tesla token: refresh failed: %w", ErrTeslaTokenExpired)
+		// Multi-%w: keep the sentinel match AND the refresh failure cause.
+		return TeslaToken{}, fmt.Errorf("resolve tesla token: refresh failed: %w: %w", ErrTeslaTokenExpired, err)
 	}
 
 	expiresAt := refreshed.ExpiresAt()
