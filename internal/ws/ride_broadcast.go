@@ -31,6 +31,7 @@ func (b *Broadcaster) handleRideRequestCreated(_ context.Context, event events.E
 		VehicleID:     payload.VehicleID,
 		RiderID:       payload.RiderID,
 		Status:        payload.Status,
+		RequesterName: payload.RequesterName,
 		ScheduledFor:  formatOptionalTime(payload.ScheduledFor),
 		Timestamp:     payload.CreatedAt.UTC().Format(time.RFC3339),
 	})
@@ -60,6 +61,7 @@ func (b *Broadcaster) handleRideStatusChanged(_ context.Context, event events.Ev
 		RideRequestID:    payload.RideRequestID,
 		VehicleID:        payload.VehicleID,
 		Status:           payload.Status,
+		RequesterName:    payload.RequesterName,
 		RescheduleStatus: payload.RescheduleStatus,
 		Timestamp:        payload.UpdatedAt.UTC().Format(time.RFC3339),
 	})

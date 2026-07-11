@@ -21,6 +21,7 @@ func toRideRequestWire(d RideRequestData) rideRequestWire {
 		Pickup:                toRidePlaceWire(d.Pickup),
 		Dropoff:               toRidePlaceWire(d.Dropoff),
 		Status:                d.Status,
+		RequesterName:         d.RequesterName,
 		PassengerName:         d.PassengerName,
 		PassengerPhone:        d.PassengerPhone,
 		ScheduledFor:          formatRideTimePtr(d.ScheduledFor),

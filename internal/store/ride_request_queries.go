@@ -5,16 +5,35 @@
 
 package store
 
+// requesterIdentitySelect resolves the requester's display identity (MYR-229)
+// INLINE, in the SAME statement as the ride row, via correlated subselects on
+// the Prisma-owned "User" table keyed on the row's rider_id. Appended to every
+// ride-request projection (plain SELECTs, list scans, and every
+// UPDATE/INSERT ... RETURNING) so there is never a separate lookup — no
+// after-commit window, no extra round trip, no independent outage mode.
+//
+// "User" is READ-ONLY here (CG-DL-9): these SELECT name/email, never write.
+// Both columns are nullable in the Prisma schema, so name/email scan into
+// pointers. requester_exists (a boolean EXISTS) distinguishes a deleted rider
+// (no row → requesterName OMITTED) from a row that has neither name nor email
+// (→ the "Rider" literal). The resolved value is P1 PII — NEVER logged. A
+// NULL/absent identity NEVER fails the surrounding ride operation.
+const requesterIdentitySelect = `,
+	(SELECT u."name" FROM "User" u WHERE u."id" = rider_id) AS requester_name,
+	(SELECT u."email" FROM "User" u WHERE u."id" = rider_id) AS requester_email,
+	EXISTS (SELECT 1 FROM "User" u WHERE u."id" = rider_id) AS requester_exists`
+
 // rideRequestColumns is every column read into RideRequestRecord, in scan
 // order. Coordinates travel as *_enc ciphertext; the repo decrypts them
-// into RidePlace.Latitude/Longitude after scanning.
+// into RidePlace.Latitude/Longitude after scanning. The trailing
+// requesterIdentitySelect resolves RequesterName in the same statement.
 const rideRequestColumns = `id, rider_id, owner_id, vehicle_id,
 	pickup_lat_enc, pickup_lng_enc, pickup_label, pickup_address,
 	dropoff_lat_enc, dropoff_lng_enc, dropoff_label, dropoff_address,
 	status, passenger_name, passenger_phone,
 	scheduled_for, reschedule_proposed_for, reschedule_status,
 	accepted_at, completed_at, created_at, updated_at,
-	dispatch_status, dispatched_at, dispatch_error`
+	dispatch_status, dispatched_at, dispatch_error` + requesterIdentitySelect
 
 const queryRideRequestInsert = `INSERT INTO go_ride_requests (
 	id, rider_id, owner_id, vehicle_id,
@@ -27,7 +46,7 @@ const queryRideRequestInsert = `INSERT INTO go_ride_requests (
 	$9, $10, $11, $12,
 	$13, $14, $15, $16
 )
-RETURNING created_at, updated_at`
+RETURNING created_at, updated_at` + requesterIdentitySelect
 
 const queryRideRequestByID = `SELECT ` + rideRequestColumns + `
 FROM go_ride_requests

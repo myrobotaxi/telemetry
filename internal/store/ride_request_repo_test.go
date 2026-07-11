@@ -29,6 +29,9 @@ func setupRideRequestRepo(t *testing.T) (*store.RideRequestRepo, cryptox.Encrypt
 	if _, err := testPool.Exec(ctx, `DELETE FROM go_ride_requests`); err != nil {
 		t.Fatalf("clean go_ride_requests: %v", err)
 	}
+	if _, err := testPool.Exec(ctx, `DELETE FROM "User"`); err != nil {
+		t.Fatalf("clean User: %v", err)
+	}
 	enc := newTestEncryptor(t)
 	return store.NewRideRequestRepo(testPool, store.NoopMetrics{}, enc), enc
 }

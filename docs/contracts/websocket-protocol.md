@@ -690,6 +690,7 @@ Announces a new ride request (P10 ride-hailing, MYR-174). **Per-party unicast** 
     "vehicleId": "clxyz1234567890abcdef",
     "riderId": "clrider1234567890abcdef",
     "status": "requested",
+    "requesterName": "Ada",
     "scheduledFor": "2026-06-18T16:00:00Z",
     "timestamp": "2026-06-15T16:12:00Z"
   }
@@ -702,6 +703,7 @@ Announces a new ride request (P10 ride-hailing, MYR-174). **Per-party unicast** 
 | `vehicleId` | `string` | **P0** | Vehicle the ride was requested on — lets the owner client badge the right car without a fetch. |
 | `riderId` | `string` | **P1** | Requesting rider's user cuid. Both recipients already know their own id; the owner uses this to attribute the request after the detail fetch resolves the display name. |
 | `status` | `string` (enum) | **P0** | Lifecycle status at creation — always `requested` today; typed as the full `RideRequestStatus` enum so future create-time states never break the frame. |
+| `requesterName` | `string` | **P1** | OPTIONAL (MYR-229) — the requester's display name, resolved server-side from the rider's identity (first name → email local-part → `"Rider"`; rest-api.md §7.8). Lets the owner label the incoming request without the detail fetch. Omitted only when the rider has no identity row. Never logged. |
 | `scheduledFor` | `string` (ISO 8601 UTC) | **P0** | OPTIONAL — omitted for an on-demand ("Now") request. The owner sheet's now-vs-scheduled fork is its primary rendering decision. |
 | `timestamp` | `string` (ISO 8601 UTC) | **P0** | Row-creation time (`created_at`). |
 
@@ -722,6 +724,7 @@ Announces a mutation of an existing ride request (P10 ride-hailing): a main-life
     "rideRequestId": "crr0123456789abcdef0123456789abcd",
     "vehicleId": "clxyz1234567890abcdef",
     "status": "cancelled",
+    "requesterName": "Ada",
     "timestamp": "2026-06-15T16:14:30Z"
   }
 }
@@ -732,6 +735,7 @@ Announces a mutation of an existing ride request (P10 ride-hailing): a main-life
 | `rideRequestId` | `string` | **P0** | Opaque ride-request cuid. |
 | `vehicleId` | `string` | **P0** | |
 | `status` | `string` (enum) | **P0** | Main lifecycle status AFTER the mutation. On a reschedule-only mutation this is unchanged from the previous frame — consumers key on `(status, rescheduleStatus)` as a pair. |
+| `requesterName` | `string` | **P1** | OPTIONAL (MYR-229) — the requester's display name, resolved server-side from the rider's identity (first name → email local-part → `"Rider"`; rest-api.md §7.8). Carried so the owner keeps a stable requester label across transitions. Omitted only when the rider has no identity row. Never logged. |
 | `rescheduleStatus` | `string` (enum) | **P0** | OPTIONAL — omitted when the ride has no reschedule history. Present-and-`requested` is the rider's "reschedule requested / waiting to re-confirm" moment (MYR-192). |
 | `timestamp` | `string` (ISO 8601 UTC) | **P0** | Mutation time (the row's `updated_at`). |
 

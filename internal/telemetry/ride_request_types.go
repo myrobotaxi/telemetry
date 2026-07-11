@@ -60,6 +60,12 @@ type RideRequestData struct {
 	CreatedAt             time.Time
 	UpdatedAt             time.Time
 
+	// RequesterName is the requester's resolved display name (MYR-229),
+	// populated server-side from the rider's identity. nil = the field is
+	// OMITTED on the wire (the rider has no identity row); never an empty
+	// string. P1 PII — never logged.
+	RequesterName *string
+
 	// Dispatch outcome (MYR-176). Nil until the nav-dispatch push resolves.
 	// Surfaced on the party-only detail payload (dispatchStatus/dispatchedAt);
 	// the internal error code is not exposed on the wire.
@@ -175,6 +181,7 @@ type rideRequestWire struct {
 	Pickup                ridePlaceWire `json:"pickup"`
 	Dropoff               ridePlaceWire `json:"dropoff"`
 	Status                string        `json:"status"`
+	RequesterName         *string       `json:"requesterName,omitempty"`
 	PassengerName         *string       `json:"passengerName,omitempty"`
 	PassengerPhone        *string       `json:"passengerPhone,omitempty"`
 	ScheduledFor          *string       `json:"scheduledFor,omitempty"`

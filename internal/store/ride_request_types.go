@@ -87,6 +87,14 @@ type RideRequestRecord struct {
 	PassengerName  *string
 	PassengerPhone *string
 
+	// RequesterName is the requester's display name (MYR-229), resolved
+	// server-side from the rider's identity via the Prisma-owned "User"
+	// table: first name (first whitespace token of the display name) →
+	// email local-part → "Rider". Empty string means the rider has no
+	// "User" row at all — the wire projections OMIT the field in that case
+	// (never emit an empty string). P1 PII — never logged.
+	RequesterName string
+
 	// Scheduled rides + reschedule negotiation. ScheduledFor nil = an
 	// on-demand ("Now") ride. RescheduleProposedFor/RescheduleStatus nil =
 	// no reschedule ever proposed.

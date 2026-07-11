@@ -105,13 +105,20 @@ func (r *RideRequestRepo) Create(ctx context.Context, req RideRequestRecord) (Ri
 	}
 
 	start := time.Now()
+	// The INSERT ... RETURNING resolves RequesterName inline via
+	// requesterIdentitySelect (MYR-229) — the requester name rides the same
+	// statement as the write, so there is no separate lookup and no
+	// after-commit failure window. A NULL/absent identity never fails Create.
+	var requesterName *string
+	var requesterEmail *string
+	var requesterExists bool
 	row := r.pool.QueryRow(ctx, queryRideRequestInsert,
 		req.ID, req.RiderID, req.OwnerID, req.VehicleID,
 		pickupLatEnc, pickupLngEnc, req.Pickup.Label, req.Pickup.Address,
 		dropoffLatEnc, dropoffLngEnc, req.Dropoff.Label, req.Dropoff.Address,
 		string(req.Status), req.PassengerName, req.PassengerPhone, req.ScheduledFor,
 	)
-	err = row.Scan(&req.CreatedAt, &req.UpdatedAt)
+	err = row.Scan(&req.CreatedAt, &req.UpdatedAt, &requesterName, &requesterEmail, &requesterExists)
 	r.metrics.ObserveQueryDuration("ride_request.create", time.Since(start).Seconds())
 	if err != nil {
 		// The one-active-instant-ride guard (0004) losing the race is an
@@ -126,6 +133,9 @@ func (r *RideRequestRepo) Create(ctx context.Context, req RideRequestRecord) (Ri
 	}
 	req.AcceptedAt, req.CompletedAt = nil, nil
 	req.RescheduleProposedFor, req.RescheduleStatus = nil, nil
+	if requesterExists {
+		req.RequesterName = requesterDisplayName(requesterName, requesterEmail)
+	}
 	return req, nil
 }
 
@@ -230,44 +240,4 @@ func (r *RideRequestRepo) UpdateStatusFrom(ctx context.Context, id string, from 
 		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.UpdateStatusFrom(%s): disambiguate miss: %w", id, getErr)
 	}
 	return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.UpdateStatusFrom(%s -> %s): %w", id, to, ErrRideRequestConflict)
-}
-
-// ProposeReschedule records the rider's proposed new pickup time and opens
-// the reschedule negotiation (RescheduleStatus 'requested' — the owner is
-// asked to re-confirm; MYR-192). The main Status is untouched: the design
-// keeps the reservation alive while the ask is pending. Returns the
-// post-update record, or ErrRideRequestNotFound.
-func (r *RideRequestRepo) ProposeReschedule(ctx context.Context, id string, proposedFor time.Time) (RideRequestRecord, error) {
-	start := time.Now()
-	row := r.pool.QueryRow(ctx, queryRideRequestProposeReschedule, id, proposedFor)
-	rec, err := r.scanRideRequest(row)
-	r.metrics.ObserveQueryDuration("ride_request.propose_reschedule", time.Since(start).Seconds())
-	if errors.Is(err, pgx.ErrNoRows) {
-		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.ProposeReschedule(%s): %w", id, ErrRideRequestNotFound)
-	}
-	if err != nil {
-		r.metrics.IncQueryError("ride_request.propose_reschedule")
-		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.ProposeReschedule(%s): %w", id, err)
-	}
-	return rec, nil
-}
-
-// ResolveReschedule closes an open reschedule negotiation. confirmed=true
-// adopts the proposed time into ScheduledFor and marks the sub-state
-// 'confirmed'; confirmed=false marks it 'declined' and keeps the original
-// reservation. Rows without an open 'requested' negotiation don't match —
-// that (or a missing id) returns ErrRideRequestNotFound.
-func (r *RideRequestRepo) ResolveReschedule(ctx context.Context, id string, confirmed bool) (RideRequestRecord, error) {
-	start := time.Now()
-	row := r.pool.QueryRow(ctx, queryRideRequestResolveReschedule, id, confirmed)
-	rec, err := r.scanRideRequest(row)
-	r.metrics.ObserveQueryDuration("ride_request.resolve_reschedule", time.Since(start).Seconds())
-	if errors.Is(err, pgx.ErrNoRows) {
-		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.ResolveReschedule(%s): %w", id, ErrRideRequestNotFound)
-	}
-	if err != nil {
-		r.metrics.IncQueryError("ride_request.resolve_reschedule")
-		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.ResolveReschedule(%s): %w", id, err)
-	}
-	return rec, nil
 }
