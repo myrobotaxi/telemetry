@@ -70,6 +70,18 @@ func minimalRideRequest() store.RideRequestRecord {
 	}
 }
 
+// scheduledRideRequest is minimalRideRequest with a fixed future scheduledFor.
+// Scheduled rides are EXEMPT from the one-active-INSTANT-ride guard (MYR-230,
+// migration 0004's partial unique index only covers scheduled_for IS NULL
+// rows), so tests that need several concurrently-open rides for a single rider
+// build them as scheduled to stay in a state the business rule permits.
+func scheduledRideRequest() store.RideRequestRecord {
+	rec := minimalRideRequest()
+	sched := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	rec.ScheduledFor = &sched
+	return rec
+}
+
 // TestRideRequestMigration_TableApplied proves migration 0002 lands the
 // table (and that re-running stays idempotent — RunMigrations is invoked
 // again by every other test's setup).
@@ -211,8 +223,13 @@ func TestRideRequestRepo_Lists(t *testing.T) {
 		return created
 	}
 
-	r1 := mk(func(r *store.RideRequestRecord) {}) // rider A -> owner A
-	r2 := mk(func(r *store.RideRequestRecord) {}) // rider A -> owner A
+	r1 := mk(func(r *store.RideRequestRecord) {}) // rider A -> owner A (open instant)
+	// r2 is rider A's second row: scheduled, so it does not collide with r1
+	// under the one-active-instant-ride guard (MYR-230).
+	r2 := mk(func(r *store.RideRequestRecord) {
+		sched := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+		r.ScheduledFor = &sched
+	})
 	r3 := mk(func(r *store.RideRequestRecord) { r.RiderID = "clriderB000000000000000" })
 	if _, err := repo.UpdateStatus(ctx, r2.ID, store.RideRequestStatusAccepted); err != nil {
 		t.Fatalf("UpdateStatus: %v", err)
@@ -319,7 +336,11 @@ func TestRideRequestRepo_UpdateStatus(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			created, err := repo.Create(ctx, minimalRideRequest())
+			// Scheduled so subtests sharing this repo don't collide under the
+			// one-active-instant-ride guard (MYR-230) — one subtest leaves the
+			// ride in an open 'accepted' state, which would otherwise block the
+			// next subtest's create.
+			created, err := repo.Create(ctx, scheduledRideRequest())
 			if err != nil {
 				t.Fatalf("Create: %v", err)
 			}
@@ -352,7 +373,7 @@ func TestRideRequestRepo_UpdateStatus(t *testing.T) {
 	}
 
 	t.Run("re-entering accepted never moves the original stamp", func(t *testing.T) {
-		created, err := repo.Create(ctx, minimalRideRequest())
+		created, err := repo.Create(ctx, scheduledRideRequest())
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
@@ -377,7 +398,7 @@ func TestRideRequestRepo_UpdateStatus(t *testing.T) {
 	})
 
 	t.Run("status outside the contract enum is rejected by the CHECK", func(t *testing.T) {
-		created, err := repo.Create(ctx, minimalRideRequest())
+		created, err := repo.Create(ctx, scheduledRideRequest())
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}

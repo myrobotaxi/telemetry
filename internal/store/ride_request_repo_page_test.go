@@ -17,7 +17,10 @@ func TestRideRequestRepo_ListByRiderPage_Paginates(t *testing.T) {
 	const total = 5
 	created := make(map[string]bool, total)
 	for i := 0; i < total; i++ {
-		rec, err := repo.Create(ctx, minimalRideRequest())
+		// Scheduled rides: a single rider may hold many, whereas only one
+		// open INSTANT ride is permitted (MYR-230 guard). Pagination is
+		// exercised on the rider's full list regardless of scheduled/instant.
+		rec, err := repo.Create(ctx, scheduledRideRequest())
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
@@ -71,7 +74,10 @@ func TestRideRequestRepo_ListByOwnerPage_StatusAndCursor(t *testing.T) {
 
 	var requestedIDs []string
 	for i := 0; i < 3; i++ {
-		rec, err := repo.Create(ctx, minimalRideRequest())
+		// Scheduled: several open rides for one rider only coexist when they
+		// are not instant (MYR-230 guard). The owner feed filters by status,
+		// not by scheduled/instant, so the assertions are unaffected.
+		rec, err := repo.Create(ctx, scheduledRideRequest())
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
