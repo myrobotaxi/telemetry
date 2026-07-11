@@ -226,6 +226,117 @@ func TestRideRequestRepo_Create_OneActiveInstant(t *testing.T) {
 	})
 }
 
+// TestMigration0004_DedupsOpenInstantRides proves migration 0004 is
+// self-cleaning on databases that predate the guard (MYR-230 review fix):
+// production accumulated riders holding several concurrently-open instant
+// rides, on which a bare CREATE UNIQUE INDEX would abort and fail the
+// deploy. The migration must first cancel every OLDER open instant ride per
+// rider (keeping the most recent by created_at DESC, id DESC), leave
+// scheduled/terminal/other-rider rows untouched, and then land the index.
+func TestMigration0004_DedupsOpenInstantRides(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("Docker not available -- skipping migration integration test")
+	}
+	ctx := context.Background()
+
+	// Ensure the schema is fully migrated, then rewind to pre-0004: drop the
+	// guard index and point golang-migrate's version at 0003 so RunMigrations
+	// re-applies 0004 against the seeded pre-guard state.
+	if err := store.RunMigrations(ctx, testConnStr, testLogger()); err != nil {
+		t.Fatalf("RunMigrations (initial): %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `DELETE FROM go_ride_requests`); err != nil {
+		t.Fatalf("clean go_ride_requests: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `DROP INDEX IF EXISTS uq_go_ride_requests_active_instant_rider`); err != nil {
+		t.Fatalf("drop guard index: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `UPDATE schema_migrations SET version = 3, dirty = false`); err != nil {
+		t.Fatalf("rewind schema_migrations: %v", err)
+	}
+
+	// Seed the pre-guard debris directly (raw SQL so created_at is exact and
+	// distinct; the *_enc columns are opaque TEXT, dummy ciphertext is fine
+	// since assertions read status/updated_at and never decrypt coordinates).
+	const riderA, riderB = "clriderdupA0000000000000", "clriderdupB0000000000000"
+	seed := func(id, rider, status string, createdAt time.Time, scheduled *time.Time) {
+		t.Helper()
+		if _, err := testPool.Exec(ctx, `INSERT INTO go_ride_requests (
+			id, rider_id, owner_id, vehicle_id,
+			pickup_lat_enc, pickup_lng_enc, pickup_label,
+			dropoff_lat_enc, dropoff_lng_enc, dropoff_label,
+			status, scheduled_for, created_at, updated_at
+		) VALUES ($1, $2, 'clownerdup000000000000', 'clvehicledup0000000000',
+			'enc', 'enc', 'A', 'enc', 'enc', 'B', $3, $4, $5, $5)`,
+			id, rider, status, scheduled, createdAt); err != nil {
+			t.Fatalf("seed %s: %v", id, err)
+		}
+	}
+	base := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	sched := base.Add(48 * time.Hour)
+	// Rider A: three open instant rides (the production debris shape) — only
+	// the newest may survive open. Plus one scheduled and one terminal row,
+	// both of which the dedup must not touch.
+	seed("crrdupA1oldest", riderA, "requested", base, nil)
+	seed("crrdupA2middle", riderA, "accepted", base.Add(time.Hour), nil)
+	seed("crrdupA3newest", riderA, "accepted", base.Add(2*time.Hour), nil)
+	seed("crrdupA4sched", riderA, "requested", base.Add(3*time.Hour), &sched)
+	seed("crrdupA5done", riderA, "completed", base.Add(4*time.Hour), nil)
+	// Rider B: a single open instant ride — must pass through untouched.
+	seed("crrdupB1only", riderB, "requested", base, nil)
+
+	// Re-apply 0004 (with the dedup) via the production entry point.
+	if err := store.RunMigrations(ctx, testConnStr, testLogger()); err != nil {
+		t.Fatalf("RunMigrations (re-apply 0004 over duplicates): %v", err)
+	}
+
+	wantStatus := map[string]string{
+		"crrdupA1oldest": "cancelled", // older open instant → cancelled
+		"crrdupA2middle": "cancelled", // older open instant → cancelled
+		"crrdupA3newest": "accepted",  // newest open instant survives as-is
+		"crrdupA4sched":  "requested", // scheduled: exempt, untouched
+		"crrdupA5done":   "completed", // terminal: untouched
+		"crrdupB1only":   "requested", // other rider's single open: untouched
+	}
+	for id, want := range wantStatus {
+		var status string
+		var updatedAt, createdAt time.Time
+		if err := testPool.QueryRow(ctx,
+			`SELECT status, updated_at, created_at FROM go_ride_requests WHERE id = $1`, id,
+		).Scan(&status, &updatedAt, &createdAt); err != nil {
+			t.Fatalf("read %s: %v", id, err)
+		}
+		if status != want {
+			t.Errorf("%s: status = %q, want %q", id, status, want)
+		}
+		bumped := updatedAt.After(createdAt)
+		if want == "cancelled" && !bumped {
+			t.Errorf("%s: updated_at not bumped by the dedup transition", id)
+		}
+		if want != "cancelled" && bumped {
+			t.Errorf("%s: updated_at moved on an untouched row", id)
+		}
+	}
+
+	// The guard index landed and is live: a second open instant for rider B
+	// is now rejected through the repo.
+	var indexed bool
+	if err := testPool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'uq_go_ride_requests_active_instant_rider')`,
+	).Scan(&indexed); err != nil {
+		t.Fatalf("pg_indexes: %v", err)
+	}
+	if !indexed {
+		t.Fatal("guard index missing after migration")
+	}
+	rec := minimalRideRequest()
+	rec.RiderID = riderB
+	repo := store.NewRideRequestRepo(testPool, store.NoopMetrics{}, newTestEncryptor(t))
+	if _, err := repo.Create(ctx, rec); !errors.Is(err, store.ErrRideRequestActive) {
+		t.Fatalf("expected ErrRideRequestActive after migration, got %v", err)
+	}
+}
+
 // TestRideRequestRepo_Create_ConcurrentInstant is the race the guard exists
 // for: two instant creates for the same rider fire simultaneously. The
 // partial unique index serializes them in Postgres — exactly one INSERT

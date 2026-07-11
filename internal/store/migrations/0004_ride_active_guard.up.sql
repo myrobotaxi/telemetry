@@ -22,6 +22,34 @@
 -- many scheduled rides plus one open instant ride. Only instant requests
 -- (scheduled_for IS NULL) participate in the uniqueness constraint.
 
+-- MYR-230: pre-index dedup — the guard postdates the create endpoint, so
+-- production already holds riders with several concurrently-open instant
+-- rides (stale test debris from pre-guard client QA). CREATE UNIQUE INDEX
+-- would abort on those rows and fail the deploy, so first transition every
+-- OLDER open instant ride to 'cancelled', keeping only each rider's MOST
+-- RECENT open instant ride — keeping newest matches rider expectation (the
+-- ride they asked for last is the one they are waiting on). Deterministic
+-- keep-pick: ORDER BY created_at DESC with id DESC as the tiebreaker, the
+-- same total order the list endpoints use. 'cancelled' is a legal member of
+-- go_ride_requests_status_check (0002), and the write mirrors the store's
+-- UpdateStatusFrom timestamp discipline: entering 'cancelled' stamps
+-- neither accepted_at nor completed_at, and the transition touches
+-- updated_at. Migrations run with no event bus, so no ride_status_changed
+-- WS frames fire for these rows — clients refetch state via REST
+-- (FR-9.1/FR-9.2 reconciliation) and observe the stale rides as cancelled.
+UPDATE go_ride_requests
+SET status     = 'cancelled',
+    updated_at = NOW()
+WHERE scheduled_for IS NULL
+  AND status IN ('requested', 'accepted', 'enroute', 'arrived')
+  AND id NOT IN (
+      SELECT DISTINCT ON (rider_id) id
+      FROM go_ride_requests
+      WHERE scheduled_for IS NULL
+        AND status IN ('requested', 'accepted', 'enroute', 'arrived')
+      ORDER BY rider_id, created_at DESC, id DESC
+  );
+
 CREATE UNIQUE INDEX IF NOT EXISTS uq_go_ride_requests_active_instant_rider
     ON go_ride_requests (rider_id)
     WHERE scheduled_for IS NULL
