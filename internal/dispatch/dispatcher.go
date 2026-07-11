@@ -2,7 +2,6 @@ package dispatch
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -10,23 +9,7 @@ import (
 
 	"github.com/myrobotaxi/telemetry/internal/commands"
 	"github.com/myrobotaxi/telemetry/internal/events"
-	"github.com/myrobotaxi/telemetry/internal/wserrors"
 )
-
-// commandNavigationGPS is the Tesla command name for a lat/long navigation
-// push (MYR-180 registry). UNSIGNED — forwarded straight to the Fleet API.
-const commandNavigationGPS = "navigation_gps_request"
-
-// pickupNavOrder is the Tesla remote-nav "order" integer for the pickup
-// destination. Tesla's convention is 1-based: order=1 REPLACES the current
-// trip (making the pickup THE active destination), 2 prepends a stop, 3
-// appends a stop. We want the pickup to be the immediate destination, so we
-// send 1 — matching internal/commands buildNavigationGPS's default. (Source:
-// Tesla Fleet API navigation_gps_request remote-nav order semantics, as
-// documented by the Teslemetry python-tesla-fleet-api client:
-// https://github.com/Teslemetry/python-tesla-fleet-api — "1 replaces the
-// trip, 2 prepends a stop, 3 appends a stop".)
-const pickupNavOrder = float64(1)
 
 // Outcome is the resolved dispatch result persisted on the ride row. The
 // string values match the go_ride_requests.dispatch_status CHECK enum.
@@ -36,49 +19,6 @@ const (
 	OutcomeSent    Outcome = "sent"
 	OutcomeFailed  Outcome = "failed"
 	OutcomeSkipped Outcome = "skipped"
-)
-
-// Non-command failure codes recorded in dispatch_error when the pipeline
-// fails BEFORE (or instead of) a Tesla command. Command failures record the
-// typed wserrors code (key_not_paired, vehicle_asleep, …) verbatim.
-//
-// The standalone `// #nosec G101` lines below suppress gosec's hardcoded-
-// credential false positive: these are OPAQUE outcome codes surfaced in
-// logs + the P0 dispatch_error column, never credentials. gosec matches the
-// nosec directive on the line directly above the flagged const spec, so the
-// comment MUST stay standalone (a trailing `//nolint:gosec // #nosec` on the
-// same line is NOT honored by the standalone gosec scanner).
-const (
-	codeVehicleUnresolved = "vehicle_unresolved"
-	// #nosec G101 -- opaque outcome code, not a credential
-	codeTokenUnavailable = "token_unavailable"
-	// #nosec G101 -- opaque outcome code, not a credential
-	codeTokenExpired          = "token_expired"
-	codeTransportUnconfigured = "transport_unconfigured"
-	codeCanceled              = "dispatch_canceled"
-	// codeDispatchInterrupted marks a dispatch claimed (dispatched_at set) but
-	// whose process died before it recorded an outcome — a crash/SIGTERM in
-	// the claim→record window. Set by the startup reconciler.
-	codeDispatchInterrupted = "dispatch_interrupted"
-)
-
-// Permanent (non-retryable) resolution-failure sentinels. The cmd/ adapters
-// map the concrete telemetry/store sentinels (ErrTeslaTokenExpired,
-// ErrTeslaTokenUnavailable, store.ErrVehicleNotFound) onto these so the
-// dispatcher can classify a resolution failure as permanent WITHOUT importing
-// those packages (keeping the consumer-site interface boundary clean). Any
-// OTHER resolution error is treated as transient and retried under the
-// bounded policy.
-var (
-	// ErrTokenExpired — a token exists but is expired and cannot be
-	// refreshed; the owner must re-link. Recorded as token_expired.
-	ErrTokenExpired = errors.New("dispatch: tesla token expired")
-	// ErrTokenUnavailable — no token on file (account never linked).
-	// Recorded as token_unavailable.
-	ErrTokenUnavailable = errors.New("dispatch: tesla token unavailable")
-	// ErrVehicleNotFound — the vehicle row is gone; no VIN to resolve.
-	// Recorded as vehicle_unresolved.
-	ErrVehicleNotFound = errors.New("dispatch: vehicle not found")
 )
 
 // VehicleResolver resolves a vehicle cuid to its Tesla VIN. Implemented in
@@ -108,14 +48,6 @@ type OutcomeStore interface {
 	// RecordDispatchOutcome persists the resolved status; errCode is nil for
 	// sent/skipped and the opaque failure code for failed.
 	RecordDispatchOutcome(ctx context.Context, rideID string, status Outcome, errCode *string) error
-}
-
-// InterruptedDispatchLister finds rides latched for dispatch (dispatched_at
-// set) whose outcome never resolved (dispatch_status still NULL) and are
-// older than olderThan — the orphan signature of a crash/SIGTERM in the
-// claim→record window. Satisfied by the ride-request repo via a cmd/ adapter.
-type InterruptedDispatchLister interface {
-	ListInterruptedDispatches(ctx context.Context, olderThan time.Duration) ([]string, error)
 }
 
 // Config tunes the dispatcher. Zero values get sane defaults via withDefaults.
@@ -222,50 +154,6 @@ func (d *Dispatcher) Subscribe(bus events.Bus) (events.Subscription, error) {
 // (bus.Close) on shutdown to drain cleanly; also used by tests.
 func (d *Dispatcher) Wait() { d.wg.Wait() }
 
-// Reconcile resolves dispatches orphaned by a crash/SIGTERM in the window
-// between ClaimDispatch and RecordDispatchOutcome. Such a ride sits with
-// dispatched_at set and dispatch_status NULL forever — nothing else clears it,
-// so it is stuck "claimed but unresolved" and invisible to monitoring.
-//
-// We record each as failed / dispatch_interrupted rather than re-dispatching.
-// Rationale: the process died at an UNKNOWN point, so the nav push may or may
-// not have reached the vehicle; the accept may be minutes/hours stale by the
-// time we restart; and pushing nav to a car that has since moved on is worse
-// than an honest, alertable "interrupted" outcome. The exactly-once latch has
-// already done its job — reconciliation only needs to unstick the NULL status.
-// (See rest-api.md §7.8 for the recorded-code contract.)
-//
-// olderThan is floored at OverallTimeout so a genuinely in-flight dispatch
-// (which briefly has the same dispatched_at-set / status-NULL shape) is never
-// stomped. Returns the count of rides resolved.
-func (d *Dispatcher) Reconcile(ctx context.Context, lister InterruptedDispatchLister, olderThan time.Duration) (int, error) {
-	if olderThan < d.cfg.OverallTimeout {
-		olderThan = d.cfg.OverallTimeout
-	}
-	ids, err := lister.ListInterruptedDispatches(ctx, olderThan)
-	if err != nil {
-		return 0, fmt.Errorf("dispatch reconcile: list interrupted: %w", err)
-	}
-	code := codeDispatchInterrupted
-	resolved := 0
-	for _, id := range ids {
-		if err := d.store.RecordDispatchOutcome(ctx, id, OutcomeFailed, &code); err != nil {
-			d.logger.Error("dispatch reconcile: failed to resolve interrupted dispatch",
-				slog.String("ride_id", id),
-				slog.String("error", err.Error()),
-			)
-			continue
-		}
-		resolved++
-		d.logger.Info("dispatch reconcile: resolved interrupted dispatch",
-			slog.String("ride_id", id),
-			slog.String("outcome", string(OutcomeFailed)),
-			slog.String("error_code", code),
-		)
-	}
-	return resolved, nil
-}
-
 // handle is the events.Handler: it type-asserts and hands the event to a
 // worker goroutine, returning immediately so the bus's serial per-subscriber
 // loop is never blocked by a slow dispatch. Concurrency is capped by the sem
@@ -371,118 +259,6 @@ func (d *Dispatcher) resolveToken(ctx context.Context, ownerID string) (token st
 	return token, nil
 }
 
-// resolveWithRetry runs fn under the bounded retry policy (MaxRetries extra
-// attempts with exponential backoff). It retries only transient errors:
-// a permanentResolution error, or a dead ctx, stops the loop immediately.
-func (d *Dispatcher) resolveWithRetry(ctx context.Context, fn func(context.Context) (string, error)) (string, error) {
-	attempts := d.cfg.MaxRetries + 1
-	var lastErr error
-	for attempt := 0; attempt < attempts; attempt++ {
-		if attempt > 0 {
-			if err := sleepCtx(ctx, backoffFor(d.cfg.Backoff, attempt)); err != nil {
-				return "", err
-			}
-		}
-		v, err := fn(ctx)
-		if err == nil {
-			return v, nil
-		}
-		lastErr = err
-		if permanentResolution(err) || ctx.Err() != nil {
-			return "", err
-		}
-	}
-	return "", lastErr
-}
-
-// permanentResolution reports whether a resolution error is a well-identified
-// permanent condition that no retry can fix.
-func permanentResolution(err error) bool {
-	return errors.Is(err, ErrTokenExpired) ||
-		errors.Is(err, ErrTokenUnavailable) ||
-		errors.Is(err, ErrVehicleNotFound)
-}
-
-// tokenErrorCode maps a failed token resolution to its opaque outcome code.
-func tokenErrorCode(err error) string {
-	switch {
-	case isContextErr(err):
-		return codeCanceled
-	case errors.Is(err, ErrTokenExpired):
-		return codeTokenExpired
-	case errors.Is(err, ErrTokenUnavailable):
-		return codeTokenUnavailable
-	default:
-		// Transient failure that exhausted the retry budget: the token could
-		// not be obtained, so it is effectively unavailable.
-		return codeTokenUnavailable
-	}
-}
-
-// isContextErr reports whether err is (or wraps) a context cancellation or
-// deadline — used to record dispatch_canceled rather than a resolution code.
-func isContextErr(err error) bool {
-	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
-}
-
-// executeWithRetry runs the navigation_gps_request under the bounded retry
-// policy. Retryable codes (transport / asleep-after-wake) back off and retry
-// up to MaxRetries; every other code is terminal.
-func (d *Dispatcher) executeWithRetry(ctx context.Context, vin, token string, pickup events.RidePlace) (outcome Outcome, errCode *string) {
-	req := commands.Request{
-		VIN:     vin,
-		Command: commandNavigationGPS,
-		Params: map[string]any{
-			"lat":   pickup.Latitude,
-			"lon":   pickup.Longitude,
-			"order": pickupNavOrder,
-		},
-		AccessToken: token,
-		Scopes:      commands.ParseScopes(token),
-	}
-
-	attempts := d.cfg.MaxRetries + 1
-	lastCode := string(wserrors.ErrCodeCommandFailed)
-	for attempt := 0; attempt < attempts; attempt++ {
-		if attempt > 0 {
-			if err := sleepCtx(ctx, backoffFor(d.cfg.Backoff, attempt)); err != nil {
-				c := codeCanceled
-				return OutcomeFailed, &c
-			}
-		}
-
-		_, err := d.executor.Execute(ctx, req)
-		if err == nil {
-			return OutcomeSent, nil
-		}
-		var retry bool
-		retry, lastCode = classifyCommandErr(err)
-		if !retry {
-			return OutcomeFailed, &lastCode
-		}
-	}
-	// Retries exhausted on a retryable error.
-	return OutcomeFailed, &lastCode
-}
-
-// classifyCommandErr decides whether a command error is worth another bounded
-// attempt and returns the opaque code to record. Retryability is the
-// executor's own signal (CommandError.Retryable) — a transient transport /
-// vehicle failure or asleep-after-wake. The unconfigured-transport sentinel is
-// a permanent misconfiguration: never retry it, and record a distinct code so
-// ops can tell it apart from a live command_failed 502. A non-typed error is
-// treated as a transient transport failure.
-func classifyCommandErr(err error) (retryable bool, code string) {
-	if errors.Is(err, commands.ErrTransportNotConfigured) {
-		return false, codeTransportUnconfigured
-	}
-	var cmdErr *commands.CommandError
-	if errors.As(err, &cmdErr) {
-		return cmdErr.Retryable, string(cmdErr.Code)
-	}
-	return true, string(wserrors.ErrCodeCommandFailed)
-}
-
 // record persists the outcome and emits the single per-attempt audit line.
 // The write runs on a context DETACHED from the per-event ctx (which bounds
 // the whole dispatch and may already be canceled/timed-out — precisely when
@@ -512,37 +288,3 @@ func (d *Dispatcher) record(ctx context.Context, ev events.RideAcceptedEvent, vi
 	}
 	d.logger.Info("dispatch attempt", attrs...)
 }
-
-// backoffFor grows the base backoff exponentially per retry attempt
-// (attempt is 1-based for the first retry): base, 2·base, 4·base, …
-func backoffFor(base time.Duration, attempt int) time.Duration {
-	if attempt <= 1 {
-		return base
-	}
-	return base << (attempt - 1)
-}
-
-// sleepCtx sleeps for d or returns early if ctx is canceled.
-func sleepCtx(ctx context.Context, d time.Duration) error {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return fmt.Errorf("dispatch backoff: %w", ctx.Err())
-	case <-timer.C:
-		return nil
-	}
-}
-
-// redactVIN shows only the last 4 chars of a VIN for logs (empty stays empty).
-func redactVIN(vin string) string {
-	if len(vin) <= 4 {
-		return vin
-	}
-	return "***" + vin[len(vin)-4:]
-}
-
-// discardWriter drops log output for the nil-logger default.
-type discardWriter struct{}
-
-func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
