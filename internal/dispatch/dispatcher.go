@@ -16,9 +16,16 @@ import (
 // push (MYR-180 registry). UNSIGNED — forwarded straight to the Fleet API.
 const commandNavigationGPS = "navigation_gps_request"
 
-// pickupNavOrder is the stop index for the pickup destination. 0 makes the
-// pickup the vehicle's immediate/first navigation stop.
-const pickupNavOrder = float64(0)
+// pickupNavOrder is the Tesla remote-nav "order" integer for the pickup
+// destination. Tesla's convention is 1-based: order=1 REPLACES the current
+// trip (making the pickup THE active destination), 2 prepends a stop, 3
+// appends a stop. We want the pickup to be the immediate destination, so we
+// send 1 — matching internal/commands buildNavigationGPS's default. (Source:
+// Tesla Fleet API navigation_gps_request remote-nav order semantics, as
+// documented by the Teslemetry python-tesla-fleet-api client:
+// https://github.com/Teslemetry/python-tesla-fleet-api — "1 replaces the
+// trip, 2 prepends a stop, 3 appends a stop".)
+const pickupNavOrder = float64(1)
 
 // Outcome is the resolved dispatch result persisted on the ride row. The
 // string values match the go_ride_requests.dispatch_status CHECK enum.

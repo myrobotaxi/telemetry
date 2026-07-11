@@ -148,8 +148,8 @@ func TestProcess_Success(t *testing.T) {
 	if got.Params["lat"] != 37.7955 || got.Params["lon"] != -122.3937 {
 		t.Errorf("lat/lon params = %v/%v", got.Params["lat"], got.Params["lon"])
 	}
-	if got.Params["order"] != float64(0) {
-		t.Errorf("order param = %v, want float64(0)", got.Params["order"])
+	if got.Params["order"] != float64(1) {
+		t.Errorf("order param = %v, want float64(1) (replace-trip)", got.Params["order"])
 	}
 	if len(st.recorded) != 1 || st.recorded[0].status != OutcomeSent || st.recorded[0].code != "" {
 		t.Errorf("recorded = %+v, want one {sent, no code}", st.recorded)
