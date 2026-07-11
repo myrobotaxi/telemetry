@@ -188,3 +188,14 @@ const queryRideRequestRecordDispatch = `UPDATE go_ride_requests SET
 	dispatch_error = $3,
 	updated_at = NOW()
 WHERE id = $1`
+
+// queryRideRequestListInterrupted finds rides claimed for dispatch
+// (dispatched_at set) whose outcome never resolved (dispatch_status NULL) and
+// whose claim is older than $1 seconds — the orphan signature of a process
+// that died between ClaimDispatch and RecordDispatchOutcome (MYR-176 startup
+// reconciler). The age floor keeps a live in-flight dispatch from matching.
+const queryRideRequestListInterrupted = `SELECT id
+	FROM go_ride_requests
+	WHERE dispatched_at IS NOT NULL
+	  AND dispatch_status IS NULL
+	  AND dispatched_at < NOW() - make_interval(secs => $1)`

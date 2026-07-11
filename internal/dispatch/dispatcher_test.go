@@ -661,6 +661,137 @@ func TestHandle_ConcurrentDispatch_NoHeadOfLineBlocking(t *testing.T) {
 	}
 }
 
+// fakeLister feeds Reconcile a scripted id list and records the olderThan it
+// was asked for.
+type fakeLister struct {
+	ids          []string
+	err          error
+	gotOlderThan time.Duration
+	called       bool
+}
+
+func (f *fakeLister) ListInterruptedDispatches(_ context.Context, olderThan time.Duration) ([]string, error) {
+	f.called = true
+	f.gotOlderThan = olderThan
+	return f.ids, f.err
+}
+
+// reconcileStore records per-id outcomes and can fail RecordDispatchOutcome
+// for specific ids.
+type reconcileStore struct {
+	mu       sync.Mutex
+	recorded map[string]recordCall
+	failIDs  map[string]bool
+}
+
+func (s *reconcileStore) ClaimDispatch(context.Context, string) (bool, error) { return true, nil }
+
+func (s *reconcileStore) RecordDispatchOutcome(_ context.Context, id string, status Outcome, code *string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failIDs[id] {
+		return errors.New("record failed for " + id)
+	}
+	rc := recordCall{status: status}
+	if code != nil {
+		rc.code = *code
+	}
+	s.recorded[id] = rc
+	return nil
+}
+
+func TestReconcile(t *testing.T) {
+	tests := []struct {
+		name         string
+		ids          []string
+		listErr      error
+		failIDs      map[string]bool
+		wantResolved int
+		wantErr      bool
+		wantRecorded []string // ids expected to be recorded failed/interrupted
+	}{
+		{
+			name:         "resolves all interrupted",
+			ids:          []string{"r1", "r2", "r3"},
+			wantResolved: 3,
+			wantRecorded: []string{"r1", "r2", "r3"},
+		},
+		{
+			name:         "no interrupted rides",
+			ids:          nil,
+			wantResolved: 0,
+		},
+		{
+			name:    "list error propagates, nothing recorded",
+			listErr: errors.New("db down"),
+			wantErr: true,
+		},
+		{
+			name:         "continues past a record failure",
+			ids:          []string{"r1", "r2", "r3"},
+			failIDs:      map[string]bool{"r2": true},
+			wantResolved: 2,
+			wantRecorded: []string{"r1", "r3"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := &reconcileStore{recorded: map[string]recordCall{}, failIDs: tt.failIDs}
+			d := New(&fakeVehicleResolver{}, &fakeTokenSource{}, &fakeExecutor{}, st,
+				Config{Enabled: true}, nil)
+			lister := &fakeLister{ids: tt.ids, err: tt.listErr}
+
+			n, err := d.Reconcile(context.Background(), lister, time.Minute)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("Reconcile expected error, got nil")
+				}
+				if len(st.recorded) != 0 {
+					t.Errorf("recorded %+v on list error, want none", st.recorded)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			if n != tt.wantResolved {
+				t.Errorf("resolved = %d, want %d", n, tt.wantResolved)
+			}
+			for _, id := range tt.wantRecorded {
+				rc, ok := st.recorded[id]
+				if !ok {
+					t.Errorf("ride %s not recorded", id)
+					continue
+				}
+				if rc.status != OutcomeFailed || rc.code != codeDispatchInterrupted {
+					t.Errorf("ride %s recorded %+v, want {failed, dispatch_interrupted}", id, rc)
+				}
+			}
+		})
+	}
+}
+
+func TestReconcile_FloorsOlderThanAtOverallTimeout(t *testing.T) {
+	st := &reconcileStore{recorded: map[string]recordCall{}}
+	d := New(&fakeVehicleResolver{}, &fakeTokenSource{}, &fakeExecutor{}, st,
+		Config{Enabled: true, OverallTimeout: 90 * time.Second}, nil)
+	lister := &fakeLister{}
+
+	// Ask for a cutoff BELOW OverallTimeout; it must be floored so a live
+	// in-flight dispatch is never mistaken for an orphan.
+	if _, err := d.Reconcile(context.Background(), lister, time.Second); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !lister.called {
+		t.Fatal("lister was not called")
+	}
+	if lister.gotOlderThan != 90*time.Second {
+		t.Errorf("olderThan = %v, want floored to 90s (OverallTimeout)", lister.gotOlderThan)
+	}
+}
+
 func TestHandle_WrongPayloadType(t *testing.T) {
 	exec := &fakeExecutor{errs: []error{nil}}
 	st := &fakeStore{claimed: true}

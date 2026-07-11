@@ -341,7 +341,7 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 	// Subscribes to the ride.accepted seam (published by the owner-accept
 	// handler) and pushes the rider's pickup into the vehicle's Tesla
 	// navigation via the command Executor. Gated by DISPATCH_ENABLED.
-	if err := setupNavDispatcher(cfg, bus, vehicleRepo, accountRepo, rideRepo, logger); err != nil {
+	if err := setupNavDispatcher(ctx, cfg, bus, vehicleRepo, accountRepo, rideRepo, logger); err != nil {
 		return fmt.Errorf("setting up nav dispatcher: %w", err)
 	}
 

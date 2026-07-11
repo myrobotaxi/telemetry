@@ -1403,8 +1403,11 @@ Both fields are **optional and additive** (older clients ignore them); the inter
 > - `token_unavailable` — no usable Tesla token could be obtained (account **never linked**, or a transient lookup failure exhausted retries).
 > - `transport_unconfigured` — the tesla-http-proxy command transport is not configured; a permanent misconfiguration (not retried).
 > - `dispatch_canceled` — the per-event context was canceled/timed out mid-resolution.
+> - `dispatch_interrupted` — the dispatch was claimed (`dispatched_at` stamped) but the process died (crash/SIGTERM) before recording an outcome; the startup reconciler resolved the orphaned row (see below).
 >
 > Resolution steps (VIN + token) run under the same bounded retry policy as the command: transient failures are retried; only well-identified permanent conditions (`token_expired`, `token_unavailable` on a never-linked account, `vehicle_unresolved` not-found, `transport_unconfigured`) short-circuit.
+
+> **Startup reconciliation of interrupted dispatches.** The `dispatched_at` claim latch is stamped BEFORE the nav push runs, so a crash or SIGTERM in the claim→record window leaves a row with `dispatched_at` set and `dispatch_status` NULL — stuck "claimed but unresolved" forever, invisible to monitoring, and never re-attempted (the exactly-once latch blocks a second claim). On startup the dispatcher runs a one-shot reconciliation pass (`internal/dispatch` `Reconcile`, wired in `cmd/telemetry-server/dispatch_wiring.go`) that finds every such row **older than the per-event OverallTimeout** (so a genuinely in-flight dispatch is never touched) and records it `failed` / `dispatch_interrupted`. **We resolve-as-failed rather than re-dispatch on purpose:** the process died at an unknown point (the push may or may not have reached the car), the accept is likely stale by restart, and a late nav push to a car that has since moved is worse than an honest, alertable "interrupted" outcome. The reconciler is best-effort (log-and-continue; a failure never blocks server startup).
 
 #### `POST /api/ride-requests/{id}/decline`
 

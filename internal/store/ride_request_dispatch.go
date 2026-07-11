@@ -56,3 +56,32 @@ func (r *RideRequestRepo) RecordDispatchOutcome(ctx context.Context, id string, 
 	}
 	return nil
 }
+
+// ListInterruptedDispatches returns the ids of rides claimed for dispatch
+// (dispatched_at set) whose outcome never resolved (dispatch_status NULL) and
+// whose claim is older than olderThan — dispatches orphaned by a crash/SIGTERM
+// in the claim→record window. The startup reconciler (internal/dispatch)
+// resolves each. No match is not an error (returns an empty slice).
+func (r *RideRequestRepo) ListInterruptedDispatches(ctx context.Context, olderThan time.Duration) ([]string, error) {
+	start := time.Now()
+	rows, err := r.pool.Query(ctx, queryRideRequestListInterrupted, olderThan.Seconds())
+	r.metrics.ObserveQueryDuration("ride_request.list_interrupted_dispatches", time.Since(start).Seconds())
+	if err != nil {
+		r.metrics.IncQueryError("ride_request.list_interrupted_dispatches")
+		return nil, fmt.Errorf("RideRequestRepo.ListInterruptedDispatches: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("RideRequestRepo.ListInterruptedDispatches scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("RideRequestRepo.ListInterruptedDispatches rows: %w", err)
+	}
+	return ids, nil
+}

@@ -26,6 +26,13 @@ import (
 const (
 	dispatchRetryMax     = 2
 	dispatchRetryBackoff = 2 * time.Second
+	// dispatchReconcileAge is the minimum claim age for the startup reconciler
+	// to treat a claimed-but-unresolved dispatch as interrupted. It sits
+	// comfortably above the dispatcher's default OverallTimeout (2m) so a
+	// genuinely in-flight dispatch is never mistaken for an orphan.
+	dispatchReconcileAge = 5 * time.Minute
+	// dispatchReconcileTimeout bounds the one-shot startup reconciliation pass.
+	dispatchReconcileTimeout = 30 * time.Second
 )
 
 // setupNavDispatcher builds the command executor over the tesla-http-proxy
@@ -33,6 +40,7 @@ const (
 // resolver, and the store adapter, then subscribes the dispatcher on the
 // ride.accepted seam. The subscription lives until bus.Close on shutdown.
 func setupNavDispatcher(
+	ctx context.Context,
 	cfg *config.Config,
 	bus events.Bus,
 	vehicleRepo *store.VehicleRepo,
@@ -76,6 +84,18 @@ func setupNavDispatcher(
 	)
 	if _, err := d.Subscribe(bus); err != nil {
 		return fmt.Errorf("subscribe nav dispatcher: %w", err)
+	}
+
+	// Startup reconciliation: resolve any dispatch orphaned by a crash/SIGTERM
+	// in the claim→record window (dispatched_at set, dispatch_status NULL). We
+	// log-and-continue on error rather than blocking startup — a reconcile
+	// failure must not stop the server from serving.
+	reconcileCtx, cancel := context.WithTimeout(ctx, dispatchReconcileTimeout)
+	defer cancel()
+	if n, err := d.Reconcile(reconcileCtx, &dispatchOutcomeStoreAdapter{repo: rideRepo}, dispatchReconcileAge); err != nil {
+		logger.Error("nav-dispatch startup reconciliation failed", slog.String("error", err.Error()))
+	} else if n > 0 {
+		logger.Info("nav-dispatch startup reconciliation resolved interrupted dispatches", slog.Int("count", n))
 	}
 
 	logger.Info("nav-dispatch subscriber enabled",
@@ -145,4 +165,10 @@ func (a *dispatchOutcomeStoreAdapter) ClaimDispatch(ctx context.Context, rideID 
 
 func (a *dispatchOutcomeStoreAdapter) RecordDispatchOutcome(ctx context.Context, rideID string, status dispatch.Outcome, errCode *string) error {
 	return a.repo.RecordDispatchOutcome(ctx, rideID, store.DispatchStatus(status), errCode)
+}
+
+// ListInterruptedDispatches satisfies dispatch.InterruptedDispatchLister for
+// the startup reconciler.
+func (a *dispatchOutcomeStoreAdapter) ListInterruptedDispatches(ctx context.Context, olderThan time.Duration) ([]string, error) {
+	return a.repo.ListInterruptedDispatches(ctx, olderThan)
 }

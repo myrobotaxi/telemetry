@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/store"
 )
@@ -98,6 +99,65 @@ func TestRideRequestRepo_RecordDispatchOutcome(t *testing.T) {
 				t.Errorf("DispatchError = %v, want %q", got.DispatchError, *tt.errCode)
 			}
 		})
+	}
+}
+
+// TestRideRequestRepo_ListInterruptedDispatches verifies the startup
+// reconciler's query: it returns only rides claimed (dispatched_at set) but
+// unresolved (dispatch_status NULL) AND older than the cutoff — never an
+// in-flight (recent) claim, a resolved ride, or an unclaimed one.
+func TestRideRequestRepo_ListInterruptedDispatches(t *testing.T) {
+	repo, _ := setupRideRequestRepo(t)
+	ctx := context.Background()
+
+	backdate := func(id string) {
+		t.Helper()
+		if _, err := testPool.Exec(ctx,
+			`UPDATE go_ride_requests SET dispatched_at = NOW() - interval '10 minutes' WHERE id = $1`, id); err != nil {
+			t.Fatalf("backdate %s: %v", id, err)
+		}
+	}
+	mustCreate := func() string {
+		t.Helper()
+		r, err := repo.Create(ctx, fullRideRequest())
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		return r.ID
+	}
+
+	// (1) claimed + unresolved + old -> MATCH.
+	interrupted := mustCreate()
+	if _, err := repo.ClaimDispatch(ctx, interrupted); err != nil {
+		t.Fatalf("ClaimDispatch: %v", err)
+	}
+	backdate(interrupted)
+
+	// (2) claimed + unresolved but RECENT (in-flight) -> no match.
+	inflight := mustCreate()
+	if _, err := repo.ClaimDispatch(ctx, inflight); err != nil {
+		t.Fatalf("ClaimDispatch: %v", err)
+	}
+
+	// (3) claimed + RESOLVED + old -> no match.
+	resolved := mustCreate()
+	if _, err := repo.ClaimDispatch(ctx, resolved); err != nil {
+		t.Fatalf("ClaimDispatch: %v", err)
+	}
+	if err := repo.RecordDispatchOutcome(ctx, resolved, store.DispatchStatusSent, nil); err != nil {
+		t.Fatalf("RecordDispatchOutcome: %v", err)
+	}
+	backdate(resolved)
+
+	// (4) never claimed -> no match.
+	_ = mustCreate()
+
+	ids, err := repo.ListInterruptedDispatches(ctx, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("ListInterruptedDispatches: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != interrupted {
+		t.Errorf("ids = %v, want [%s] (only the old claimed-unresolved ride)", ids, interrupted)
 	}
 }
 
