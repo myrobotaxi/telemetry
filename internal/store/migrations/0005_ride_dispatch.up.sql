@@ -1,4 +1,4 @@
--- 0003_ride_dispatch.up.sql
+-- 0005_ride_dispatch.up.sql
 --
 -- MYR-176: dispatch outcome on go_ride_requests. When an owner accepts a ride
 -- request the server pushes the pickup into the vehicle's Tesla navigation
