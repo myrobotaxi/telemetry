@@ -117,7 +117,7 @@ func (e *Executor) Execute(ctx context.Context, req Request) (Result, error) {
 		if cmd.SignerRequired {
 			return Result{}, errKeyNotPaired("vehicle command signing is not configured (no proxy)")
 		}
-		return Result{}, errCommandFailed("vehicle command transport is not configured")
+		return Result{}, errTransportNotConfigured()
 	}
 
 	var body []byte
