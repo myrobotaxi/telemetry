@@ -31,6 +31,7 @@ func (b *Broadcaster) handleRideRequestCreated(_ context.Context, event events.E
 		VehicleID:     payload.VehicleID,
 		RiderID:       payload.RiderID,
 		Status:        payload.Status,
+		RequesterName: optionalString(payload.RequesterName),
 		ScheduledFor:  formatOptionalTime(payload.ScheduledFor),
 		Timestamp:     payload.CreatedAt.UTC().Format(time.RFC3339),
 	})
@@ -60,6 +61,7 @@ func (b *Broadcaster) handleRideStatusChanged(_ context.Context, event events.Ev
 		RideRequestID:    payload.RideRequestID,
 		VehicleID:        payload.VehicleID,
 		Status:           payload.Status,
+		RequesterName:    optionalString(payload.RequesterName),
 		RescheduleStatus: payload.RescheduleStatus,
 		Timestamp:        payload.UpdatedAt.UTC().Format(time.RFC3339),
 	})
@@ -72,6 +74,16 @@ func (b *Broadcaster) handleRideStatusChanged(_ context.Context, event events.Ev
 	}
 
 	b.hub.SendToUsers([]string{payload.RiderID, payload.OwnerID}, msg)
+}
+
+// optionalString maps the event layer's empty-means-absent string (e.g.
+// RequesterName, MYR-229) to a pointer so the omitempty JSON tag drops the key
+// entirely when the value is unresolved — never emitting an empty string.
+func optionalString(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // formatOptionalTime renders a nullable timestamp as an RFC 3339 UTC string

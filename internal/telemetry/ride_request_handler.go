@@ -119,6 +119,7 @@ func (h *RideRequestHandler) ServeCreate(w http.ResponseWriter, r *http.Request)
 		RiderID:       created.RiderID,
 		OwnerID:       created.OwnerID,
 		Status:        created.Status,
+		RequesterName: derefString(created.RequesterName),
 		ScheduledFor:  created.ScheduledFor,
 		CreatedAt:     created.CreatedAt,
 	})
@@ -258,6 +259,7 @@ func (h *RideRequestHandler) mutateStatus(ctx context.Context, w http.ResponseWr
 		RiderID:          updated.RiderID,
 		OwnerID:          updated.OwnerID,
 		Status:           updated.Status,
+		RequesterName:    derefString(updated.RequesterName),
 		RescheduleStatus: updated.RescheduleStatus,
 		UpdatedAt:        updated.UpdatedAt,
 	})

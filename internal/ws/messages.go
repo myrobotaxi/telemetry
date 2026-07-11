@@ -124,6 +124,9 @@ type rideRequestCreatedPayload struct {
 	VehicleID     string  `json:"vehicleId"`
 	RiderID       string  `json:"riderId"`
 	Status        string  `json:"status"`
+	// RequesterName is the requester's resolved display name (MYR-229),
+	// omitted when the rider has no identity row. P1 PII — never logged.
+	RequesterName *string `json:"requesterName,omitempty"`
 	ScheduledFor  *string `json:"scheduledFor,omitempty"`
 	Timestamp     string  `json:"timestamp"`
 }
@@ -134,9 +137,12 @@ type rideRequestCreatedPayload struct {
 // the rider and vehicle-owner connections only. RescheduleStatus is omitted
 // (omitempty) when the ride has no reschedule history.
 type rideStatusChangedPayload struct {
-	RideRequestID    string  `json:"rideRequestId"`
-	VehicleID        string  `json:"vehicleId"`
-	Status           string  `json:"status"`
+	RideRequestID string `json:"rideRequestId"`
+	VehicleID     string `json:"vehicleId"`
+	Status        string `json:"status"`
+	// RequesterName is the requester's resolved display name (MYR-229),
+	// omitted when the rider has no identity row. P1 PII — never logged.
+	RequesterName    *string `json:"requesterName,omitempty"`
 	RescheduleStatus *string `json:"rescheduleStatus,omitempty"`
 	Timestamp        string  `json:"timestamp"`
 }

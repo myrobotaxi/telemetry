@@ -21,6 +21,7 @@ func toRideRequestWire(d RideRequestData) rideRequestWire {
 		Pickup:                toRidePlaceWire(d.Pickup),
 		Dropoff:               toRidePlaceWire(d.Dropoff),
 		Status:                d.Status,
+		RequesterName:         d.RequesterName,
 		PassengerName:         d.PassengerName,
 		PassengerPhone:        d.PassengerPhone,
 		ScheduledFor:          formatRideTimePtr(d.ScheduledFor),
@@ -42,6 +43,17 @@ func toRidePlaceWire(p RidePlaceData) ridePlaceWire {
 		w.Address = p.Address
 	}
 	return w
+}
+
+// derefString flattens an optional string pointer to its value, or "" when
+// nil — the inverse of the store layer's empty-means-absent convention. Used
+// to carry the optional requesterName (MYR-229) onto the plain-string event
+// fields; the broadcaster re-omits an empty value on the wire.
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // formatRideTimePtr renders a nullable timestamp as an RFC 3339 UTC string

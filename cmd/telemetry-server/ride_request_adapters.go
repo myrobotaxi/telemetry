@@ -144,6 +144,7 @@ func fromStoreRideRequest(rec store.RideRequestRecord) telemetry.RideRequestData
 		Pickup:                fromStorePlace(rec.Pickup),
 		Dropoff:               fromStorePlace(rec.Dropoff),
 		Status:                string(rec.Status),
+		RequesterName:         optionalString(rec.RequesterName),
 		PassengerName:         rec.PassengerName,
 		PassengerPhone:        rec.PassengerPhone,
 		ScheduledFor:          rec.ScheduledFor,
@@ -156,6 +157,16 @@ func fromStoreRideRequest(rec store.RideRequestRecord) telemetry.RideRequestData
 		DispatchStatus:        dispatchStatus,
 		DispatchedAt:          rec.DispatchedAt,
 	}
+}
+
+// optionalString maps the store layer's empty-string-means-absent convention
+// (e.g. RequesterName, MYR-229) onto the handler layer's nil-pointer optional:
+// "" -> nil (omitted on the wire), any other value -> &value.
+func optionalString(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 func fromStorePage(page store.RideRequestListPage) telemetry.RideRequestListPage {
