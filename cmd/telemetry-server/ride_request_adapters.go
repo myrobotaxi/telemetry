@@ -31,6 +31,11 @@ func (a *rideRequestStoreAdapter) Create(ctx context.Context, in telemetry.RideR
 		ScheduledFor:   in.ScheduledFor,
 	})
 	if err != nil {
+		// Translate the one-active-ride guard rejection into the handler-layer
+		// sentinel (MYR-230), keeping the handler decoupled from internal/store.
+		if errors.Is(err, store.ErrRideRequestActive) {
+			return telemetry.RideRequestData{}, fmt.Errorf("create ride request: %w", telemetry.ErrRideActive)
+		}
 		return telemetry.RideRequestData{}, fmt.Errorf("create ride request: %w", err)
 	}
 	return fromStoreRideRequest(rec), nil
@@ -40,6 +45,17 @@ func (a *rideRequestStoreAdapter) GetByID(ctx context.Context, id string) (telem
 	rec, err := a.repo.GetByID(ctx, id)
 	if err != nil {
 		return telemetry.RideRequestData{}, fmt.Errorf("get ride request by id: %w", err)
+	}
+	return fromStoreRideRequest(rec), nil
+}
+
+// GetActiveInstantByRider passes through the rider's single OPEN instant ride
+// (MYR-230). store.ErrRideRequestNotFound wraps sdk.ErrNotFound, so the
+// handler's errors.Is(err, sdk.ErrNotFound) check sees "no open ride".
+func (a *rideRequestStoreAdapter) GetActiveInstantByRider(ctx context.Context, riderID string) (telemetry.RideRequestData, error) {
+	rec, err := a.repo.GetActiveInstantByRider(ctx, riderID)
+	if err != nil {
+		return telemetry.RideRequestData{}, fmt.Errorf("get active instant ride by rider: %w", err)
 	}
 	return fromStoreRideRequest(rec), nil
 }

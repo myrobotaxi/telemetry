@@ -88,6 +88,17 @@ const (
 	// on the typed code and surface the transition as rejected, never
 	// auto-retrying the same mutation.
 	ErrCodeConflict ErrorCode = "conflict"
+	// ErrCodeRideActive is REST 409 (MYR-230) — the caller already has an
+	// OPEN instant ride request (status in {requested, accepted, enroute,
+	// arrived}) and tried to create another instant one. Only one active
+	// instant ride per rider is allowed; scheduled rides are exempt. REST-only:
+	// the WS transport never emits it. Distinct from ErrCodeConflict (which is
+	// an illegal lifecycle *transition* on a known ride) — this rejects the
+	// *creation* of a second concurrent ride. The 409 body carries the
+	// existing open request so the SDK can adopt it into the pending/tracking
+	// UI rather than surfacing a generic failure (rest-api.md §7.8). SDK
+	// consumers branch on the typed code and MUST NOT auto-retry the create.
+	ErrCodeRideActive ErrorCode = "ride_active"
 )
 
 // Vehicle-command codes added by MYR-180 (Tesla signed vehicle-command
@@ -136,6 +147,7 @@ func AllCodes() []ErrorCode {
 		ErrCodeServiceUnavailable,
 		ErrCodeSnapshotRequired,
 		ErrCodeConflict,
+		ErrCodeRideActive,
 		ErrCodeKeyNotPaired,
 		ErrCodeVehicleAsleep,
 		ErrCodeCommandFailed,
