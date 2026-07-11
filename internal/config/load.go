@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -167,11 +168,17 @@ func applyEnvOverrides(fc *fileConfig) error {
 	}
 
 	// DISPATCH_ENABLED is the MYR-176 nav-dispatch kill-switch. Defaults to
-	// true (dispatch on) — set to "false" or "0" to disable nav pushes to the
-	// vehicle without a deploy. Any other value (incl. unset) leaves it on.
+	// true (dispatch on) when unset. When set it MUST be a strconv.ParseBool
+	// value (1/t/T/TRUE/true/True/0/f/F/FALSE/false/False); anything else is a
+	// config error and fails fast at startup (repo rule: validate config at
+	// startup — do not silently fall back to "on" on a typo like "no"/"off").
 	fc.dispatchEnabled = true
-	if v := os.Getenv("DISPATCH_ENABLED"); v == "false" || v == "0" {
-		fc.dispatchEnabled = false
+	if v, ok := os.LookupEnv("DISPATCH_ENABLED"); ok {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("config.Load: %w: DISPATCH_ENABLED=%q is not a boolean", ErrInvalidValue, v)
+		}
+		fc.dispatchEnabled = enabled
 	}
 
 	// TLS env vars override JSON values.

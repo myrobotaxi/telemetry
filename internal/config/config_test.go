@@ -379,6 +379,60 @@ func TestLoad_MapboxTokenOptional(t *testing.T) {
 	}
 }
 
+func TestLoad_DispatchEnabledParsing(t *testing.T) {
+	tests := []struct {
+		name    string
+		set     bool
+		value   string
+		want    bool
+		wantErr bool
+	}{
+		{name: "unset defaults to true", set: false, want: true},
+		{name: "false disables", set: true, value: "false", want: false},
+		{name: "0 disables", set: true, value: "0", want: false},
+		{name: "False disables", set: true, value: "False", want: false},
+		{name: "f disables", set: true, value: "f", want: false},
+		{name: "true enables", set: true, value: "true", want: true},
+		{name: "1 enables", set: true, value: "1", want: true},
+		{name: "TRUE enables", set: true, value: "TRUE", want: true},
+		{name: "empty is invalid", set: true, value: "", wantErr: true},
+		{name: "no is invalid", set: true, value: "no", wantErr: true},
+		{name: "off is invalid", set: true, value: "off", wantErr: true},
+		{name: "yes is invalid", set: true, value: "yes", wantErr: true},
+		{name: "garbage is invalid", set: true, value: "maybe", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeTestConfig(t, dir, nil)
+			setRequiredEnv(t)
+			if tt.set {
+				t.Setenv("DISPATCH_ENABLED", tt.value)
+			} else {
+				os.Unsetenv("DISPATCH_ENABLED")
+			}
+
+			cfg, err := Load(path)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("Load() expected error for DISPATCH_ENABLED=%q, got nil", tt.value)
+				}
+				if !errors.Is(err, ErrInvalidValue) {
+					t.Errorf("error should wrap ErrInvalidValue, got: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() unexpected error: %v", err)
+			}
+			if cfg.DispatchEnabled() != tt.want {
+				t.Errorf("DispatchEnabled() = %v, want %v", cfg.DispatchEnabled(), tt.want)
+			}
+		})
+	}
+}
+
 func TestLoad_FileNotFound(t *testing.T) {
 	setRequiredEnv(t)
 
