@@ -193,7 +193,16 @@ func TestPgStore_GetUserProfile(t *testing.T) {
 		t.Errorf("go_users fallback: got name=%q email=%q", name, email)
 	}
 
-	// go_identity_apple binding present -> takes precedence over go_users.
+	// go_identity_apple binding present -> takes precedence over go_users,
+	// even when both rows exist for the same user_id with DIFFERING values
+	// (the only way to actually prove precedence rather than just exercising
+	// the binding path in isolation). A go_users row for a user_id that also
+	// has an apple binding is a real production shape: the fresh-mint path
+	// (Service.resolveFirstSignIn) always writes go_users first, then binds
+	// go_identity_apple in the same first-sign-in flow.
+	if err := s.CreateGoUser(ctx, "capplebound", "conflict-gouser@example.com", "Conflict GoUser"); err != nil {
+		t.Fatalf("CreateGoUser (conflicting row): %v", err)
+	}
 	if err := s.InsertAppleIdentity(ctx, identity.AppleIdentity{
 		AppleSub: "sub-profile", UserID: "capplebound", Email: "apple@example.com", Name: "Apple Bound",
 	}); err != nil {
@@ -204,7 +213,7 @@ func TestPgStore_GetUserProfile(t *testing.T) {
 		t.Fatalf("apple binding: unexpected error %v", err)
 	}
 	if name != "Apple Bound" || email != "apple@example.com" {
-		t.Errorf("apple binding: got name=%q email=%q", name, email)
+		t.Errorf("apple binding: got name=%q email=%q, want the go_identity_apple values (Apple Bound / apple@example.com), not the conflicting go_users row", name, email)
 	}
 }
 
