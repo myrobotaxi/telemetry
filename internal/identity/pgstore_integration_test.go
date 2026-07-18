@@ -163,6 +163,51 @@ func TestPgStore_EmailLinkageAndGoUser(t *testing.T) {
 	}
 }
 
+// TestPgStore_GetUserProfile covers MYR-243: the best-effort name/email
+// lookup used by refresh. It exercises the go_identity_apple binding path,
+// the go_users fallback (no binding row), and the fully-missing case.
+func TestPgStore_GetUserProfile(t *testing.T) {
+	requireDocker(t)
+	cleanIdentityTables(t)
+	ctx := context.Background()
+	s := identity.NewPgStore(testPool)
+
+	// No row anywhere -> empty strings, no error (best-effort).
+	name, email, err := s.GetUserProfile(ctx, "cnobody")
+	if err != nil {
+		t.Fatalf("missing profile: unexpected error %v", err)
+	}
+	if name != "" || email != "" {
+		t.Errorf("missing profile: got name=%q email=%q, want empty", name, email)
+	}
+
+	// go_users only (no apple binding) -> fallback path.
+	if err := s.CreateGoUser(ctx, "cgouseronly", "gouser@example.com", "Go User"); err != nil {
+		t.Fatalf("CreateGoUser: %v", err)
+	}
+	name, email, err = s.GetUserProfile(ctx, "cgouseronly")
+	if err != nil {
+		t.Fatalf("go_users fallback: unexpected error %v", err)
+	}
+	if name != "Go User" || email != "gouser@example.com" {
+		t.Errorf("go_users fallback: got name=%q email=%q", name, email)
+	}
+
+	// go_identity_apple binding present -> takes precedence over go_users.
+	if err := s.InsertAppleIdentity(ctx, identity.AppleIdentity{
+		AppleSub: "sub-profile", UserID: "capplebound", Email: "apple@example.com", Name: "Apple Bound",
+	}); err != nil {
+		t.Fatalf("InsertAppleIdentity: %v", err)
+	}
+	name, email, err = s.GetUserProfile(ctx, "capplebound")
+	if err != nil {
+		t.Fatalf("apple binding: unexpected error %v", err)
+	}
+	if name != "Apple Bound" || email != "apple@example.com" {
+		t.Errorf("apple binding: got name=%q email=%q", name, email)
+	}
+}
+
 func TestPgStore_RefreshRotationAndReuse(t *testing.T) {
 	requireDocker(t)
 	cleanIdentityTables(t)
