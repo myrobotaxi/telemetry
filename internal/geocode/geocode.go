@@ -148,9 +148,27 @@ func (g *MapboxGeocoder) ReverseGeocode(ctx context.Context, lat, lng float64) (
 		}
 	}
 
-	// limit=5 gives us a small candidate set so we can prefer a nearby
-	// POI over the closest address-only feature when one is in walking
-	// range; see the post-decode ranking below.
+	// MYR-240: NO `limit` param here. Mapbox's Geocoding v5 API rejects
+	// `limit` combined with more than one `types` value on a reverse
+	// lookup with HTTP 422 ("limit must be combined with a single type
+	// parameter when reverse geocoding") — the previous `limit=5` here
+	// broke every production reverse geocode outright (Drive.startAddress
+	// / endAddress never populated, "Location Unavailable" everywhere).
+	//
+	// Omitting `limit` is safe, not just legal: per Mapbox's documented
+	// reverse-geocode default, a request naming N types returns AT MOST
+	// one feature per requested type, so this single call already gives
+	// buildResult exactly the poi/address/neighborhood candidates it
+	// ranks over, with a response size bounded by len(types) instead of
+	// an arbitrary limit. Verified live against api.mapbox.com for
+	// MYR-240 across three coordinates (the reported failing coordinate,
+	// a dense downtown-Dallas POI area, and a Frisco residential street):
+	// all returned HTTP 200 with <= 1 feature per type, never a 422. A
+	// two-call split (types=poi&limit=5, then types=address,neighborhood,
+	// merged before ranking) was also verified live and returns the same
+	// candidates for this Mapbox account, but at double the rate-limiter
+	// cost per lookup for no extra ranking benefit — so the single
+	// no-limit call is preferred.
 	//
 	// types includes "neighborhood" (MYR-206) so buildResult can fall
 	// back to the containing neighborhood's name when no POI is within
@@ -158,10 +176,10 @@ func (g *MapboxGeocoder) ReverseGeocode(ctx context.Context, lat, lng float64) (
 	// (and coarser city-level types) are deliberately NOT requested:
 	// buildResult would only ever discard them (a bare city name in
 	// PlaceName renders "Dallas → Dallas" on intra-city drives, rejected
-	// by client QA), so requesting them wastes candidate slots in the
-	// limit=5 window.
+	// by client QA), so requesting them would only waste a type slot in
+	// the response.
 	url := fmt.Sprintf(
-		"https://api.mapbox.com/geocoding/v5/mapbox.places/%f,%f.json?access_token=%s&limit=5&types=poi,address,neighborhood",
+		"https://api.mapbox.com/geocoding/v5/mapbox.places/%f,%f.json?access_token=%s&types=poi,address,neighborhood",
 		lng, lat, g.token,
 	)
 
