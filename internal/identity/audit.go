@@ -52,3 +52,16 @@ func (a *auditLogger) revoke(userID string) {
 		slog.String("user_id", userID),
 	)
 }
+
+// profileLookupFailed records a best-effort profile enrichment failure
+// (MYR-243). It is a Warn, not an Error: the refresh itself still succeeds
+// id-only — enrichment is fail-open, never fail-closed for auth. No PII (the
+// failing name/email values are never logged, only the opaque user id and
+// the error).
+func (a *auditLogger) profileLookupFailed(userID string, err error) {
+	a.log.Warn("auth.profile_lookup_failed",
+		slog.String("event", "profile_lookup_failed"),
+		slog.String("user_id", userID),
+		slog.String("error", err.Error()),
+	)
+}

@@ -33,6 +33,19 @@ type fakeStore struct {
 
 	revokeUserID string
 	revokeFound  bool
+
+	// profiles/profileErr back GetUserProfile (MYR-243): profiles is keyed by
+	// userID -> {name, email}; a missing key behaves like "no row" (empty
+	// strings, no error) exactly like PgStore. profileErr, when set, is
+	// returned regardless of profiles (simulates a store failure).
+	profiles   map[string]userProfile
+	profileErr error
+}
+
+// userProfile is the fakeStore's minimal stand-in for a profile row.
+type userProfile struct {
+	name  string
+	email string
 }
 
 func newFakeStore() *fakeStore {
@@ -81,6 +94,17 @@ func (s *fakeStore) RotateRefreshToken(context.Context, string, string, time.Tim
 
 func (s *fakeStore) RevokeFamilyByToken(context.Context, string) (string, bool, error) {
 	return s.revokeUserID, s.revokeFound, nil
+}
+
+func (s *fakeStore) GetUserProfile(_ context.Context, userID string) (string, string, error) {
+	if s.profileErr != nil {
+		return "", "", s.profileErr
+	}
+	p, ok := s.profiles[userID]
+	if !ok {
+		return "", "", nil
+	}
+	return p.name, p.email, nil
 }
 
 func newTestService(t *testing.T, store Store, apple appleTokenValidator, bootstrap map[string]string) *Service {
@@ -219,6 +243,66 @@ func TestRefresh_Rotated(t *testing.T) {
 	}
 	if res.User.ID != "cuser" {
 		t.Errorf("user id = %q", res.User.ID)
+	}
+}
+
+// TestRefresh_ProfileEnrichment covers MYR-243: a successful refresh
+// rotation enriches UserInfo.Name/Email from the store on a best-effort
+// basis. Enrichment failure must never fail the refresh itself (fail-open
+// for enrichment, never for auth).
+func TestRefresh_ProfileEnrichment(t *testing.T) {
+	tests := []struct {
+		name       string
+		profiles   map[string]userProfile
+		profileErr error
+		wantName   string
+		wantEmail  string
+	}{
+		{
+			name:      "profile found -> name and email populated",
+			profiles:  map[string]userProfile{"cuser": {name: "Ada Lovelace", email: "ada@example.com"}},
+			wantName:  "Ada Lovelace",
+			wantEmail: "ada@example.com",
+		},
+		{
+			name:      "no binding row -> id-only projection",
+			profiles:  map[string]userProfile{}, // no row for "cuser"
+			wantName:  "",
+			wantEmail: "",
+		},
+		{
+			name:       "store error -> refresh still succeeds id-only",
+			profileErr: errors.New("boom: connection reset"),
+			wantName:   "",
+			wantEmail:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newFakeStore()
+			store.rotateResult = RotateResult{Outcome: RotateRotated, UserID: "cuser", FamilyID: "fam1"}
+			store.profiles = tt.profiles
+			store.profileErr = tt.profileErr
+			svc := newTestService(t, store, fakeApple{}, nil)
+
+			res, err := svc.Refresh(context.Background(), "some-refresh-token")
+			if err != nil {
+				t.Fatalf("Refresh: %v", err)
+			}
+			if res.AccessToken == "" || res.RefreshToken == "" {
+				t.Error("rotated refresh missing tokens")
+			}
+			if res.User.ID != "cuser" {
+				t.Errorf("user id = %q, want cuser", res.User.ID)
+			}
+			if res.User.Name != tt.wantName {
+				t.Errorf("user name = %q, want %q", res.User.Name, tt.wantName)
+			}
+			if res.User.Email != tt.wantEmail {
+				t.Errorf("user email = %q, want %q", res.User.Email, tt.wantEmail)
+			}
+		})
 	}
 }
 

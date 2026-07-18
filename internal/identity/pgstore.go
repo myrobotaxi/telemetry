@@ -135,3 +135,41 @@ func (s *PgStore) CreateGoUser(ctx context.Context, id, email, name string) erro
 	}
 	return nil
 }
+
+const queryGetUserProfileByAppleBinding = `
+SELECT COALESCE(name, ''), COALESCE(email, '')
+FROM go_identity_apple WHERE user_id = $1
+ORDER BY last_login_at DESC LIMIT 1`
+
+const queryGetUserProfileFromGoUsers = `
+SELECT COALESCE(name, ''), COALESCE(email, '')
+FROM go_users WHERE id = $1`
+
+// GetUserProfile is a best-effort name/email lookup for a resolved user CUID
+// (MYR-243). It is consulted on refresh, where the caller only has a userID
+// and no fresh Apple claims to draw a name/email from.
+//
+// It reads the go_identity_apple binding row first (the same table sign-in
+// populates), falling back to go_users when no binding row exists (e.g. a
+// legacy Prisma "User" linked by email-match may never gain a
+// go_identity_apple row on some historical paths). A missing row in both
+// tables is not an error — enrichment is best-effort, so the caller falls
+// back to an id-only projection.
+func (s *PgStore) GetUserProfile(ctx context.Context, userID string) (name, email string, err error) {
+	err = s.pool.QueryRow(ctx, queryGetUserProfileByAppleBinding, userID).Scan(&name, &email)
+	if err == nil {
+		return name, email, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return "", "", fmt.Errorf("identity.GetUserProfile: apple binding: %w", err)
+	}
+
+	err = s.pool.QueryRow(ctx, queryGetUserProfileFromGoUsers, userID).Scan(&name, &email)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("identity.GetUserProfile: go_users: %w", err)
+	}
+	return name, email, nil
+}

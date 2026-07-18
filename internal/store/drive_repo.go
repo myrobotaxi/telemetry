@@ -221,7 +221,7 @@ func (r *DriveRepo) Complete(ctx context.Context, driveID string, stats DriveCom
 		stats.DistanceMiles, stats.DurationMinutes,
 		stats.AvgSpeedMph, stats.MaxSpeedMph, stats.EnergyUsedKwh,
 		stats.EndChargeLevel, stats.FsdMiles, stats.FsdPercentage,
-		stats.Interventions,
+		stats.Interventions, stats.StartChargeLevel,
 	)
 	r.metrics.ObserveQueryDuration("drive.complete", time.Since(start).Seconds())
 	if err != nil {

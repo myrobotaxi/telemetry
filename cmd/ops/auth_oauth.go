@@ -67,6 +67,10 @@ func buildAuthorizeURL(clientID, redirectURI, scopes, state, codeChallenge strin
 	q.Set("state", state)
 	q.Set("code_challenge", codeChallenge)
 	q.Set("code_challenge_method", "S256")
+	// Without this, Tesla silently re-issues the previously consented scope
+	// set for an already-linked account and never shows the consent screen
+	// for newly requested scopes (observed MYR-242: vehicle_cmds dropped).
+	q.Set("prompt_missing_scopes", "true")
 	return teslaOAuthAuthorizeURL + "?" + q.Encode()
 }
 

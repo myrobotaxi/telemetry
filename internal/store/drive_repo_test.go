@@ -254,18 +254,19 @@ func TestDriveRepo_Complete(t *testing.T) {
 			name:    "complete drive",
 			driveID: "drv_030",
 			stats: store.DriveCompletion{
-				EndTime:         "2026-03-17T10:45:00Z",
-				EndLocation:     "33.1500,-96.8800",
-				EndAddress:      "456 Oak Ave, Dallas, TX",
-				DistanceMiles:   12.5,
-				DurationMinutes: 45,
-				AvgSpeedMph:     35.2,
-				MaxSpeedMph:     72.0,
-				EnergyUsedKwh:   4.2,
-				EndChargeLevel:  78,
-				FsdMiles:        10.0,
-				FsdPercentage:   80.0,
-				Interventions:   1,
+				EndTime:          "2026-03-17T10:45:00Z",
+				EndLocation:      "33.1500,-96.8800",
+				EndAddress:       "456 Oak Ave, Dallas, TX",
+				DistanceMiles:    12.5,
+				DurationMinutes:  45,
+				AvgSpeedMph:      35.2,
+				MaxSpeedMph:      72.0,
+				EnergyUsedKwh:    4.2,
+				StartChargeLevel: 90,
+				EndChargeLevel:   78,
+				FsdMiles:         10.0,
+				FsdPercentage:    80.0,
+				Interventions:    1,
 			},
 		},
 		{
@@ -309,6 +310,14 @@ func TestDriveRepo_Complete(t *testing.T) {
 	}
 	if d.EndChargeLevel != 78 {
 		t.Errorf("EndChargeLevel = %d, want 78", d.EndChargeLevel)
+	}
+	// MYR-241: the completion write must (re)persist startChargeLevel. The row
+	// was seeded at insert with 85; Complete overwrites it with the detector's
+	// true drive-start SOC (90 here). In production the insert defaults to 0
+	// because drive.started carries no charge, so this write is the ONLY thing
+	// that lands a non-zero startChargeLevel in the DB.
+	if d.StartChargeLevel != 90 {
+		t.Errorf("StartChargeLevel = %d, want 90 (completion must persist it)", d.StartChargeLevel)
 	}
 	if d.Interventions != 1 {
 		t.Errorf("Interventions = %d, want 1", d.Interventions)
