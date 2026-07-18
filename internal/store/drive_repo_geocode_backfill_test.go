@@ -22,19 +22,43 @@ func TestDriveRepo_ListMissingAddresses(t *testing.T) {
 
 	seeds := []store.DriveRecord{
 		{
+			// Closed drive, only startAddress missing.
 			ID: "drv_missing_start", VehicleID: "veh_020", Date: "2026-07-17",
-			StartTime: "2026-07-17T10:00:00Z", RoutePoints: routePoints,
+			StartTime: "2026-07-17T10:00:00Z", EndTime: "2026-07-17T10:20:00Z", RoutePoints: routePoints,
 			StartAddress: "", EndAddress: "789 Elm St, Frisco, TX",
 		},
 		{
+			// Closed drive, only endAddress missing — the ordinary
+			// backfill-eligible case.
 			ID: "drv_missing_end", VehicleID: "veh_020", Date: "2026-07-17",
-			StartTime: "2026-07-17T11:00:00Z", RoutePoints: routePoints,
+			StartTime: "2026-07-17T11:00:00Z", EndTime: "2026-07-17T11:20:00Z", RoutePoints: routePoints,
 			StartAddress: "123 Main St, Frisco, TX", EndAddress: "",
 		},
 		{
+			// Both addresses already populated — never eligible.
 			ID: "drv_fully_addressed", VehicleID: "veh_020", Date: "2026-07-17",
-			StartTime: "2026-07-17T12:00:00Z", RoutePoints: routePoints,
+			StartTime: "2026-07-17T12:00:00Z", EndTime: "2026-07-17T12:20:00Z", RoutePoints: routePoints,
 			StartAddress: "123 Main St, Frisco, TX", EndAddress: "789 Elm St, Frisco, TX",
+		},
+		{
+			// MYR-240 adversarial-review fix: an OPEN drive (empty
+			// endTime) with an empty endAddress — the state every Drive
+			// row starts in per mapDriveStarted. Must be excluded from
+			// the endAddress side of the sweep: routePoints' last entry
+			// is the car's current, still-changing position, and writing
+			// it as endAddress on an open drive would be wrong.
+			ID: "drv_open_missing_end", VehicleID: "veh_020", Date: "2026-07-17",
+			StartTime: "2026-07-17T13:00:00Z", EndTime: "", RoutePoints: routePoints,
+			StartAddress: "123 Main St, Frisco, TX", EndAddress: "",
+		},
+		{
+			// Open drive that's ALSO missing startAddress — the start
+			// side must still be picked up (start is known and stable
+			// the moment the drive begins; only the end side is
+			// mid-drive-unstable).
+			ID: "drv_open_missing_start", VehicleID: "veh_020", Date: "2026-07-17",
+			StartTime: "2026-07-17T14:00:00Z", EndTime: "", RoutePoints: routePoints,
+			StartAddress: "", EndAddress: "",
 		},
 	}
 	for _, d := range seeds {
@@ -60,15 +84,29 @@ func TestDriveRepo_ListMissingAddresses(t *testing.T) {
 		t.Errorf("drv_missing_start should be returned (startAddress empty)")
 	}
 	if _, ok := got["drv_missing_end"]; !ok {
-		t.Errorf("drv_missing_end should be returned (endAddress empty)")
+		t.Errorf("drv_missing_end should be returned (endAddress empty, drive is closed)")
+	}
+	if _, ok := got["drv_open_missing_end"]; ok {
+		t.Errorf("drv_open_missing_end must NOT be returned — the drive is still open, its endAddress='' is expected, not backfill-eligible")
+	}
+	if _, ok := got["drv_open_missing_start"]; !ok {
+		t.Errorf("drv_open_missing_start should still be returned for its start side even though the drive is open")
 	}
 
 	row := got["drv_missing_start"]
 	if row.EndAddress != "789 Elm St, Frisco, TX" {
 		t.Errorf("EndAddress = %q, want the already-populated value preserved", row.EndAddress)
 	}
+	if row.EndTime == "" {
+		t.Errorf("EndTime should be surfaced and non-empty for a closed drive")
+	}
 	if len(row.RoutePoints) == 0 {
 		t.Error("RoutePoints should be populated so the caller can extract coordinates")
+	}
+
+	openRow := got["drv_open_missing_start"]
+	if openRow.EndTime != "" {
+		t.Errorf("EndTime = %q, want empty for an open drive (belt-and-braces signal to the caller)", openRow.EndTime)
 	}
 }
 

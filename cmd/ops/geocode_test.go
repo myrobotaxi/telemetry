@@ -175,10 +175,23 @@ func TestGeocodeSide(t *testing.T) {
 	}
 }
 
+// fakeDriveAddressUpdater is a test double for driveAddressUpdater so
+// backfillRow's post-geocode UPDATE handling — in particular the
+// ErrDriveNotFound-as-skip race — can be exercised without a real
+// database.
+type fakeDriveAddressUpdater struct {
+	err   error
+	calls int
+}
+
+func (f *fakeDriveAddressUpdater) UpdateAddresses(_ context.Context, _ string, _, _, _, _ *string) error {
+	f.calls++
+	return f.err
+}
+
 // TestBackfillRow_DryRun exercises backfillRow's decision logic without
-// touching the database — dry-run never calls DriveRepo.UpdateAddresses,
-// so a nil *store.DriveRepo is safe to pass here (the DB-write path is
-// covered by internal/store's own DriveRepo.UpdateAddresses tests).
+// touching the database — dry-run never calls UpdateAddresses, so a nil
+// driveAddressUpdater is safe to pass here.
 func TestBackfillRow_DryRun(t *testing.T) {
 	routePoints := json.RawMessage(`[
 		{"lat":33.0860,"lng":-96.8522,"speed":0,"heading":0,"timestamp":"2026-07-17T10:00:00Z"},
@@ -195,23 +208,45 @@ func TestBackfillRow_DryRun(t *testing.T) {
 		wantOutcome backfillOutcome
 	}{
 		{
-			name: "both sides missing, both geocoded successfully",
+			name: "both sides missing on a closed drive, both geocoded successfully",
 			row: store.DriveBackfillRow{
-				ID: "drv_both", StartAddress: "", EndAddress: "", RoutePoints: routePoints,
+				ID: "drv_both", StartAddress: "", EndAddress: "", EndTime: "2026-07-17T10:20:00Z", RoutePoints: routePoints,
 			},
 			wantOutcome: backfillUpdated,
 		},
 		{
 			name: "only start missing, end left untouched",
 			row: store.DriveBackfillRow{
-				ID: "drv_start_only", StartAddress: "", EndAddress: "already set", RoutePoints: routePoints,
+				ID: "drv_start_only", StartAddress: "", EndAddress: "already set", EndTime: "2026-07-17T10:20:00Z", RoutePoints: routePoints,
 			},
 			wantOutcome: backfillUpdated,
 		},
 		{
 			name: "no usable route points at all",
 			row: store.DriveBackfillRow{
-				ID: "drv_no_points", StartAddress: "", EndAddress: "", RoutePoints: json.RawMessage(`[]`),
+				ID: "drv_no_points", StartAddress: "", EndAddress: "", EndTime: "2026-07-17T10:20:00Z", RoutePoints: json.RawMessage(`[]`),
+			},
+			wantOutcome: backfillSkipped,
+		},
+		{
+			// MYR-240 adversarial-review fix: an OPEN drive (EndTime=="")
+			// must never have its end side geocoded, even though
+			// EndAddress=="" matches the naive predicate — the last
+			// routePoints entry is the car's current position, not a
+			// drive endpoint. Start is still geocoded normally.
+			name: "open drive: end side skipped even though endAddress is empty",
+			row: store.DriveBackfillRow{
+				ID: "drv_open", StartAddress: "", EndAddress: "", EndTime: "", RoutePoints: routePoints,
+			},
+			wantOutcome: backfillUpdated, // start side still gets written
+		},
+		{
+			// Same open-drive row, but startAddress is ALSO already
+			// populated — so after skipping the end side there is
+			// nothing left to write at all.
+			name: "open drive: nothing to do when start is already populated too",
+			row: store.DriveBackfillRow{
+				ID: "drv_open_nothing_to_do", StartAddress: "already set", EndAddress: "", EndTime: "", RoutePoints: routePoints,
 			},
 			wantOutcome: backfillSkipped,
 		},
@@ -223,6 +258,91 @@ func TestBackfillRow_DryRun(t *testing.T) {
 			got := backfillRow(context.Background(), g, nil, tt.row, true /* dryRun */, discardLogger())
 			if got != tt.wantOutcome {
 				t.Errorf("outcome = %v, want %v", got, tt.wantOutcome)
+			}
+		})
+	}
+}
+
+// TestBackfillRow_ApplyPath exercises backfillRow's non-dry-run branch
+// against a fakeDriveAddressUpdater, in particular the MYR-240
+// adversarial-review fix: DriveRepo.UpdateAddresses returning
+// ErrDriveNotFound (the row was hard-deleted between this backfill's
+// SELECT and UPDATE — handleDriveDiscarded does this for micro-drives)
+// must be treated as a skip, not a failure.
+func TestBackfillRow_ApplyPath(t *testing.T) {
+	routePoints := json.RawMessage(`[{"lat":33.0860,"lng":-96.8522,"speed":0,"heading":0,"timestamp":"2026-07-17T10:00:00Z"}]`)
+	geocoderResults := map[string]*geocode.Result{
+		"33.0860,-96.8522": {PlaceName: "Stonebriar", Address: "4220 Tributary Way, Frisco, TX"},
+	}
+	row := store.DriveBackfillRow{
+		ID: "drv_apply", StartAddress: "", EndAddress: "already set", EndTime: "2026-07-17T10:20:00Z", RoutePoints: routePoints,
+	}
+
+	tests := []struct {
+		name        string
+		updaterErr  error
+		wantOutcome backfillOutcome
+	}{
+		{name: "update succeeds", updaterErr: nil, wantOutcome: backfillUpdated},
+		{name: "row deleted before update is a skip, not a failure", updaterErr: store.ErrDriveNotFound, wantOutcome: backfillSkipped},
+		{name: "generic DB error is a failure", updaterErr: errors.New("connection refused"), wantOutcome: backfillFailed},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := &fakeGeocoder{results: geocoderResults}
+			updater := &fakeDriveAddressUpdater{err: tt.updaterErr}
+			got := backfillRow(context.Background(), g, updater, row, false /* dryRun */, discardLogger())
+			if got != tt.wantOutcome {
+				t.Errorf("outcome = %v, want %v", got, tt.wantOutcome)
+			}
+			if updater.calls != 1 {
+				t.Errorf("UpdateAddresses calls = %d, want 1", updater.calls)
+			}
+		})
+	}
+}
+
+func TestErrorClass(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "invalid coordinate", err: fmt.Errorf("geocode.ReverseGeocode(999.0000,999.0000): %w", geocode.ErrInvalidCoordinate), want: "invalid_coordinate"},
+		{name: "http status error", err: errors.New("geocode.ReverseGeocode(33.0000,-96.0000): HTTP 500: internal error"), want: "http_status"},
+		{name: "generic transport error", err: errors.New("dial tcp: connection reset by peer"), want: "transport"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := errorClass(tt.err); got != tt.want {
+				t.Errorf("errorClass(%v) = %q, want %q", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLogSafePresence(t *testing.T) {
+	set := "4220 Tributary Way, Frisco, TX"
+	empty := ""
+
+	tests := []struct {
+		name string
+		in   *string
+		want string
+	}{
+		{name: "nil pointer", in: nil, want: "-"},
+		{name: "empty string", in: &empty, want: "empty"},
+		{name: "set value never appears in output", in: &set, want: fmt.Sprintf("set(len=%d)", len(set))},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := logSafePresence(tt.in)
+			if got != tt.want {
+				t.Errorf("logSafePresence = %q, want %q", got, tt.want)
+			}
+			if tt.in != nil && *tt.in != "" && got == *tt.in {
+				t.Fatalf("logSafePresence leaked the raw P1 value")
 			}
 		})
 	}

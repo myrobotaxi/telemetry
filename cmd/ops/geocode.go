@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/cryptox"
@@ -144,6 +145,15 @@ const (
 	backfillFailed
 )
 
+// driveAddressUpdater is the narrow slice of *store.DriveRepo backfillRow
+// needs. Defined at the consumer per the repo's interfaces-at-consumer-
+// site convention, and narrow enough that a fake can exercise the
+// ErrDriveNotFound-as-skip race-handling branch below without a real
+// database.
+type driveAddressUpdater interface {
+	UpdateAddresses(ctx context.Context, id string, startLocation, startAddress, endLocation, endAddress *string) error
+}
+
 // backfillRow reverse-geocodes whichever side(s) of one Drive row are
 // missing an address, using the first (start) and last (end) point
 // recorded in routePoints. Logs a per-row outcome unconditionally — a
@@ -151,7 +161,16 @@ const (
 // no usable route points at all is a soft skip, matching how the
 // writer's inline geocode calls already treat these cases (see
 // internal/store/writer_drives.go).
-func backfillRow(ctx context.Context, geocoder geocode.Geocoder, drives *store.DriveRepo, row store.DriveBackfillRow, dryRun bool, logger *slog.Logger) backfillOutcome {
+//
+// The end side is skipped whenever row.EndTime is empty, i.e. the drive
+// is still open — belt-and-braces alongside queryDriveMissingAddresses'
+// own endTime guard. Every Drive row is created with both endTime and
+// endAddress set to the empty string (mapDriveStarted); without this
+// guard a backfill run against a still-driving vehicle would
+// reverse-geocode the LAST routePoints entry — the car's current,
+// still-changing position — and persist it as the drive's permanent
+// endLocation/endAddress.
+func backfillRow(ctx context.Context, geocoder geocode.Geocoder, drives driveAddressUpdater, row store.DriveBackfillRow, dryRun bool, logger *slog.Logger) backfillOutcome {
 	startPt, endPt, ok := decodeRouteEndpoints(row.RoutePoints)
 	if !ok {
 		logger.Warn("geocode backfill: skip row, no usable route points", slog.String("drive_id", row.ID))
@@ -163,7 +182,7 @@ func backfillRow(ctx context.Context, geocoder geocode.Geocoder, drives *store.D
 		startLocation, startAddress = geocodeSide(ctx, geocoder, row.ID, "start", startPt, logger)
 	}
 	var endLocation, endAddress *string
-	if row.EndAddress == "" {
+	if row.EndAddress == "" && row.EndTime != "" {
 		endLocation, endAddress = geocodeSide(ctx, geocoder, row.ID, "end", endPt, logger)
 	}
 
@@ -172,16 +191,34 @@ func backfillRow(ctx context.Context, geocoder geocode.Geocoder, drives *store.D
 		return backfillSkipped
 	}
 
+	// startAddress/endAddress are P1 ("Log-safe: No" per
+	// docs/contracts/data-classification.md §1.4) — logSafePresence
+	// summarizes whether a value was resolved without exposing the
+	// place name / street address itself.
 	if dryRun {
 		logger.Info("geocode backfill: dry-run, would update",
 			slog.String("drive_id", row.ID),
-			slog.Any("start_address", startAddress),
-			slog.Any("end_address", endAddress),
+			slog.String("start_address", logSafePresence(startAddress)),
+			slog.String("end_address", logSafePresence(endAddress)),
 		)
 		return backfillUpdated
 	}
 
 	if err := drives.UpdateAddresses(ctx, row.ID, startLocation, startAddress, endLocation, endAddress); err != nil {
+		// The row can vanish between this backfill's SELECT and this
+		// UPDATE — handleDriveDiscarded hard-deletes micro-drives the
+		// detector later decides were too short. That's a benign race,
+		// not a backfill failure.
+		if errors.Is(err, store.ErrDriveNotFound) {
+			logger.Warn("geocode backfill: skip row, deleted before update (likely a discarded micro-drive)",
+				slog.String("drive_id", row.ID),
+			)
+			return backfillSkipped
+		}
+		// Unlike geocodeSide's errors, DriveRepo.UpdateAddresses errors
+		// wrap a plain DB/pgx failure keyed by drive_id — no GPS
+		// coordinates or place-name text ever enters this error string,
+		// so logging it verbatim doesn't trip the P1 log-safety rule.
 		logger.Error("geocode backfill: update failed",
 			slog.String("drive_id", row.ID),
 			slog.String("error", err.Error()),
@@ -190,10 +227,26 @@ func backfillRow(ctx context.Context, geocoder geocode.Geocoder, drives *store.D
 	}
 	logger.Info("geocode backfill: updated",
 		slog.String("drive_id", row.ID),
-		slog.Any("start_address", startAddress),
-		slog.Any("end_address", endAddress),
+		slog.String("start_address", logSafePresence(startAddress)),
+		slog.String("end_address", logSafePresence(endAddress)),
 	)
 	return backfillUpdated
+}
+
+// logSafePresence summarizes a nilable P1 string for logging without
+// exposing its value. Drive.startAddress/endAddress and the
+// reverse-geocoded place name are P1, "Log-safe: No" per
+// docs/contracts/data-classification.md §1.4 — presence + length is
+// enough to verify a dry-run or confirm a write landed without putting
+// a street address or place name into structured logs.
+func logSafePresence(s *string) string {
+	if s == nil {
+		return "-"
+	}
+	if *s == "" {
+		return "empty"
+	}
+	return fmt.Sprintf("set(len=%d)", len(*s))
 }
 
 // geocodeSide reverse-geocodes one endpoint and returns pointers to the
@@ -221,10 +274,39 @@ func geocodeSide(ctx context.Context, geocoder geocode.Geocoder, driveID, side s
 		)
 		return nil, nil
 	default:
+		// geocode.ReverseGeocode's own error strings embed the raw
+		// lat/lng queried (fmt %.4f) and, on a non-200 response, up to
+		// 256B of the Mapbox response body — GPS coordinates are P1,
+		// "never in logs" per data-classification.md §2.2. Log only a
+		// coarse, sanitized error class, never err.Error(). The geocode
+		// package's error text itself is intentionally left unchanged —
+		// other callers (internal/store/writer_drives.go) rely on it
+		// for their own (already-compliant) handling.
 		logger.Warn("geocode backfill: reverse geocode failed",
-			slog.String("drive_id", driveID), slog.String("side", side), slog.String("error", err.Error()),
+			slog.String("drive_id", driveID), slog.String("side", side),
+			slog.String("error_class", errorClass(err)),
 		)
 		return nil, nil
+	}
+}
+
+// errorClass reduces a geocode.ReverseGeocode error to a coarse,
+// log-safe classification. Only called from geocodeSide's default
+// branch, where err is guaranteed non-nil and not geocode.ErrNoResult
+// (that case is already handled above it) — so those two states aren't
+// re-checked here. Never returns or logs err.Error() itself — see the
+// data-classification note at geocodeSide's default branch.
+func errorClass(err error) string {
+	switch {
+	case errors.Is(err, geocode.ErrInvalidCoordinate):
+		return "invalid_coordinate"
+	case strings.Contains(err.Error(), "HTTP "):
+		// geocode.ReverseGeocode formats non-200 responses as
+		// "...: HTTP <code>: <body>" — matching on that literal is an
+		// in-process classification check only, never logged.
+		return "http_status"
+	default:
+		return "transport"
 	}
 }
 

@@ -211,15 +211,29 @@ ORDER BY "startTime" DESC, "id" DESC
 LIMIT $4`
 
 // queryDriveMissingAddresses is the MYR-240 backfill read path: every
-// Drive row still missing a start or end address, oldest first (the
-// backfill is a one-shot admin sweep, not a hot path, so ordering by
-// createdAt just makes progress human-legible in logs). routePoints
-// (+ routePointsEnc) are included because the Drive table carries no
-// dedicated start/end lat/lng columns — the only source of coordinates
-// to re-geocode is the first and last recorded route point.
-const queryDriveMissingAddresses = `SELECT "id", "startAddress", "endAddress", "routePoints", "routePointsEnc"
+// Drive row still missing a start address, or missing an end address on
+// a row that has actually ENDED, oldest first (the backfill is a
+// one-shot admin sweep, not a hot path, so ordering by createdAt just
+// makes progress human-legible in logs). routePoints (+ routePointsEnc)
+// are included because the Drive table carries no dedicated start/end
+// lat/lng columns — the only source of coordinates to re-geocode is the
+// first and last recorded route point.
+//
+// The end-side predicate is deliberately gated on endTime: every Drive
+// row is created with endTime and endAddress both set to the empty
+// string (mapDriveStarted) and only gets a real endTime when the drive
+// completes (handleDriveEnded). Without the endTime guard, a backfill
+// run against a still-OPEN drive would match on an empty endAddress and
+// reverse-geocode the LAST recorded routePoints entry — the car's
+// current, still-changing position — and persist it as the drive's
+// endLocation/endAddress, which is simply wrong (and would be
+// immediately stale). The "endTime IS NULL OR endTime is empty" shape
+// mirrors queryDriveListOpen's predicate: the cleanup-binary findings
+// showed the column can be either representation depending on how the
+// row was inserted.
+const queryDriveMissingAddresses = `SELECT "id", "startAddress", "endAddress", "endTime", "routePoints", "routePointsEnc"
 FROM "Drive"
-WHERE "startAddress" = '' OR "endAddress" = ''
+WHERE "startAddress" = '' OR ("endAddress" = '' AND NOT ("endTime" IS NULL OR "endTime" = ''))
 ORDER BY "createdAt" ASC`
 
 // queryDriveUpdateAddresses writes whichever of the four location

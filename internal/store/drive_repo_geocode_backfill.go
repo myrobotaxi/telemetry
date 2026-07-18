@@ -25,20 +25,30 @@ import (
 // the MYR-240 backfill sweep: the row's current (empty) address columns,
 // so the caller knows which side(s) still need geocoding, plus the
 // resolved routePoints array to pull coordinates from.
+//
+// EndTime is surfaced (not just used server-side in
+// queryDriveMissingAddresses' WHERE clause) as a belt-and-braces guard:
+// the caller MUST skip the end side entirely for a row whose EndTime is
+// empty (drive still open) even though the query already excludes those
+// rows from matching on an empty endAddress — see queries.go for why a
+// still-open drive's routePoints last entry is the car's current,
+// still-changing position and must never be written as endAddress.
 type DriveBackfillRow struct {
 	ID           string
 	StartAddress string
 	EndAddress   string
+	EndTime      string
 	RoutePoints  json.RawMessage
 }
 
-// ListMissingAddresses returns every Drive row whose startAddress or
-// endAddress is empty, oldest first. Used exclusively by `ops geocode
-// backfill` (MYR-240) — the running server always attempts a reverse
-// geocode inline on drive.started/drive.ended, so in steady state this
-// result set only holds rows from before the request-shape fix landed
-// (every reverse geocode 422'd) or rows where the geocoder had no
-// result for that coordinate.
+// ListMissingAddresses returns every Drive row whose startAddress is
+// empty, or whose endAddress is empty on a row that has actually ended,
+// oldest first. Used exclusively by `ops geocode backfill` (MYR-240) —
+// the running server always attempts a reverse geocode inline on
+// drive.started/drive.ended, so in steady state this result set only
+// holds rows from before the request-shape fix landed (every reverse
+// geocode 422'd) or rows where the geocoder had no result for that
+// coordinate.
 //
 // RoutePoints prefers the routePointsEnc shadow the same way GetByID
 // does, falling back to plaintext on decrypt/shape failure — reusing
@@ -58,7 +68,7 @@ func (r *DriveRepo) ListMissingAddresses(ctx context.Context) ([]DriveBackfillRo
 	for rows.Next() {
 		var d DriveBackfillRow
 		var routePointsEnc *string
-		if scanErr := rows.Scan(&d.ID, &d.StartAddress, &d.EndAddress, &d.RoutePoints, &routePointsEnc); scanErr != nil {
+		if scanErr := rows.Scan(&d.ID, &d.StartAddress, &d.EndAddress, &d.EndTime, &d.RoutePoints, &routePointsEnc); scanErr != nil {
 			r.metrics.IncQueryError("drive.list_missing_addresses")
 			r.metrics.ObserveQueryDuration("drive.list_missing_addresses", time.Since(start).Seconds())
 			return nil, fmt.Errorf("DriveRepo.ListMissingAddresses: scan: %w", scanErr)
