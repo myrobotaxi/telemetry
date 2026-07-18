@@ -114,12 +114,17 @@ const queryDriveSetRoutePointsEnc = `UPDATE "Drive"
 SET "routePointsEnc" = $2
 WHERE "id" = $1`
 
+// queryDriveComplete writes the final drive stats on drive.ended. It also
+// (re)writes "startChargeLevel": the row was inserted on drive.started with
+// startChargeLevel defaulting to 0 (that event carries no charge), and the
+// true drive-start SOC is only known once the detector ends the drive
+// (MYR-241). $14 lands that value so start/end charge are both persisted.
 const queryDriveComplete = `UPDATE "Drive"
 SET "endTime" = $2, "endLocation" = $3, "endAddress" = $4,
 	"distanceMiles" = $5, "durationMinutes" = $6,
 	"avgSpeedMph" = $7, "maxSpeedMph" = $8, "energyUsedKwh" = $9,
 	"endChargeLevel" = $10, "fsdMiles" = $11, "fsdPercentage" = $12,
-	"interventions" = $13
+	"interventions" = $13, "startChargeLevel" = $14
 WHERE "id" = $1`
 
 // queryDriveDelete removes a Drive row outright. Used when the drive

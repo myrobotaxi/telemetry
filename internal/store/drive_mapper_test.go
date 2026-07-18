@@ -106,6 +106,81 @@ func TestMapDriveCompletion(t *testing.T) {
 	}
 }
 
+// TestMapDriveCompletion_StartChargeLevel is the MYR-241 regression: the
+// completion mapper must forward evt.Stats.StartChargeLevel so the drive
+// detector's computed drive-start SOC is persisted on the completion UPDATE.
+// Before the fix the field did not exist on DriveCompletion, so the value the
+// detector already produced (MYR-207) was dropped and every Drive row kept the
+// insert-time default of 0 while endChargeLevel captured correctly.
+func TestMapDriveCompletion_StartChargeLevel(t *testing.T) {
+	endedAt := time.Date(2026, 3, 17, 15, 15, 0, 0, time.UTC)
+
+	tests := []struct {
+		name           string
+		startCharge    int // Stats.StartChargeLevel from the detector
+		endCharge      int // Stats.EndChargeLevel from the detector
+		wantStartLevel int
+		wantEndLevel   int
+	}{
+		{
+			// (a) SOC known before drive start → detector seeds it → persisted.
+			name:           "soc known before start",
+			startCharge:    80,
+			endCharge:      74,
+			wantStartLevel: 80,
+			wantEndLevel:   74,
+		},
+		{
+			// (b) SOC first arrived mid-drive → detector patched start once.
+			name:           "soc patched mid-drive",
+			startCharge:    70,
+			endCharge:      65,
+			wantStartLevel: 70,
+			wantEndLevel:   65,
+		},
+		{
+			// (c) SOC never observed → detector leaves both 0; mapper must not
+			// invent a value. End behaviour unchanged (also 0).
+			name:           "soc never observed",
+			startCharge:    0,
+			endCharge:      0,
+			wantStartLevel: 0,
+			wantEndLevel:   0,
+		},
+		{
+			// (d) no regression: a distinct start/end pair round-trips intact.
+			name:           "distinct start and end",
+			startCharge:    100,
+			endCharge:      42,
+			wantStartLevel: 100,
+			wantEndLevel:   42,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			evt := events.DriveEndedEvent{
+				VIN:     "5YJ3E1EA1NF000001",
+				DriveID: "drive_charge",
+				EndedAt: endedAt,
+				Stats: events.DriveStats{
+					StartChargeLevel: tt.startCharge,
+					EndChargeLevel:   tt.endCharge,
+				},
+			}
+
+			completion := mapDriveCompletion(evt)
+
+			if completion.StartChargeLevel != tt.wantStartLevel {
+				t.Errorf("StartChargeLevel = %d, want %d", completion.StartChargeLevel, tt.wantStartLevel)
+			}
+			if completion.EndChargeLevel != tt.wantEndLevel {
+				t.Errorf("EndChargeLevel = %d, want %d", completion.EndChargeLevel, tt.wantEndLevel)
+			}
+		})
+	}
+}
+
 func TestMapSingleRoutePoint(t *testing.T) {
 	ts := time.Date(2026, 3, 17, 14, 31, 0, 0, time.UTC)
 	pt := events.RoutePoint{
