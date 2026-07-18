@@ -1593,7 +1593,7 @@ Rotate a refresh token (single-use). Presenting a spent or revoked token is trea
 
 **Request** — `{ "refreshToken": "<opaque>" }`
 
-**Response — 200 OK** — same shape as §7.9.1 (a fresh `accessToken` + a new `refreshToken`; `user` carries at least `id`). The previous refresh token is now invalid.
+**Response — 200 OK** — same shape as §7.10.1 (a fresh `accessToken` + a new `refreshToken`). As of [MYR-243](https://linear.app/myrobotaxi/issue/MYR-243), `user` is enriched the same way as sign-in — `name`/`email` are populated best-effort from the stored profile (`go_identity_apple` binding, falling back to `go_users`) so installs that lost their local profile cache still get a full projection on refresh, not just `id`. A profile-lookup failure is fail-open: the refresh still succeeds and `user` degrades to `id`-only rather than the request failing. The previous refresh token is now invalid.
 
 **Response — error**
 
