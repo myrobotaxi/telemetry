@@ -210,6 +210,32 @@ WHERE "vehicleId" = $1
 ORDER BY "startTime" DESC, "id" DESC
 LIMIT $4`
 
+// queryDriveMissingAddresses is the MYR-240 backfill read path: every
+// Drive row still missing a start or end address, oldest first (the
+// backfill is a one-shot admin sweep, not a hot path, so ordering by
+// createdAt just makes progress human-legible in logs). routePoints
+// (+ routePointsEnc) are included because the Drive table carries no
+// dedicated start/end lat/lng columns — the only source of coordinates
+// to re-geocode is the first and last recorded route point.
+const queryDriveMissingAddresses = `SELECT "id", "startAddress", "endAddress", "routePoints", "routePointsEnc"
+FROM "Drive"
+WHERE "startAddress" = '' OR "endAddress" = ''
+ORDER BY "createdAt" ASC`
+
+// queryDriveUpdateAddresses writes whichever of the four location
+// columns the caller supplies; COALESCE leaves the rest untouched. Every
+// argument is a nilable *string so the backfill can pass nil for the
+// side it didn't (re)geocode this run — e.g. only startAddress was empty,
+// or the end-side geocode lookup returned ErrNoResult — without
+// clobbering a value the row already had or that a concurrent write
+// landed between the backfill's SELECT and this UPDATE.
+const queryDriveUpdateAddresses = `UPDATE "Drive"
+SET "startLocation" = COALESCE($2, "startLocation"),
+    "startAddress"  = COALESCE($3, "startAddress"),
+    "endLocation"   = COALESCE($4, "endLocation"),
+    "endAddress"    = COALESCE($5, "endAddress")
+WHERE "id" = $1`
+
 // Account queries. The Account table is Prisma-owned (NextAuth). We read
 // tokens and update them in-place when refreshing expired OAuth tokens.
 //
