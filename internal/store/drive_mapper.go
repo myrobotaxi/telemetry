@@ -42,18 +42,19 @@ func mapDriveStarted(evt events.DriveStartedEvent, vehicleID string) DriveRecord
 // does in mapDriveStarted — see that comment.
 func mapDriveCompletion(evt events.DriveEndedEvent) DriveCompletion {
 	return DriveCompletion{
-		EndTime:         evt.EndedAt.Format(time.RFC3339),
-		EndLocation:     "",
-		EndAddress:      "",
-		DistanceMiles:   evt.Stats.Distance,
-		DurationMinutes: int(evt.Stats.Duration.Minutes()),
-		AvgSpeedMph:     evt.Stats.AvgSpeed,
-		MaxSpeedMph:     evt.Stats.MaxSpeed,
-		EnergyUsedKwh:   evt.Stats.EnergyDelta,
-		EndChargeLevel:  evt.Stats.EndChargeLevel,
-		FsdMiles:        evt.Stats.FSDMiles,
-		FsdPercentage:   evt.Stats.FSDPercentage,
-		Interventions:   0,
+		EndTime:          evt.EndedAt.Format(time.RFC3339),
+		EndLocation:      "",
+		EndAddress:       "",
+		DistanceMiles:    evt.Stats.Distance,
+		DurationMinutes:  int(evt.Stats.Duration.Minutes()),
+		AvgSpeedMph:      evt.Stats.AvgSpeed,
+		MaxSpeedMph:      evt.Stats.MaxSpeed,
+		EnergyUsedKwh:    evt.Stats.EnergyDelta,
+		StartChargeLevel: evt.Stats.StartChargeLevel,
+		EndChargeLevel:   evt.Stats.EndChargeLevel,
+		FsdMiles:         evt.Stats.FSDMiles,
+		FsdPercentage:    evt.Stats.FSDPercentage,
+		Interventions:    0,
 	}
 }
 

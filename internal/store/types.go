@@ -123,19 +123,28 @@ type DriveRecord struct {
 }
 
 // DriveCompletion holds the final values written when a drive ends.
+//
+// StartChargeLevel is (re)written here as well as at insert time because the
+// Drive row is created on drive.started — a DriveStartedEvent that carries no
+// charge — so the insert always defaults startChargeLevel to 0. The drive
+// detector only knows the true drive-start SOC by the time the drive ends
+// (it seeds from the last-known charge, or lazily from the first in-drive SOC
+// sample; see internal/drives). Persisting evt.Stats.StartChargeLevel on the
+// completion UPDATE is what actually lands that value in the DB (MYR-241).
 type DriveCompletion struct {
-	EndTime         string
-	EndLocation     string
-	EndAddress      string
-	DistanceMiles   float64
-	DurationMinutes int
-	AvgSpeedMph     float64
-	MaxSpeedMph     float64
-	EnergyUsedKwh   float64
-	EndChargeLevel  int
-	FsdMiles        float64
-	FsdPercentage   float64
-	Interventions   int
+	EndTime          string
+	EndLocation      string
+	EndAddress       string
+	DistanceMiles    float64
+	DurationMinutes  int
+	AvgSpeedMph      float64
+	MaxSpeedMph      float64
+	EnergyUsedKwh    float64
+	StartChargeLevel int
+	EndChargeLevel   int
+	FsdMiles         float64
+	FsdPercentage    float64
+	Interventions    int
 }
 
 // RoutePointRecord is a single GPS point stored inside the Drive.routePoints

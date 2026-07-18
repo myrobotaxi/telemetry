@@ -99,7 +99,7 @@ Live drive events (start, route point, speed update) flow over the WebSocket in 
 | `avgSpeedMph` | DB | Go store (create) | Computed at completion |
 | `maxSpeedMph` | DB | Go store (create) | Computed at completion |
 | `energyUsedKwh` | DB | Go store (create) | Computed at completion |
-| `startChargeLevel` | DB | Go store (create) | Captured at drive start |
+| `startChargeLevel` | DB | Go store (complete) | SOC at drive start; the create-time insert defaults it to 0 (drive.started carries no charge), so it is persisted on the completion UPDATE from the detector's last-known/first-in-drive SOC (MYR-241) |
 | `endChargeLevel` | DB | Go store (create) | Captured at drive end |
 | `fsdMiles` | DB | Go store (create) | Accumulated during drive |
 | `fsdPercentage` | DB | Go store (create) | Computed at completion |
