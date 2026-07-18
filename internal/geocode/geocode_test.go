@@ -490,56 +490,133 @@ func TestMapboxGeocoder_AddressFallbackToFirstFeature(t *testing.T) {
 	}
 }
 
+// TestMapboxGeocoder_RequestFormat is a table-driven regression guard for
+// MYR-240: `limit` combined with more than one `types` value makes Mapbox's
+// Geocoding v5 API reject the request with HTTP 422 ("limit must be
+// combined with a single type parameter when reverse geocoding"), which
+// broke 100% of production reverse geocodes. The fix drops `limit`
+// entirely, so a 422 from this cause is impossible by construction — this
+// test asserts the built request never contains a `limit` param, across
+// several real-world coordinates (including the MYR-240 bug report
+// coordinate) so the regression can't creep back in for a subset of
+// inputs.
 func TestMapboxGeocoder_RequestFormat(t *testing.T) {
+	tests := []struct {
+		name     string
+		lat, lng float64
+	}{
+		{name: "MYR-240 reported failing coordinate", lat: 33.0860, lng: -96.8522},
+		{name: "dense downtown-Dallas POI area", lat: 32.7905, lng: -96.8104},
+		{name: "Frisco residential street", lat: 33.1301, lng: -96.8236},
+		{name: "arbitrary Austin coordinate", lat: 33.0860, lng: -96.8518},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var capturedPath string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				capturedPath = r.URL.String()
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(mapboxResponse{
+					Features: []mapboxFeature{
+						{
+							Text:      "Test",
+							PlaceName: "Test Place",
+							PlaceType: []string{"address"},
+							Center:    [2]float64{tt.lng, tt.lat},
+						},
+					},
+				})
+			}))
+			defer srv.Close()
+
+			g := &MapboxGeocoder{
+				token:  "pk.my-token",
+				client: srv.Client(),
+			}
+			g.client.Transport = &rewriteTransport{
+				base:    srv.Client().Transport,
+				baseURL: srv.URL,
+			}
+
+			_, err := g.ReverseGeocode(context.Background(), tt.lat, tt.lng)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if capturedPath == "" {
+				t.Fatal("no request was captured")
+			}
+			// MYR-240: `limit` must never appear — that's what triggered
+			// the 422 when combined with 3 `types` values.
+			if strings.Contains(capturedPath, "limit=") {
+				t.Errorf("limit param must never be sent (causes 422 with multiple types), got: %s", capturedPath)
+			}
+			if !strings.Contains(capturedPath, "types=poi,address,neighborhood") {
+				t.Errorf("expected types=poi,address,neighborhood in URL, got: %s", capturedPath)
+			}
+			// Locality/place (city-level) types must never be requested —
+			// their text is banned from PlaceName (see buildResult).
+			if strings.Contains(capturedPath, "locality") || strings.Contains(capturedPath, "place,") {
+				t.Errorf("city-level types must not be requested, got: %s", capturedPath)
+			}
+			t.Logf("captured path: %s", capturedPath)
+		})
+	}
+}
+
+// TestMapboxGeocoder_MYR240LiveResponseRegression pins the fix against the
+// actual Mapbox response shape observed live for the coordinate reported in
+// MYR-240 (33.0860, -96.8522) once `limit` was dropped: a 200 OK carrying
+// exactly one "address" feature and one "neighborhood" feature (no "poi"
+// feature — this Mapbox account/token returns no POI-typed features for
+// any of the coordinates checked during the MYR-240 investigation). This
+// guards both halves of the fix at once: the request no longer 422s, and
+// buildResult's neighborhood-fallback ranking (MYR-206) still produces the
+// expected PlaceName/Address pair from that exact response shape.
+func TestMapboxGeocoder_MYR240LiveResponseRegression(t *testing.T) {
+	body := `{
+		"features": [
+			{
+				"text": "Tributary Way",
+				"place_name": "4220 Tributary Way, Frisco, Texas 75034, United States",
+				"place_type": ["address"],
+				"center": [-96.852371, 33.085983]
+			},
+			{
+				"text": "Stonebriar",
+				"place_name": "Stonebriar, Frisco, Texas, United States",
+				"place_type": ["neighborhood"],
+				"center": [-96.82457, 33.101925]
+			}
+		]
+	}`
+
 	var capturedPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedPath = r.URL.String()
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(mapboxResponse{
-			Features: []mapboxFeature{
-				{
-					Text:      "Test",
-					PlaceName: "Test Place",
-					PlaceType: []string{"address"},
-					Center:    [2]float64{-96.8518, 33.0860},
-				},
-			},
-		})
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(body))
 	}))
 	defer srv.Close()
 
-	g := &MapboxGeocoder{
-		token:  "pk.my-token",
-		client: srv.Client(),
-	}
-	g.client.Transport = &rewriteTransport{
-		base:    srv.Client().Transport,
-		baseURL: srv.URL,
-	}
+	g := &MapboxGeocoder{token: "test-token", client: srv.Client()}
+	g.client.Transport = &rewriteTransport{base: srv.Client().Transport, baseURL: srv.URL}
 
-	_, err := g.ReverseGeocode(context.Background(), 33.0860, -96.8518)
+	result, err := g.ReverseGeocode(context.Background(), 33.0860, -96.8522)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("unexpected error (this is the exact MYR-240 422 regression if non-nil): %v", err)
 	}
-
-	// Verify the URL contains the correct coordinates in lng,lat order
-	// (Mapbox expects lng,lat, not lat,lng) and the bumped limit param.
-	if capturedPath == "" {
-		t.Fatal("no request was captured")
+	if strings.Contains(capturedPath, "limit=") {
+		t.Fatalf("request must not include limit param, got: %s", capturedPath)
 	}
-	if !strings.Contains(capturedPath, "limit=5") {
-		t.Errorf("expected limit=5 in URL, got: %s", capturedPath)
+	if result.PlaceName != "Stonebriar" {
+		t.Errorf("PlaceName = %q, want %q (neighborhood fallback — no POI in this response)", result.PlaceName, "Stonebriar")
 	}
-	if !strings.Contains(capturedPath, "types=poi,address,neighborhood") {
-		t.Errorf("expected types=poi,address,neighborhood in URL, got: %s", capturedPath)
+	if result.Address != "4220 Tributary Way, Frisco, Texas 75034, United States" {
+		t.Errorf("Address = %q, want %q", result.Address, "4220 Tributary Way, Frisco, Texas 75034, United States")
 	}
-	// Locality/place (city-level) types must never be requested — their
-	// text is banned from PlaceName (see buildResult), so requesting
-	// them only wastes candidate slots in the limit=5 window.
-	if strings.Contains(capturedPath, "locality") || strings.Contains(capturedPath, "place,") {
-		t.Errorf("city-level types must not be requested, got: %s", capturedPath)
-	}
-	t.Logf("captured path: %s", capturedPath)
 }
 
 func TestMapboxGeocoder_ContextCancellation(t *testing.T) {
