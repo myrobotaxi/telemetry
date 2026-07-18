@@ -21,6 +21,11 @@ type Store interface {
 	InsertRefreshRoot(ctx context.Context, tokenHash, familyID, userID string, expiresAt time.Time) error
 	RotateRefreshToken(ctx context.Context, oldHash, newHash string, newExpiresAt time.Time) (RotateResult, error)
 	RevokeFamilyByToken(ctx context.Context, tokenHash string) (userID string, found bool, err error)
+
+	// GetUserProfile is a best-effort name/email lookup by resolved user CUID
+	// (MYR-243). A missing row is not an error — the returned strings are
+	// simply empty; the caller decides how to treat a lookup failure.
+	GetUserProfile(ctx context.Context, userID string) (name, email string, err error)
 }
 
 // appleTokenValidator is the consumer-site view of AppleValidator.
@@ -144,11 +149,26 @@ func (s *Service) Refresh(ctx context.Context, rawRefresh string) (AuthResult, e
 			AccessToken:  access,
 			ExpiresIn:    expiresIn,
 			RefreshToken: newRaw,
-			User:         UserInfo{ID: res.UserID},
+			User:         s.projectUser(ctx, res.UserID),
 		}, nil
 	default:
 		return AuthResult{}, ErrInvalidRefreshToken
 	}
+}
+
+// projectUser builds the client-facing user projection for a refresh. It
+// best-effort enriches name/email from the store (MYR-243) — refresh only
+// carries a userID, unlike sign-in which has fresh Apple claims to draw a
+// name/email from. A lookup failure never fails the refresh (fail-open for
+// enrichment, never for auth): it degrades to an id-only projection and is
+// logged via the audit trail.
+func (s *Service) projectUser(ctx context.Context, userID string) UserInfo {
+	name, email, err := s.store.GetUserProfile(ctx, userID)
+	if err != nil {
+		s.audit.profileLookupFailed(userID, err)
+		return UserInfo{ID: userID}
+	}
+	return UserInfo{ID: userID, Name: name, Email: email}
 }
 
 // Revoke revokes the whole refresh-token family a token belongs to. It is
