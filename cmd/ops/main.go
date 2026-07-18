@@ -54,6 +54,8 @@ func run() error {
 		return runFleetConfig(ctx, os.Args[2:])
 	case "fields":
 		return runFields(ctx, os.Args[2:])
+	case "geocode":
+		return runGeocode(ctx, os.Args[2:])
 	case "help", "-h", "--help":
 		fmt.Print(usage())
 		return nil
@@ -78,6 +80,7 @@ Commands:
   fleet-config push   --vin <vin> --user-id <id>     Push DefaultFieldConfig to Tesla for this VIN
   fields watch        --vin <vin> [--server <url>]   Stream raw decoded fields from /api/debug/fields
   fields snapshot     --vin <vin>                    Dump the current vehicle row as JSON
+  geocode backfill    [--dry-run] [--limit N]        Reverse-geocode Drive rows missing startAddress/endAddress (MYR-240)
 
 Environment:
   DATABASE_URL                  Postgres connection string (required)
@@ -88,5 +91,8 @@ Environment:
   AUTH_TESLA_ID                 Tesla OAuth client id (enables token refresh)
   AUTH_TESLA_SECRET             Tesla OAuth client secret
   DEBUG_FIELDS_TOKEN            Auth token for fields watch (when server requires it)
+  MAPBOX_TOKEN                  Mapbox API token (required for geocode backfill)
+  ENCRYPTION_KEY                base64(32B) AES-256 key (optional for geocode backfill;
+                                 falls back to plaintext routePoints reads when unset)
 `
 }
