@@ -79,13 +79,21 @@ func NewRegistry() *Registry {
 		{Name: "honk_horn", Scope: ScopeVehicleCmds, SignerRequired: true},
 		{Name: "flash_lights", Scope: ScopeVehicleCmds, SignerRequired: true},
 
-		// --- Navigation / dispatch (P10, MYR-176). UNSIGNED: Tesla processes
-		// these server-side, so the proxy forwards them straight to the Fleet
-		// API rather than signing them (teslamotors/vehicle-command
-		// pkg/proxy: navigation_request -> ErrCommandUseRESTAPI -> forward).
-		// navigation_gps_request sends a lat/long destination and is the
-		// command MYR-176 dispatch should use; navigation_request sends a
-		// text address / maps-link share. ---
+		// --- Navigation / dispatch (P10). UNSIGNED. ONLY navigation_request is
+		// usable through the tesla-http-proxy: it processes it server-side and
+		// the proxy returns ErrCommandUseRESTAPI, forwarding it to the Fleet
+		// REST API (teslamotors/vehicle-command pkg/proxy command.go:545,
+		// proxy.go:325). Dispatch (MYR-245) sends navigation_request with a
+		// Google Maps share URL.
+		//
+		// navigation_gps_request is NOT forwarded by the proxy: its
+		// ExtractCommandAction (command.go) has no case for it, so the proxy
+		// hits the default branch and returns HTTP 400 `invalid_command`
+		// locally — the car is never dialed (the Jul 18 2026 dispatch outage).
+		// It is only reachable via a direct Fleet REST call, which we do not
+		// make. It stays registered for the public commands API (a client with
+		// its own direct-REST path may still use it), but MUST NOT be used for
+		// proxy-routed dispatch. ---
 		{Name: "navigation_gps_request", Scope: ScopeVehicleCmds, SignerRequired: false, BuildBody: buildNavigationGPS},
 		{Name: "navigation_request", Scope: ScopeVehicleCmds, SignerRequired: false, BuildBody: buildNavigationShare},
 	}
