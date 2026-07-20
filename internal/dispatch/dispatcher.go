@@ -205,24 +205,24 @@ func (d *Dispatcher) process(ctx context.Context, ev events.RideAcceptedEvent) {
 	}
 
 	if !d.cfg.Enabled {
-		d.record(ctx, ev, "", OutcomeSkipped, nil)
+		d.record(ctx, ev, "", OutcomeSkipped, nil, "")
 		return
 	}
 
 	vin, code := d.resolveVIN(ctx, ev.VehicleID)
 	if code != nil {
-		d.record(ctx, ev, "", OutcomeFailed, code)
+		d.record(ctx, ev, "", OutcomeFailed, code, "")
 		return
 	}
 
 	token, code := d.resolveToken(ctx, ev.OwnerID)
 	if code != nil {
-		d.record(ctx, ev, vin, OutcomeFailed, code)
+		d.record(ctx, ev, vin, OutcomeFailed, code, "")
 		return
 	}
 
-	outcome, ecode := d.executeWithRetry(ctx, vin, token, ev.Pickup)
-	d.record(ctx, ev, vin, outcome, ecode)
+	outcome, ecode, detail := d.executeWithRetry(ctx, vin, token, ev.Pickup)
+	d.record(ctx, ev, vin, outcome, ecode, detail)
 }
 
 // resolveVIN resolves the vehicle's VIN under the bounded retry policy,
@@ -266,7 +266,10 @@ func (d *Dispatcher) resolveToken(ctx context.Context, ownerID string) (token st
 // ride would stay claimed (dispatched_at set) with a NULL dispatch_status
 // forever; the startup reconciler would then have to clean it up. We keep the
 // ctx values but drop its deadline, adding our own short bound.
-func (d *Dispatcher) record(ctx context.Context, ev events.RideAcceptedEvent, vin string, outcome Outcome, code *string) {
+// detail is the opaque Tesla-side reason (e.g. `invalid_command`) surfaced on
+// the audit line as error_detail. It is empty for non-command outcomes and is
+// NOT persisted (no DB column — the detail lives only in the structured log).
+func (d *Dispatcher) record(ctx context.Context, ev events.RideAcceptedEvent, vin string, outcome Outcome, code *string, detail string) {
 	recCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
 	if err := d.store.RecordDispatchOutcome(recCtx, ev.RideRequestID, outcome, code); err != nil {
@@ -285,6 +288,9 @@ func (d *Dispatcher) record(ctx context.Context, ev events.RideAcceptedEvent, vi
 	}
 	if code != nil {
 		attrs = append(attrs, slog.String("error_code", *code))
+	}
+	if detail != "" {
+		attrs = append(attrs, slog.String("error_detail", detail))
 	}
 	d.logger.Info("dispatch attempt", attrs...)
 }

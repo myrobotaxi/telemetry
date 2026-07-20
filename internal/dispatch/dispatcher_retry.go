@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/commands"
@@ -11,20 +12,25 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
 )
 
-// commandNavigationGPS is the Tesla command name for a lat/long navigation
-// push (MYR-180 registry). UNSIGNED — forwarded straight to the Fleet API.
-const commandNavigationGPS = "navigation_gps_request"
+// commandNavigationRequest is the Tesla command name for a share-to-nav push.
+// UNSIGNED — Tesla processes it server-side, so the tesla-http-proxy returns
+// ErrCommandUseRESTAPI and forwards it to the Fleet REST API (vehicle-command
+// pkg/proxy command.go:545, proxy.go:325). Dispatch uses THIS command, not
+// navigation_gps_request: the official proxy's ExtractCommandAction has NO
+// case for navigation_gps_request, so it hits the default branch and 400s
+// `invalid_command` locally, before the car is ever dialed — the Jul 18 2026
+// dispatch_error invalid_request outage (MYR-245).
+const commandNavigationRequest = "navigation_request"
 
-// pickupNavOrder is the Tesla remote-nav "order" integer for the pickup
-// destination. Tesla's convention is 1-based: order=1 REPLACES the current
-// trip (making the pickup THE active destination), 2 prepends a stop, 3
-// appends a stop. We want the pickup to be the immediate destination, so we
-// send 1 — matching internal/commands buildNavigationGPS's default. (Source:
-// Tesla Fleet API navigation_gps_request remote-nav order semantics, as
-// documented by the Teslemetry python-tesla-fleet-api client:
-// https://github.com/Teslemetry/python-tesla-fleet-api — "1 replaces the
-// trip, 2 prepends a stop, 3 appends a stop".)
-const pickupNavOrder = float64(1)
+// mapsShareURL builds the Google Maps share URL Tesla share-to-nav clients
+// (e.g. Teslemetry) hand the car: it resolves ?q=<lat>,<lon> to a navigation
+// destination. Coordinates are formatted at FULL precision (strconv 'f', -1) —
+// never truncated — so the pickup pin lands exactly where the rider is.
+func mapsShareURL(lat, lon float64) string {
+	return fmt.Sprintf("https://maps.google.com/?q=%s,%s",
+		strconv.FormatFloat(lat, 'f', -1, 64),
+		strconv.FormatFloat(lon, 'f', -1, 64))
+}
 
 // Non-command failure codes recorded in dispatch_error when the pipeline
 // fails BEFORE (or instead of) a Tesla command. Command failures record the
@@ -123,17 +129,17 @@ func isContextErr(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
-// executeWithRetry runs the navigation_gps_request under the bounded retry
+// executeWithRetry runs the navigation_request share under the bounded retry
 // policy. Retryable codes (transport / asleep-after-wake) back off and retry
-// up to MaxRetries; every other code is terminal.
-func (d *Dispatcher) executeWithRetry(ctx context.Context, vin, token string, pickup events.RidePlace) (outcome Outcome, errCode *string) {
+// up to MaxRetries; every other code is terminal. It also returns the opaque
+// Tesla-side detail (CommandError.Detail, e.g. `invalid_command`) so the
+// outcome log can explain WHY a command was rejected.
+func (d *Dispatcher) executeWithRetry(ctx context.Context, vin, token string, pickup events.RidePlace) (outcome Outcome, errCode *string, detail string) {
 	req := commands.Request{
 		VIN:     vin,
-		Command: commandNavigationGPS,
+		Command: commandNavigationRequest,
 		Params: map[string]any{
-			"lat":   pickup.Latitude,
-			"lon":   pickup.Longitude,
-			"order": pickupNavOrder,
+			"value": mapsShareURL(pickup.Latitude, pickup.Longitude),
 		},
 		AccessToken: token,
 		Scopes:      commands.ParseScopes(token),
@@ -141,26 +147,27 @@ func (d *Dispatcher) executeWithRetry(ctx context.Context, vin, token string, pi
 
 	attempts := d.cfg.MaxRetries + 1
 	lastCode := string(wserrors.ErrCodeCommandFailed)
+	var lastDetail string
 	for attempt := 0; attempt < attempts; attempt++ {
 		if attempt > 0 {
 			if err := sleepCtx(ctx, backoffFor(d.cfg.Backoff, attempt)); err != nil {
 				c := codeCanceled
-				return OutcomeFailed, &c
+				return OutcomeFailed, &c, ""
 			}
 		}
 
 		_, err := d.executor.Execute(ctx, req)
 		if err == nil {
-			return OutcomeSent, nil
+			return OutcomeSent, nil, ""
 		}
 		var retry bool
-		retry, lastCode = classifyCommandErr(err)
+		retry, lastCode, lastDetail = classifyCommandErr(err)
 		if !retry {
-			return OutcomeFailed, &lastCode
+			return OutcomeFailed, &lastCode, lastDetail
 		}
 	}
 	// Retries exhausted on a retryable error.
-	return OutcomeFailed, &lastCode
+	return OutcomeFailed, &lastCode, lastDetail
 }
 
 // classifyCommandErr decides whether a command error is worth another bounded
@@ -170,15 +177,15 @@ func (d *Dispatcher) executeWithRetry(ctx context.Context, vin, token string, pi
 // a permanent misconfiguration: never retry it, and record a distinct code so
 // ops can tell it apart from a live command_failed 502. A non-typed error is
 // treated as a transient transport failure.
-func classifyCommandErr(err error) (retryable bool, code string) {
+func classifyCommandErr(err error) (retryable bool, code, detail string) {
 	if errors.Is(err, commands.ErrTransportNotConfigured) {
-		return false, codeTransportUnconfigured
+		return false, codeTransportUnconfigured, ""
 	}
 	var cmdErr *commands.CommandError
 	if errors.As(err, &cmdErr) {
-		return cmdErr.Retryable, string(cmdErr.Code)
+		return cmdErr.Retryable, string(cmdErr.Code), cmdErr.Detail
 	}
-	return true, string(wserrors.ErrCodeCommandFailed)
+	return true, string(wserrors.ErrCodeCommandFailed), ""
 }
 
 // backoffFor grows the base backoff exponentially per retry attempt
