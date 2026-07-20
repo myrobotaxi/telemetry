@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -132,13 +133,13 @@ func classifyResponse(status int, body []byte) TransportResult {
 	// reason is the opaque detail surfaced in logs + errors. Prefer Tesla's
 	// command-envelope reason; fall back to the top-level {"error":...} string
 	// (the shape the proxy uses for its own 400 `invalid_command` and other
-	// error paths, which carry NO envelope reason). These are opaque codes /
-	// prose — no coordinates or tokens — but truncate defensively.
+	// error paths, which carry NO envelope reason). It is sanitized before it
+	// can reach any log or CommandError.Detail (see sanitizeReason).
 	reason := env.Response.Reason
 	if reason == "" {
 		reason = env.Error
 	}
-	reason = truncateReason(reason)
+	reason = sanitizeReason(reason)
 
 	switch {
 	case containsAny(text, "not paired", "not been paired", "unpaired", "add your key",
@@ -164,14 +165,48 @@ func classifyResponse(status int, body []byte) TransportResult {
 // pathological upstream body cannot bloat a log line.
 const maxReasonLen = 120
 
-// truncateReason clamps a reason string to maxReasonLen runes (rune-safe so a
-// multibyte boundary is never split).
-func truncateReason(s string) string {
-	r := []rune(s)
-	if len(r) <= maxReasonLen {
-		return s
+var (
+	// reasonURLRe matches any URL (scheme://…) up to the next whitespace, so a
+	// maps link (and any coordinates embedded in it) is stripped whole.
+	reasonURLRe = regexp.MustCompile(`(?i)[a-z][a-z0-9+.-]*://\S+`)
+	// reasonCoordRe matches a signed-decimal coordinate pair (lat,lon), the
+	// one P1 shape that could otherwise slip through the charset filter (which
+	// keeps digits, '.', and '-').
+	reasonCoordRe = regexp.MustCompile(`-?\d+\.\d+\s*,\s*-?\d+\.\d+`)
+)
+
+// sanitizeReason hardens the opaque upstream reason before it can reach any
+// log or CommandError.Detail. It is defense-in-depth: these strings are
+// expected to be opaque codes/prose (e.g. `invalid_command`), but the upstream
+// is untrusted, so we ENFORCE — not merely assume — that no P1 value leaks:
+//  1. strip any URL (a maps link would carry embedded coordinates),
+//  2. strip any signed-decimal coordinate pair,
+//  3. lowercase and collapse to the [a-z0-9_ .:-] charset (dropping anything
+//     else, including stray digits left after coordinate removal are kept only
+//     if they are not a pair — single tokens like an HTTP status are harmless),
+//  4. trim and truncate to maxReasonLen runes.
+func sanitizeReason(s string) string {
+	s = strings.ToLower(s)
+	s = reasonURLRe.ReplaceAllString(s, "")
+	s = reasonCoordRe.ReplaceAllString(s, "")
+
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case strings.ContainsRune("_ .:-", r):
+			b.WriteRune(r)
+		}
 	}
-	return string(r[:maxReasonLen])
+	out := strings.TrimSpace(b.String())
+
+	rn := []rune(out)
+	if len(rn) > maxReasonLen {
+		out = string(rn[:maxReasonLen])
+	}
+	return out
 }
 
 func containsAny(s string, subs ...string) bool {

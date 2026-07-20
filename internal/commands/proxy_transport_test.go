@@ -81,25 +81,52 @@ func TestProxyTransport_CommandResponseMapping(t *testing.T) {
 	}
 }
 
-func TestTruncateReason(t *testing.T) {
+func TestSanitizeReason(t *testing.T) {
 	tests := []struct {
-		name    string
-		in      string
-		wantLen int
+		name       string
+		in         string
+		want       string   // exact expected output ("" = skip exact check)
+		wantAbsent []string // substrings that MUST NOT appear
+		wantLen    int      // -1 = skip length check
 	}{
-		{"short passes through", "invalid_command", len("invalid_command")},
-		{"empty stays empty", "", 0},
-		{"long is clamped", strings.Repeat("a", 500), maxReasonLen},
-		{"exactly at bound", strings.Repeat("b", maxReasonLen), maxReasonLen},
+		{name: "plain code passes through", in: "invalid_command", want: "invalid_command", wantLen: -1},
+		{name: "empty stays empty", in: "", want: "", wantLen: 0},
+		{
+			name:       "maps URL with coordinates fully stripped",
+			in:         "rejected: https://maps.google.com/?q=33.086,-96.8522 bad",
+			wantAbsent: []string{"http", "://", "33.086", "-96.8522", "33.086,-96.8522"},
+			wantLen:    -1,
+		},
+		{
+			name:       "bare coordinate pair stripped",
+			in:         "destination 33.086,-96.8522 out of service area",
+			wantAbsent: []string{"33.086,-96.8522", "33.086,", ",-96.8522"},
+			wantLen:    -1,
+		},
+		{name: "uppercase lowercased", in: "Vehicle Is Not Awake", want: "vehicle is not awake", wantLen: -1},
+		{name: "disallowed punctuation dropped", in: "err<script>!@#code", want: "errscriptcode", wantLen: -1},
+		{name: "long is clamped", in: strings.Repeat("a", 500), want: "", wantLen: maxReasonLen},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := truncateReason(tt.in)
-			if len([]rune(got)) != tt.wantLen {
-				t.Errorf("len = %d want %d", len([]rune(got)), tt.wantLen)
+			got := sanitizeReason(tt.in)
+			if tt.want != "" && got != tt.want {
+				t.Errorf("sanitizeReason(%q) = %q, want %q", tt.in, got, tt.want)
 			}
-			if tt.wantLen <= maxReasonLen && got != "" && !strings.HasPrefix(tt.in, got) {
-				t.Errorf("truncated %q is not a prefix of %q", got, tt.in)
+			if tt.wantLen >= 0 && len([]rune(got)) != tt.wantLen {
+				t.Errorf("len = %d want %d (got %q)", len([]rune(got)), tt.wantLen, got)
+			}
+			for _, sub := range tt.wantAbsent {
+				if strings.Contains(got, sub) {
+					t.Errorf("sanitized %q still contains forbidden %q", got, sub)
+				}
+			}
+			// A coordinate pair must never survive, whatever the input.
+			if reasonCoordRe.MatchString(got) {
+				t.Errorf("sanitized %q still contains a coordinate pair", got)
+			}
+			if reasonURLRe.MatchString(got) {
+				t.Errorf("sanitized %q still contains a URL", got)
 			}
 		})
 	}
