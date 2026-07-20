@@ -129,28 +129,49 @@ func classifyResponse(status int, body []byte) TransportResult {
 		return TransportResult{Outcome: OutcomeOK}
 	}
 
+	// reason is the opaque detail surfaced in logs + errors. Prefer Tesla's
+	// command-envelope reason; fall back to the top-level {"error":...} string
+	// (the shape the proxy uses for its own 400 `invalid_command` and other
+	// error paths, which carry NO envelope reason). These are opaque codes /
+	// prose — no coordinates or tokens — but truncate defensively.
+	reason := env.Response.Reason
+	if reason == "" {
+		reason = env.Error
+	}
+	reason = truncateReason(reason)
+
 	switch {
 	case containsAny(text, "not paired", "not been paired", "unpaired", "add your key",
 		"missing key", "keys_not_configured", "no key", "could not find", "unregistered"):
-		return TransportResult{Outcome: OutcomeNotPaired, Reason: env.Response.Reason}
+		return TransportResult{Outcome: OutcomeNotPaired, Reason: reason}
 	case status == http.StatusRequestTimeout,
 		containsAny(text, "asleep", "unavailable", "not available", "offline", "waking", "vehicle is not awake"):
-		return TransportResult{Outcome: OutcomeAsleep, Reason: env.Response.Reason}
+		return TransportResult{Outcome: OutcomeAsleep, Reason: reason}
 	case containsAny(text, "counter", "anti-replay", "invalid signature", "session"):
-		return TransportResult{Outcome: OutcomeCounterError, Reason: env.Response.Reason}
+		return TransportResult{Outcome: OutcomeCounterError, Reason: reason}
 	case status == http.StatusForbidden, status == http.StatusUnauthorized,
 		containsAny(text, "scope", "not authorized", "forbidden"):
-		return TransportResult{Outcome: OutcomePermissionDenied, Reason: env.Response.Reason}
+		return TransportResult{Outcome: OutcomePermissionDenied, Reason: reason}
 	case status == http.StatusBadRequest,
 		containsAny(text, "invalid_command", "invalid parameter", "invalid request"):
-		return TransportResult{Outcome: OutcomeInvalidRequest, Reason: env.Response.Reason}
+		return TransportResult{Outcome: OutcomeInvalidRequest, Reason: reason}
 	default:
-		reason := env.Response.Reason
-		if reason == "" {
-			reason = env.Error
-		}
 		return TransportResult{Outcome: OutcomeFailed, Reason: reason}
 	}
+}
+
+// maxReasonLen bounds the opaque detail string carried into logs/errors so a
+// pathological upstream body cannot bloat a log line.
+const maxReasonLen = 120
+
+// truncateReason clamps a reason string to maxReasonLen runes (rune-safe so a
+// multibyte boundary is never split).
+func truncateReason(s string) string {
+	r := []rune(s)
+	if len(r) <= maxReasonLen {
+		return s
+	}
+	return string(r[:maxReasonLen])
 }
 
 func containsAny(s string, subs ...string) bool {

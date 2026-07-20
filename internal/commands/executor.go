@@ -156,7 +156,7 @@ func (e *Executor) invoke(ctx context.Context, cmd Command, req Request, body []
 
 		case OutcomeAsleep:
 			if wakeAttempts >= e.cfg.WakeMaxAttempts {
-				return Result{}, errVehicleAsleep()
+				return Result{}, withDetail(errVehicleAsleep(), res.Reason)
 			}
 			wakeAttempts++
 			if wErr := e.transport.Wake(ctx, req.VIN, req.AccessToken); wErr != nil {
@@ -171,7 +171,7 @@ func (e *Executor) invoke(ctx context.Context, cmd Command, req Request, body []
 
 		case OutcomeCounterError:
 			if counterRetries >= e.cfg.CounterRetryMax {
-				return Result{}, errCommandFailed("signing session error after re-handshake")
+				return Result{}, withDetail(errCommandFailed("signing session error after re-handshake"), res.Reason)
 			}
 			counterRetries++
 			e.logger.Info("retrying command after session counter error",
@@ -179,18 +179,28 @@ func (e *Executor) invoke(ctx context.Context, cmd Command, req Request, body []
 			)
 
 		case OutcomeNotPaired:
-			return Result{}, errKeyNotPaired("virtual key not paired with vehicle")
+			return Result{}, withDetail(errKeyNotPaired("virtual key not paired with vehicle"), res.Reason)
 
 		case OutcomePermissionDenied:
-			return Result{}, errPermissionDenied("Tesla rejected command: insufficient access")
+			return Result{}, withDetail(errPermissionDenied("Tesla rejected command: insufficient access"), res.Reason)
 
 		case OutcomeInvalidRequest:
-			return Result{}, errInvalidParams("Tesla rejected command parameters")
+			return Result{}, withDetail(errInvalidParams("Tesla rejected command parameters"), res.Reason)
 
 		default: // OutcomeFailed
-			return Result{}, errCommandFailed("vehicle command failed")
+			return Result{}, withDetail(errCommandFailed("vehicle command failed"), res.Reason)
 		}
 	}
+}
+
+// withDetail attaches the opaque transport-side reason to a *CommandError so
+// it can be surfaced in the dispatch outcome log without altering the wire
+// code. A nil error or empty detail is a no-op.
+func withDetail(e *CommandError, detail string) *CommandError {
+	if e != nil && detail != "" {
+		e.Detail = detail
+	}
+	return e
 }
 
 // sleepCtx sleeps for d or returns early if ctx is canceled.

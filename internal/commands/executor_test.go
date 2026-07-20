@@ -280,6 +280,41 @@ func TestExecute_OutcomeMapping(t *testing.T) {
 	}
 }
 
+// TestExecute_ThreadsTransportReasonAsDetail proves the opaque Tesla/proxy
+// reason on a terminal outcome is threaded onto CommandError.Detail (MYR-245
+// observability) — feeding the dispatch outcome log without changing the wire
+// code. Covers each terminal branch that carries a res.Reason.
+func TestExecute_ThreadsTransportReasonAsDetail(t *testing.T) {
+	tests := []struct {
+		name    string
+		outcome Outcome
+		reason  string
+		code    wserrors.ErrorCode
+	}{
+		{"invalid request", OutcomeInvalidRequest, "invalid_command", wserrors.ErrCodeInvalidRequest},
+		{"not paired", OutcomeNotPaired, "keys_not_configured", wserrors.ErrCodeKeyNotPaired},
+		{"permission denied", OutcomePermissionDenied, "missing scope", wserrors.ErrCodePermissionDenied},
+		{"failed", OutcomeFailed, "vehicle error 500", wserrors.ErrCodeCommandFailed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tr := &fakeTransport{enabled: true, results: []TransportResult{{Outcome: tt.outcome, Reason: tt.reason}}}
+			e := newExec(tr)
+			_, err := e.Execute(context.Background(), Request{VIN: "V", Command: "door_lock", Scopes: grantAll()})
+			var cErr *CommandError
+			if !asCommandError(err, &cErr) {
+				t.Fatalf("error is not *CommandError: %v", err)
+			}
+			if cErr.Code != tt.code {
+				t.Errorf("code = %q want %q", cErr.Code, tt.code)
+			}
+			if cErr.Detail != tt.reason {
+				t.Errorf("detail = %q want %q", cErr.Detail, tt.reason)
+			}
+		})
+	}
+}
+
 func TestExecute_InvalidParamsBeforeTransport(t *testing.T) {
 	tr := &fakeTransport{enabled: true, results: []TransportResult{{Outcome: OutcomeOK}}}
 	e := newExec(tr)
