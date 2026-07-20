@@ -154,9 +154,15 @@ Notes:
 - Max 5 third-party apps per vehicle.
 - The owner can revoke access anytime in the Tesla app (subsequent commands
   revert to `key_not_paired`).
-- Unsigned commands (`navigation_request` / `navigation_gps_request`) do NOT
-  require the virtual key, but still need `TESLA_PROXY_URL` configured and a
-  valid owner OAuth token with `vehicle_cmds` scope.
+- Unsigned commands do NOT require the virtual key, but still need
+  `TESLA_PROXY_URL` configured and a valid owner OAuth token with
+  `vehicle_cmds` scope. **Only `navigation_request` is proxy-usable:** the
+  proxy returns `ErrCommandUseRESTAPI` for it and relays it to the Fleet REST
+  API. `navigation_gps_request` is **not** in the proxy's `ExtractCommandAction`
+  switch — the proxy 400s it as `invalid_command` locally, before the car is
+  dialed (the Jul 18 2026 dispatch outage, MYR-245). Dispatch and any
+  proxy-routed nav push therefore use `navigation_request` (share `value` =
+  `"<lat>,<lon>"`, text the car geocodes).
 
 ---
 
