@@ -152,11 +152,12 @@ func TestProcess_Success(t *testing.T) {
 	if got.VIN != "5YJ3E1EA7KF000000" || got.AccessToken != "tok" {
 		t.Errorf("vin/token = %q/%q", got.VIN, got.AccessToken)
 	}
-	// navigation_request carries a single share `value` (a Google Maps URL);
-	// the raw lat/lon and the navigation_gps-only `order` param are gone.
-	wantURL := "https://maps.google.com/?q=37.7955,-122.3937"
-	if got.Params["value"] != wantURL {
-		t.Errorf("value param = %v, want %q", got.Params["value"], wantURL)
+	// navigation_request carries a single share `value` (a raw "<lat>,<lon>"
+	// coordinate pair the car geocodes); the raw lat/lon and the
+	// navigation_gps-only `order` param are gone.
+	wantValue := "37.7955,-122.3937"
+	if got.Params["value"] != wantValue {
+		t.Errorf("value param = %v, want %q", got.Params["value"], wantValue)
 	}
 	if _, ok := got.Params["order"]; ok {
 		t.Errorf("order param must not be sent for navigation_request: %v", got.Params)
@@ -172,23 +173,57 @@ func TestProcess_Success(t *testing.T) {
 	}
 }
 
-// TestMapsShareURL_FullPrecision proves the pickup coordinate is formatted at
-// full precision (strconv 'f', -1) — NOT truncated to 4 decimals (%.4f) — so
-// the car navigates to the exact pickup, not a rounded-off approximation.
-func TestMapsShareURL_FullPrecision(t *testing.T) {
+// TestPickupShareValue_FullPrecision proves the pickup coordinate is formatted
+// at full precision (strconv 'f', -1) — NOT truncated to 4 decimals (%.4f) —
+// so the car navigates to the exact pickup, not a rounded-off approximation.
+func TestPickupShareValue_FullPrecision(t *testing.T) {
 	tests := []struct {
 		name     string
 		lat, lon float64
 		want     string
 	}{
-		{"MYR-245 example", 33.086, -96.8522, "https://maps.google.com/?q=33.086,-96.8522"},
-		{"high precision not truncated", 37.795512, -122.393729, "https://maps.google.com/?q=37.795512,-122.393729"},
-		{"integers stay compact", 1, 2, "https://maps.google.com/?q=1,2"},
+		{"MYR-245 example", 33.086, -96.8522, "33.086,-96.8522"},
+		{"high precision not truncated", 37.795512, -122.393729, "37.795512,-122.393729"},
+		{"integers stay compact", 1, 2, "1,2"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := mapsShareURL(tt.lat, tt.lon); got != tt.want {
-				t.Errorf("mapsShareURL(%v,%v) = %q, want %q", tt.lat, tt.lon, got, tt.want)
+			if got := pickupShareValue(tt.lat, tt.lon); got != tt.want {
+				t.Errorf("pickupShareValue(%v,%v) = %q, want %q", tt.lat, tt.lon, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestProcess_OutOfRangePickupIsTerminal proves a pickup coordinate outside the
+// valid WGS-84 range fails terminally with invalid_request and NEVER dials
+// Tesla (the executor is not called). Covers both lat and lon bounds.
+func TestProcess_OutOfRangePickupIsTerminal(t *testing.T) {
+	tests := []struct {
+		name     string
+		lat, lon float64
+	}{
+		{"lat above 90", 91.0, -96.8522},
+		{"lat below -90", -90.0001, 10.0},
+		{"lon above 180", 33.086, 180.5},
+		{"lon below -180", 33.086, -180.5},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			exec := &fakeExecutor{errs: []error{nil}}
+			st := &fakeStore{claimed: true}
+			d := newTestDispatcher(exec, st, Config{Enabled: true, MaxRetries: 2})
+
+			ev := testEvent()
+			ev.Pickup = events.RidePlace{Latitude: tt.lat, Longitude: tt.lon}
+			d.process(context.Background(), ev)
+
+			if len(exec.calls) != 0 {
+				t.Errorf("out-of-range pickup must not dial Tesla, got %d calls", len(exec.calls))
+			}
+			if len(st.recorded) != 1 || st.recorded[0].status != OutcomeFailed ||
+				st.recorded[0].code != string(wserrors.ErrCodeInvalidRequest) {
+				t.Errorf("recorded = %+v, want one {failed, invalid_request}", st.recorded)
 			}
 		})
 	}
