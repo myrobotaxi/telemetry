@@ -26,10 +26,20 @@ var ErrTransportNotConfigured = errors.New("vehicle command transport is not con
 // Retryable marks a transient failure worth another bounded attempt. cause
 // (optional) carries a sentinel for errors.Is classification (e.g.
 // ErrTransportNotConfigured) without leaking it into Error()/the wire code.
+//
+// Detail (optional) is the opaque Tesla/proxy-side reason for the failure
+// (e.g. `invalid_command`, `already_locked`) threaded up from the transport's
+// TransportResult.Reason. It feeds the dispatch outcome log's error_detail
+// without touching the wire code. It is developer-facing and carries no P1
+// value: the transport's sanitizeReason ENFORCES this before the reason is set
+// here — it strips any URL and any signed-decimal coordinate pair, collapses
+// the remainder to a lowercase [a-z0-9_ .:-] charset, and truncates to 120
+// runes. Only opaque codes/prose survive.
 type CommandError struct {
 	Code      wserrors.ErrorCode
 	Status    int
 	Message   string
+	Detail    string
 	Retryable bool
 	cause     error
 }

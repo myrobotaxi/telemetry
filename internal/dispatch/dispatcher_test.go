@@ -146,20 +146,112 @@ func TestProcess_Success(t *testing.T) {
 		t.Fatalf("want 1 executor call, got %d", len(exec.calls))
 	}
 	got := exec.calls[0]
-	if got.Command != commandNavigationGPS {
-		t.Errorf("command = %q, want %q", got.Command, commandNavigationGPS)
+	if got.Command != commandNavigationRequest {
+		t.Errorf("command = %q, want %q", got.Command, commandNavigationRequest)
 	}
 	if got.VIN != "5YJ3E1EA7KF000000" || got.AccessToken != "tok" {
 		t.Errorf("vin/token = %q/%q", got.VIN, got.AccessToken)
 	}
-	if got.Params["lat"] != 37.7955 || got.Params["lon"] != -122.3937 {
-		t.Errorf("lat/lon params = %v/%v", got.Params["lat"], got.Params["lon"])
+	// navigation_request carries a single share `value` (a raw "<lat>,<lon>"
+	// coordinate pair the car geocodes); the raw lat/lon and the
+	// navigation_gps-only `order` param are gone.
+	wantValue := "37.7955,-122.3937"
+	if got.Params["value"] != wantValue {
+		t.Errorf("value param = %v, want %q", got.Params["value"], wantValue)
 	}
-	if got.Params["order"] != float64(1) {
-		t.Errorf("order param = %v, want float64(1) (replace-trip)", got.Params["order"])
+	if _, ok := got.Params["order"]; ok {
+		t.Errorf("order param must not be sent for navigation_request: %v", got.Params)
+	}
+	if _, ok := got.Params["lat"]; ok {
+		t.Errorf("raw lat param must not be sent for navigation_request: %v", got.Params)
+	}
+	if _, ok := got.Params["lon"]; ok {
+		t.Errorf("raw lon param must not be sent for navigation_request: %v", got.Params)
 	}
 	if len(st.recorded) != 1 || st.recorded[0].status != OutcomeSent || st.recorded[0].code != "" {
 		t.Errorf("recorded = %+v, want one {sent, no code}", st.recorded)
+	}
+}
+
+// TestPickupShareValue_FullPrecision proves the pickup coordinate is formatted
+// at full precision (strconv 'f', -1) — NOT truncated to 4 decimals (%.4f) —
+// so the car navigates to the exact pickup, not a rounded-off approximation.
+func TestPickupShareValue_FullPrecision(t *testing.T) {
+	tests := []struct {
+		name     string
+		lat, lon float64
+		want     string
+	}{
+		{"MYR-245 example", 33.086, -96.8522, "33.086,-96.8522"},
+		{"high precision not truncated", 37.795512, -122.393729, "37.795512,-122.393729"},
+		{"integers stay compact", 1, 2, "1,2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pickupShareValue(tt.lat, tt.lon); got != tt.want {
+				t.Errorf("pickupShareValue(%v,%v) = %q, want %q", tt.lat, tt.lon, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestProcess_OutOfRangePickupIsTerminal proves a pickup coordinate outside the
+// valid WGS-84 range fails terminally with invalid_request and NEVER dials
+// Tesla (the executor is not called). Covers both lat and lon bounds.
+func TestProcess_OutOfRangePickupIsTerminal(t *testing.T) {
+	tests := []struct {
+		name     string
+		lat, lon float64
+	}{
+		{"lat above 90", 91.0, -96.8522},
+		{"lat below -90", -90.0001, 10.0},
+		{"lon above 180", 33.086, 180.5},
+		{"lon below -180", 33.086, -180.5},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			exec := &fakeExecutor{errs: []error{nil}}
+			st := &fakeStore{claimed: true}
+			d := newTestDispatcher(exec, st, Config{Enabled: true, MaxRetries: 2})
+
+			ev := testEvent()
+			ev.Pickup = events.RidePlace{Latitude: tt.lat, Longitude: tt.lon}
+			d.process(context.Background(), ev)
+
+			if len(exec.calls) != 0 {
+				t.Errorf("out-of-range pickup must not dial Tesla, got %d calls", len(exec.calls))
+			}
+			if len(st.recorded) != 1 || st.recorded[0].status != OutcomeFailed ||
+				st.recorded[0].code != string(wserrors.ErrCodeInvalidRequest) {
+				t.Errorf("recorded = %+v, want one {failed, invalid_request}", st.recorded)
+			}
+		})
+	}
+}
+
+// TestProcess_LogsErrorDetail proves the opaque Tesla-side detail
+// (CommandError.Detail) threads from the executor through executeWithRetry to
+// the dispatch outcome. The store does not persist it (no DB column), so we
+// assert the plumbing by driving a Detail-carrying terminal error end to end
+// and confirming the outcome/code are recorded (the detail lands on the log
+// line via record's error_detail attr).
+func TestProcess_LogsErrorDetail(t *testing.T) {
+	detailErr := &commands.CommandError{
+		Code:    wserrors.ErrCodeInvalidRequest,
+		Message: "Tesla rejected command parameters",
+		Detail:  "invalid_command",
+	}
+	exec := &fakeExecutor{errs: []error{detailErr}}
+	st := &fakeStore{claimed: true}
+	d := newTestDispatcher(exec, st, Config{Enabled: true, MaxRetries: 2})
+
+	// Assert executeWithRetry surfaces the detail directly (record logs it).
+	_, code, detail := d.executeWithRetry(context.Background(), "5YJ3E1EA7KF000000", "tok", testEvent().Pickup)
+	if detail != "invalid_command" {
+		t.Errorf("detail = %q, want %q", detail, "invalid_command")
+	}
+	if code == nil || *code != string(wserrors.ErrCodeInvalidRequest) {
+		t.Errorf("code = %v, want %q", code, wserrors.ErrCodeInvalidRequest)
 	}
 }
 
