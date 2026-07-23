@@ -112,11 +112,16 @@ func (e *Executor) Execute(ctx context.Context, req Request) (Result, error) {
 		return Result{}, errPermissionDenied("Tesla token lacks the " + string(cmd.Scope) + " scope for this command")
 	}
 
-	// Degrade gracefully when the signing transport is not configured.
-	if !e.transport.Enabled() {
-		if cmd.SignerRequired {
+	// Degrade gracefully when the required transport is not configured. Signed
+	// commands need the signing proxy (Enabled); unsigned commands need the
+	// direct Fleet REST path (RESTEnabled) and must NOT depend on the proxy —
+	// they route straight to Fleet because proxy v0.4.1 mis-forwards them
+	// (MYR-245).
+	if cmd.SignerRequired {
+		if !e.transport.Enabled() {
 			return Result{}, errKeyNotPaired("vehicle command signing is not configured (no proxy)")
 		}
+	} else if !e.transport.RESTEnabled() {
 		return Result{}, errTransportNotConfigured()
 	}
 
@@ -137,7 +142,13 @@ func (e *Executor) Execute(ctx context.Context, req Request) (Result, error) {
 // return, and the transient outcomes (asleep, counter) each bound their own
 // retry counter, so it cannot spin.
 func (e *Executor) invoke(ctx context.Context, cmd Command, req Request, body []byte) (Result, error) {
-	tReq := TransportRequest{VIN: req.VIN, Command: cmd.Name, Token: req.AccessToken, Body: body}
+	tReq := TransportRequest{
+		VIN:            req.VIN,
+		Command:        cmd.Name,
+		Token:          req.AccessToken,
+		Body:           body,
+		SignerRequired: cmd.SignerRequired,
+	}
 
 	wakeAttempts := 0
 	counterRetries := 0

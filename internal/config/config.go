@@ -142,14 +142,24 @@ type IdentityConfig struct {
 	AuthRateLimitBurst     int
 }
 
-// ProxyConfig holds settings for the Tesla Fleet API proxy (tesla-http-proxy).
-// All fields are optional — when URL is empty, the fleet config push endpoint
-// is disabled.
+// ProxyConfig holds settings for the Tesla Fleet API proxy (tesla-http-proxy)
+// and the direct Fleet REST base. URL/FleetTelemetry* are optional — when URL
+// is empty, the fleet config push endpoint is disabled. FleetAPIBaseURL is
+// REQUIRED and validated at startup: unsigned commands (navigation_request)
+// are routed straight to it, NOT through the proxy, because tesla-http-proxy
+// v0.4.1 mis-forwards REST-API commands (MYR-245).
 type ProxyConfig struct {
 	URL                    string
 	FleetTelemetryHostname string
 	FleetTelemetryPort     int
 	FleetTelemetryCA       string // PEM-encoded CA cert
+
+	// FleetAPIBaseURL is the Tesla Fleet API origin (scheme + host, no path)
+	// for direct REST command calls. Defaults to the North-America prod region
+	// (https://fleet-api.prd.na.vn.cloud.tesla.com). Must parse as an https URL
+	// — validated fail-fast at startup so unsigned commands never silently fall
+	// back to the (mis-forwarding) proxy.
+	FleetAPIBaseURL string
 }
 
 // TeslaOAuthConfig holds the Tesla OAuth2 application credentials needed to

@@ -39,6 +39,11 @@ type TransportRequest struct {
 	Command string
 	Token   string
 	Body    []byte
+	// SignerRequired mirrors the registry entry: true routes to the signing
+	// proxy, false routes straight to the Fleet REST API (MYR-245). The
+	// RoutingTransport uses it to pick the endpoint; a plain ProxyTransport or
+	// FleetRESTTransport ignores it.
+	SignerRequired bool
 }
 
 // TransportResult is the classified transport response. Reason is an
@@ -62,4 +67,10 @@ type Transport interface {
 	// (proxy URL present). When false the Executor degrades to
 	// key_not_paired for signer-required commands instead of dialing.
 	Enabled() bool
+	// RESTEnabled reports whether the direct Fleet REST path is configured
+	// (fleet base URL present). When false the Executor degrades to
+	// transport_unconfigured for unsigned commands instead of dialing. It is
+	// independent of Enabled(): unsigned commands (navigation_request) go
+	// straight to Fleet REST and must NOT depend on the proxy (MYR-245).
+	RESTEnabled() bool
 }

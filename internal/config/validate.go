@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -18,6 +19,7 @@ func validate(cfg *Config) error {
 	errs = append(errs, validateWebSocket(cfg.websocket)...)
 	errs = append(errs, validateAuth(cfg.auth)...)
 	errs = append(errs, validateIdentity(cfg.identity)...)
+	errs = append(errs, validateProxy(cfg.proxy)...)
 
 	if len(errs) > 0 {
 		return fmt.Errorf("config.Validate: %w:\n  %s",
@@ -160,6 +162,30 @@ func validateIdentity(i IdentityConfig) []string {
 	}
 	if i.AuthRateLimitBurst < 1 {
 		errs = append(errs, fmt.Sprintf("identity.auth_rate_limit_burst: %d must be >= 1", i.AuthRateLimitBurst))
+	}
+	return errs
+}
+
+// validateProxy checks the Fleet API command-transport settings. The proxy
+// URL itself is optional (empty disables signed commands + fleet-config push),
+// but FleetAPIBaseURL is REQUIRED: unsigned commands route directly to it
+// (MYR-245), so it must be a well-formed https origin — fail fast rather than
+// silently fall back to the mis-forwarding proxy.
+func validateProxy(p ProxyConfig) []string {
+	var errs []string
+	base := p.FleetAPIBaseURL
+	if base == "" {
+		errs = append(errs, "proxy.fleet_api_base_url (FLEET_API_BASE_URL): must not be empty")
+		return errs
+	}
+	u, err := url.Parse(base)
+	switch {
+	case err != nil:
+		errs = append(errs, fmt.Sprintf("proxy.fleet_api_base_url (FLEET_API_BASE_URL): %q is not a valid URL", base))
+	case u.Scheme != "https":
+		errs = append(errs, fmt.Sprintf("proxy.fleet_api_base_url (FLEET_API_BASE_URL): %q must use https", base))
+	case u.Host == "":
+		errs = append(errs, fmt.Sprintf("proxy.fleet_api_base_url (FLEET_API_BASE_URL): %q must include a host", base))
 	}
 	return errs
 }

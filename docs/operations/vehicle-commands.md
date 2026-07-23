@@ -42,12 +42,18 @@ strictly better:
    security posture. This satisfies MYR-180's "key material is config-only,
    never generated/committed, never in the server process" constraint by
    construction.
-3. **Signing, session caching, wake, and unsigned-command forwarding are
-   free.** The proxy signs signer-required commands, caches per-vehicle
-   sessions (`TESLA_CACHE_FILE`), re-handshakes on counter errors, and
-   forwards unsigned commands (`navigation_request`) straight to the Fleet
-   API (`pkg/proxy/proxy.go`: `navigation_request → ErrCommandUseRESTAPI →
-   forwardRequest`). Embedding the library would re-implement all of this.
+3. **Signing, session caching, and wake are free.** The proxy signs
+   signer-required commands, caches per-vehicle sessions
+   (`TESLA_CACHE_FILE`), and re-handshakes on counter errors. Embedding the
+   library would re-implement all of this. **Caveat (MYR-245, found live
+   2026-07-23):** the pinned proxy (v0.4.1) does NOT cleanly forward
+   unsigned REST-API commands — POSTing `navigation_request` to it
+   double-writes an HTTP 400 body (`"command requires using the REST API"`
+   followed by `"upstream internal error"`). Unsigned commands therefore
+   bypass the proxy and POST directly to the Fleet REST API
+   (`FLEET_API_BASE_URL`, `RoutingTransport` picks per the registry's
+   `SignerRequired` flag) — the same body returns
+   `{"response":{"result":true,"queued":true}}` direct.
 4. **Lower risk.** The proxy is Tesla's own reference implementation of the
    exact command REST surface. No large dependency (protobuf/crypto) is
    pulled into this module.

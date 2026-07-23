@@ -22,6 +22,11 @@ type fakeTransport struct {
 
 func (f *fakeTransport) Enabled() bool { return f.enabled }
 
+// RESTEnabled mirrors enabled: the fake models a transport that is either fully
+// configured (both signing + REST) or fully unconfigured, which is all the
+// executor gate needs to exercise both the signed and unsigned degraded paths.
+func (f *fakeTransport) RESTEnabled() bool { return f.enabled }
+
 func (f *fakeTransport) Command(_ context.Context, req TransportRequest) (TransportResult, error) {
 	f.calls = append(f.calls, req)
 	if f.cmdErr != nil {

@@ -48,12 +48,8 @@ func setupNavDispatcher(
 	rideRepo *store.RideRequestRepo,
 	logger *slog.Logger,
 ) error {
-	proxyURL := cfg.Proxy().URL
-	transport := commands.NewProxyTransport(
-		proxyURL,
-		proxyHTTPClient(proxyURL, logger),
-		logger.With(slog.String("component", "dispatch-transport")),
-	)
+	transport := newCommandTransport(cfg.Proxy().URL, cfg.Proxy().FleetAPIBaseURL,
+		logger.With(slog.String("component", "dispatch-transport")))
 	executor := commands.NewExecutor(transport, logger.With(slog.String("component", "dispatch-executor")))
 
 	var tokenOpts []telemetry.TeslaTokenResolverOption

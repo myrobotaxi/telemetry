@@ -461,11 +461,8 @@ func setupFleetConfigEndpoint(
 // required command resolves to key_not_paired.
 func setupVehicleCommandEndpoint(deps httpRouteDeps, vehicles telemetry.VehicleSnapshotReader) {
 	proxyURL := deps.cfg.Proxy().URL
-	transport := commands.NewProxyTransport(
-		proxyURL,
-		proxyHTTPClient(proxyURL, deps.logger),
-		deps.logger.With(slog.String("component", "command-transport")),
-	)
+	transport := newCommandTransport(proxyURL, deps.cfg.Proxy().FleetAPIBaseURL,
+		deps.logger.With(slog.String("component", "command-transport")))
 	executor := commands.NewExecutor(transport, deps.logger.With(slog.String("component", "command-executor")))
 
 	var opts []telemetry.VehicleCommandOption
@@ -495,6 +492,19 @@ func setupVehicleCommandEndpoint(deps httpRouteDeps, vehicles telemetry.VehicleS
 	} else {
 		deps.logger.Warn("vehicle command endpoint mounted but signing disabled: TESLA_PROXY_URL not set — signer-required commands return key_not_paired")
 	}
+}
+
+// newCommandTransport builds the RoutingTransport the command Executor uses:
+// SIGNED commands go to the tesla-http-proxy (loopback-aware client, as
+// before); UNSIGNED commands (navigation_request) go directly to the Fleet
+// REST API because proxy v0.4.1 mis-forwards them (MYR-245). The Fleet REST
+// transport uses a default, TLS-verified client — never the proxy's loopback
+// InsecureSkipVerify client — because it dials the real public Fleet API host.
+// fleetBaseURL is validated (https, non-empty) fail-fast in config.
+func newCommandTransport(proxyURL, fleetBaseURL string, logger *slog.Logger) *commands.RoutingTransport {
+	proxyTr := commands.NewProxyTransport(proxyURL, proxyHTTPClient(proxyURL, logger), logger)
+	fleetTr := commands.NewFleetRESTTransport(fleetBaseURL, nil, logger)
+	return commands.NewRoutingTransport(proxyTr, fleetTr, logger)
 }
 
 // buildTeslaTLS creates a TLS config for the Tesla mTLS port. It loads
