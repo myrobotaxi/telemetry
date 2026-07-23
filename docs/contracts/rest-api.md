@@ -71,6 +71,8 @@ Every FR/NFR listed here is anchored in at least one section of this doc. The ta
    5. Invite endpoints (3 operations)
    6. `DELETE /api/users/me`
    7. `GET /api/users/me/export`
+   10. Authentication (identity module — MYR-193)
+   11. In-app Tesla account link (MYR-246)
 8. Resource schemas
 9. Observability
 10. Code <-> spec divergences
@@ -1623,6 +1625,114 @@ Public JSON Web Key Set (RFC 7517) of the ES256 verification keys. Public, cache
 
 All JWKS fields are P0 (public by definition). The `kid` is the RFC 7638 thumbprint of the key.
 
+### 7.11 In-app Tesla account link (owner onboarding — MYR-246)
+
+Two owner-facing endpoints that let a signed-in user link their Tesla Fleet
+account **from inside the native app** (iOS `ASWebAuthenticationSession`),
+replacing the developer-only localhost `ops auth link` flow. They mint the
+Tesla authorize URL server-side (so the Tesla `client_secret` never reaches the
+device) and complete the code→token exchange on the server, persisting the
+tokens through the existing encrypted `Account` dual-write path
+(`store.AccountRepo.UpdateTeslaToken`, §MYR-62). The OAuth primitives are shared
+with the ops CLI via `internal/teslaauth`; the endpoints live in
+`internal/teslalink`.
+
+**Enablement.** Mounted only when `TESLA_LINK_REDIRECT_BASE_URL` **and** the
+Tesla OAuth credentials (`AUTH_TESLA_ID` / `AUTH_TESLA_SECRET`) are configured;
+otherwise the routes are not registered (the app's "Link your Tesla" button has
+no backend). This mirrors the fleet-config endpoint's optional-mount pattern.
+
+**End-to-end flow.**
+
+1. App (authenticated) → `POST /api/tesla/link/start` → receives the Tesla
+   `authorizeUrl`.
+2. App opens `authorizeUrl` in `ASWebAuthenticationSession` with
+   `callbackURLScheme = "myrobotaxi"`.
+3. User consents on `auth.tesla.com`. Tesla redirects the browser to the
+   backend `redirect_uri` = `TESLA_LINK_REDIRECT_BASE_URL` +
+   `/api/tesla/link/callback`.
+4. The callback validates `state`, exchanges the `code` for tokens, persists
+   them for the calling user, and issues a `302` to the app deep link
+   `myrobotaxi://tesla-linked?status=…`.
+5. `ASWebAuthenticationSession` intercepts the `myrobotaxi://` redirect and
+   returns control to the app.
+
+**Scopes.** The authorize URL always requests the full Fleet scope set —
+`openid offline_access user_data vehicle_device_data vehicle_location
+vehicle_cmds vehicle_charging_cmds` — and always sends
+`prompt_missing_scopes=true` (MYR-242), so an already-linked owner re-consents
+to any newly requested scope instead of silently keeping the old set. Verify the
+**granted** JWT `scp` claim after linking, not the request.
+
+#### 7.11.1 `POST /api/tesla/link/start`
+
+Owner-authenticated. Creates a short-lived (10 min), single-use PKCE + `state`
+session bound to the caller's user id and returns the Tesla authorize URL.
+
+**Auth:** `Authorization: Bearer <access token>` (ES256 or HS256, §3). Missing/
+invalid → `401 auth_failed`.
+
+**Request body:** none.
+
+**Response — 200 OK**
+
+```json
+{
+  "authorizeUrl": "https://auth.tesla.com/oauth2/v3/authorize?client_id=…&redirect_uri=…&scope=…&state=…&code_challenge=…&code_challenge_method=S256&prompt_missing_scopes=true&response_type=code",
+  "state": "<base64url-32B CSRF nonce>"
+}
+```
+
+| Field | Type | Classification | Notes |
+|-------|------|----------------|-------|
+| `authorizeUrl` | `string` | P0 | Public Tesla authorize URL; contains no secret (client_secret is never included). |
+| `state` | `string` | P0 | CSRF nonce and the server-side session key. Echoed for optional client correlation; the server is the authority on validation. |
+
+Errors: `401 auth_failed` (missing/invalid bearer), `500 internal_error`
+(randomness/PKCE failure).
+
+#### 7.11.2 `GET /api/tesla/link/callback`
+
+**Unauthenticated** (Tesla redirects a browser here — there is no bearer token).
+The caller is recovered from the single-use `state` session created at `/start`,
+so a forged callback cannot bind tokens onto an arbitrary account. Query params
+are Tesla's standard OAuth redirect: `code`, `state`, and on denial `error` /
+`error_description`.
+
+On every outcome the handler responds `302 Found` with `Location:
+myrobotaxi://tesla-linked?status=<success|error>[&reason=<code>]` (plus a tiny
+HTML fallback page with a tappable link + meta-refresh). **No tokens or PII ever
+appear in the redirect URL or logs.** Outcome classification:
+
+| `status` | `reason` | Cause |
+|----------|----------|-------|
+| `success` | — | Tokens exchanged and persisted for the caller. |
+| `error` | `tesla_denied` | Tesla returned an `error` param (user declined / scope refusal). |
+| `error` | `invalid_state` | No matching session — unknown, replayed, or expired `state`. |
+| `error` | `missing_code` | No authorization `code` in the redirect. |
+| `error` | `exchange_failed` | Tesla rejected the code→token exchange. |
+| `error` | `account_not_provisioned` | The caller has no Tesla `Account` row to write into (see implementation notes). |
+| `error` | `persist_failed` | Token encryption / DB write failed. |
+
+**Implementation notes.**
+
+- Tokens are written via `AccountRepo.UpdateTeslaToken` (the sanctioned Prisma-
+  `Account` dual-write). This is an **UPDATE**: the caller's `Account` row must
+  already exist (its `userId` is a Prisma `User` cuid; `Account.userId` is a FK
+  to `User`). For the MVP, tester provisioning (a Prisma `User` + a `tesla`
+  `Account` row, bound to the app's Apple identity via `AUTH_APPLE_BOOTSTRAP`)
+  is an ops step — see [`../architecture/owner-onboarding.md`](../architecture/owner-onboarding.md).
+  A fully self-serve version needs a server-side `Account` **upsert** (INSERT
+  with the real Tesla `providerAccountId` from a userinfo call) + server-side
+  vehicle sync; that is out of scope here and tracked in the design doc.
+- Sessions are in-memory, single-use, and TTL-bounded (10 min). A process
+  restart drops in-flight sessions (the user simply retries the link — nothing
+  is persisted until the callback succeeds).
+- **Ops must register the exact callback URI** (`TESLA_LINK_REDIRECT_BASE_URL` +
+  `/api/tesla/link/callback`) as an Allowed Redirect URI on the Tesla Fleet app,
+  alongside the existing web (`https://myrobotaxi.app/api/auth/callback/tesla`)
+  and CLI (`http://localhost:8765/callback`) URIs.
+
 ---
 
 ## 8. Resource schemas
@@ -1695,6 +1805,7 @@ Same as [`websocket-protocol.md`](websocket-protocol.md) §10 divergence managem
 ## 11. Change log
 
 | Date | Change | Author |
+| 2026-07-23 | **User-facing in-app Tesla OAuth link — owner onboarding ([MYR-246](https://linear.app/myrobotaxi/issue/MYR-246)).** New §7.11: `POST /api/tesla/link/start` (owner-authenticated; mints a 10-min single-use PKCE+state session bound to the caller and returns the Tesla authorize URL — full scope set `openid offline_access user_data vehicle_device_data vehicle_location vehicle_cmds vehicle_charging_cmds` + `prompt_missing_scopes=true`, MYR-242) and `GET /api/tesla/link/callback` (unauthenticated Tesla redirect; validates `state`, exchanges the code, persists tokens via the existing encrypted `AccountRepo.UpdateTeslaToken` dual-write, then `302`s to the `myrobotaxi://tesla-linked?status=…` app deep link — no tokens/PII in the URL or logs). Lets the iOS app link a Tesla account in-app (`ASWebAuthenticationSession`) instead of the localhost `ops auth link` dev flow; the `client_secret` stays server-side. OAuth primitives factored out of `cmd/ops/auth_oauth.go` into shared `internal/teslaauth` (PKCE, authorize URL, code→token exchange); endpoints in new `internal/teslalink` (single-use TTL session store + handler). New config `TESLA_LINK_REDIRECT_BASE_URL` (enables the surface; its `/api/tesla/link/callback` must be registered on the Tesla app) + `TESLA_LINK_APP_REDIRECT` (default `myrobotaxi://tesla-linked`). No new persisted fields, WS messages, or error codes (start uses `auth_failed`/`internal_error`; callback redirects rather than emitting the error envelope). MVP requires the callee `Account` row to be pre-provisioned (ops step, bound via `AUTH_APPLE_BOOTSTRAP`) — self-serve `Account` upsert + server-side vehicle sync are documented follow-ups in [`../architecture/owner-onboarding.md`](../architecture/owner-onboarding.md). Wired in `cmd/telemetry-server/wiring_tesla_link.go`. | go-engineer |
 | 2026-07-19 | **Dispatch pushes the pickup via `navigation_request`, not `navigation_gps_request` ([MYR-245](https://linear.app/myrobotaxi/issue/MYR-245)).** Fixes the Jul 18 2026 prod outage where every accept recorded `dispatch_error = invalid_request` and the car was never contacted. Root cause: the tesla-http-proxy's `ExtractCommandAction` has **no case** for `navigation_gps_request`, so the proxy returns HTTP 400 `invalid_command` **locally, before the vehicle is dialed**; our `classifyResponse` mapped that 400 → `invalid_request`. Only `navigation_request` is proxy-forwardable (proxy returns `ErrCommandUseRESTAPI` → Fleet REST). Dispatch now sends `navigation_request` with the pickup's full-precision `"<lat>,<lon>"` coordinate pair as the share `value` (text the car's nav geocoder resolves — the raw-coordinate form Teslemetry/Tessie-class clients use; on-car acceptance settled by MYR-245 live verification, fallbacks are the pickup address label or a maps URL). The `navigation_gps`-only `order` param is dropped; an out-of-range pickup coordinate now fails terminally with `invalid_request` **without dialing Tesla**. `navigation_gps_request` stays registered for API completeness but is documented NOT proxy-usable (§7.9 catalog + note updated; §7.8 "Dispatch outcome" updated). **Observability (no wire/schema change, no new DB column):** `classifyResponse` now falls back to the top-level `error` string (the proxy's `invalid_command` shape carries no envelope reason) in every non-OK branch and **sanitizes** it (strips URLs + signed-decimal coordinate pairs, collapses to a lowercase `[a-z0-9_ .:-]` charset, truncates to 120) before it reaches any log; a new optional `CommandError.Detail` carries that opaque reason, surfaced only on the server-side dispatch outcome log as `error_detail` (the `dispatch_error` code set is unchanged). Implementation: `internal/dispatch/dispatcher_retry.go` + `dispatcher.go`, `internal/commands/{registry,proxy_transport,errors,executor}.go`; docs/operations/vehicle-commands.md nav note corrected. | go-engineer |
 | 2026-07-23 | **Unsigned nav commands route directly to the Fleet REST API ([MYR-245](https://linear.app/myrobotaxi/issue/MYR-245) layer 2).** The Jul 20 2026 ride still recorded `dispatch_error = invalid_request` after the `navigation_request` switch: the pinned tesla-http-proxy (v0.4.1) mis-forwards REST-API commands — verified live, it double-writes an HTTP 400 body (`"command requires using the REST API"` + `"upstream internal error"`) instead of relaying to Fleet. The same body POSTed directly to `https://fleet-api.prd.na.vn.cloud.tesla.com` returned `{"response":{"result":true,"queued":true}}` and the vehicle received the destination (live-verified 2026-07-23). New `RoutingTransport` sends `SignerRequired` commands to the proxy (unchanged) and unsigned commands (`navigation_request`) directly to Fleet REST (`FLEET_API_BASE_URL`, validated fail-fast at startup; 408/asleep → the existing wake+retry loop; 400/401/403/422 classified as before). `transport_unconfigured` now also covers a missing Fleet base for unsigned commands. §7.8 dispatch note, §7.9 transport/catalog notes, and the ops runbook corrected (the proxy does NOT forward unsigned commands in this deployment). | go-engineer |
 | 2026-07-17 | **`POST /api/auth/refresh` enriches `user.name`/`user.email` on refresh, not just `user.id` ([MYR-243](https://linear.app/myrobotaxi/issue/MYR-243)).** §7.10.2 previously documented refresh's `user` as carrying "at least `id`" -- installs whose local profile cache was wiped got a blank name/email until the next full sign-in even though the fields were already `omitempty` on the wire. `Service.Refresh`'s successful-rotation path now best-effort enriches `UserInfo` the same way sign-in does, via a new `Store.GetUserProfile(ctx, userID)` that reads the `go_identity_apple` binding row (freshest by `last_login_at`), falling back to `go_users` when no binding row exists. **No wire-shape change** -- `name`/`email` were already optional fields; this only changes which requests populate them. A profile-lookup failure is fail-open for enrichment only, never for auth: the refresh still succeeds and `user` degrades to `id`-only rather than the request failing (logged via the identity module's existing audit trail, no PII). §7.10.2 response description updated accordingly; a stale `§7.9.1` cross-reference (section does not exist) corrected to `§7.10.1`. Implementation: `internal/identity/pgstore.go` (`GetUserProfile`), `internal/identity/service.go` (`Store` interface + `Service.projectUser`), `internal/identity/audit.go` (`profileLookupFailed`). | go-engineer |
