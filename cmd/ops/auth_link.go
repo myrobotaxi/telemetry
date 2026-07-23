@@ -13,6 +13,8 @@ import (
 	"os/exec"
 	"runtime"
 	"time"
+
+	"github.com/myrobotaxi/telemetry/internal/teslaauth"
 )
 
 const (
@@ -25,15 +27,9 @@ const (
 	// complete the browser flow before giving up.
 	defaultOAuthTimeout = 2 * time.Minute
 
-	// teslaOAuthAuthorizeURL is Tesla's OAuth2 authorize endpoint.
-	teslaOAuthAuthorizeURL = "https://auth.tesla.com/oauth2/v3/authorize"
-
-	// teslaOAuthTokenURL is Tesla's OAuth2 token endpoint (same one used
-	// by refresh_token grant).
-	teslaOAuthTokenURL = "https://auth.tesla.com/oauth2/v3/token" //#nosec G101 -- public OAuth endpoint URL, not a credential
-
-	// defaultTeslaOAuthScopes is the Fleet API scope set needed by the
-	// ops CLI (read telemetry + push fleet config commands).
+	// defaultTeslaOAuthScopes is the Fleet API scope set the ops CLI requests
+	// (read telemetry + push fleet config commands). The user-facing in-app
+	// link flow requests the broader teslaauth.FullScopes set (MYR-246).
 	defaultTeslaOAuthScopes = "openid offline_access vehicle_device_data vehicle_cmds vehicle_charging_cmds"
 )
 
@@ -47,7 +43,8 @@ type authLinkOutput struct {
 // runAuthLink drives the full Tesla OAuth2 authorization_code + PKCE flow:
 // spins up a localhost callback server, opens the Tesla authorize URL in
 // the developer's browser, exchanges the returned code for fresh tokens,
-// and persists them to the Account row.
+// and persists them to the Account row. The OAuth primitives are shared with
+// the server-side in-app link endpoints via internal/teslaauth (MYR-246).
 func runAuthLink(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("auth link", flag.ContinueOnError)
 	userID := fs.String("user-id", "", "MyRoboTaxi user id (Prisma cuid)")
@@ -74,24 +71,24 @@ func runAuthLink(ctx context.Context, args []string) error {
 	}
 	defer db.Close()
 
-	pkce, err := newPKCE()
+	pkce, err := teslaauth.GeneratePKCE()
 	if err != nil {
 		return fmt.Errorf("generate pkce: %w", err)
 	}
-	state, err := randomURLSafeString(24)
+	state, err := teslaauth.RandomURLSafeString(24)
 	if err != nil {
 		return fmt.Errorf("generate state: %w", err)
 	}
 
 	redirectURI := fmt.Sprintf("http://localhost:%d/callback", *port)
-	authorizeURL := buildAuthorizeURL(clientID, redirectURI, *scopes, state, pkce.challenge)
+	authorizeURL := teslaauth.BuildAuthorizeURL(clientID, redirectURI, *scopes, state, pkce.Challenge)
 
 	code, err := runCallbackServer(ctx, logger, *port, state, authorizeURL, *timeout)
 	if err != nil {
 		return err
 	}
 
-	tok, err := exchangeCodeForToken(ctx, logger, clientID, clientSecret, redirectURI, code, pkce.verifier)
+	tok, err := teslaauth.ExchangeCodeForToken(ctx, logger, clientID, clientSecret, redirectURI, code, pkce.Verifier)
 	if err != nil {
 		return fmt.Errorf("exchange code for token: %w", err)
 	}
@@ -242,19 +239,19 @@ func respondCallback(w http.ResponseWriter, status int, title, body string) {
 // the platform-appropriate command. On failure it logs a warning; the
 // user is already told to open the URL manually in the stderr banner.
 //
-// The URL passed here is the authorize URL built by buildAuthorizeURL
-// from static constants plus CLI flags and env vars — not arbitrary
-// user input — so gosec G204 (subprocess launched with variable) is
-// suppressed on each exec call.
+// The URL passed here is the authorize URL built by teslaauth.BuildAuthorizeURL
+// from static constants plus CLI flags and env vars — not arbitrary user
+// input — so gosec G204 (subprocess launched with variable) is suppressed on
+// each exec call.
 func openBrowser(ctx context.Context, logger *slog.Logger, browserURL string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.CommandContext(ctx, "open", browserURL) //#nosec G204 -- browserURL is the CLI-built Tesla authorize URL
+		cmd = exec.CommandContext(ctx, "open", browserURL) //#nosec G204 G702 -- browserURL is the CLI-built Tesla authorize URL
 	case "linux":
-		cmd = exec.CommandContext(ctx, "xdg-open", browserURL) //#nosec G204 -- browserURL is the CLI-built Tesla authorize URL
+		cmd = exec.CommandContext(ctx, "xdg-open", browserURL) //#nosec G204 G702 -- browserURL is the CLI-built Tesla authorize URL
 	case "windows":
-		cmd = exec.CommandContext(ctx, "rundll32", "url.dll,FileProtocolHandler", browserURL) //#nosec G204 -- browserURL is the CLI-built Tesla authorize URL
+		cmd = exec.CommandContext(ctx, "rundll32", "url.dll,FileProtocolHandler", browserURL) //#nosec G204 G702 -- browserURL is the CLI-built Tesla authorize URL
 	default:
 		logger.Warn("unsupported platform for auto-open — open the URL manually",
 			slog.String("platform", runtime.GOOS),

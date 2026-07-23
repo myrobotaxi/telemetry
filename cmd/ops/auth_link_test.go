@@ -2,94 +2,16 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
 )
 
-func TestNewPKCE_ChallengeIsSha256OfVerifier(t *testing.T) {
-	pkce, err := newPKCE()
-	if err != nil {
-		t.Fatalf("newPKCE: %v", err)
-	}
-	if pkce.verifier == "" || pkce.challenge == "" {
-		t.Fatalf("empty pkce pair: %+v", pkce)
-	}
-
-	// challenge must be base64url(sha256(verifier)) with no padding.
-	sum := sha256.Sum256([]byte(pkce.verifier))
-	want := base64.RawURLEncoding.EncodeToString(sum[:])
-	if pkce.challenge != want {
-		t.Errorf("challenge mismatch: got %q, want %q", pkce.challenge, want)
-	}
-
-	// Two consecutive pkce pairs must differ.
-	other, err := newPKCE()
-	if err != nil {
-		t.Fatalf("second newPKCE: %v", err)
-	}
-	if other.verifier == pkce.verifier {
-		t.Error("expected distinct verifiers across pkce pairs")
-	}
-}
-
-func TestBuildAuthorizeURL_ContainsAllRequiredParams(t *testing.T) {
-	urlStr := buildAuthorizeURL(
-		"client-123",
-		"http://localhost:8765/callback",
-		"openid offline_access",
-		"state-xyz",
-		"challenge-abc",
-	)
-
-	u, err := url.Parse(urlStr)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if got := u.Scheme + "://" + u.Host + u.Path; got != teslaOAuthAuthorizeURL {
-		t.Errorf("endpoint: got %q, want %q", got, teslaOAuthAuthorizeURL)
-	}
-	q := u.Query()
-	checks := map[string]string{
-		"response_type":         "code",
-		"client_id":             "client-123",
-		"redirect_uri":          "http://localhost:8765/callback",
-		"scope":                 "openid offline_access",
-		"state":                 "state-xyz",
-		"code_challenge":        "challenge-abc",
-		"code_challenge_method": "S256",
-	}
-	for k, want := range checks {
-		if got := q.Get(k); got != want {
-			t.Errorf("param %s: got %q, want %q", k, got, want)
-		}
-	}
-}
-
-func TestBuildTokenExchangeForm_AssemblesAllFields(t *testing.T) {
-	form := buildTokenExchangeForm("cid", "csec", "http://localhost:8765/callback", "the-code", "pkce-verifier")
-
-	want := map[string]string{
-		"grant_type":    "authorization_code",
-		"client_id":     "cid",
-		"client_secret": "csec",
-		"code":          "the-code",
-		"redirect_uri":  "http://localhost:8765/callback",
-		"code_verifier": "pkce-verifier",
-	}
-	for k, v := range want {
-		if got := form.Get(k); got != v {
-			t.Errorf("form[%s]: got %q, want %q", k, got, v)
-		}
-	}
-}
+// The Tesla OAuth PKCE / authorize-URL / token-exchange primitives moved to
+// internal/teslaauth (MYR-246) and are tested there. The callback-server
+// handler remains CLI-local (the localhost one-shot flow) and is tested here.
 
 func TestCallbackHandler_SuccessPath(t *testing.T) {
 	result := make(chan callbackResult, 1)
@@ -174,86 +96,4 @@ func TestCallbackHandler_DuplicateSendDoesNotBlock(t *testing.T) {
 	case <-time.After(1 * time.Second):
 		t.Fatal("duplicate callback blocked on full channel")
 	}
-}
-
-func TestExchangeCodeForToken_SuccessParses200Response(t *testing.T) {
-	var gotForm url.Values
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		gotForm, _ = url.ParseQuery(string(body))
-		if ct := r.Header.Get("Content-Type"); ct != "application/x-www-form-urlencoded" {
-			t.Errorf("content-type: got %q", ct)
-		}
-		// Literal JSON avoids the gosec G117 literal-struct credential scanner.
-		_, _ = w.Write([]byte(`{"access_token":"fake-access","refresh_token":"fake-refresh","expires_in":3600,"token_type":"Bearer"}`))
-	}))
-	defer srv.Close()
-	withTokenEndpoint(t, srv.URL)
-
-	tok, err := exchangeCodeForToken(
-		context.Background(),
-		slog.Default(),
-		"cid", "csec", "http://localhost:8765/callback", "the-code", "pkce-verifier",
-	)
-	if err != nil {
-		t.Fatalf("exchangeCodeForToken: %v", err)
-	}
-	if tok.AccessToken != "fake-access" || tok.RefreshToken != "fake-refresh" {
-		t.Errorf("token decode: %+v", tok)
-	}
-	if tok.ExpiresIn != 3600 {
-		t.Errorf("expires_in: %d", tok.ExpiresIn)
-	}
-	// Confirm the real function built the expected form body.
-	for k, want := range map[string]string{
-		"grant_type":    "authorization_code",
-		"client_id":     "cid",
-		"client_secret": "csec",
-		"code":          "the-code",
-		"redirect_uri":  "http://localhost:8765/callback",
-		"code_verifier": "pkce-verifier",
-	} {
-		if got := gotForm.Get(k); got != want {
-			t.Errorf("form[%s]: got %q, want %q", k, got, want)
-		}
-	}
-}
-
-func TestExchangeCodeForToken_Non200ReturnsError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
-	}))
-	defer srv.Close()
-	withTokenEndpoint(t, srv.URL)
-
-	_, err := exchangeCodeForToken(context.Background(), slog.Default(), "c", "s", "r", "c", "v")
-	if err == nil {
-		t.Fatal("expected error on 401")
-	}
-	if !strings.Contains(err.Error(), "401") || !strings.Contains(err.Error(), "invalid_grant") {
-		t.Errorf("error should include status + body, got: %v", err)
-	}
-}
-
-func TestExchangeCodeForToken_MissingTokenFieldsRejected(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"access_token":"","refresh_token":"","expires_in":0}`))
-	}))
-	defer srv.Close()
-	withTokenEndpoint(t, srv.URL)
-
-	_, err := exchangeCodeForToken(context.Background(), slog.Default(), "c", "s", "r", "c", "v")
-	if err == nil || !strings.Contains(err.Error(), "missing access_token") {
-		t.Errorf("expected missing-token error, got: %v", err)
-	}
-}
-
-// withTokenEndpoint points the Tesla token endpoint at a test server for
-// the duration of a single test and restores the production URL at the end.
-func withTokenEndpoint(t *testing.T, endpoint string) {
-	t.Helper()
-	prev := teslaOAuthTokenEndpoint
-	teslaOAuthTokenEndpoint = endpoint
-	t.Cleanup(func() { teslaOAuthTokenEndpoint = prev })
 }
