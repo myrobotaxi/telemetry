@@ -19,6 +19,7 @@ type Config struct {
 	identity        IdentityConfig
 	proxy           ProxyConfig
 	teslaOAuth      TeslaOAuthConfig
+	teslaLink       TeslaLinkConfig
 	monitoring      MonitoringConfig
 	mapboxToken     string
 	teslaPublicKey  string
@@ -170,6 +171,26 @@ type TeslaOAuthConfig struct {
 	ClientSecret string
 }
 
+// TeslaLinkConfig holds settings for the user-facing in-app Tesla OAuth link
+// endpoints (MYR-246, internal/teslalink). The link surface is ENABLED only
+// when RedirectBaseURL is non-empty AND Tesla OAuth credentials (AUTH_TESLA_ID/
+// SECRET, see TeslaOAuthConfig) are configured. Both fields come from the
+// environment.
+type TeslaLinkConfig struct {
+	// RedirectBaseURL is the public origin (scheme + host[:port], no trailing
+	// slash) at which this server's client mux is reachable by Tesla's browser
+	// redirect — e.g. https://telemetry.myrobotaxi.app:4443. The callback route
+	// is RedirectBaseURL + "/api/tesla/link/callback"; THIS exact URI must be
+	// registered as an Allowed Redirect URI on the Tesla Fleet app. Empty
+	// disables the in-app link endpoints. From TESLA_LINK_REDIRECT_BASE_URL.
+	RedirectBaseURL string
+
+	// AppRedirectURL is the app deep link the callback hands off to after the
+	// token exchange (ASWebAuthenticationSession intercepts it). Defaults to
+	// "myrobotaxi://tesla-linked". From TESLA_LINK_APP_REDIRECT.
+	AppRedirectURL string
+}
+
 // Getters — one per section, returning a copy of the section struct.
 
 // Server returns the server port configuration.
@@ -203,6 +224,10 @@ func (c *Config) Proxy() ProxyConfig { return c.proxy }
 // TeslaOAuth returns the Tesla OAuth2 application credentials. When
 // ClientID is empty, automatic token refresh is disabled.
 func (c *Config) TeslaOAuth() TeslaOAuthConfig { return c.teslaOAuth }
+
+// TeslaLink returns the in-app Tesla OAuth link configuration (MYR-246). When
+// RedirectBaseURL is empty, the /api/tesla/link/* endpoints are not mounted.
+func (c *Config) TeslaLink() TeslaLinkConfig { return c.teslaLink }
 
 // Monitoring returns the observability probe configuration. When
 // CertEndpoints is empty, the endpoint TLS cert monitor is disabled.
