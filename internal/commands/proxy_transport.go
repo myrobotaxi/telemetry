@@ -19,12 +19,15 @@ const (
 	maxProxyResponse    = 1 << 16 // 64 KiB
 )
 
-// ProxyTransport is the concrete Transport: it forwards vehicle commands to
-// the tesla-http-proxy sidecar (the same TESLA_PROXY_URL the fleet-config
-// push already uses). The proxy signs signer-required commands with the
-// virtual key and forwards unsigned commands (navigation_request) straight
-// to the Fleet API. It also owns per-vehicle session caching, so there is
-// no session state to manage in this process.
+// ProxyTransport forwards SIGNED vehicle commands to the tesla-http-proxy
+// sidecar (the same TESLA_PROXY_URL the fleet-config push already uses). The
+// proxy signs signer-required commands with the virtual key and owns per-
+// vehicle session caching, so there is no session state to manage in this
+// process. Unsigned commands (navigation_request) do NOT go through here:
+// proxy v0.4.1 mis-forwards REST-API commands (it double-writes a 400 body),
+// so they route directly to the Fleet REST API via FleetRESTTransport — the
+// RoutingTransport picks the endpoint per TransportRequest.SignerRequired
+// (MYR-245).
 type ProxyTransport struct {
 	baseURL string
 	client  *http.Client
@@ -75,17 +78,25 @@ func (t *ProxyTransport) Wake(ctx context.Context, vin, token string) error {
 	return nil
 }
 
-// post issues the HTTP request and returns (status, body, transport-error).
-// The request target host is always the fixed, operator-configured proxy
-// base — never attacker-controlled — and only validated, PathEscape'd path
-// segments are interpolated.
+// post issues the HTTP request against the proxy and returns
+// (status, body, transport-error). It delegates to httpPostCommand, the
+// shared poster the Fleet REST transport also uses (MYR-245).
 func (t *ProxyTransport) post(ctx context.Context, endpoint, token string, body []byte) (status int, respBody []byte, err error) {
+	return httpPostCommand(ctx, t.client, endpoint, token, body)
+}
+
+// httpPostCommand POSTs a Bearer-authenticated JSON command body to endpoint
+// and returns (status, body, transport-error). It is shared by ProxyTransport
+// (loopback proxy base) and FleetRESTTransport (Fleet API base). The request
+// target host is always a fixed, operator-configured base — never attacker-
+// controlled — and only validated, PathEscape'd path segments are interpolated.
+func httpPostCommand(ctx context.Context, client *http.Client, endpoint, token string, body []byte) (status int, respBody []byte, err error) {
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
 	}
-	// #nosec G107 -- endpoint host is the fixed proxy base from config, not
-	// user input; path segments are PathEscape'd validated values.
+	// #nosec G107 -- endpoint host is a fixed config base (proxy loopback or
+	// Fleet API), not user input; path segments are PathEscape'd validated values.
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, reader) //nolint:gosec // host is fixed config
 	if err != nil {
 		return 0, nil, fmt.Errorf("create request: %w", err)
@@ -95,15 +106,15 @@ func (t *ProxyTransport) post(ctx context.Context, endpoint, token string, body 
 		httpReq.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := t.client.Do(httpReq) //nolint:gosec // host is fixed config
+	resp, err := client.Do(httpReq) //nolint:gosec // host is fixed config
 	if err != nil {
-		return 0, nil, fmt.Errorf("proxy request: %w", err)
+		return 0, nil, fmt.Errorf("command request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err = io.ReadAll(io.LimitReader(resp.Body, maxProxyResponse))
 	if err != nil {
-		return 0, nil, fmt.Errorf("read proxy response: %w", err)
+		return 0, nil, fmt.Errorf("read command response: %w", err)
 	}
 	return resp.StatusCode, respBody, nil
 }
@@ -153,8 +164,9 @@ func classifyResponse(status int, body []byte) TransportResult {
 	case status == http.StatusForbidden, status == http.StatusUnauthorized,
 		containsAny(text, "scope", "not authorized", "forbidden"):
 		return TransportResult{Outcome: OutcomePermissionDenied, Reason: reason}
-	case status == http.StatusBadRequest,
+	case status == http.StatusBadRequest, status == http.StatusUnprocessableEntity,
 		containsAny(text, "invalid_command", "invalid parameter", "invalid request"):
+		// Fleet REST rejects malformed command params with 400 or 422 (MYR-245).
 		return TransportResult{Outcome: OutcomeInvalidRequest, Reason: reason}
 	default:
 		return TransportResult{Outcome: OutcomeFailed, Reason: reason}

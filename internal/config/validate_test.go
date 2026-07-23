@@ -115,6 +115,58 @@ func TestLoad_ValidationErrors(t *testing.T) {
 	}
 }
 
+// TestLoad_FleetAPIBaseURL covers the MYR-245 fail-fast rule: FLEET_API_BASE_URL
+// defaults to the NA prod region when unset, accepts a valid https override, and
+// fails startup for an empty or non-https value (never silently falling back to
+// the mis-forwarding proxy for unsigned commands).
+func TestLoad_FleetAPIBaseURL(t *testing.T) {
+	tests := []struct {
+		name       string
+		set        bool   // whether to set FLEET_API_BASE_URL at all
+		value      string // value when set
+		wantErr    bool
+		wantSubstr string // required error fragment when wantErr
+		wantBase   string // expected loaded base when !wantErr
+	}{
+		{name: "unset uses NA prod default", set: false, wantBase: "https://fleet-api.prd.na.vn.cloud.tesla.com"},
+		{name: "valid https override", set: true, value: "https://fleet-api.prd.eu.vn.cloud.tesla.com", wantBase: "https://fleet-api.prd.eu.vn.cloud.tesla.com"},
+		{name: "explicit empty fails", set: true, value: "", wantErr: true, wantSubstr: "fleet_api_base_url"},
+		{name: "non-https fails", set: true, value: "http://fleet-api.prd.na.vn.cloud.tesla.com", wantErr: true, wantSubstr: "must use https"},
+		{name: "missing host fails", set: true, value: "https:///command", wantErr: true, wantSubstr: "must include a host"},
+		{name: "malformed url fails", set: true, value: "://nope", wantErr: true, wantSubstr: "not a valid URL"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeTestConfig(t, dir, nil)
+			setRequiredEnv(t)
+			if tt.set {
+				t.Setenv("FLEET_API_BASE_URL", tt.value)
+			}
+
+			cfg, err := Load(path)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("Load() expected validation error, got nil")
+				}
+				if !errors.Is(err, ErrInvalidValue) {
+					t.Errorf("error should wrap ErrInvalidValue, got: %v", err)
+				}
+				if !strings.Contains(err.Error(), tt.wantSubstr) {
+					t.Errorf("error %q should contain %q", err.Error(), tt.wantSubstr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() unexpected error: %v", err)
+			}
+			if got := cfg.Proxy().FleetAPIBaseURL; got != tt.wantBase {
+				t.Errorf("FleetAPIBaseURL = %q want %q", got, tt.wantBase)
+			}
+		})
+	}
+}
+
 func TestLoad_MultipleValidationErrors(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTestConfig(t, dir, map[string]any{

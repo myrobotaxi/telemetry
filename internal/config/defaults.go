@@ -116,8 +116,16 @@ func applyIdentityDefaults(i *fileIdentityConfig) {
 	}
 }
 
+// defaultFleetAPIBaseURL is the Tesla Fleet API North-America prod region
+// origin. Direct REST command calls (unsigned navigation_request) target it
+// (MYR-245). Operators on other regions override it via FLEET_API_BASE_URL.
+const defaultFleetAPIBaseURL = "https://fleet-api.prd.na.vn.cloud.tesla.com"
+
 func applyProxyDefaults(p *fileProxyConfig) {
 	if p.FleetTelemetryPort == 0 {
 		p.FleetTelemetryPort = 443
+	}
+	if p.FleetAPIBaseURL == "" {
+		p.FleetAPIBaseURL = defaultFleetAPIBaseURL
 	}
 }

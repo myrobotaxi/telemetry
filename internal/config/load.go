@@ -97,6 +97,7 @@ type fileProxyConfig struct {
 	URL                    string `json:"url"`
 	FleetTelemetryHostname string `json:"fleet_telemetry_hostname"`
 	FleetTelemetryPort     int    `json:"fleet_telemetry_port"`
+	FleetAPIBaseURL        string `json:"fleet_api_base_url"`
 }
 
 // loadFile reads and decodes the JSON configuration from disk.
@@ -162,10 +163,7 @@ func applyEnvOverrides(fc *fileConfig) error {
 		fc.Database.DisablePreparedStatements = true
 	}
 
-	// Proxy env var overrides.
-	if v := os.Getenv("TESLA_PROXY_URL"); v != "" {
-		fc.Proxy.URL = v
-	}
+	applyProxyEnvOverrides(fc)
 
 	// DISPATCH_ENABLED is the MYR-176 nav-dispatch kill-switch. Defaults to
 	// true (dispatch on) when unset. When set it MUST be a strconv.ParseBool
@@ -215,6 +213,21 @@ func applyEnvOverrides(fc *fileConfig) error {
 		return fmt.Errorf("config.Load: %w: %v", ErrMissingRequired, missing)
 	}
 	return nil
+}
+
+// applyProxyEnvOverrides reads the Tesla command-transport env overrides:
+// TESLA_PROXY_URL (optional signing proxy) and FLEET_API_BASE_URL (the direct
+// Fleet REST base for unsigned commands, MYR-245). FLEET_API_BASE_URL uses
+// LookupEnv (not the "!= \"\"" guard) so an explicitly-empty override wipes the
+// default and fails validation — a config error must NOT silently fall back to
+// the mis-forwarding proxy for unsigned commands.
+func applyProxyEnvOverrides(fc *fileConfig) {
+	if v := os.Getenv("TESLA_PROXY_URL"); v != "" {
+		fc.Proxy.URL = v
+	}
+	if v, ok := os.LookupEnv("FLEET_API_BASE_URL"); ok {
+		fc.Proxy.FleetAPIBaseURL = v
+	}
 }
 
 // readES256KeyEnv reads the identity module's ES256 private key from the
@@ -334,6 +347,7 @@ func buildConfig(fc *fileConfig) *Config {
 			FleetTelemetryHostname: fc.Proxy.FleetTelemetryHostname,
 			FleetTelemetryPort:     fc.Proxy.FleetTelemetryPort,
 			FleetTelemetryCA:       fc.fleetTelemetryCA,
+			FleetAPIBaseURL:        fc.Proxy.FleetAPIBaseURL,
 		},
 		teslaOAuth: TeslaOAuthConfig{
 			ClientID:     fc.teslaClientID,
