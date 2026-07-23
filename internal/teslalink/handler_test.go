@@ -1,6 +1,7 @@
 package teslalink
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -187,9 +188,11 @@ func TestResolveCallback(t *testing.T) {
 			if tt.wantLinked && linker.gotUserID != "u1" {
 				t.Errorf("expected token persisted for u1, got %q", linker.gotUserID)
 			}
-			// The state session must be consumed once Take is reached with a match.
-			// tesla_denied returns before Take (error param wins), so it is exempt.
-			if tt.seedState != "" && tt.wantReason != reasonInvalidState && tt.wantReason != reasonTeslaDenied {
+			// The state session must be consumed whenever a matching session
+			// existed — including the tesla_denied path, which now burns the
+			// session so a denied attempt cannot be replayed within its TTL.
+			// (invalid_state has no matching session to consume.)
+			if tt.seedState != "" && tt.wantReason != reasonInvalidState {
 				if _, ok := store.Take(tt.seedState); ok {
 					t.Error("session should have been consumed (single-use)")
 				}
@@ -199,14 +202,26 @@ func TestResolveCallback(t *testing.T) {
 }
 
 func TestServeCallback_RedirectsToApp(t *testing.T) {
-	linker := &fakeLinker{}
-	h, store := newTestHandler(fakeValidator{userID: "u1"}, linker)
+	// Distinctive token/code material so a leak is unambiguous in any output.
+	const (
+		accessSentinel  = "ACCESS-TOKEN-SENTINEL-9f3a"
+		refreshSentinel = "REFRESH-TOKEN-SENTINEL-7b1c"
+		codeSentinel    = "AUTHCODE-SENTINEL-4e2d"
+	)
+
+	// Capture the handler's logs so we can assert no token material is logged.
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	store := NewSessionStore(10 * time.Minute)
+	h := NewHandler(fakeValidator{userID: "u1"}, &fakeLinker{}, store, testConfig(), logger)
 	h.exchange = func(_ context.Context, _ *slog.Logger, _, _, _, _, _ string) (*teslaauth.TokenResponse, error) {
-		return &teslaauth.TokenResponse{AccessToken: "a", RefreshToken: "r", ExpiresIn: 3600}, nil
+		return &teslaauth.TokenResponse{AccessToken: accessSentinel, RefreshToken: refreshSentinel, ExpiresIn: 3600}, nil
 	}
 	store.Put(Session{State: "s1", PKCEVerifier: "v1", UserID: "u1"})
 
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/tesla/link/callback?state=s1&code=c", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/api/tesla/link/callback?state=s1&code="+codeSentinel, nil)
 	rec := httptest.NewRecorder()
 	h.ServeCallback(rec, req)
 
@@ -217,9 +232,23 @@ func TestServeCallback_RedirectsToApp(t *testing.T) {
 	if !strings.HasPrefix(loc, "myrobotaxi://tesla-linked?") || !strings.Contains(loc, "status=success") {
 		t.Errorf("unexpected redirect location: %q", loc)
 	}
-	// Tokens must NEVER appear in the redirect URL.
-	if strings.Contains(loc, "access") || strings.Contains(loc, "a") && strings.Contains(loc, "token") {
-		t.Errorf("redirect leaked token material: %q", loc)
+
+	// The redirect URL (Location header + HTML body) must carry ONLY the
+	// outcome — never token or authorization-code material.
+	body := rec.Body.String()
+	for _, secret := range []string{accessSentinel, refreshSentinel, codeSentinel} {
+		if strings.Contains(loc, secret) {
+			t.Errorf("redirect Location leaked %q: %q", secret, loc)
+		}
+		if strings.Contains(body, secret) {
+			t.Errorf("redirect HTML body leaked %q", secret)
+		}
+	}
+	// Nor may any of it reach the logs.
+	for _, secret := range []string{accessSentinel, refreshSentinel, codeSentinel} {
+		if strings.Contains(logs.String(), secret) {
+			t.Errorf("logs leaked %q:\n%s", secret, logs.String())
+		}
 	}
 }
 

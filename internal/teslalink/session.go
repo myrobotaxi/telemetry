@@ -62,15 +62,19 @@ func (s *SessionStore) WithClock(now func() time.Time) *SessionStore {
 // TTL returns the configured session lifetime.
 func (s *SessionStore) TTL() time.Duration { return s.ttl }
 
-// Put stores sess keyed by its State, stamping ExpiresAt = now + ttl. It also
-// opportunistically reaps expired sessions so an abandoned-flow leak cannot
-// grow the map unbounded.
+// Put stores sess keyed by its State, stamping ExpiresAt = now + ttl. It caps
+// live sessions to at most ONE in-flight link per user: any existing session
+// for sess.UserID is evicted first (a fresh /start supersedes an abandoned
+// one — better UX and a hard ceiling on map growth of one entry per user). It
+// also opportunistically reaps expired sessions so an abandoned-flow leak
+// cannot grow the map unbounded.
 func (s *SessionStore) Put(sess Session) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
 	sess.ExpiresAt = now.Add(s.ttl)
 	s.reapLocked(now)
+	s.evictUserLocked(sess.UserID)
 	s.sessions[sess.State] = sess
 }
 
@@ -103,6 +107,21 @@ func (s *SessionStore) Len() int {
 func (s *SessionStore) reapLocked(now time.Time) {
 	for k, v := range s.sessions {
 		if !now.Before(v.ExpiresAt) {
+			delete(s.sessions, k)
+		}
+	}
+}
+
+// evictUserLocked deletes any existing session belonging to userID, enforcing
+// the one-in-flight-session-per-user cap. Caller must hold s.mu. userID is
+// never empty in practice (it is the authenticated caller), but an empty id is
+// left untouched rather than evicting all anonymous entries.
+func (s *SessionStore) evictUserLocked(userID string) {
+	if userID == "" {
+		return
+	}
+	for k, v := range s.sessions {
+		if v.UserID == userID {
 			delete(s.sessions, k)
 		}
 	}

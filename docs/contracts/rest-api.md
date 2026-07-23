@@ -1725,9 +1725,15 @@ appear in the redirect URL or logs.** Outcome classification:
   A fully self-serve version needs a server-side `Account` **upsert** (INSERT
   with the real Tesla `providerAccountId` from a userinfo call) + server-side
   vehicle sync; that is out of scope here and tracked in the design doc.
-- Sessions are in-memory, single-use, and TTL-bounded (10 min). A process
-  restart drops in-flight sessions (the user simply retries the link — nothing
-  is persisted until the callback succeeds).
+- Sessions are in-memory, single-use, and TTL-bounded (10 min), and capped at
+  **one in-flight session per user** (a new `/start` supersedes the user's
+  previous unfinished attempt — better UX and a hard ceiling on store growth). A
+  denied callback (`error` param) also burns the session so it cannot be
+  replayed within its TTL. A process restart drops in-flight sessions (the user
+  simply retries the link — nothing is persisted until the callback succeeds).
+- `TESLA_LINK_REDIRECT_BASE_URL`, when set, is validated at startup — it must be
+  an absolute `http`/`https` origin with a host — so a typo fails fast rather
+  than silently producing a callback URI Tesla never redirects to.
 - **Ops must register the exact callback URI** (`TESLA_LINK_REDIRECT_BASE_URL` +
   `/api/tesla/link/callback`) as an Allowed Redirect URI on the Tesla Fleet app,
   alongside the existing web (`https://myrobotaxi.app/api/auth/callback/tesla`)

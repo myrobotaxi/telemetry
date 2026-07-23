@@ -78,3 +78,27 @@ func TestSessionStore_PutReapsExpired(t *testing.T) {
 		t.Error("fresh session should survive")
 	}
 }
+
+func TestSessionStore_OneInFlightPerUser(t *testing.T) {
+	store := NewSessionStore(10 * time.Minute)
+
+	// First /start for the user.
+	store.Put(Session{State: "state-A", PKCEVerifier: "vA", UserID: "u1"})
+	// A concurrent user is unaffected by u1's sessions.
+	store.Put(Session{State: "state-X", PKCEVerifier: "vX", UserID: "u2"})
+	// Second /start for the SAME user supersedes the first.
+	store.Put(Session{State: "state-B", PKCEVerifier: "vB", UserID: "u1"})
+
+	if store.Len() != 2 {
+		t.Fatalf("expected 2 live sessions (one per user), got %d", store.Len())
+	}
+	if _, ok := store.Take("state-A"); ok {
+		t.Error("superseded session state-A should have been evicted")
+	}
+	if sess, ok := store.Take("state-B"); !ok || sess.PKCEVerifier != "vB" {
+		t.Error("newest session state-B should be live")
+	}
+	if _, ok := store.Take("state-X"); !ok {
+		t.Error("another user's session must not be evicted")
+	}
+}

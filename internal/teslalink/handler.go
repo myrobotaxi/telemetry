@@ -173,6 +173,9 @@ const (
 // values, so it is directly table-testable.
 func (h *Handler) resolveCallback(ctx context.Context, q url.Values) callbackResult {
 	if errCode := q.Get("error"); errCode != "" {
+		// Burn any live session for this state so a denied attempt cannot be
+		// replayed for the remainder of its TTL.
+		h.sessions.Take(q.Get("state"))
 		return callbackResult{status: statusError, reason: reasonTeslaDenied}
 	}
 

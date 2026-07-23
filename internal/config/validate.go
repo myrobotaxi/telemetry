@@ -20,6 +20,7 @@ func validate(cfg *Config) error {
 	errs = append(errs, validateAuth(cfg.auth)...)
 	errs = append(errs, validateIdentity(cfg.identity)...)
 	errs = append(errs, validateProxy(cfg.proxy)...)
+	errs = append(errs, validateTeslaLink(cfg.teslaLink)...)
 
 	if len(errs) > 0 {
 		return fmt.Errorf("config.Validate: %w:\n  %s",
@@ -186,6 +187,29 @@ func validateProxy(p ProxyConfig) []string {
 		errs = append(errs, fmt.Sprintf("proxy.fleet_api_base_url (FLEET_API_BASE_URL): %q must use https", base))
 	case u.Host == "":
 		errs = append(errs, fmt.Sprintf("proxy.fleet_api_base_url (FLEET_API_BASE_URL): %q must include a host", base))
+	}
+	return errs
+}
+
+// validateTeslaLink checks the in-app Tesla link settings (MYR-246). The
+// surface is OPTIONAL: an empty RedirectBaseURL disables the endpoints (warn +
+// skip mounting, handled in wiring). But when SET it must be a well-formed
+// absolute http(s) origin with a host — a typo'd redirect base would otherwise
+// produce a callback URI Tesla never redirects to, silently breaking every
+// in-app link. Fail fast at startup per the config validation rule.
+func validateTeslaLink(t TeslaLinkConfig) []string {
+	if t.RedirectBaseURL == "" {
+		return nil
+	}
+	var errs []string
+	u, err := url.Parse(t.RedirectBaseURL)
+	switch {
+	case err != nil:
+		errs = append(errs, fmt.Sprintf("tesla_link.redirect_base_url (TESLA_LINK_REDIRECT_BASE_URL): %q is not a valid URL", t.RedirectBaseURL))
+	case u.Scheme != "http" && u.Scheme != "https":
+		errs = append(errs, fmt.Sprintf("tesla_link.redirect_base_url (TESLA_LINK_REDIRECT_BASE_URL): %q must use http or https", t.RedirectBaseURL))
+	case u.Host == "":
+		errs = append(errs, fmt.Sprintf("tesla_link.redirect_base_url (TESLA_LINK_REDIRECT_BASE_URL): %q must include a host", t.RedirectBaseURL))
 	}
 	return errs
 }

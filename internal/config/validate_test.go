@@ -167,6 +167,55 @@ func TestLoad_FleetAPIBaseURL(t *testing.T) {
 	}
 }
 
+func TestLoad_TeslaLinkRedirectBaseURL(t *testing.T) {
+	tests := []struct {
+		name       string
+		set        bool   // whether to set TESLA_LINK_REDIRECT_BASE_URL at all
+		value      string // value when set
+		wantErr    bool
+		wantSubstr string // required error fragment when wantErr
+		wantBase   string // expected loaded base when !wantErr
+	}{
+		{name: "unset disables surface", set: false, wantBase: ""},
+		{name: "valid https", set: true, value: "https://telemetry.myrobotaxi.app:4443", wantBase: "https://telemetry.myrobotaxi.app:4443"},
+		{name: "valid http loopback (dev)", set: true, value: "http://localhost:8080", wantBase: "http://localhost:8080"},
+		{name: "trailing slash trimmed", set: true, value: "https://telemetry.myrobotaxi.app/", wantBase: "https://telemetry.myrobotaxi.app"},
+		{name: "non-http scheme fails", set: true, value: "ftp://telemetry.myrobotaxi.app", wantErr: true, wantSubstr: "must use http or https"},
+		{name: "missing host fails", set: true, value: "https:///api", wantErr: true, wantSubstr: "must include a host"},
+		{name: "malformed url fails", set: true, value: "://nope", wantErr: true, wantSubstr: "not a valid URL"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeTestConfig(t, dir, nil)
+			setRequiredEnv(t)
+			if tt.set {
+				t.Setenv("TESLA_LINK_REDIRECT_BASE_URL", tt.value)
+			}
+
+			cfg, err := Load(path)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("Load() expected validation error, got nil")
+				}
+				if !errors.Is(err, ErrInvalidValue) {
+					t.Errorf("error should wrap ErrInvalidValue, got: %v", err)
+				}
+				if !strings.Contains(err.Error(), tt.wantSubstr) {
+					t.Errorf("error %q should contain %q", err.Error(), tt.wantSubstr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() unexpected error: %v", err)
+			}
+			if got := cfg.TeslaLink().RedirectBaseURL; got != tt.wantBase {
+				t.Errorf("RedirectBaseURL = %q want %q", got, tt.wantBase)
+			}
+		})
+	}
+}
+
 func TestLoad_MultipleValidationErrors(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTestConfig(t, dir, map[string]any{
