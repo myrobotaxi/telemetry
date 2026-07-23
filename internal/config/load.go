@@ -30,6 +30,8 @@ type fileConfig struct {
 	fleetTelemetryCA     string
 	teslaClientID        string
 	teslaClientSec       string
+	teslaLinkRedirect    string
+	teslaLinkAppRedirect string
 	certMonitorEndpoints []string
 	dispatchEnabled      bool
 
@@ -148,6 +150,14 @@ func applyEnvOverrides(fc *fileConfig) error {
 	fc.teslaClientID = os.Getenv("AUTH_TESLA_ID")         // optional: enables token refresh
 	fc.teslaClientSec = os.Getenv("AUTH_TESLA_SECRET")    // optional: enables token refresh
 
+	// In-app Tesla OAuth link endpoints (MYR-246). RedirectBaseURL empty =>
+	// endpoints disabled. AppRedirect defaults to the myrobotaxi:// deep link.
+	fc.teslaLinkRedirect = strings.TrimRight(os.Getenv("TESLA_LINK_REDIRECT_BASE_URL"), "/")
+	fc.teslaLinkAppRedirect = os.Getenv("TESLA_LINK_APP_REDIRECT")
+	if fc.teslaLinkAppRedirect == "" {
+		fc.teslaLinkAppRedirect = "myrobotaxi://tesla-linked"
+	}
+
 	// Identity module (MYR-193, ADR-001). All optional: absent = module
 	// disabled (the server stays a pure token VALIDATOR, HS256-only).
 	keyPEM, err := readES256KeyEnv()
@@ -155,7 +165,7 @@ func applyEnvOverrides(fc *fileConfig) error {
 		return err
 	}
 	fc.es256PrivateKeyPEM = keyPEM
-	fc.appleClientID = os.Getenv("APPLE_NATIVE_CLIENT_ID")   // expected aud on Apple id tokens
+	fc.appleClientID = os.Getenv("APPLE_NATIVE_CLIENT_ID")            // expected aud on Apple id tokens
 	fc.appleBootstrap = parseKVMap(os.Getenv("AUTH_APPLE_BOOTSTRAP")) // email=cuid[,email=cuid]
 
 	// Database env var overrides.
@@ -352,6 +362,10 @@ func buildConfig(fc *fileConfig) *Config {
 		teslaOAuth: TeslaOAuthConfig{
 			ClientID:     fc.teslaClientID,
 			ClientSecret: fc.teslaClientSec,
+		},
+		teslaLink: TeslaLinkConfig{
+			RedirectBaseURL: fc.teslaLinkRedirect,
+			AppRedirectURL:  fc.teslaLinkAppRedirect,
 		},
 		monitoring: MonitoringConfig{
 			CertEndpoints: fc.certMonitorEndpoints,

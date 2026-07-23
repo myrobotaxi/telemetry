@@ -294,6 +294,8 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 
 	setupFleetConfigEndpoint(deps.cfg, deps.srv, deps.authenticator, deps.vinCache, deps.accountRepo, deps.vehicleRepo, deps.logger)
 
+	setupTeslaLinkEndpoints(deps.cfg, deps.srv, deps.authenticator, deps.accountRepo, deps.logger)
+
 	setupVehicleCommandEndpoint(deps, snapshotAdapter)
 
 	setupDebugFieldsEndpoint(deps)
