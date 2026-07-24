@@ -153,3 +153,33 @@ func hvacPowerString(hp tpb.HvacPowerState) string {
 		return "Unknown"
 	}
 }
+
+// hvacAutoModeString converts an HvacAutoModeState enum (MYR-252) to a
+// human-readable string. Matches the vehicle-state.schema.json hvacAutoMode
+// enum: Unknown, On, Override.
+func hvacAutoModeString(am tpb.HvacAutoModeState) string {
+	switch am {
+	case tpb.HvacAutoModeState_HvacAutoModeStateOn:
+		return "On"
+	case tpb.HvacAutoModeState_HvacAutoModeStateOverride:
+		return "Override"
+	default:
+		return "Unknown"
+	}
+}
+
+// mediaStatusString converts a MediaStatus enum (MYR-252) to a human-readable
+// string. Matches the vehicle-state.schema.json mediaPlaybackStatus enum:
+// Unknown, Stopped, Playing, Paused.
+func mediaStatusString(ms tpb.MediaStatus) string {
+	switch ms {
+	case tpb.MediaStatus_MediaStatusStopped:
+		return "Stopped"
+	case tpb.MediaStatus_MediaStatusPlaying:
+		return "Playing"
+	case tpb.MediaStatus_MediaStatusPaused:
+		return "Paused"
+	default:
+		return "Unknown"
+	}
+}
