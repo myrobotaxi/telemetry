@@ -230,9 +230,39 @@ func TestBuildBodyValidation(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "remote_seat_cooler_request level out of range",
+			name:    "remote_seat_cooler_request level below range (0)",
 			command: "remote_seat_cooler_request",
-			params:  map[string]any{"seat_position": 1.0, "seat_cooler_level": 4.0},
+			params:  map[string]any{"seat_position": 1.0, "seat_cooler_level": 0.0},
+			wantErr: true,
+		},
+		{
+			name:    "remote_seat_cooler_request level boundary min (1=off)",
+			command: "remote_seat_cooler_request",
+			params:  map[string]any{"seat_position": 1.0, "seat_cooler_level": 1.0},
+			assert: func(t *testing.T, body []byte) {
+				var m map[string]any
+				mustJSON(t, body, &m)
+				if m["seat_cooler_level"] != 1.0 {
+					t.Fatalf("body = %s", body)
+				}
+			},
+		},
+		{
+			name:    "remote_seat_cooler_request level boundary max (4=high)",
+			command: "remote_seat_cooler_request",
+			params:  map[string]any{"seat_position": 2.0, "seat_cooler_level": 4.0},
+			assert: func(t *testing.T, body []byte) {
+				var m map[string]any
+				mustJSON(t, body, &m)
+				if m["seat_cooler_level"] != 4.0 {
+					t.Fatalf("body = %s", body)
+				}
+			},
+		},
+		{
+			name:    "remote_seat_cooler_request level above range (5)",
+			command: "remote_seat_cooler_request",
+			params:  map[string]any{"seat_position": 1.0, "seat_cooler_level": 5.0},
 			wantErr: true,
 		},
 		{

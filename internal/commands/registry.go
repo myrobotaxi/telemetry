@@ -255,9 +255,16 @@ func buildSeatHeater(p map[string]any) ([]byte, error) {
 // buildSeatCooler marshals {seat_position, seat_cooler_level} for
 // remote_seat_cooler_request. Only the front seats have coolers, and Tesla's
 // cooler seat_position enum DIFFERS from the heater's index: 1 front-left,
-// 2 front-right (0 is Unknown and the vehicle rejects it). seat_cooler_level
-// is 0-3 per Tesla's Fleet API — the pinned proxy (v0.4.1) notes "The API uses
-// 0-3" and forwards it via SetSeatCooler.
+// 2 front-right (0 is Unknown and the vehicle rejects it).
+//
+// seat_cooler_level is 1-4 (1 off, 2 low, 3 med, 4 high), NOT 0-3. The HTTP
+// value maps 1:1 onto the vehicle's HvacSeatCoolerLevel enum
+// (Unknown=0, Off=1, Low=2, Med=3, High=4): the pinned proxy (v0.4.1) does
+// vehicle.Level(x-1) in settingForCoolerSeatPosition and SetSeatCooler then
+// sends HvacSeatCoolerLevel_E(level+1), so the -1/+1 cancel. (The proxy's
+// "The API uses 0-3" comment describes the internal vehicle.Level scale after
+// the -1, not this HTTP field.) This is asymmetric with the heater, whose
+// level is 0-3 and is passed straight through to vehicle.Level (LevelOff=0).
 func buildSeatCooler(p map[string]any) ([]byte, error) {
 	seat, _, err := paramInt(p, "seat_position", true)
 	if err != nil {
@@ -270,8 +277,8 @@ func buildSeatCooler(p map[string]any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if level < 0 || level > 3 {
-		return nil, errInvalidParams("parameter \"seat_cooler_level\" must be between 0 and 3")
+	if level < 1 || level > 4 {
+		return nil, errInvalidParams("parameter \"seat_cooler_level\" must be between 1 and 4")
 	}
 	return marshalBody(map[string]any{"seat_position": seat, "seat_cooler_level": level})
 }
