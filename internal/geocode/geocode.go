@@ -27,6 +27,27 @@ var ErrNoResult = errors.New("geocode: no result for coordinates")
 // the given input — retrying with the same coordinates will not help.
 var ErrInvalidCoordinate = errors.New("geocode: invalid coordinate")
 
+// ErrRateLimited is returned when the Mapbox API responds with HTTP 429
+// (Too Many Requests). Callers should back off before retrying rather
+// than treating this the same as ErrUpstreamStatus.
+var ErrRateLimited = errors.New("geocode: rate limited by upstream")
+
+// ErrUpstreamStatus is returned when the Mapbox API responds with a
+// non-200, non-429 status code. The numeric status code is safe to
+// include in the wrapping error text (see ReverseGeocode) — it carries
+// no coordinates, tokens, or response body.
+var ErrUpstreamStatus = errors.New("geocode: upstream returned an error status")
+
+// ErrTransport is returned for network-level failures reaching the
+// Mapbox API: request construction, DNS, connection, TLS, timeout, or
+// response-decode failures. Deliberately opaque (MYR-254): the
+// underlying errors here — in particular the *url.Error returned by
+// (*http.Client).Do — embed the full request URL, which carries the
+// full-precision queried coordinates AND the access_token secret as
+// query parameters. Never unwrap or format the underlying error into
+// this one; classify only.
+var ErrTransport = errors.New("geocode: transport error calling upstream")
+
 // defaultRateLimit is the steady-state requests-per-second cap applied
 // when NewMapboxGeocoder is used without an explicit limiter. Mapbox's
 // free tier permits 600 requests/minute (10 req/s); paid tiers go
@@ -134,12 +155,21 @@ func NewMapboxGeocoderWithLimiter(token string, timeout time.Duration, limiter *
 // ReverseGeocode calls the Mapbox Geocoding API to convert lat/lng into
 // a place name and address. Returns ErrInvalidCoordinate when the input
 // is outside the WGS-84 range. Returns ErrNoResult when the API returns
-// no matching features. Returns other errors on network or API failures.
+// no matching features. Returns ErrRateLimited, ErrUpstreamStatus, or
+// ErrTransport on network/API failures — see those sentinels' docs.
 // Honors the configured rate limiter — a request that exceeds the
 // budget blocks until a token is available or ctx is cancelled.
+//
+// MYR-254: every error this method returns is guaranteed free of the
+// queried coordinates, the request URL, the access_token secret, and
+// the upstream response body — all of which are P1 data
+// (docs/contracts/data-classification.md §2.2) that callers routinely
+// log verbatim via err.Error(). Do not reintroduce any of the four into
+// an error string here without updating that guarantee (and the tests
+// that pin it) at the same time.
 func (g *MapboxGeocoder) ReverseGeocode(ctx context.Context, lat, lng float64) (*Result, error) {
 	if !validCoordinate(lat, lng) {
-		return nil, fmt.Errorf("geocode.ReverseGeocode(%.4f,%.4f): %w", lat, lng, ErrInvalidCoordinate)
+		return nil, fmt.Errorf("geocode.ReverseGeocode: %w", ErrInvalidCoordinate)
 	}
 
 	if g.limiter != nil {
@@ -185,23 +215,38 @@ func (g *MapboxGeocoder) ReverseGeocode(ctx context.Context, lat, lng float64) (
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
-		return nil, fmt.Errorf("geocode.ReverseGeocode: build request: %w", err)
+		// MYR-254: never wrap err here. http.NewRequestWithContext's error
+		// embeds the URL it failed to parse — which carries the
+		// full-precision coordinates and the access_token secret.
+		// Classify only.
+		return nil, fmt.Errorf("geocode.ReverseGeocode: build request: %w", ErrTransport)
 	}
 
 	resp, err := g.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("geocode.ReverseGeocode(%.4f,%.4f): %w", lat, lng, err)
+		// MYR-254: client.Do's error is a *url.Error whose Error() embeds
+		// the full request URL — access_token and full-precision
+		// coordinates included. Never wrap it; classify only.
+		return nil, fmt.Errorf("geocode.ReverseGeocode: %w", ErrTransport)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return nil, fmt.Errorf("geocode.ReverseGeocode(%.4f,%.4f): HTTP %d: %s", lat, lng, resp.StatusCode, body)
+		// MYR-254: drain (don't parse) up to 256B so the connection can be
+		// reused, but the body is never placed in the returned error —
+		// Mapbox error bodies can echo back query parameters, including
+		// the access_token.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 256))
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return nil, fmt.Errorf("geocode.ReverseGeocode: %w", ErrRateLimited)
+		}
+		// The numeric status code alone is safe to log/return.
+		return nil, fmt.Errorf("geocode.ReverseGeocode: status %d: %w", resp.StatusCode, ErrUpstreamStatus)
 	}
 
 	var data mapboxResponse
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, fmt.Errorf("geocode.ReverseGeocode: decode: %w", err)
+		return nil, fmt.Errorf("geocode.ReverseGeocode: decode response: %w", ErrTransport)
 	}
 
 	if len(data.Features) == 0 {
@@ -209,6 +254,32 @@ func (g *MapboxGeocoder) ReverseGeocode(ctx context.Context, lat, lng float64) (
 	}
 
 	return buildResult(lat, lng, data.Features), nil
+}
+
+// ClassifyError reduces any error returned by ReverseGeocode to a coarse,
+// log-safe classification string. MYR-254: every error ReverseGeocode
+// returns is already free of coordinates, the request URL/access_token,
+// and the upstream response body, so err.Error() itself is safe to log —
+// ClassifyError exists for callers that want a single structured log
+// field (e.g. slog.String("error_class", ...)) instead of duplicating
+// errors.Is checks against every sentinel at each call site.
+func ClassifyError(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, ErrInvalidCoordinate):
+		return "invalid_coordinate"
+	case errors.Is(err, ErrNoResult):
+		return "no_result"
+	case errors.Is(err, ErrRateLimited):
+		return "rate_limited"
+	case errors.Is(err, ErrUpstreamStatus):
+		return "upstream_status"
+	case errors.Is(err, ErrTransport):
+		return "transport"
+	default:
+		return "unknown"
+	}
 }
 
 // NoopGeocoder always returns ErrNoResult, effectively disabling

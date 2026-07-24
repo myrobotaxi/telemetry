@@ -392,19 +392,19 @@ func TestMapboxGeocoder_ReverseGeocode(t *testing.T) {
 			name:       "server error",
 			statusCode: http.StatusInternalServerError,
 			body:       `{"message": "internal error"}`,
-			wantErr:    errors.New("HTTP 500"),
+			wantErr:    ErrUpstreamStatus,
 		},
 		{
 			name:       "unauthorized",
 			statusCode: http.StatusUnauthorized,
 			body:       `{"message": "Not Authorized"}`,
-			wantErr:    errors.New("HTTP 401"),
+			wantErr:    ErrUpstreamStatus,
 		},
 		{
 			name:       "rate limited (server-side 429)",
 			statusCode: http.StatusTooManyRequests,
 			body:       `{"message": "Rate limit exceeded"}`,
-			wantErr:    errors.New("HTTP 429"),
+			wantErr:    ErrRateLimited,
 		},
 	}
 
@@ -432,8 +432,8 @@ func TestMapboxGeocoder_ReverseGeocode(t *testing.T) {
 				if err == nil {
 					t.Fatalf("expected error, got nil")
 				}
-				if errors.Is(tt.wantErr, ErrNoResult) && !errors.Is(err, ErrNoResult) {
-					t.Errorf("expected ErrNoResult, got: %v", err)
+				if !errors.Is(err, tt.wantErr) {
+					t.Errorf("expected error matching %v, got: %v", tt.wantErr, err)
 				}
 				return
 			}
