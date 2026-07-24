@@ -48,13 +48,13 @@ func (f *fakeConfigDeleter) DeleteTelemetryConfig(_ context.Context, token, vin 
 }
 
 type fakeTeardownWriter struct {
-	result        VehicleTeardownResult
-	err           error
-	called        bool
-	gotUserID     string
-	gotVehicleID  string
-	order         *int
-	seq           int
+	result       VehicleTeardownResult
+	err          error
+	called       bool
+	gotUserID    string
+	gotVehicleID string
+	order        *int
+	seq          int
 }
 
 func (f *fakeTeardownWriter) RemoveVehicle(_ context.Context, userID, vehicleID string) (VehicleTeardownResult, error) {
@@ -84,7 +84,7 @@ func ownedTeardownRow() VehicleSnapshotRow {
 func newTeardownHandler(
 	reader VehicleSnapshotReader,
 	resolver teslaTokenResolver,
-	deleter TelemetryConfigDeleter,
+	deleter FleetConfigDeleter,
 	writer VehicleTeardownWriter,
 ) *VehicleTeardownHandler {
 	return NewVehicleTeardownHandler(
@@ -98,11 +98,11 @@ func newTeardownHandler(
 	)
 }
 
-func doTeardown(t *testing.T, h *VehicleTeardownHandler, method, vehicleID string, withAuth bool) *httptest.ResponseRecorder {
+func doTeardown(t *testing.T, h *VehicleTeardownHandler, method string, withAuth bool) *httptest.ResponseRecorder {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.Handle("/api/tesla/vehicles/{vehicleId}", h)
-	req := httptest.NewRequestWithContext(context.Background(), method, "/api/tesla/vehicles/"+vehicleID, nil)
+	req := httptest.NewRequestWithContext(context.Background(), method, "/api/tesla/vehicles/"+teardownVehicleID, nil)
 	if withAuth {
 		req.Header.Set("Authorization", "Bearer jwt")
 	}
@@ -119,17 +119,17 @@ func validResolver() *fakeTokenResolver {
 
 func TestVehicleTeardownHandler_Sequence(t *testing.T) {
 	tests := []struct {
-		name                string
-		reader              VehicleSnapshotReader
-		resolver            teslaTokenResolver
-		deleter             *fakeConfigDeleter
-		writer              *fakeTeardownWriter
-		wantStatus          int
-		wantDeleterCalled   bool
-		wantWriterCalled    bool
-		wantStreamDeleted   bool
-		wantWasLastVehicle  bool
-		wantTokensCleared   bool
+		name               string
+		reader             VehicleSnapshotReader
+		resolver           teslaTokenResolver
+		deleter            *fakeConfigDeleter
+		writer             *fakeTeardownWriter
+		wantStatus         int
+		wantDeleterCalled  bool
+		wantWriterCalled   bool
+		wantStreamDeleted  bool
+		wantWasLastVehicle bool
+		wantTokensCleared  bool
 	}{
 		{
 			name:               "happy path last vehicle",
@@ -158,28 +158,28 @@ func TestVehicleTeardownHandler_Sequence(t *testing.T) {
 			wantTokensCleared:  false,
 		},
 		{
-			name:              "config delete failure is non-fatal — teardown still runs",
-			reader:            &stubSnapshotReader{row: ownedTeardownRow()},
-			resolver:          validResolver(),
-			deleter:           &fakeConfigDeleter{err: errors.New("tesla 500")},
-			writer:            &fakeTeardownWriter{result: VehicleTeardownResult{Removed: true, WasLastVehicle: true, TeslaTokensCleared: true}},
-			wantStatus:        http.StatusOK,
-			wantDeleterCalled: true,
-			wantWriterCalled:  true,
-			wantStreamDeleted: false, // failed → false, but teardown proceeded
+			name:               "config delete failure is non-fatal — teardown still runs",
+			reader:             &stubSnapshotReader{row: ownedTeardownRow()},
+			resolver:           validResolver(),
+			deleter:            &fakeConfigDeleter{err: errors.New("tesla 500")},
+			writer:             &fakeTeardownWriter{result: VehicleTeardownResult{Removed: true, WasLastVehicle: true, TeslaTokensCleared: true}},
+			wantStatus:         http.StatusOK,
+			wantDeleterCalled:  true,
+			wantWriterCalled:   true,
+			wantStreamDeleted:  false, // failed → false, but teardown proceeded
 			wantWasLastVehicle: true,
 			wantTokensCleared:  true,
 		},
 		{
-			name:              "no tesla token — config delete skipped, teardown still runs",
-			reader:            &stubSnapshotReader{row: ownedTeardownRow()},
-			resolver:          &fakeTokenResolver{err: errors.New("no token")},
-			deleter:           &fakeConfigDeleter{},
-			writer:            &fakeTeardownWriter{result: VehicleTeardownResult{Removed: true, WasLastVehicle: true, TeslaTokensCleared: true}},
-			wantStatus:        http.StatusOK,
-			wantDeleterCalled: false,
-			wantWriterCalled:  true,
-			wantStreamDeleted: false,
+			name:               "no tesla token — config delete skipped, teardown still runs",
+			reader:             &stubSnapshotReader{row: ownedTeardownRow()},
+			resolver:           &fakeTokenResolver{err: errors.New("no token")},
+			deleter:            &fakeConfigDeleter{},
+			writer:             &fakeTeardownWriter{result: VehicleTeardownResult{Removed: true, WasLastVehicle: true, TeslaTokensCleared: true}},
+			wantStatus:         http.StatusOK,
+			wantDeleterCalled:  false,
+			wantWriterCalled:   true,
+			wantStreamDeleted:  false,
 			wantWasLastVehicle: true,
 			wantTokensCleared:  true,
 		},
@@ -239,7 +239,7 @@ func TestVehicleTeardownHandler_Sequence(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newTeardownHandler(tt.reader, tt.resolver, tt.deleter, tt.writer)
-			rec := doTeardown(t, h, http.MethodDelete, teardownVehicleID, true)
+			rec := doTeardown(t, h, http.MethodDelete, true)
 
 			if rec.Code != tt.wantStatus {
 				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, tt.wantStatus, rec.Body.String())
@@ -296,7 +296,7 @@ func TestVehicleTeardownHandler_DeleteBeforeTeardown(t *testing.T) {
 	writer := &fakeTeardownWriter{result: VehicleTeardownResult{Removed: true, WasLastVehicle: true}, order: &order}
 	h := newTeardownHandler(&stubSnapshotReader{row: ownedTeardownRow()}, validResolver(), deleter, writer)
 
-	rec := doTeardown(t, h, http.MethodDelete, teardownVehicleID, true)
+	rec := doTeardown(t, h, http.MethodDelete, true)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
@@ -320,7 +320,7 @@ func TestVehicleTeardownHandler_RevokeURL(t *testing.T) {
 		&fakeConfigDeleter{},
 		&fakeTeardownWriter{result: VehicleTeardownResult{Removed: true, WasLastVehicle: true, TeslaTokensCleared: true}},
 	)
-	rec := doTeardown(t, h, http.MethodDelete, teardownVehicleID, true)
+	rec := doTeardown(t, h, http.MethodDelete, true)
 
 	var body vehicleTeardownResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
@@ -347,14 +347,14 @@ func TestVehicleTeardownHandler_MethodAndAuth(t *testing.T) {
 	}
 
 	t.Run("GET not allowed", func(t *testing.T) {
-		rec := doTeardown(t, newH(), http.MethodGet, teardownVehicleID, true)
+		rec := doTeardown(t, newH(), http.MethodGet, true)
 		if rec.Code != http.StatusMethodNotAllowed {
 			t.Errorf("status = %d, want 405", rec.Code)
 		}
 	})
 
 	t.Run("missing auth", func(t *testing.T) {
-		rec := doTeardown(t, newH(), http.MethodDelete, teardownVehicleID, false)
+		rec := doTeardown(t, newH(), http.MethodDelete, false)
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("status = %d, want 401", rec.Code)
 		}
@@ -370,7 +370,7 @@ func TestVehicleTeardownHandler_MethodAndAuth(t *testing.T) {
 			VehicleTeardownConfig{RevokeClientID: teardownClientID},
 			discardLogger(),
 		)
-		rec := doTeardown(t, h, http.MethodDelete, teardownVehicleID, true)
+		rec := doTeardown(t, h, http.MethodDelete, true)
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("status = %d, want 401", rec.Code)
 		}

@@ -38,7 +38,7 @@ type VehicleTeardownHandler struct {
 	auth     tokenValidator
 	vehicles VehicleSnapshotReader
 	tokens   teslaTokenResolver
-	fleet    TelemetryConfigDeleter // nil disables the Tesla-side config delete
+	fleet    FleetConfigDeleter // nil disables the Tesla-side config delete
 	teardown VehicleTeardownWriter
 	cfg      VehicleTeardownConfig
 	logger   *slog.Logger
@@ -61,7 +61,7 @@ func NewVehicleTeardownHandler(
 	auth tokenValidator,
 	vehicles VehicleSnapshotReader,
 	tokens teslaTokenResolver,
-	fleet TelemetryConfigDeleter,
+	fleet FleetConfigDeleter,
 	teardown VehicleTeardownWriter,
 	cfg VehicleTeardownConfig,
 	logger *slog.Logger,

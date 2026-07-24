@@ -33,11 +33,11 @@ type teslaTokenResolver interface {
 	Resolve(ctx context.Context, userID string) (TeslaToken, error)
 }
 
-// TelemetryConfigDeleter removes a vehicle's fleet-telemetry config at Tesla
+// FleetConfigDeleter removes a vehicle's fleet-telemetry config at Tesla
 // (satisfied by *FleetAPIClient.DeleteTelemetryConfig). It is nil in tests/CI
 // and only wired when the tesla-http-proxy is configured at runtime, so no
 // real Tesla call ever fires from a unit test.
-type TelemetryConfigDeleter interface {
+type FleetConfigDeleter interface {
 	DeleteTelemetryConfig(ctx context.Context, token, vin string) error
 }
 
@@ -54,12 +54,12 @@ type virtualKeyRemoval struct {
 // §4). removed is authoritative ("gone from the app"); the Tesla-side items are
 // the two steps only the owner can complete.
 type vehicleTeardownResponse struct {
-	Removed            bool              `json:"removed"`
-	WasLastVehicle     bool              `json:"wasLastVehicle"`
-	TeslaTokensCleared bool              `json:"teslaTokensCleared"`
-	StreamConfigDeleted bool             `json:"streamConfigDeleted"`
-	RevokeURL          string            `json:"revokeUrl,omitempty"`
-	VirtualKeyRemoval  virtualKeyRemoval `json:"virtualKeyRemoval"`
+	Removed             bool              `json:"removed"`
+	WasLastVehicle      bool              `json:"wasLastVehicle"`
+	TeslaTokensCleared  bool              `json:"teslaTokensCleared"`
+	StreamConfigDeleted bool              `json:"streamConfigDeleted"`
+	RevokeURL           string            `json:"revokeUrl,omitempty"`
+	VirtualKeyRemoval   virtualKeyRemoval `json:"virtualKeyRemoval"`
 }
 
 // teslaConsentRevokeBase is the owner-confirmed consent-revoke page. It revokes

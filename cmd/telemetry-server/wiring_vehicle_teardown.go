@@ -26,7 +26,7 @@ func setupVehicleTeardownEndpoint(deps httpRouteDeps) {
 	// Tesla-side config deleter + token resolver: only meaningful when the
 	// tesla-http-proxy is configured. When absent, fleet stays nil (the
 	// handler skips the best-effort Tesla call).
-	var fleet telemetry.TelemetryConfigDeleter
+	var fleet telemetry.FleetConfigDeleter
 	if deps.cfg.Proxy().URL != "" {
 		fleet = telemetry.NewFleetAPIClient(telemetry.FleetAPIConfig{
 			BaseURL:    deps.cfg.Proxy().URL,
