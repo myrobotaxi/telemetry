@@ -16,39 +16,64 @@ type OwnedVehicleInput struct {
 	Name           string
 }
 
-// queryUpsertOwnedVehicle inserts the minimal identity columns for a newly
-// linked vehicle, keyed on the unique "teslaVehicleId". On re-link it refreshes
-// vin/name/userId only — it never clobbers live telemetry columns (charge, GPS,
-// status) written by the streaming pipeline. Columns not listed rely on the
-// Prisma-defined DB defaults; if the prod schema has a NOT-NULL column without a
-// default the INSERT fails and the caller (a best-effort post-link hook) logs
-// and moves on — no orphan row, no link failure. See self-serve-onboarding.md §7.
-const queryUpsertOwnedVehicle = `
-INSERT INTO "Vehicle" ("id", "userId", "teslaVehicleId", "vin", "name", "updatedAt")
-VALUES ($1, $2, $3, $4, $5, NOW())
-ON CONFLICT ("teslaVehicleId") DO UPDATE
-SET "userId"    = EXCLUDED."userId",
-    "vin"       = EXCLUDED."vin",
-    "name"      = COALESCE(NULLIF("Vehicle"."name", ''), EXCLUDED."name"),
-    "updatedAt" = NOW()`
+// VehicleUpsertOutcome classifies a vehicle-provision attempt (log-safe, P0).
+type VehicleUpsertOutcome string
 
-// UpsertOwnedVehicle seeds (or reconciles) a "Vehicle" identity row for a
-// linked owner. Idempotent on "teslaVehicleId".
-func (p *OwnerProvisioner) UpsertOwnedVehicle(ctx context.Context, in OwnedVehicleInput) error {
+const (
+	// VehicleOwned: the row was inserted or reconciled for this owner.
+	VehicleOwned VehicleUpsertOutcome = "owned"
+	// VehicleSkippedCrossUser: the teslaVehicleId already belongs to a DIFFERENT
+	// user; the row was left untouched (never reassigned) and the caller audits.
+	VehicleSkippedCrossUser VehicleUpsertOutcome = "skipped_cross_user"
+)
+
+// queryUpsertOwnedVehicle inserts the minimal identity columns for a newly
+// linked vehicle, keyed on the unique "teslaVehicleId". On a same-user conflict
+// it refreshes vin/name only (never clobbering live telemetry columns —
+// charge/GPS/status — written by the streaming pipeline). The
+// `WHERE "Vehicle"."userId" = EXCLUDED."userId"` predicate on the DO UPDATE means
+// a conflict against a row owned by a DIFFERENT user updates nothing and reports
+// RowsAffected()==0 — the teslaVehicleId is NEVER reassigned across users.
+//
+// The four NOT-NULL identity columns without Prisma defaults (`model`, `year`,
+// `color`, `licensePlate`) are seeded with empty placeholders so the INSERT
+// succeeds against the prod schema; the web sync / streaming pipeline fills real
+// values later. `xmax = 0` is Postgres's "row was inserted (not updated) by this
+// statement" test, used to distinguish an insert from a same-user reconcile.
+const queryUpsertOwnedVehicle = `
+INSERT INTO "Vehicle" ("id", "userId", "teslaVehicleId", "vin", "name",
+                       "model", "year", "color", "licensePlate", "updatedAt")
+VALUES ($1, $2, $3, $4, $5, '', 0, '', '', NOW())
+ON CONFLICT ("teslaVehicleId") DO UPDATE
+SET "vin"       = EXCLUDED."vin",
+    "name"      = COALESCE(NULLIF("Vehicle"."name", ''), EXCLUDED."name"),
+    "updatedAt" = NOW()
+WHERE "Vehicle"."userId" = EXCLUDED."userId"`
+
+// UpsertOwnedVehicle seeds (or reconciles) a "Vehicle" identity row for a linked
+// owner. Idempotent on "teslaVehicleId". Returns VehicleSkippedCrossUser (and no
+// error) when the teslaVehicleId is already owned by a different user — the row
+// is never reassigned; the caller emits an audit line.
+func (p *OwnerProvisioner) UpsertOwnedVehicle(ctx context.Context, in OwnedVehicleInput) (VehicleUpsertOutcome, error) {
 	if strings.TrimSpace(in.UserID) == "" {
-		return fmt.Errorf("store.UpsertOwnedVehicle: empty user id")
+		return "", fmt.Errorf("store.UpsertOwnedVehicle: empty user id")
 	}
 	if strings.TrimSpace(in.TeslaVehicleID) == "" {
-		return fmt.Errorf("store.UpsertOwnedVehicle(user=%s): empty teslaVehicleId", in.UserID)
+		return "", fmt.Errorf("store.UpsertOwnedVehicle(user=%s): empty teslaVehicleId", in.UserID)
 	}
 	name := in.Name
 	if strings.TrimSpace(name) == "" {
 		name = "Tesla"
 	}
-	_, err := p.pool.Exec(ctx, queryUpsertOwnedVehicle,
+	tag, err := p.pool.Exec(ctx, queryUpsertOwnedVehicle,
 		newProvisionID(), in.UserID, in.TeslaVehicleID, in.VIN, name)
 	if err != nil {
-		return fmt.Errorf("store.UpsertOwnedVehicle(user=%s, vin=%s): %w", in.UserID, redactVIN(in.VIN), err)
+		return "", fmt.Errorf("store.UpsertOwnedVehicle(user=%s, vin=%s): %w", in.UserID, redactVIN(in.VIN), err)
 	}
-	return nil
+	// A same-teslaVehicleId row owned by another user fails the DO UPDATE WHERE
+	// predicate → zero rows affected → cross-user skip (never a reassignment).
+	if tag.RowsAffected() == 0 {
+		return VehicleSkippedCrossUser, nil
+	}
+	return VehicleOwned, nil
 }
