@@ -360,6 +360,8 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 		driveRepo:      driveRepo,
 		rideRepo:       rideRepo,
 		accountRepo:    accountRepo,
+		pool:           db.Pool(),
+		encryptor:      encryptor,
 		auditEmitter:   auditEmitter,
 		auditMetrics:   auditMetrics,
 		debugGate:      debugGate,

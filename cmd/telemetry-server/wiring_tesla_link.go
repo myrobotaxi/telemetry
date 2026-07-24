@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/myrobotaxi/telemetry/internal/config"
+	"github.com/myrobotaxi/telemetry/internal/cryptox"
+	"github.com/myrobotaxi/telemetry/internal/identity"
 	"github.com/myrobotaxi/telemetry/internal/server"
 	"github.com/myrobotaxi/telemetry/internal/store"
+	"github.com/myrobotaxi/telemetry/internal/teslaauth"
 	"github.com/myrobotaxi/telemetry/internal/teslalink"
 	"github.com/myrobotaxi/telemetry/internal/ws"
 )
@@ -21,14 +25,20 @@ const teslaLinkSessionTTL = 10 * time.Minute
 // setupTeslaLinkEndpoints mounts the user-facing in-app Tesla OAuth link
 // surface (MYR-246): POST /api/tesla/link/start and GET /api/tesla/link/callback.
 // It is enabled only when a public redirect base URL AND Tesla OAuth credentials
-// are configured; otherwise the endpoints are not mounted (the iOS "Link your
-// Tesla" button has no backend until then). Mirrors the fleet-config endpoint's
-// "warn + skip when unconfigured" pattern.
+// are configured; otherwise the endpoints are not mounted.
+//
+// MYR-257: on callback success the link now PROVISIONS the caller's minimal
+// Prisma owner rows (User/Settings/Account) via store.OwnerProvisioner before
+// persisting tokens, so a brand-new go_users-native Apple user becomes a working
+// owner with no ops step. The optional post-link hook (vehicle sync + fleet
+// config push) runs best-effort and is guarded so it only fires against a real
+// linked user at runtime — see newOwnerLink / postLinkHook.
 func setupTeslaLinkEndpoints(
 	cfg *config.Config,
 	srv *server.Server,
 	authenticator ws.Authenticator,
-	accountRepo *store.AccountRepo,
+	pool *pgxpool.Pool,
+	encryptor cryptox.Encryptor,
 	logger *slog.Logger,
 ) {
 	linkCfg := cfg.TeslaLink()
@@ -41,10 +51,23 @@ func setupTeslaLinkEndpoints(
 		return
 	}
 
+	linkLogger := logger.With(slog.String("component", "tesla-link"))
+	provisioner := store.NewOwnerProvisioner(pool, encryptor, linkLogger)
+	hook := buildOwnerStreamHook(cfg, provisioner, linkLogger)
+	linker := &ownerLink{
+		provisioner: provisioner,
+		profiles:    identity.NewPgStore(pool),
+		fetchUserInfo: func(ctx context.Context, accessToken string) (teslaauth.UserInfo, error) {
+			return teslaauth.FetchUserInfo(ctx, linkLogger, accessToken)
+		},
+		hook:   hook,
+		logger: linkLogger,
+	}
+
 	redirectURI := linkCfg.RedirectBaseURL + "/api/tesla/link/callback"
 	handler := teslalink.NewHandler(
 		authenticator,
-		&teslaLinkAccountAdapter{repo: accountRepo},
+		linker,
 		teslalink.NewSessionStore(teslaLinkSessionTTL),
 		teslalink.Config{
 			ClientID:       cfg.TeslaOAuth().ClientID,
@@ -52,31 +75,15 @@ func setupTeslaLinkEndpoints(
 			RedirectURI:    redirectURI,
 			AppRedirectURL: linkCfg.AppRedirectURL,
 		},
-		logger.With(slog.String("component", "tesla-link")),
+		linkLogger,
 	)
 
 	srv.HandleFunc("POST /api/tesla/link/start", handler.ServeStart)
 	srv.HandleFunc("GET /api/tesla/link/callback", handler.ServeCallback)
 
-	logger.Info("in-app Tesla link endpoints enabled",
+	logger.Info("in-app Tesla link endpoints enabled (self-serve provisioning)",
 		slog.String("redirect_uri", redirectURI),
 		slog.String("app_redirect", linkCfg.AppRedirectURL),
+		slog.Bool("post_link_hook", hook != nil),
 	)
-}
-
-// teslaLinkAccountAdapter adapts store.AccountRepo to teslalink.AccountLinker,
-// translating the store's ErrTeslaTokenNotFound (zero rows updated => the user
-// has no Tesla Account row) into teslalink.ErrAccountNotProvisioned so the
-// callback can classify it as account_not_provisioned. This keeps the
-// teslalink package free of an internal/store dependency.
-type teslaLinkAccountAdapter struct {
-	repo *store.AccountRepo
-}
-
-func (a *teslaLinkAccountAdapter) UpdateTeslaToken(ctx context.Context, userID, accessToken, refreshToken string, expiresAt int64) error {
-	err := a.repo.UpdateTeslaToken(ctx, userID, accessToken, refreshToken, expiresAt)
-	if errors.Is(err, store.ErrTeslaTokenNotFound) {
-		return teslalink.ErrAccountNotProvisioned
-	}
-	return err
 }
