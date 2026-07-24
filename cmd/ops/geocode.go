@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/cryptox"
@@ -274,39 +273,20 @@ func geocodeSide(ctx context.Context, geocoder geocode.Geocoder, driveID, side s
 		)
 		return nil, nil
 	default:
-		// geocode.ReverseGeocode's own error strings embed the raw
-		// lat/lng queried (fmt %.4f) and, on a non-200 response, up to
-		// 256B of the Mapbox response body — GPS coordinates are P1,
-		// "never in logs" per data-classification.md §2.2. Log only a
-		// coarse, sanitized error class, never err.Error(). The geocode
-		// package's error text itself is intentionally left unchanged —
-		// other callers (internal/store/writer_drives.go) rely on it
-		// for their own (already-compliant) handling.
+		// MYR-254: geocode.ReverseGeocode's errors are sanitized at the
+		// source (internal/geocode/geocode.go) — none of them ever embed
+		// the queried coordinates, the request URL/access_token, or the
+		// Mapbox response body, so err.Error() itself is safe to log.
+		// Still prefer geocode.ClassifyError's coarse tag over the raw
+		// string: it's a stable, greppable value across Mapbox error
+		// message changes, and it's a defense-in-depth backstop against a
+		// future geocode.go change accidentally reintroducing sensitive
+		// detail into an error string.
 		logger.Warn("geocode backfill: reverse geocode failed",
 			slog.String("drive_id", driveID), slog.String("side", side),
-			slog.String("error_class", errorClass(err)),
+			slog.String("error_class", geocode.ClassifyError(err)),
 		)
 		return nil, nil
-	}
-}
-
-// errorClass reduces a geocode.ReverseGeocode error to a coarse,
-// log-safe classification. Only called from geocodeSide's default
-// branch, where err is guaranteed non-nil and not geocode.ErrNoResult
-// (that case is already handled above it) — so those two states aren't
-// re-checked here. Never returns or logs err.Error() itself — see the
-// data-classification note at geocodeSide's default branch.
-func errorClass(err error) string {
-	switch {
-	case errors.Is(err, geocode.ErrInvalidCoordinate):
-		return "invalid_coordinate"
-	case strings.Contains(err.Error(), "HTTP "):
-		// geocode.ReverseGeocode formats non-200 responses as
-		// "...: HTTP <code>: <body>" — matching on that literal is an
-		// in-process classification check only, never logged.
-		return "http_status"
-	default:
-		return "transport"
 	}
 }
 
