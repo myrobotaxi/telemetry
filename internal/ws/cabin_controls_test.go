@@ -57,13 +57,16 @@ func TestMapFields_IsClimateOn(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		power string
-		want  bool
+		power   string
+		want    bool
+		present bool // whether isClimateOn should be emitted at all
 	}{
-		{"Off", false},
-		{"On", true},
-		{"Precondition", true},
-		{"OverheatProtect", true},
+		{"Off", false, true},
+		{"On", true, true},
+		{"Precondition", true, true},
+		{"OverheatProtect", true, true},
+		// Honest unknown: isClimateOn must be OMITTED, never asserted true.
+		{"Unknown", false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.power, func(t *testing.T) {
@@ -71,8 +74,12 @@ func TestMapFields_IsClimateOn(t *testing.T) {
 			out := mapFieldsForClient(map[string]events.TelemetryValue{
 				"hvacPower": strVal(tt.power),
 			})
-			if out["isClimateOn"] != tt.want {
-				t.Errorf("isClimateOn for hvacPower=%q = %v, want %v", tt.power, out["isClimateOn"], tt.want)
+			got, ok := out["isClimateOn"]
+			if ok != tt.present {
+				t.Errorf("isClimateOn presence for hvacPower=%q = %v, want present=%v (got value %v)", tt.power, ok, tt.present, got)
+			}
+			if tt.present && got != tt.want {
+				t.Errorf("isClimateOn for hvacPower=%q = %v, want %v", tt.power, got, tt.want)
 			}
 			if out["hvacPower"] != tt.power {
 				t.Errorf("hvacPower = %v, want %q (should pass through unchanged)", out["hvacPower"], tt.power)

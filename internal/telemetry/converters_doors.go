@@ -12,24 +12,23 @@ import (
 // struct of six booleans, NOT a scalar. Each open door is folded into one
 // bit of an int64 bitmask whose layout is defined by the events.Door*
 // constants; internal/ws later unpacks the two bits MYR-252 contracts on the
-// wire: frunkOpen (Doors.TrunkFront) and trunkOpen (Doors.TrunkRear). Older
-// firmware that sends the aggregate as a plain int is passed through so the
-// same bit positions still apply.
+// wire: frunkOpen (Doors.TrunkFront) and trunkOpen (Doors.TrunkRear).
+//
+// Only the Doors-message variant is accepted. A scalar int/long is NOT
+// treated as a pre-packed bitmask: our bit layout is a MyRoboTaxi convention,
+// not Tesla's, so there is no attested int encoding to trust (MYR-42's rule:
+// empirical capture before trusting an alternate encoding). An unexpected
+// variant is an error, matching the string-fallback error path in the sibling
+// enum converters — a malformed DoorState frame drops rather than silently
+// mis-decoding door state.
 func convertDoorState(v *tpb.Value) (events.TelemetryValue, error) {
-	switch val := v.Value.(type) {
-	case *tpb.Value_DoorValue:
-		bits := packDoors(val.DoorValue)
+	if dv, ok := v.Value.(*tpb.Value_DoorValue); ok {
+		bits := packDoors(dv.DoorValue)
 		return events.TelemetryValue{IntVal: &bits}, nil
-	case *tpb.Value_IntValue:
-		i := int64(val.IntValue)
-		return events.TelemetryValue{IntVal: &i}, nil
-	case *tpb.Value_LongValue:
-		return events.TelemetryValue{IntVal: &val.LongValue}, nil
-	default:
-		return events.TelemetryValue{}, fmt.Errorf(
-			"%w: DoorState expected doorValue or int, got %T", ErrUnexpectedValueType, v.Value,
-		)
 	}
+	return events.TelemetryValue{}, fmt.Errorf(
+		"%w: DoorState expected doorValue, got %T", ErrUnexpectedValueType, v.Value,
+	)
 }
 
 // packDoors folds the six Doors booleans into the events.Door* bitmask. A nil

@@ -134,7 +134,7 @@ func convertHvacPower(v *tpb.Value) (events.TelemetryValue, error) {
 		s := hvacPowerString(val.HvacPowerValue)
 		return events.TelemetryValue{StringVal: &s}, nil
 	case *tpb.Value_StringValue:
-		s := val.StringValue
+		s := matchEnum(val.StringValue, hvacPowerEnum)
 		return events.TelemetryValue{StringVal: &s}, nil
 	default:
 		return events.TelemetryValue{}, fmt.Errorf(
@@ -152,7 +152,7 @@ func convertHvacAutoMode(v *tpb.Value) (events.TelemetryValue, error) {
 		s := hvacAutoModeString(val.HvacAutoModeValue)
 		return events.TelemetryValue{StringVal: &s}, nil
 	case *tpb.Value_StringValue:
-		s := val.StringValue
+		s := matchEnum(val.StringValue, hvacAutoModeEnum)
 		return events.TelemetryValue{StringVal: &s}, nil
 	default:
 		return events.TelemetryValue{}, fmt.Errorf(
@@ -169,7 +169,7 @@ func convertMediaStatus(v *tpb.Value) (events.TelemetryValue, error) {
 		s := mediaStatusString(val.MediaStatusValue)
 		return events.TelemetryValue{StringVal: &s}, nil
 	case *tpb.Value_StringValue:
-		s := val.StringValue
+		s := matchEnum(val.StringValue, mediaStatusEnum)
 		return events.TelemetryValue{StringVal: &s}, nil
 	default:
 		return events.TelemetryValue{}, fmt.Errorf(

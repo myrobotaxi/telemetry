@@ -276,7 +276,7 @@
     },
     "isClimateOn": {
       "type": ["boolean", "null"],
-      "description": "Convenience boolean derived server-side from `hvacPower` (true when hvacPower is any value other than 'Off'). Added by MYR-252 so consumers can render a climate on/off toggle without interpreting the HvacPowerState enum. Derived from Tesla proto field 201; no dedicated proto field.",
+      "description": "Convenience boolean derived server-side from `hvacPower`: false when hvacPower is 'Off', true when it is 'On'/'Precondition'/'OverheatProtect'. When hvacPower is 'Unknown' this field is OMITTED entirely (not sent as any value) so the client renders an honest 'unknown' rather than a fabricated on/off state (MYR-251/252). Added by MYR-252 so consumers can render a climate on/off toggle without interpreting the HvacPowerState enum. Derived from Tesla proto field 201; no dedicated proto field.",
       "x-classification": "P0"
     },
     "fanSpeed": {

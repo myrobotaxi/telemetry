@@ -1,6 +1,32 @@
 package telemetry
 
-import tpb "github.com/myrobotaxi/telemetry/internal/telemetry/proto/tesla"
+import (
+	"strings"
+
+	tpb "github.com/myrobotaxi/telemetry/internal/telemetry/proto/tesla"
+)
+
+// Canonical wire-enum value sets for the MYR-252 cabin-control enums, matching
+// the enum lists in vehicle-state.schema.json. Used by matchEnum to normalize
+// a raw firmware-supplied string (the string-fallback decode path) so an
+// unrecognized value can never reach the contracted enum field.
+var (
+	hvacPowerEnum    = []string{"Off", "On", "Precondition", "OverheatProtect", "Unknown"}
+	hvacAutoModeEnum = []string{"Unknown", "On", "Override"}
+	mediaStatusEnum  = []string{"Unknown", "Stopped", "Playing", "Paused"}
+)
+
+// matchEnum case-folds raw against the allowed canonical values and returns
+// the canonical spelling on a match, else "Unknown". This guarantees the
+// string-fallback decode path never emits a value outside the schema enum.
+func matchEnum(raw string, allowed []string) string {
+	for _, a := range allowed {
+		if strings.EqualFold(raw, a) {
+			return a
+		}
+	}
+	return "Unknown"
+}
 
 // shiftStateString converts a Tesla ShiftState enum to a human-readable
 // single-letter gear indicator used throughout MyRoboTaxi.

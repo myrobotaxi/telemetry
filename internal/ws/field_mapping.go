@@ -130,11 +130,19 @@ func mapFieldsForClient(fields map[string]events.TelemetryValue) map[string]any 
 	}
 	// Derive isClimateOn from hvacPower when present so the frontend can
 	// render the climate card without needing to interpret the enum itself.
-	// hvacPowerString emits capitalized values ("Off", "On", ...), so the
-	// comparison MUST be case-insensitive — a plain `!= "off"` would report
-	// isClimateOn=true even when the climate is off (fixed in MYR-252).
+	// hvacPowerString emits capitalized values ("Off", "On", ...). "Unknown"
+	// must NOT map to isClimateOn=true — asserting the climate is on when we
+	// don't actually know is the dishonest-default MYR-251/252 exist to kill,
+	// so we OMIT isClimateOn in that case and let the client render "unknown".
 	if power, ok := out["hvacPower"].(string); ok {
-		out["isClimateOn"] = !strings.EqualFold(power, "off")
+		switch {
+		case strings.EqualFold(power, "off"):
+			out["isClimateOn"] = false
+		case strings.EqualFold(power, "unknown"):
+			// leave isClimateOn absent — honest unknown
+		default:
+			out["isClimateOn"] = true
+		}
 	}
 	return out
 }

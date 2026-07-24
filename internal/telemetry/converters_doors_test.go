@@ -60,10 +60,6 @@ func TestConvertDoorState_BitDecode(t *testing.T) {
 				int64(events.DoorPassengerFront) | int64(events.DoorPassengerRear) |
 				int64(events.DoorFrunk) | int64(events.DoorTrunk),
 		},
-		// Firmware fallback: aggregate delivered as a plain int passes
-		// through unchanged so the same bit positions apply.
-		{"int passthrough", intVal(int32(events.DoorTrunk)), int64(events.DoorTrunk)},
-		{"long passthrough", longVal(int64(events.DoorFrunk)), int64(events.DoorFrunk)},
 	}
 
 	for _, tt := range tests {
@@ -92,9 +88,57 @@ func TestConvertDoorState_BitDecode(t *testing.T) {
 	}
 }
 
+// TestConvertDoorState_WrongType asserts non-Doors variants error rather than
+// mis-decode. A scalar int/long is deliberately NOT accepted as a pre-packed
+// bitmask — the bit layout is a MyRoboTaxi convention, not an attested Tesla
+// encoding (MYR-252 review low #2).
 func TestConvertDoorState_WrongType(t *testing.T) {
 	t.Parallel()
-	if _, err := convertValue(tpb.Field_DoorState, stringVal("nope")); err == nil {
-		t.Error("convertValue(DoorState, string) expected error, got nil")
+	cases := map[string]*tpb.Value{
+		"string": stringVal("nope"),
+		"int":    intVal(3),
+		"long":   longVal(3),
+		"bool":   boolVal(true),
+	}
+	for name, v := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := convertValue(tpb.Field_DoorState, v); err == nil {
+				t.Errorf("convertValue(DoorState, %s) expected error, got nil", name)
+			}
+		})
+	}
+}
+
+// TestConvertCabinEnum_StringFallbackNormalized verifies the string-fallback
+// path never emits a value outside the schema enum (MYR-252 review low #3):
+// a recognized value case-folds to canonical, an unrecognized firmware string
+// collapses to "Unknown".
+func TestConvertCabinEnum_StringFallbackNormalized(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		field tpb.Field
+		raw   string
+		want  string
+	}{
+		{"hvacPower case-fold", tpb.Field_HvacPower, "on", "On"},
+		{"hvacPower unknown-value", tpb.Field_HvacPower, "bogus", "Unknown"},
+		{"hvacAutoMode case-fold", tpb.Field_HvacAutoMode, "OVERRIDE", "Override"},
+		{"hvacAutoMode unknown-value", tpb.Field_HvacAutoMode, "weird", "Unknown"},
+		{"mediaStatus case-fold", tpb.Field_MediaPlaybackStatus, "playing", "Playing"},
+		{"mediaStatus unknown-value", tpb.Field_MediaPlaybackStatus, "buffering", "Unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := convertValue(tt.field, stringVal(tt.raw))
+			if err != nil {
+				t.Fatalf("convertValue error: %v", err)
+			}
+			if got.StringVal == nil || *got.StringVal != tt.want {
+				t.Errorf("= %v, want %q", got.StringVal, tt.want)
+			}
+		})
 	}
 }
