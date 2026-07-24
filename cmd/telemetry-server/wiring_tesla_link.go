@@ -52,7 +52,7 @@ func setupTeslaLinkEndpoints(
 	}
 
 	linkLogger := logger.With(slog.String("component", "tesla-link"))
-	provisioner := store.NewOwnerProvisioner(pool, encryptor)
+	provisioner := store.NewOwnerProvisioner(pool, encryptor, linkLogger)
 	hook := buildOwnerStreamHook(cfg, provisioner, linkLogger)
 	linker := &ownerLink{
 		provisioner: provisioner,

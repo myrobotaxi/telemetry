@@ -10,15 +10,23 @@ import (
 )
 
 type fakeProvisioner struct {
-	calls int
-	last  store.ProvisionInput
-	err   error
+	calls     int
+	last      store.ProvisionInput
+	canonical string
+	err       error
 }
 
-func (f *fakeProvisioner) ProvisionTeslaOwner(_ context.Context, in store.ProvisionInput) error {
+func (f *fakeProvisioner) ProvisionTeslaOwner(_ context.Context, in store.ProvisionInput) (store.ProvisionResult, error) {
 	f.calls++
 	f.last = in
-	return f.err
+	if f.err != nil {
+		return store.ProvisionResult{}, f.err
+	}
+	canon := f.canonical
+	if canon == "" {
+		canon = in.UserID
+	}
+	return store.ProvisionResult{CanonicalUserID: canon, Outcome: store.OutcomeNewUser}, nil
 }
 
 type fakeProfiles struct {
@@ -30,9 +38,15 @@ func (f *fakeProfiles) GetUserProfile(_ context.Context, _ string) (string, stri
 	return f.name, f.email, f.err
 }
 
-type fakeHook struct{ calls int }
+type fakeHook struct {
+	calls      int
+	lastUserID string
+}
 
-func (f *fakeHook) AfterLink(_ context.Context, _, _ string) { f.calls++ }
+func (f *fakeHook) AfterLink(_ context.Context, userID, _ string) {
+	f.calls++
+	f.lastUserID = userID
+}
 
 func TestOwnerLink_UpdateTeslaToken(t *testing.T) {
 	ctx := context.Background()
@@ -64,6 +78,24 @@ func TestOwnerLink_UpdateTeslaToken(t *testing.T) {
 		}
 		if hook.calls != 1 {
 			t.Errorf("hook calls = %d, want 1", hook.calls)
+		}
+	})
+
+	t.Run("converged link passes CANONICAL user to the stream hook, not caller", func(t *testing.T) {
+		prov := &fakeProvisioner{canonical: "cowner-A"} // link converged onto A
+		hook := &fakeHook{}
+		link := &ownerLink{
+			provisioner:   prov,
+			profiles:      &fakeProfiles{},
+			fetchUserInfo: func(context.Context, string) (teslaauth.UserInfo, error) { return teslaauth.UserInfo{Sub: "s"}, nil },
+			hook:          hook,
+			logger:        testLogger(),
+		}
+		if err := link.UpdateTeslaToken(ctx, "ccaller-B", "acc", "ref", 1); err != nil {
+			t.Fatalf("UpdateTeslaToken: %v", err)
+		}
+		if hook.lastUserID != "cowner-A" {
+			t.Errorf("hook userID = %q, want canonical cowner-A (not caller ccaller-B)", hook.lastUserID)
 		}
 	})
 

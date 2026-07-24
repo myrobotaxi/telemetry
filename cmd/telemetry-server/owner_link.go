@@ -10,7 +10,7 @@ import (
 
 // ownerProvisioner is the consumer-site view of store.OwnerProvisioner.
 type ownerProvisioner interface {
-	ProvisionTeslaOwner(ctx context.Context, in store.ProvisionInput) error
+	ProvisionTeslaOwner(ctx context.Context, in store.ProvisionInput) (store.ProvisionResult, error)
 }
 
 // profileLookup is the best-effort name/email source for the provisioned
@@ -66,7 +66,7 @@ func (o *ownerLink) UpdateTeslaToken(ctx context.Context, userID, accessToken, r
 		email = info.Email
 	}
 
-	if err := o.provisioner.ProvisionTeslaOwner(ctx, store.ProvisionInput{
+	res, err := o.provisioner.ProvisionTeslaOwner(ctx, store.ProvisionInput{
 		UserID:            userID,
 		ProviderAccountID: info.Sub,
 		Name:              name,
@@ -74,15 +74,21 @@ func (o *ownerLink) UpdateTeslaToken(ctx context.Context, userID, accessToken, r
 		AccessToken:       accessToken,
 		RefreshToken:      refreshToken,
 		ExpiresAt:         expiresAt,
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
 
-	o.logger.Info("owner provisioned + tesla linked", slog.String("user_id", userID))
+	o.logger.Info("owner provisioned + tesla linked",
+		slog.String("caller_id", userID),
+		slog.String("user_id", res.CanonicalUserID),
+		slog.String("outcome", string(res.Outcome)))
 
 	if o.hook != nil {
-		// Best-effort: never block or fail the link on stream setup.
-		o.hook.AfterLink(ctx, userID, accessToken)
+		// Best-effort: never block or fail the link on stream setup. Vehicles are
+		// owned under the CANONICAL user (a converged link may differ from the
+		// caller's original id), so pass res.CanonicalUserID, not userID.
+		o.hook.AfterLink(ctx, res.CanonicalUserID, accessToken)
 	}
 	return nil
 }

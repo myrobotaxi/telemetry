@@ -49,7 +49,7 @@ type vehicleLister interface {
 
 // vehicleUpserter seeds "Vehicle" identity rows (store.OwnerProvisioner).
 type vehicleUpserter interface {
-	UpsertOwnedVehicle(ctx context.Context, in store.OwnedVehicleInput) error
+	UpsertOwnedVehicle(ctx context.Context, in store.OwnedVehicleInput) (store.VehicleUpsertOutcome, error)
 }
 
 // fleetConfigPusher pushes the fleet-telemetry config for one VIN so the car
@@ -83,16 +83,43 @@ func (h *ownerStreamHook) AfterLink(ctx context.Context, userID, accessToken str
 
 	for _, v := range vehicles {
 		vin := v.VIN
-		if err := h.upsert.UpsertOwnedVehicle(ctx, store.OwnedVehicleInput{
+
+		// Ownership filter (MYR-257 finding 3): never provision a car the caller
+		// only shares (shared-driver access). Skip + audit non-owner vehicles.
+		if !v.IsOwner() {
+			h.logger.Info("owner_vehicle_skipped",
+				slog.String("event", "owner_vehicle_skipped"),
+				slog.String("user_id", userID),
+				slog.String("reason", "not_owner"),
+				slog.String("vin", redactVIN(vin)))
+			continue
+		}
+
+		outcome, err := h.upsert.UpsertOwnedVehicle(ctx, store.OwnedVehicleInput{
 			UserID:         userID,
 			TeslaVehicleID: v.ID.String(),
 			VIN:            vin,
 			Name:           v.DisplayName,
-		}); err != nil {
+		})
+		if err != nil {
 			h.logger.Warn("owner stream setup: vehicle upsert failed (skipping vehicle)",
 				slog.String("user_id", userID), slog.String("error", err.Error()))
 			continue
 		}
+		if outcome == store.VehicleSkippedCrossUser {
+			// The teslaVehicleId already belongs to another user — never
+			// reassigned. Audit and do NOT push config for a car we don't own.
+			h.logger.Warn("owner_vehicle_skipped",
+				slog.String("event", "owner_vehicle_skipped"),
+				slog.String("user_id", userID),
+				slog.String("reason", "cross_user_teslaVehicleId"),
+				slog.String("vin", redactVIN(vin)))
+			continue
+		}
+		h.logger.Info("owner_vehicle_owned",
+			slog.String("event", "owner_vehicle_owned"),
+			slog.String("user_id", userID),
+			slog.String("vin", redactVIN(vin)))
 
 		if h.pusher == nil {
 			continue // proxy unconfigured — stream starts when ops/web pushes config
@@ -109,6 +136,15 @@ func (h *ownerStreamHook) AfterLink(ctx context.Context, userID, accessToken str
 
 // vinLength is the fixed Tesla VIN length used to guard the fleet push.
 const vinLength = 17
+
+// redactVIN returns a VIN with only the last 4 characters visible, for log
+// safety (data-classification §2.1 VIN redaction rule).
+func redactVIN(vin string) string {
+	if len(vin) <= 4 {
+		return vin
+	}
+	return "***" + vin[len(vin)-4:]
+}
 
 // realFleetPusher is the runtime fleetConfigPusher. It is only constructed when
 // a proxy URL + telemetry endpoint are configured, so it never exists in tests.

@@ -20,13 +20,21 @@ func (f *fakeLister) ListVehicles(context.Context, string) ([]telemetry.FleetVeh
 }
 
 type fakeUpserter struct {
-	inputs []store.OwnedVehicleInput
-	err    error
+	inputs  []store.OwnedVehicleInput
+	outcome store.VehicleUpsertOutcome
+	err     error
 }
 
-func (f *fakeUpserter) UpsertOwnedVehicle(_ context.Context, in store.OwnedVehicleInput) error {
+func (f *fakeUpserter) UpsertOwnedVehicle(_ context.Context, in store.OwnedVehicleInput) (store.VehicleUpsertOutcome, error) {
 	f.inputs = append(f.inputs, in)
-	return f.err
+	if f.err != nil {
+		return "", f.err
+	}
+	out := f.outcome
+	if out == "" {
+		out = store.VehicleOwned
+	}
+	return out, nil
 }
 
 type fakePusher struct {
@@ -39,8 +47,12 @@ func (f *fakePusher) PushForVIN(_ context.Context, _, vin string) error {
 	return f.err
 }
 
-func fleetVehicle(id, vin, name string) telemetry.FleetVehicle {
-	return telemetry.FleetVehicle{ID: json.Number(id), VIN: vin, DisplayName: name}
+func ownedVehicle(id, vin, name string) telemetry.FleetVehicle {
+	return telemetry.FleetVehicle{ID: json.Number(id), VIN: vin, DisplayName: name, AccessType: "OWNER"}
+}
+
+func driverVehicle(id, vin, name string) telemetry.FleetVehicle {
+	return telemetry.FleetVehicle{ID: json.Number(id), VIN: vin, DisplayName: name, AccessType: "DRIVER"}
 }
 
 func TestOwnerStreamHook_AfterLink(t *testing.T) {
@@ -49,7 +61,7 @@ func TestOwnerStreamHook_AfterLink(t *testing.T) {
 
 	t.Run("syncs vehicles and pushes config per valid VIN", func(t *testing.T) {
 		lister := &fakeLister{vehicles: []telemetry.FleetVehicle{
-			fleetVehicle("111", validVIN, "Lunar"),
+			ownedVehicle("111", validVIN, "Lunar"),
 		}}
 		upsert := &fakeUpserter{}
 		pusher := &fakePusher{}
@@ -69,7 +81,7 @@ func TestOwnerStreamHook_AfterLink(t *testing.T) {
 	})
 
 	t.Run("nil pusher: syncs but never pushes (SAFETY guard)", func(t *testing.T) {
-		lister := &fakeLister{vehicles: []telemetry.FleetVehicle{fleetVehicle("1", validVIN, "V")}}
+		lister := &fakeLister{vehicles: []telemetry.FleetVehicle{ownedVehicle("1", validVIN, "V")}}
 		upsert := &fakeUpserter{}
 		hook := &ownerStreamHook{lister: lister, upsert: upsert, pusher: nil, logger: testLogger()}
 
@@ -81,7 +93,7 @@ func TestOwnerStreamHook_AfterLink(t *testing.T) {
 	})
 
 	t.Run("malformed VIN is synced but not pushed", func(t *testing.T) {
-		lister := &fakeLister{vehicles: []telemetry.FleetVehicle{fleetVehicle("1", "SHORTVIN", "V")}}
+		lister := &fakeLister{vehicles: []telemetry.FleetVehicle{ownedVehicle("1", "SHORTVIN", "V")}}
 		upsert := &fakeUpserter{}
 		pusher := &fakePusher{}
 		hook := &ownerStreamHook{lister: lister, upsert: upsert, pusher: pusher, logger: testLogger()}
@@ -111,7 +123,7 @@ func TestOwnerStreamHook_AfterLink(t *testing.T) {
 
 	t.Run("upsert failure skips push for that vehicle but continues", func(t *testing.T) {
 		lister := &fakeLister{vehicles: []telemetry.FleetVehicle{
-			fleetVehicle("1", validVIN, "A"),
+			ownedVehicle("1", validVIN, "A"),
 		}}
 		upsert := &fakeUpserter{err: errors.New("vehicle insert failed")}
 		pusher := &fakePusher{}
@@ -121,6 +133,39 @@ func TestOwnerStreamHook_AfterLink(t *testing.T) {
 
 		if len(pusher.vins) != 0 {
 			t.Errorf("pushed vins = %v, want none (upsert failed)", pusher.vins)
+		}
+	})
+
+	t.Run("shared-driver vehicle is NOT provisioned or pushed (ownership filter)", func(t *testing.T) {
+		lister := &fakeLister{vehicles: []telemetry.FleetVehicle{
+			driverVehicle("1", validVIN, "Someone else's car"),
+			ownedVehicle("2", "5YJ3E1EA7KF000002", "Mine"),
+		}}
+		upsert := &fakeUpserter{}
+		pusher := &fakePusher{}
+		hook := &ownerStreamHook{lister: lister, upsert: upsert, pusher: pusher, logger: testLogger()}
+
+		hook.AfterLink(ctx, "cuser1", "token")
+
+		// Only the OWNER vehicle is provisioned + pushed; the DRIVER one is dropped.
+		if len(upsert.inputs) != 1 || upsert.inputs[0].TeslaVehicleID != "2" {
+			t.Fatalf("upsert inputs = %+v, want only the owned vehicle (id 2)", upsert.inputs)
+		}
+		if len(pusher.vins) != 1 || pusher.vins[0] != "5YJ3E1EA7KF000002" {
+			t.Errorf("pushed vins = %v, want only the owned VIN", pusher.vins)
+		}
+	})
+
+	t.Run("cross-user teslaVehicleId skip is not pushed", func(t *testing.T) {
+		lister := &fakeLister{vehicles: []telemetry.FleetVehicle{ownedVehicle("1", validVIN, "A")}}
+		upsert := &fakeUpserter{outcome: store.VehicleSkippedCrossUser}
+		pusher := &fakePusher{}
+		hook := &ownerStreamHook{lister: lister, upsert: upsert, pusher: pusher, logger: testLogger()}
+
+		hook.AfterLink(ctx, "cuser1", "token")
+
+		if len(pusher.vins) != 0 {
+			t.Errorf("pushed vins = %v, want none (cross-user vehicle not owned)", pusher.vins)
 		}
 	})
 }
