@@ -260,7 +260,7 @@ A single `vehicle_update` frame's `payload.fields` map MUST contain members of *
 
 `destinationAddress` is nullable on the wire (Prisma `String?`). It is a full member of the navigation atomic group and participates in the active-navigation predicate as of MYR-24 (2026-04-23); the prior spec-only exemption in [`vehicle-state-schema.md`](vehicle-state-schema.md) §3.1 has been retired.
 
-Ungrouped fields (delivered individually, no group membership): `speed`, `odometerMiles`, `interiorTemp`, `exteriorTemp`, `fsdMilesSinceReset`, `locationName`, `locationAddress`, `lastUpdated`, and the drive-only `driveTrailCoordinates` field (§4.1.6). Their classification tiers are defined in [`vehicle-state-schema.md`](vehicle-state-schema.md) §1.1.
+Ungrouped fields (delivered individually, no group membership): `speed`, `odometerMiles`, `interiorTemp`, `exteriorTemp`, `fsdMilesSinceReset`, `locationName`, `locationAddress`, `lastUpdated`, the MYR-252 cabin-control read-back fields (`locked`, `hvacPower`, `isClimateOn`, `fanSpeed`, `driverTempSetting`, `passengerTempSetting`, `hvacAutoMode`, `hvacAcEnabled`, `seatHeaterLeft`/`Right`, `seatHeaterRearLeft`/`Center`/`Right`, `seatCoolerLeft`/`Right`, `seatVentEnabled`, `chargePortDoorOpen`, `frunkOpen`, `trunkOpen`, `mediaPlaybackStatus`, `mediaVolume` — see §4.1.7), and the drive-only `driveTrailCoordinates` field (§4.1.6). Their classification tiers are defined in [`vehicle-state-schema.md`](vehicle-state-schema.md) §1.1.
 
 **Server enforcement** ([`internal/ws/nav_broadcast.go:handleTelemetry`](../../internal/ws/nav_broadcast.go)):
 
@@ -378,7 +378,7 @@ The wire field names in `payload.fields` are the **frontend / SDK** names, not t
 | `originLocation` | split into `originLatitude` + `originLongitude` |
 | `routeLine` (Tesla encoded polyline) | `navRouteCoordinates` (decoded `[lng, lat]` array) |
 
-Integer rounding is applied server-side to the fields listed in `integerFields` (`speed`, `heading`, `chargeLevel`, `estimatedRange`, `etaMinutes`, `interiorTemp`, `exteriorTemp`, `odometerMiles`, `fanSpeed`, seat heater and climate settings). See [`field_mapping.go:roundIfInteger`](../../internal/ws/field_mapping.go).
+Integer rounding is applied server-side to the fields listed in `integerFields` (`speed`, `heading`, `chargeLevel`, `estimatedRange`, `etaMinutes`, `interiorTemp`, `exteriorTemp`, `odometerMiles`, `fanSpeed`, `driverTempSetting`, `passengerTempSetting`, `seatHeaterLeft`/`Right`, `seatHeaterRearLeft`/`Center`/`Right`, `seatCoolerLeft`/`Right`). `mediaVolume` (MYR-252) is intentionally NOT rounded — it is a fractional level. See [`field_mapping.go:roundIfInteger`](../../internal/ws/field_mapping.go).
 
 SDKs MUST accept the integer-rounded values as-is and MUST NOT round-trip through floats.
 
@@ -526,6 +526,8 @@ Coordinates are `[lng, lat]` order (GeoJSON / Mapbox). Each element is a per-poi
 `speed` is delivered ungrouped even though `requirements.md` NFR-3.1 text puts it in the GPS group. This is a resolved decision in [`vehicle-state-schema.md`](vehicle-state-schema.md) §7.1: speed updates at 2 s cadence while GPS uses a 10 m delta filter, so coupling them would either delay speed updates or flood GPS updates. DV-10 records this as an accepted divergence from the NFR literal.
 
 Other ungrouped fields: `odometerMiles`, `interiorTemp`, `exteriorTemp`, `fsdMilesSinceReset`, `locationName`, `locationAddress`, `lastUpdated`. None of these transition a `dataState` group on receipt (per [`state-machine.md`](state-machine.md) §4.3 footnote). Their freshness is implied by `connectionState`.
+
+The MYR-252 cabin-control read-back fields are also ungrouped (individually delivered): `locked`, `hvacPower`, `isClimateOn`, `fanSpeed`, `driverTempSetting`, `passengerTempSetting`, `hvacAutoMode`, `hvacAcEnabled`, `seatHeaterLeft`/`Right`, `seatHeaterRearLeft`/`Center`/`Right`, `seatCoolerLeft`/`Right`, `seatVentEnabled`, `chargePortDoorOpen`, `frunkOpen`, `trunkOpen`, `mediaPlaybackStatus`, `mediaVolume`. Per-field types/units/classification (all P0) live in [`vehicle-state-schema.md`](vehicle-state-schema.md) §1.1; `frunkOpen`/`trunkOpen` are bit-decoded from Tesla `DoorState` (proto 58) per §6.3. These stream on the live `vehicle_update` wire but are NOT persisted, so they do not appear on the DB-backed REST `/snapshot` or the WS snapshot-on-connect frame until [MYR-253](https://linear.app/myrobotaxi/issue/MYR-253) adds the columns.
 
 `lastUpdated` is set by the server on every outbound `vehicle_update` (in `nav_broadcast.go`'s `handleTelemetry` and `flushGroup`) to the event's `CreatedAt` for non-nav broadcasts or `time.Now().UTC()` for nav flushes. SDKs SHOULD surface this to consumers as the "most recent telemetry timestamp" for the vehicle.
 

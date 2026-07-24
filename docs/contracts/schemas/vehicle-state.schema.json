@@ -261,6 +261,152 @@
         "description": "A coordinate pair: [longitude, latitude]."
       }
     },
+    "locked": {
+      "type": ["boolean", "null"],
+      "description": "Whether the vehicle is locked. Sourced from Tesla proto field 59 (Locked, boolean). Added by MYR-252 as an owner cabin-control read-back field. Delivered live on the WebSocket vehicle_update stream (individually-delivered field, no atomic group); the value is absent from a frame until the vehicle emits a change. NOT persisted to the DB-backed REST /snapshot in this iteration — see vehicle-state-schema.md §6 and rest-api.md §7.1 for the /snapshot hydration follow-up (requires a Prisma migration).",
+      "x-classification": "P0",
+      "x-tesla-proto-field": 59
+    },
+    "hvacPower": {
+      "type": ["string", "null"],
+      "enum": ["Off", "On", "Precondition", "OverheatProtect", "Unknown", null],
+      "description": "Climate (HVAC) system power state. Sourced from Tesla proto field 201 (HvacPower, HvacPowerState enum). Added by MYR-252. Live WS vehicle_update field (see `locked` for the delivery/snapshot note).",
+      "x-classification": "P0",
+      "x-tesla-proto-field": 201
+    },
+    "isClimateOn": {
+      "type": ["boolean", "null"],
+      "description": "Convenience boolean derived server-side from `hvacPower` (true when hvacPower is any value other than 'Off'). Added by MYR-252 so consumers can render a climate on/off toggle without interpreting the HvacPowerState enum. Derived from Tesla proto field 201; no dedicated proto field.",
+      "x-classification": "P0"
+    },
+    "fanSpeed": {
+      "type": ["integer", "null"],
+      "description": "HVAC fan speed level. Sourced from Tesla proto field 198 (HvacFanSpeed, integer). Added by MYR-252. Live WS vehicle_update field.",
+      "x-classification": "P0",
+      "minimum": 0,
+      "x-tesla-proto-field": 198
+    },
+    "driverTempSetting": {
+      "type": ["integer", "null"],
+      "description": "Driver-side climate temperature setpoint. Sourced from Tesla proto field 200 (HvacLeftTemperatureRequest); Tesla emits Celsius and the server converts to Fahrenheit at the telemetry boundary (matching interiorTemp/exteriorTemp), rounded to the nearest integer. Added by MYR-252. Live WS vehicle_update field.",
+      "x-unit": "fahrenheit",
+      "x-classification": "P0",
+      "x-tesla-proto-field": 200
+    },
+    "passengerTempSetting": {
+      "type": ["integer", "null"],
+      "description": "Passenger-side climate temperature setpoint. Sourced from Tesla proto field 202 (HvacRightTemperatureRequest); Celsius→Fahrenheit converted server-side, rounded to nearest integer. Added by MYR-252. Live WS vehicle_update field.",
+      "x-unit": "fahrenheit",
+      "x-classification": "P0",
+      "x-tesla-proto-field": 202
+    },
+    "hvacAutoMode": {
+      "type": ["string", "null"],
+      "enum": ["Unknown", "On", "Override", null],
+      "description": "HVAC auto mode state. Sourced from Tesla proto field 197 (HvacAutoMode, HvacAutoModeState enum). Added by MYR-252 (Group B — newly added to the fleet-telemetry field config + server field map). Live WS vehicle_update field.",
+      "x-classification": "P0",
+      "x-tesla-proto-field": 197
+    },
+    "hvacAcEnabled": {
+      "type": ["boolean", "null"],
+      "description": "Whether the air-conditioning compressor is enabled. Sourced from Tesla proto field 196 (HvacACEnabled, boolean). Added by MYR-252 (Group B). Live WS vehicle_update field.",
+      "x-classification": "P0",
+      "x-tesla-proto-field": 196
+    },
+    "seatHeaterLeft": {
+      "type": ["integer", "null"],
+      "description": "Driver (front-left) seat heater level (0 = off, 1-3 = increasing heat). Sourced from Tesla proto field 87 (SeatHeaterLeft, integer). Added by MYR-252. Live WS vehicle_update field.",
+      "x-classification": "P0",
+      "minimum": 0,
+      "maximum": 3,
+      "x-tesla-proto-field": 87
+    },
+    "seatHeaterRight": {
+      "type": ["integer", "null"],
+      "description": "Passenger (front-right) seat heater level (0-3). Sourced from Tesla proto field 88 (SeatHeaterRight, integer). Added by MYR-252. Live WS vehicle_update field.",
+      "x-classification": "P0",
+      "minimum": 0,
+      "maximum": 3,
+      "x-tesla-proto-field": 88
+    },
+    "seatHeaterRearLeft": {
+      "type": ["integer", "null"],
+      "description": "Rear-left seat heater level (0-3). Sourced from Tesla proto field 89 (SeatHeaterRearLeft, integer). Added by MYR-252 (Group B). Live WS vehicle_update field.",
+      "x-classification": "P0",
+      "minimum": 0,
+      "maximum": 3,
+      "x-tesla-proto-field": 89
+    },
+    "seatHeaterRearCenter": {
+      "type": ["integer", "null"],
+      "description": "Rear-center seat heater level (0-3). Sourced from Tesla proto field 91 (SeatHeaterRearCenter, integer). Added by MYR-252 (Group B). Live WS vehicle_update field.",
+      "x-classification": "P0",
+      "minimum": 0,
+      "maximum": 3,
+      "x-tesla-proto-field": 91
+    },
+    "seatHeaterRearRight": {
+      "type": ["integer", "null"],
+      "description": "Rear-right seat heater level (0-3). Sourced from Tesla proto field 90 (SeatHeaterRearRight, integer). Added by MYR-252 (Group B). Live WS vehicle_update field.",
+      "x-classification": "P0",
+      "minimum": 0,
+      "maximum": 3,
+      "x-tesla-proto-field": 90
+    },
+    "seatCoolerLeft": {
+      "type": ["integer", "null"],
+      "description": "Driver (front-left) seat cooler level (0 = off, 1-3 = increasing cooling). Sourced from Tesla proto field 237 (ClimateSeatCoolingFrontLeft, integer). Added by MYR-252 (Group B). Live WS vehicle_update field.",
+      "x-classification": "P0",
+      "minimum": 0,
+      "maximum": 3,
+      "x-tesla-proto-field": 237
+    },
+    "seatCoolerRight": {
+      "type": ["integer", "null"],
+      "description": "Passenger (front-right) seat cooler level (0-3). Sourced from Tesla proto field 238 (ClimateSeatCoolingFrontRight, integer). Added by MYR-252 (Group B). Live WS vehicle_update field.",
+      "x-classification": "P0",
+      "minimum": 0,
+      "maximum": 3,
+      "x-tesla-proto-field": 238
+    },
+    "seatVentEnabled": {
+      "type": ["boolean", "null"],
+      "description": "Whether seat ventilation is enabled. Sourced from Tesla proto field 254 (SeatVentEnabled, boolean). Added by MYR-252 (Group B). Live WS vehicle_update field.",
+      "x-classification": "P0",
+      "x-tesla-proto-field": 254
+    },
+    "chargePortDoorOpen": {
+      "type": ["boolean", "null"],
+      "description": "Whether the charge-port door is open. Sourced from Tesla proto field 183 (ChargePortDoorOpen, boolean). Added by MYR-252 (Group B). Individually-delivered — intentionally NOT a member of the `charge` atomic group (it is a door state, not a battery/charge-session value). Live WS vehicle_update field.",
+      "x-classification": "P0",
+      "x-tesla-proto-field": 183
+    },
+    "frunkOpen": {
+      "type": ["boolean", "null"],
+      "description": "Whether the front trunk (frunk) is open. Decoded from Tesla proto field 58 (DoorState) — the `Doors` message's TrunkFront boolean. Added by MYR-252 (Group B). See vehicle-state-schema.md §6.1 for the DoorState bit decode. Live WS vehicle_update field.",
+      "x-classification": "P0",
+      "x-tesla-proto-field": 58
+    },
+    "trunkOpen": {
+      "type": ["boolean", "null"],
+      "description": "Whether the rear trunk is open. Decoded from Tesla proto field 58 (DoorState) — the `Doors` message's TrunkRear boolean. Added by MYR-252 (Group B). See vehicle-state-schema.md §6.1 for the DoorState bit decode. Live WS vehicle_update field.",
+      "x-classification": "P0",
+      "x-tesla-proto-field": 58
+    },
+    "mediaPlaybackStatus": {
+      "type": ["string", "null"],
+      "enum": ["Unknown", "Stopped", "Playing", "Paused", null],
+      "description": "Media playback status. Sourced from Tesla proto field 242 (MediaPlaybackStatus, MediaStatus enum). Added by MYR-252 (Group B). Live WS vehicle_update field.",
+      "x-classification": "P0",
+      "x-tesla-proto-field": 242
+    },
+    "mediaVolume": {
+      "type": ["number", "null"],
+      "description": "Current media audio volume. Sourced from Tesla proto field 244 (MediaAudioVolume). Tesla emits a fractional level (typically 0-11), so this is a number (not integer-rounded). Added by MYR-252 (Group B). Live WS vehicle_update field.",
+      "x-classification": "P0",
+      "minimum": 0,
+      "x-tesla-proto-field": 244
+    },
     "lastUpdated": {
       "type": "string",
       "format": "date-time",

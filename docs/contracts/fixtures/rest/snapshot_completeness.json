@@ -214,6 +214,174 @@
       "atomicGroup": "",
       "nullableInSteadyState": false,
       "comment": "TIMESTAMPTZ NOT NULL DEFAULT NOW() — set by the writer on every UpdateTelemetry. Test asserts Vehicle.LastUpdated is non-zero AND was advanced by an UpdateTelemetry call (i.e., greater than the seed timestamp)."
+    },
+    "locked": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "Locked", "value": true },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-253",
+      "comment": "MYR-252 cabin-control read-back. Contracted + delivered live on the WS vehicle_update stream, but NOT persisted to the DB-backed /snapshot yet — the Vehicle table is Prisma-owned and column additions are a cross-repo migration tracked in MYR-253. Synthetic names a VehicleUpdate field that does not exist yet, so the writer-pipeline gap surfaces as an EXPECTED-GAP log line and the gate stays green until MYR-253 lands."
+    },
+    "hvacPower": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "HvacPower", "value": "On" },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-253",
+      "comment": "MYR-252 cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253 (Prisma-owned Vehicle table)."
+    },
+    "isClimateOn": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "IsClimateOn", "value": true },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-253",
+      "comment": "MYR-252 derived cabin field (from hvacPower) — WS-live only; DB /snapshot persistence tracked in MYR-253."
+    },
+    "fanSpeed": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "FanSpeed", "value": 3 },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-253",
+      "comment": "MYR-252 cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253."
+    },
+    "driverTempSetting": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "DriverTempSetting", "value": 68 },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-253",
+      "comment": "MYR-252 cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253."
+    },
+    "passengerTempSetting": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "PassengerTempSetting", "value": 70 },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-253",
+      "comment": "MYR-252 cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253."
+    },
+    "hvacAutoMode": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "HvacAutoMode", "value": "On" },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-253",
+      "comment": "MYR-252 Group B cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253."
+    },
+    "hvacAcEnabled": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "HvacAcEnabled", "value": true },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-253",
+      "comment": "MYR-252 Group B cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253."
+    },
+    "seatHeaterLeft": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "SeatHeaterLeft", "value": 2 },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-253",
+      "comment": "MYR-252 cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253."
+    },
+    "seatHeaterRight": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "SeatHeaterRight", "value": 1 },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-253",
+      "comment": "MYR-252 cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253."
+    },
+    "seatHeaterRearLeft": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "SeatHeaterRearLeft", "value": 1 },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-253",
+      "comment": "MYR-252 Group B cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253."
+    },
+    "seatHeaterRearCenter": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "SeatHeaterRearCenter", "value": 1 },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-253",
+      "comment": "MYR-252 Group B cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253."
+    },
+    "seatHeaterRearRight": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "SeatHeaterRearRight", "value": 1 },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-253",
+      "comment": "MYR-252 Group B cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253."
+    },
+    "seatCoolerLeft": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "SeatCoolerLeft", "value": 1 },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-253",
+      "comment": "MYR-252 Group B cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253."
+    },
+    "seatCoolerRight": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "SeatCoolerRight", "value": 1 },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-253",
+      "comment": "MYR-252 Group B cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253."
+    },
+    "seatVentEnabled": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "SeatVentEnabled", "value": true },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-253",
+      "comment": "MYR-252 Group B cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253."
+    },
+    "chargePortDoorOpen": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "ChargePortDoorOpen", "value": true },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-253",
+      "comment": "MYR-252 Group B cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253."
+    },
+    "frunkOpen": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "FrunkOpen", "value": true },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-253",
+      "comment": "MYR-252 Group B — decoded from DoorState (proto 58) TrunkFront bit. WS-live only; DB /snapshot persistence tracked in MYR-253."
+    },
+    "trunkOpen": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "TrunkOpen", "value": true },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-253",
+      "comment": "MYR-252 Group B — decoded from DoorState (proto 58) TrunkRear bit. WS-live only; DB /snapshot persistence tracked in MYR-253."
+    },
+    "mediaPlaybackStatus": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "MediaPlaybackStatus", "value": "Playing" },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-253",
+      "comment": "MYR-252 Group B cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253 (may stay WS-live-only — ephemeral)."
+    },
+    "mediaVolume": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "MediaVolume", "value": 5.5 },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-253",
+      "comment": "MYR-252 Group B cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253 (may stay WS-live-only — ephemeral)."
     }
   }
 }
