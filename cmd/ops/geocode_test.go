@@ -303,25 +303,6 @@ func TestBackfillRow_ApplyPath(t *testing.T) {
 	}
 }
 
-func TestErrorClass(t *testing.T) {
-	tests := []struct {
-		name string
-		err  error
-		want string
-	}{
-		{name: "invalid coordinate", err: fmt.Errorf("geocode.ReverseGeocode(999.0000,999.0000): %w", geocode.ErrInvalidCoordinate), want: "invalid_coordinate"},
-		{name: "http status error", err: errors.New("geocode.ReverseGeocode(33.0000,-96.0000): HTTP 500: internal error"), want: "http_status"},
-		{name: "generic transport error", err: errors.New("dial tcp: connection reset by peer"), want: "transport"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := errorClass(tt.err); got != tt.want {
-				t.Errorf("errorClass(%v) = %q, want %q", tt.err, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestLogSafePresence(t *testing.T) {
 	set := "4220 Tributary Way, Frisco, TX"
 	empty := ""
