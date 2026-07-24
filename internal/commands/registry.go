@@ -51,7 +51,8 @@ func (r *Registry) Names() []string {
 
 // NewRegistry builds the default command registry seeded with the P11
 // (lock/climate/charge/trunk/horn/lights) and P10 dispatch
-// (navigation_request/navigation_gps_request, MYR-176) commands.
+// (navigation_request/navigation_gps_request, MYR-176) commands, plus the
+// owner-app charge-port, seat-climate, and media commands (MYR-249).
 func NewRegistry() *Registry {
 	cmds := []Command{
 		// --- Doors (P11) ---
@@ -97,6 +98,26 @@ func NewRegistry() *Registry {
 		// proxy-routed dispatch. ---
 		{Name: "navigation_gps_request", Scope: ScopeVehicleCmds, SignerRequired: false, BuildBody: buildNavigationGPS},
 		{Name: "navigation_request", Scope: ScopeVehicleCmds, SignerRequired: false, BuildBody: buildNavigationShare},
+
+		// --- Charge port door (MYR-249). Tesla groups the charge-port door
+		// commands under vehicle_charging_cmds alongside charge_start/stop/
+		// set_charge_limit. Both are signed (v0.4.1 proxy: ChargePortOpen/
+		// ChargePortClose), no params. ---
+		{Name: "charge_port_door_open", Scope: ScopeChargingCmds, SignerRequired: true},
+		{Name: "charge_port_door_close", Scope: ScopeChargingCmds, SignerRequired: true},
+
+		// --- Seats (MYR-249). Signed vehicle_cmds (v0.4.1 proxy
+		// SetSeatHeater/SetSeatCooler). The two commands use DIFFERENT
+		// seat_position numbering — see buildSeatHeater/buildSeatCooler. ---
+		{Name: "remote_seat_heater_request", Scope: ScopeVehicleCmds, SignerRequired: true, BuildBody: buildSeatHeater},
+		{Name: "remote_seat_cooler_request", Scope: ScopeVehicleCmds, SignerRequired: true, BuildBody: buildSeatCooler},
+
+		// --- Media (MYR-249). Signed vehicle_cmds (v0.4.1 proxy
+		// ToggleMediaPlayback/MediaNextTrack/MediaPreviousTrack/SetVolume). ---
+		{Name: "media_toggle_playback", Scope: ScopeVehicleCmds, SignerRequired: true},
+		{Name: "media_next_track", Scope: ScopeVehicleCmds, SignerRequired: true},
+		{Name: "media_prev_track", Scope: ScopeVehicleCmds, SignerRequired: true},
+		{Name: "adjust_volume", Scope: ScopeVehicleCmds, SignerRequired: true, BuildBody: buildAdjustVolume},
 	}
 
 	m := make(map[string]Command, len(cmds))
@@ -206,4 +227,72 @@ func buildNavigationShare(p map[string]any) ([]byte, error) {
 		"timestamp_ms": fmt.Sprintf("%d", time.Now().UnixMilli()),
 		"value":        map[string]any{"android.intent.extra.TEXT": value},
 	})
+}
+
+// buildSeatHeater marshals {seat_position, level} for
+// remote_seat_heater_request. seat_position is Tesla's 0-based seat index
+// (0 front-left, 1 front-right, then the second/third rows); the pinned proxy
+// (v0.4.1) validates 0..8 against its seatPositions table. level is the heater
+// setting 0-3 (off/low/med/high, vehicle.Level).
+func buildSeatHeater(p map[string]any) ([]byte, error) {
+	seat, _, err := paramInt(p, "seat_position", true)
+	if err != nil {
+		return nil, err
+	}
+	if seat < 0 || seat > 8 {
+		return nil, errInvalidParams("parameter \"seat_position\" must be between 0 and 8")
+	}
+	level, _, err := paramInt(p, "level", true)
+	if err != nil {
+		return nil, err
+	}
+	if level < 0 || level > 3 {
+		return nil, errInvalidParams("parameter \"level\" must be between 0 and 3")
+	}
+	return marshalBody(map[string]any{"seat_position": seat, "level": level})
+}
+
+// buildSeatCooler marshals {seat_position, seat_cooler_level} for
+// remote_seat_cooler_request. Only the front seats have coolers, and Tesla's
+// cooler seat_position enum DIFFERS from the heater's index: 1 front-left,
+// 2 front-right (0 is Unknown and the vehicle rejects it).
+//
+// seat_cooler_level is 1-4 (1 off, 2 low, 3 med, 4 high), NOT 0-3. The HTTP
+// value maps 1:1 onto the vehicle's HvacSeatCoolerLevel enum
+// (Unknown=0, Off=1, Low=2, Med=3, High=4): the pinned proxy (v0.4.1) does
+// vehicle.Level(x-1) in settingForCoolerSeatPosition and SetSeatCooler then
+// sends HvacSeatCoolerLevel_E(level+1), so the -1/+1 cancel. (The proxy's
+// "The API uses 0-3" comment describes the internal vehicle.Level scale after
+// the -1, not this HTTP field.) This is asymmetric with the heater, whose
+// level is 0-3 and is passed straight through to vehicle.Level (LevelOff=0).
+func buildSeatCooler(p map[string]any) ([]byte, error) {
+	seat, _, err := paramInt(p, "seat_position", true)
+	if err != nil {
+		return nil, err
+	}
+	if seat != 1 && seat != 2 {
+		return nil, errInvalidParams("parameter \"seat_position\" must be 1 (front-left) or 2 (front-right)")
+	}
+	level, _, err := paramInt(p, "seat_cooler_level", true)
+	if err != nil {
+		return nil, err
+	}
+	if level < 1 || level > 4 {
+		return nil, errInvalidParams("parameter \"seat_cooler_level\" must be between 1 and 4")
+	}
+	return marshalBody(map[string]any{"seat_position": seat, "seat_cooler_level": level})
+}
+
+// buildAdjustVolume marshals {volume} for adjust_volume. Tesla's media volume
+// is a float in [0, 11]; the pinned proxy (v0.4.1) forwards it to SetVolume
+// unchanged.
+func buildAdjustVolume(p map[string]any) ([]byte, error) {
+	vol, _, err := paramFloat(p, "volume", true)
+	if err != nil {
+		return nil, err
+	}
+	if vol < 0 || vol > 11 {
+		return nil, errInvalidParams("parameter \"volume\" must be between 0 and 11")
+	}
+	return marshalBody(map[string]any{"volume": vol})
 }

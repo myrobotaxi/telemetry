@@ -29,6 +29,16 @@ func TestRegistrySeededCommands(t *testing.T) {
 		"flash_lights":            {ScopeVehicleCmds, true},
 		"navigation_gps_request":  {ScopeVehicleCmds, false},
 		"navigation_request":      {ScopeVehicleCmds, false},
+
+		// MYR-249 owner-app additions.
+		"charge_port_door_open":      {ScopeChargingCmds, true},
+		"charge_port_door_close":     {ScopeChargingCmds, true},
+		"remote_seat_heater_request": {ScopeVehicleCmds, true},
+		"remote_seat_cooler_request": {ScopeVehicleCmds, true},
+		"media_toggle_playback":      {ScopeVehicleCmds, true},
+		"media_next_track":           {ScopeVehicleCmds, true},
+		"media_prev_track":           {ScopeVehicleCmds, true},
+		"adjust_volume":              {ScopeVehicleCmds, true},
 	}
 
 	for name, w := range want {
@@ -163,6 +173,125 @@ func TestBuildBodyValidation(t *testing.T) {
 			name:    "navigation_request missing value",
 			command: "navigation_request",
 			params:  map[string]any{},
+			wantErr: true,
+		},
+		{
+			name:    "remote_seat_heater_request valid",
+			command: "remote_seat_heater_request",
+			params:  map[string]any{"seat_position": 1.0, "level": 2.0},
+			assert: func(t *testing.T, body []byte) {
+				var m map[string]any
+				mustJSON(t, body, &m)
+				if m["seat_position"] != 1.0 || m["level"] != 2.0 {
+					t.Fatalf("body = %s", body)
+				}
+			},
+		},
+		{
+			name:    "remote_seat_heater_request seat out of range",
+			command: "remote_seat_heater_request",
+			params:  map[string]any{"seat_position": 9.0, "level": 1.0},
+			wantErr: true,
+		},
+		{
+			name:    "remote_seat_heater_request level out of range",
+			command: "remote_seat_heater_request",
+			params:  map[string]any{"seat_position": 0.0, "level": 4.0},
+			wantErr: true,
+		},
+		{
+			name:    "remote_seat_heater_request missing level",
+			command: "remote_seat_heater_request",
+			params:  map[string]any{"seat_position": 0.0},
+			wantErr: true,
+		},
+		{
+			name:    "remote_seat_cooler_request valid",
+			command: "remote_seat_cooler_request",
+			params:  map[string]any{"seat_position": 2.0, "seat_cooler_level": 3.0},
+			assert: func(t *testing.T, body []byte) {
+				var m map[string]any
+				mustJSON(t, body, &m)
+				if m["seat_position"] != 2.0 || m["seat_cooler_level"] != 3.0 {
+					t.Fatalf("body = %s", body)
+				}
+			},
+		},
+		{
+			name:    "remote_seat_cooler_request invalid seat",
+			command: "remote_seat_cooler_request",
+			params:  map[string]any{"seat_position": 0.0, "seat_cooler_level": 1.0},
+			wantErr: true,
+		},
+		{
+			name:    "remote_seat_cooler_request rear seat rejected",
+			command: "remote_seat_cooler_request",
+			params:  map[string]any{"seat_position": 3.0, "seat_cooler_level": 1.0},
+			wantErr: true,
+		},
+		{
+			name:    "remote_seat_cooler_request level below range (0)",
+			command: "remote_seat_cooler_request",
+			params:  map[string]any{"seat_position": 1.0, "seat_cooler_level": 0.0},
+			wantErr: true,
+		},
+		{
+			name:    "remote_seat_cooler_request level boundary min (1=off)",
+			command: "remote_seat_cooler_request",
+			params:  map[string]any{"seat_position": 1.0, "seat_cooler_level": 1.0},
+			assert: func(t *testing.T, body []byte) {
+				var m map[string]any
+				mustJSON(t, body, &m)
+				if m["seat_cooler_level"] != 1.0 {
+					t.Fatalf("body = %s", body)
+				}
+			},
+		},
+		{
+			name:    "remote_seat_cooler_request level boundary max (4=high)",
+			command: "remote_seat_cooler_request",
+			params:  map[string]any{"seat_position": 2.0, "seat_cooler_level": 4.0},
+			assert: func(t *testing.T, body []byte) {
+				var m map[string]any
+				mustJSON(t, body, &m)
+				if m["seat_cooler_level"] != 4.0 {
+					t.Fatalf("body = %s", body)
+				}
+			},
+		},
+		{
+			name:    "remote_seat_cooler_request level above range (5)",
+			command: "remote_seat_cooler_request",
+			params:  map[string]any{"seat_position": 1.0, "seat_cooler_level": 5.0},
+			wantErr: true,
+		},
+		{
+			name:    "adjust_volume valid",
+			command: "adjust_volume",
+			params:  map[string]any{"volume": 6.5},
+			assert: func(t *testing.T, body []byte) {
+				var m map[string]any
+				mustJSON(t, body, &m)
+				if m["volume"] != 6.5 {
+					t.Fatalf("body = %s", body)
+				}
+			},
+		},
+		{
+			name:    "adjust_volume boundary max",
+			command: "adjust_volume",
+			params:  map[string]any{"volume": 11.0},
+		},
+		{
+			name:    "adjust_volume out of range",
+			command: "adjust_volume",
+			params:  map[string]any{"volume": 12.0},
+			wantErr: true,
+		},
+		{
+			name:    "adjust_volume non-numeric",
+			command: "adjust_volume",
+			params:  map[string]any{"volume": "loud"},
 			wantErr: true,
 		},
 	}
