@@ -190,6 +190,8 @@ type httpRouteDeps struct {
 	driveRepo      *store.DriveRepo
 	rideRepo       *store.RideRequestRepo
 	accountRepo    *store.AccountRepo
+	pool           *pgxpool.Pool
+	encryptor      cryptox.Encryptor
 	auditEmitter   mask.AuditEmitter
 	auditMetrics   mask.AuditMetrics
 	debugGate      debugFieldsGate
@@ -294,7 +296,7 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 
 	setupFleetConfigEndpoint(deps.cfg, deps.srv, deps.authenticator, deps.vinCache, deps.accountRepo, deps.vehicleRepo, deps.logger)
 
-	setupTeslaLinkEndpoints(deps.cfg, deps.srv, deps.authenticator, deps.accountRepo, deps.logger)
+	setupTeslaLinkEndpoints(deps.cfg, deps.srv, deps.authenticator, deps.pool, deps.encryptor, deps.logger)
 
 	setupVehicleCommandEndpoint(deps, snapshotAdapter)
 
