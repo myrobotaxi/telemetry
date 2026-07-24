@@ -68,28 +68,42 @@ code→token exchange has succeeded). It is triggered inside the
 - **Single, audited, idempotent, transactional path:** one method, one DB
   transaction, all upserts. Re-link never duplicates.
 
-### The key identity insight — reuse the `go_users` id as the Prisma `User.id`
+### Canonical-user resolution (the core correctness invariant)
 
-`go_users.id` and `"User"."id"` are independent primary keys in independent
-tables; the same cuid string may exist in both. When we provision, we create the
-`"User"` row **with `id` = the caller's existing `go_users` id** (= the JWT
-`sub`). Consequences:
+Provisioning first resolves the **one** canonical Prisma user for the linked
+Tesla account, *inside the transaction, before any write*, in this precedence —
+converging identities rather than creating duplicates or reassigning ownership:
 
-- The existing `go_identity_apple` binding (apple_sub → go_users id) already
-  points at that id, so **every subsequent Apple sign-in resolves via precedence
-  (1)** — no re-match, no new binding, no per-owner `AUTH_APPLE_BOOTSTRAP`.
-- `Account.userId` / `Vehicle.userId` / `Settings.userId` are FK-valid the moment
-  the `"User"` row exists.
-- The validator's user-existence check already accepts a cuid present in
-  **either** `"User"` or `go_users` (ADR-001 §4), so the (now duplicated) id is
-  harmless.
+1. **(a) The Tesla `Account`(provider='tesla', providerAccountId=<sub>) already
+   exists** → the target IS its `userId`. The Tesla account's owner is
+   authoritative: **`Account.userId` is never rewritten.** If the caller's
+   identity differs, the caller's Apple binding is *converged* onto that owner
+   (a `go_identity_apple` re-point — see below).
+2. **(b) A `"User"` with the resolved email exists** → adopt it (reuse its id,
+   converge the Apple binding). **No `"User"` INSERT.** This is what makes the
+   Apple Hide-My-Email crossover resolve instead of colliding on
+   `User.email @unique`: an existing web user whose email surfaces only via the
+   Tesla account (their fresh go_users id had a null/relay email) is *reused*, not
+   duplicated.
+3. **(c) Otherwise** INSERT a fresh `"User"` with the caller's `go_users` id —
+   now guaranteed collision-free on **both** id and email (neither matched above).
 
-**This removes the need for a separate `go_users ↔ Prisma-cuid` mapping table.**
-The mapping is *identity* (same string). This is simpler and less state than the
-"persisted mapping row" the ticket floated, and strictly better: there is no
-second row that can drift out of sync with the binding. (A mapping table would be
-required only if we minted a *fresh, different* Prisma cuid — which buys nothing
-here and adds a join + a drift surface.)
+**Why id-reuse still holds for the common (c) case.** `go_users.id` and
+`"User"."id"` are independent PKs; the same cuid may exist in both. Case (c)
+reuses the go_users id as the `"User".id`, so the existing `go_identity_apple`
+binding already resolves every later sign-in via precedence (1) — no mapping
+table, no per-owner `AUTH_APPLE_BOOTSTRAP`. Cases (a)/(b) instead **converge**:
+`UPDATE go_identity_apple SET user_id = <canonical> WHERE user_id = <caller>`.
+This is the *one* sanctioned re-point of an Apple binding (ADR-001 §4 otherwise
+freezes it), justified because completing the Tesla OAuth link — or an exact
+email match — proves the two identities are the same human. The orphaned
+go_users row left behind is harmless (no binding, no `"User"`).
+
+**Why this is not a mapping table.** The convergence writes the canonical id
+*into the existing binding*, so there is still exactly one authoritative
+`apple_sub → user_id` row — no second row to drift. `ProvisionTeslaOwner` returns
+the **canonical** user id; the caller uses it (not the input sub) for vehicle
+sync, so a converged link never seeds vehicles under the wrong id.
 
 ### Option B — move `Account`/`Vehicle` ownership off `"User"` to `go_users`
 
@@ -101,26 +115,26 @@ needed: Option A delivers full self-serve with no schema change. **Rejected for
 now** (revisit only if the dual-id duplication in §2's insight ever becomes a
 real problem — it does not at v1 scale).
 
-**Decision: Option A, with id-reuse.** No STOP condition is hit — there is **no
-schema migration on the shared prod DB** (only runtime upserts into existing
-Prisma tables + optional `go_`-namespaced state).
+**Decision: Option A, with canonical-user resolution.** No STOP condition is hit
+— there is **no schema migration on the shared prod DB** (only runtime upserts
+into existing Prisma tables + a `go_identity_apple` binding re-point).
 
 ---
 
 ## 3. Exact rows written
 
 All writes happen in **one transaction**, only after a successful Tesla
-code→token exchange, keyed by `userID = JWT sub` (= the caller's go_users id for a
-new owner, or their existing Prisma cuid for an email-matched / returning user).
-`providerAccountId` is the Tesla OIDC `sub` fetched from Tesla's userinfo endpoint
-with the fresh access token (collision-safe against a later web link on the same
-Tesla account).
+code→token exchange, keyed by the **canonical** user id resolved in §2 (which may
+differ from the caller's JWT sub on a converged link). `providerAccountId` is the
+Tesla OIDC `sub` fetched from Tesla's userinfo endpoint with the fresh access
+token (collision-safe against a later web link on the same Tesla account).
 
 | Table (Prisma-owned) | Statement | Idempotency key | Columns written |
 |---|---|---|---|
-| `"User"` | `INSERT ... ON CONFLICT ("id") DO NOTHING` | `id` (= go_users id / sub) | `id`, `name`, `email`, `updatedAt` (rest default) |
-| `"Settings"` | `INSERT ... ON CONFLICT ("userId") DO UPDATE SET "teslaLinked"=true, "updatedAt"=now()` | `userId` | `id`, `userId`, `teslaLinked=true`, `updatedAt` (rest default) |
-| `"Account"` | `INSERT ... ON CONFLICT ("provider","providerAccountId") DO UPDATE SET "userId"=…, tokens…, "expires_at"=…` | `(provider, providerAccountId)` | `id`, `userId`, `type='oauth'`, `provider='tesla'`, `providerAccountId`, `access_token`(+`_enc`), `refresh_token`(+`_enc`), `expires_at` |
+| `"User"` | resolve (a/b) or `INSERT ... ON CONFLICT ("id") DO NOTHING` (c) | `id` / email / tesla account | `id`, `name`, `email`, `updatedAt` (rest default) — **only in case (c)** |
+| `go_identity_apple` | `UPDATE ... SET user_id=<canonical> WHERE user_id=<caller>` | `apple_sub` (binding) | converge on cases (a)/(b) only |
+| `"Settings"` | `INSERT ... ON CONFLICT ("userId") DO UPDATE SET "teslaLinked"=true, "updatedAt"=now()` | `userId` = canonical | `id`, `userId`, `teslaLinked=true`, `updatedAt` (rest default) |
+| `"Account"` | `INSERT ... ON CONFLICT ("provider","providerAccountId") DO UPDATE SET tokens…, "expires_at"=…` (**never `userId`**) | `(provider, providerAccountId)` | `id`, `userId`=canonical, `type='oauth'`, `provider='tesla'`, `providerAccountId`, `access_token`(+`_enc`), `refresh_token`(+`_enc`), `expires_at` |
 
 - **Encryption:** `Account` tokens are dual-written (plaintext + `*_enc`
   AES-256-GCM) via the injected `cryptox.Encryptor`, identical to
@@ -134,17 +148,17 @@ Tesla account).
 
 ### Idempotency / concurrency
 
-- **New owner:** all three rows created.
-- **Returning owner re-link:** `"User"` conflict → DO NOTHING; `"Settings"`
-  → teslaLinked stays true; `"Account"` conflict → tokens refreshed in place.
-  No duplicates.
-- **Email-matched user** (Apple sign-in already resolved to an existing Prisma
-  cuid via precedence (3); no go_users row): `"User"` already exists → DO NOTHING
-  → **no double-provision**, the existing row is reused.
+- **New owner (c):** fresh `"User"` + Settings + Account created.
+- **Returning owner re-link (a):** resolves to self via the Tesla account;
+  Settings stays linked; Account tokens refreshed in place. No duplicates.
+- **Hide-My-Email crossover (b):** existing web user reused by email, Apple
+  binding converged — **no colliding `"User"` INSERT**, one User row.
+- **Cross-user relink (a, different caller):** existing owner kept,
+  `Account.userId` **not rewritten**, caller's Apple binding converged onto the
+  owner, only the owner's `Settings` flipped. Audited.
 - **Concurrent re-link:** ON CONFLICT upserts are atomic at the row level in
-  Postgres; two racing transactions converge (one inserts, the other no-ops /
-  updates). No dup, no deadlock (consistent table order: User → Settings →
-  Account).
+  Postgres; two racing transactions converge. No dup, no deadlock (consistent
+  table order).
 - **Failure before token exchange** (denied / bad state / exchange error):
   provisioning is never called → **no orphan `User`**.
 
@@ -220,16 +234,48 @@ The provisioning INSERTs target the **prod Prisma schema**, whose authoritative
 definition lives in the Next.js repo (not importable here). Before enabling this
 in prod, `sdk-architect` must confirm against `prisma/schema.prisma`:
 
-1. `"Settings"."userId"` carries a UNIQUE constraint (the `ON CONFLICT ("userId")`
+1. **`"User"."email"` is `@unique`.** This is load-bearing for the canonical
+   resolver (§2): a naive `INSERT User ON CONFLICT ("id")` would still raise
+   `23505` on the email index for the Apple Hide-My-Email crossover (an existing
+   web user whose email surfaces only via the Tesla account, under a fresh
+   go_users id). The resolver's precedence (a)→(b) **adopts** the existing
+   email-owner instead of inserting, so the collision cannot happen. Verify the
+   `@unique` still holds and that email is the only unique column the INSERT path
+   could collide on.
+2. `"Settings"."userId"` carries a UNIQUE constraint (the `ON CONFLICT ("userId")`
    target) and every other NOT-NULL `Settings` column has a DB-level `@default`.
-2. `"Account"` has the compound `@@unique([provider, providerAccountId])` (the
+3. `"Account"` has the compound `@@unique([provider, providerAccountId])` (the
    `ON CONFLICT` target) and no other NOT-NULL column without a default.
-3. `"User"` NOT-NULL columns other than `id` (`updatedAt`) are set explicitly;
-   the rest default.
+4. `"User"` NOT-NULL columns other than `id` (`updatedAt`) are set explicitly;
+   the rest default. `"Vehicle"` NOT-NULL columns without a Prisma `@default` —
+   confirmed to include `model`/`year`/`color`/`licensePlate` — are seeded with
+   empty placeholders by `UpsertOwnedVehicle`; verify no other NOT-NULL
+   Vehicle column lacks a default (or the identity-seed INSERT will error — a
+   best-effort skip, but it means the car won't appear until the web sync runs).
+
+**Cross-user semantics (enforced, not just documented).** The resolver never
+reassigns ownership across users:
+
+- **Tesla account already owned (a):** `Account.userId` is authoritative and is
+  **never rewritten**. If a second identity links the same Tesla account, the
+  existing owner keeps it; the caller's Apple identity is *converged* onto that
+  owner via a `go_identity_apple` re-point (the one sanctioned re-point, gated by
+  proof of Tesla ownership). Only the owner's `Settings.teslaLinked` is set — the
+  caller's `Settings` is never created stale.
+- **Vehicle already owned by another user:** `UpsertOwnedVehicle`'s
+  `ON CONFLICT ("teslaVehicleId") DO UPDATE ... WHERE userId = EXCLUDED.userId`
+  updates nothing (RowsAffected 0) → reported as `skipped_cross_user`, audited,
+  and never pushed a fleet config. Vehicles the caller only shares (Fleet
+  `access_type != "OWNER"`) are filtered out before any write.
+- Every outcome (`new_user`, `adopted_by_email`, `adopted_by_account`,
+  identity-converged, vehicle owned/skipped) emits a P0-only audit line (opaque
+  cuids + opaque outcome; never email/name/tokens).
 
 The Go tests recreate a **slim** schema fixture (same pattern as
-`account_repo_test.go`) mirroring the classification tables; a drift between that
-fixture and prod Prisma is the risk this gate closes.
+`account_repo_test.go`) mirroring the classification tables — including the
+`User.email` unique index and `go_identity_apple` — and exercise the crossover,
+cross-user-relink, non-owner-vehicle, and concurrent-relink cases. A drift
+between that fixture and prod Prisma is the risk this gate closes.
 
 ---
 
