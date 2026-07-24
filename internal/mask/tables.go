@@ -113,6 +113,35 @@ var vehicleStateOwnerFields = []string{
 	// Climate / cabin.
 	"interiorTemp",
 	"exteriorTemp",
+	// Cabin controls read-back (MYR-252). Individually-delivered
+	// vehicle_update fields — owners see the live state of climate, lock,
+	// seats, charge-port, trunk/frunk, and media so the app can render
+	// honest control state instead of only command-ack optimism (MYR-251).
+	// Classified P0 in vehicle-state.schema.json (not identifying — same
+	// tier as chargeLevel/speed/gearPosition). rest-api.md §5.2.1 mirrors
+	// this list. Not currently emitted on the DB-backed /snapshot (WS-live
+	// only in this iteration — see rest-api.md §7.1).
+	"locked",
+	"hvacPower",
+	"isClimateOn",
+	"fanSpeed",
+	"driverTempSetting",
+	"passengerTempSetting",
+	"hvacAutoMode",
+	"hvacAcEnabled",
+	"seatHeaterLeft",
+	"seatHeaterRight",
+	"seatHeaterRearLeft",
+	"seatHeaterRearCenter",
+	"seatHeaterRearRight",
+	"seatCoolerLeft",
+	"seatCoolerRight",
+	"seatVentEnabled",
+	"chargePortDoorOpen",
+	"frunkOpen",
+	"trunkOpen",
+	"mediaPlaybackStatus",
+	"mediaVolume",
 	// Odometer / FSD.
 	"odometerMiles",
 	"fsdMilesSinceReset",

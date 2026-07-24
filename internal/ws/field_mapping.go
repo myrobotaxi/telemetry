@@ -3,6 +3,7 @@ package ws
 import (
 	"log/slog"
 	"math"
+	"strings"
 
 	"github.com/myrobotaxi/telemetry/internal/events"
 )
@@ -12,19 +13,27 @@ import (
 // the MyRoboTaxi Next.js app. Fields not in this map are passed through
 // with their internal name.
 var internalToClientField = map[string]string{
-	"soc":                    "chargeLevel",
-	"gear":                   "gearPosition",
-	"odometer":               "odometerMiles",
-	"insideTemp":             "interiorTemp",
-	"outsideTemp":            "exteriorTemp",
-	"minutesToArrival":       "etaMinutes",
-	"milesToArrival":         "tripDistanceRemaining",
-	"hvacFanSpeed":           "fanSpeed",
+	"soc":              "chargeLevel",
+	"gear":             "gearPosition",
+	"odometer":         "odometerMiles",
+	"insideTemp":       "interiorTemp",
+	"outsideTemp":      "exteriorTemp",
+	"minutesToArrival": "etaMinutes",
+	"milesToArrival":   "tripDistanceRemaining",
+	"hvacFanSpeed":     "fanSpeed",
 	// These fields pass through unchanged (internal name == wire name):
 	// speed, heading, estimatedRange, fsdMilesSinceReset,
 	// location (handled separately),
 	// hvacPower, defrostMode, climateKeeperMode, driverTempSetting,
 	// passengerTempSetting, seatHeaterLeft, seatHeaterRight.
+	//
+	// MYR-252 cabin-control read-back fields also pass through unchanged
+	// (internal name == wire name): locked, hvacAutoMode, hvacAcEnabled,
+	// seatHeaterRearLeft, seatHeaterRearCenter, seatHeaterRearRight,
+	// seatCoolerLeft, seatCoolerRight, seatVentEnabled, chargePortDoorOpen,
+	// mediaPlaybackStatus, mediaVolume. The doorState internal field is NOT
+	// passed through — it is bit-decoded into frunkOpen/trunkOpen by
+	// splitDoorStateField (door_fields.go).
 }
 
 // integerFields are client field names that the frontend Vehicle model types
@@ -43,6 +52,13 @@ var integerFields = map[string]struct{}{
 	"seatHeaterRight":      {},
 	"driverTempSetting":    {},
 	"passengerTempSetting": {},
+	// MYR-252 Group B integer levels (0-3). mediaVolume is intentionally
+	// absent — it is a fractional number (typically 0-11), not rounded.
+	"seatHeaterRearLeft":   {},
+	"seatHeaterRearCenter": {},
+	"seatHeaterRearRight":  {},
+	"seatCoolerLeft":       {},
+	"seatCoolerRight":      {},
 }
 
 // isNavField reports whether the given internal field name belongs to the
@@ -102,6 +118,9 @@ func mapFieldsForClient(fields map[string]events.TelemetryValue) map[string]any 
 			splitLocationField(out, name, val)
 		case name == "routeLine":
 			decodeRouteLineField(out, val)
+		case name == "doorState":
+			// MYR-252: bit-decode DoorState (proto 58) into frunkOpen/trunkOpen.
+			splitDoorStateField(out, val)
 		default:
 			clientName := translateFieldName(name)
 			if v := unwrapValue(val); v != nil {
@@ -111,8 +130,19 @@ func mapFieldsForClient(fields map[string]events.TelemetryValue) map[string]any 
 	}
 	// Derive isClimateOn from hvacPower when present so the frontend can
 	// render the climate card without needing to interpret the enum itself.
+	// hvacPowerString emits capitalized values ("Off", "On", ...). "Unknown"
+	// must NOT map to isClimateOn=true — asserting the climate is on when we
+	// don't actually know is the dishonest-default MYR-251/252 exist to kill,
+	// so we OMIT isClimateOn in that case and let the client render "unknown".
 	if power, ok := out["hvacPower"].(string); ok {
-		out["isClimateOn"] = power != "off"
+		switch {
+		case strings.EqualFold(power, "off"):
+			out["isClimateOn"] = false
+		case strings.EqualFold(power, "unknown"):
+			// leave isClimateOn absent — honest unknown
+		default:
+			out["isClimateOn"] = true
+		}
 	}
 	return out
 }

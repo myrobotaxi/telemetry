@@ -93,11 +93,39 @@ Every field below corresponds to a column in the `Vehicle` table or a value deri
 | `locationAddress` | `string` | No | -- | P1 | -- | Reverse-geocoded server-side. DB NOT NULL DEFAULT `""`; an empty string means no geocode is available yet. |
 | `lastUpdated` | `string` (ISO 8601) | No | -- | P0 | -- | Server timestamp |
 
+#### Cabin control fields (no atomic group — MYR-252)
+
+Owner cabin-control **read-back** fields added by [MYR-252](https://linear.app/myrobotaxi/issue/MYR-252). All are optional (nullable, NOT in the schema `required` array) and delivered **individually on the live WebSocket `vehicle_update` stream** so the app can reconcile control UI against the car's real state instead of only command-ack optimism (MYR-251). They are gated by the `owner` mask allow-list (`internal/mask/tables.go` `vehicleStateOwnerFields`, rest-api.md §5.2.1). **Delivery caveat:** these fields are NOT yet on the DB-backed REST `/snapshot` — the `Vehicle` table is Prisma-owned and column additions are a cross-repo migration tracked in [MYR-253](https://linear.app/myrobotaxi/issue/MYR-253). They surface on `/snapshot` only after MYR-253 lands; until then a `/snapshot` response omitting them is contract-valid (the schema documents WS/REST-snapshot as subsets, and all 21 are optional). Classification is **P0** — cabin comfort/lock/door/media state is not identifying, consistent with `speed`/`chargeLevel`/`gearPosition` (contrast: P2 is the platform's most-sensitive tier, reserved for payment/health per data-classification.md §0).
+
+| Field | Type | Nullable | Unit | Classification | Group | Source |
+|-------|------|----------|------|----------------|-------|--------|
+| `locked` | `boolean` or `null` | Yes | -- | P0 | -- | Tesla `Locked` (proto 59) |
+| `hvacPower` | `string` (enum) or `null` | Yes | -- | P0 | -- | Tesla `HvacPower` (proto 201, `HvacPowerState`). Enum: `Off`, `On`, `Precondition`, `OverheatProtect`, `Unknown`. |
+| `isClimateOn` | `boolean` or `null` | Yes | -- | P0 | -- | Derived server-side from `hvacPower` (true when `hvacPower != "Off"`) |
+| `fanSpeed` | `integer` or `null` | Yes | -- | P0 | -- | Tesla `HvacFanSpeed` (proto 198). Internal name `hvacFanSpeed` → wire `fanSpeed`. |
+| `driverTempSetting` | `integer` or `null` | Yes | fahrenheit | P0 | -- | Tesla `HvacLeftTemperatureRequest` (proto 200); Celsius→Fahrenheit server-side |
+| `passengerTempSetting` | `integer` or `null` | Yes | fahrenheit | P0 | -- | Tesla `HvacRightTemperatureRequest` (proto 202); Celsius→Fahrenheit server-side |
+| `hvacAutoMode` | `string` (enum) or `null` | Yes | -- | P0 | -- | Tesla `HvacAutoMode` (proto 197, `HvacAutoModeState`). Enum: `Unknown`, `On`, `Override`. Group B. |
+| `hvacAcEnabled` | `boolean` or `null` | Yes | -- | P0 | -- | Tesla `HvacACEnabled` (proto 196). Group B. |
+| `seatHeaterLeft` | `integer` or `null` | Yes | level 0-3 | P0 | -- | Tesla `SeatHeaterLeft` (proto 87) |
+| `seatHeaterRight` | `integer` or `null` | Yes | level 0-3 | P0 | -- | Tesla `SeatHeaterRight` (proto 88) |
+| `seatHeaterRearLeft` | `integer` or `null` | Yes | level 0-3 | P0 | -- | Tesla `SeatHeaterRearLeft` (proto 89). Group B. |
+| `seatHeaterRearCenter` | `integer` or `null` | Yes | level 0-3 | P0 | -- | Tesla `SeatHeaterRearCenter` (proto 91). Group B. |
+| `seatHeaterRearRight` | `integer` or `null` | Yes | level 0-3 | P0 | -- | Tesla `SeatHeaterRearRight` (proto 90). Group B. |
+| `seatCoolerLeft` | `integer` or `null` | Yes | level 0-3 | P0 | -- | Tesla `ClimateSeatCoolingFrontLeft` (proto 237). Group B. |
+| `seatCoolerRight` | `integer` or `null` | Yes | level 0-3 | P0 | -- | Tesla `ClimateSeatCoolingFrontRight` (proto 238). Group B. |
+| `seatVentEnabled` | `boolean` or `null` | Yes | -- | P0 | -- | Tesla `SeatVentEnabled` (proto 254). Group B. |
+| `chargePortDoorOpen` | `boolean` or `null` | Yes | -- | P0 | -- | Tesla `ChargePortDoorOpen` (proto 183). Individually delivered — intentionally NOT in the `charge` atomic group. Group B. |
+| `frunkOpen` | `boolean` or `null` | Yes | -- | P0 | -- | Decoded from Tesla `DoorState` (proto 58) `Doors.TrunkFront` bit — see §6.3. Group B. |
+| `trunkOpen` | `boolean` or `null` | Yes | -- | P0 | -- | Decoded from Tesla `DoorState` (proto 58) `Doors.TrunkRear` bit — see §6.3. Group B. |
+| `mediaPlaybackStatus` | `string` (enum) or `null` | Yes | -- | P0 | -- | Tesla `MediaPlaybackStatus` (proto 242, `MediaStatus`). Enum: `Unknown`, `Stopped`, `Playing`, `Paused`. Group B. |
+| `mediaVolume` | `number` or `null` | Yes | -- | P0 | -- | Tesla `MediaAudioVolume` (proto 244). Fractional (typically 0-11); NOT integer-rounded. Group B. |
+
 ### 1.2 Design notes
 
 - **`vehicleId` is the SDK identifier, not VIN.** Per FR-4.2, the SDK API is vehicle-scoped using the opaque database ID. VINs are internal to the telemetry server and never exposed to SDK consumers.
 - **`speed` is NOT in the GPS group.** Although the requirements doc lists speed in the GPS group (NFR-3.1), the implementation broadcasts speed independently (high-frequency, 2s interval) while GPS/heading are delivered together. Speed is decoupled from GPS because it changes more frequently than position and does not require atomic consistency with coordinates. This is an intentional divergence documented here; the requirements doc should be updated to reflect this.
-- **Integer rounding.** Tesla emits most numeric fields as floats. The telemetry server rounds `speed`, `heading`, `chargeLevel`, `estimatedRange`, `interiorTemp`, `exteriorTemp`, `odometerMiles`, and `etaMinutes` to the nearest integer before delivery.
+- **Integer rounding.** Tesla emits most numeric fields as floats. The telemetry server rounds `speed`, `heading`, `chargeLevel`, `estimatedRange`, `interiorTemp`, `exteriorTemp`, `odometerMiles`, and `etaMinutes` to the nearest integer before delivery. MYR-252 adds the cabin integer levels `fanSpeed`, `driverTempSetting`, `passengerTempSetting`, `seatHeaterLeft`/`seatHeaterRight`, `seatHeaterRearLeft`/`seatHeaterRearCenter`/`seatHeaterRearRight`, and `seatCoolerLeft`/`seatCoolerRight` to the same rounded-integer set (`internal/ws/field_mapping.go` `integerFields`). `mediaVolume` is deliberately excluded — it is a fractional level and stays a `number`.
 - **Coordinate order.** `navRouteCoordinates` uses `[longitude, latitude]` order (GeoJSON/Mapbox convention), NOT `[lat, lng]`.
 - **`locationName` and `locationAddress` are derived fields.** They are reverse-geocoded from GPS coordinates on the server. They are NOT part of the GPS atomic group because they update asynchronously (geocoding is async) and are not sourced from Tesla telemetry.
 - **`name` is sourced from the DB, not Tesla telemetry.** `VehicleState.name` comes exclusively from the DB `Vehicle.name` column (user-assigned via the Next.js settings UI). Tesla also streams a `VehicleName` proto field (decoded as internal field `vehicleName` in `internal/telemetry/fields.go`) at a 300s interval, but this value is received by the telemetry decoder and is NOT broadcast to SDK clients or used to populate the SDK `name` field. Rationale: (1) the user can rename their vehicle in the MyRoboTaxi app, so the DB is the source of truth for user-facing names; (2) Tesla's `VehicleName` may lag a user rename by up to 300s, creating stale-name confusion; (3) if Tesla-to-DB name sync is ever needed, that responsibility belongs to the Next.js app layer (which owns the `Vehicle` table via Prisma), not the telemetry server. The `Settings.teslaVehicleName` column (see `data-classification.md` §1.8) stores the Tesla-reported name separately and may differ from `Vehicle.name` if the user renames the vehicle in the MyRoboTaxi app.
@@ -350,6 +378,23 @@ public enum GearPosition: String, Codable, Sendable {
 
 **CI enforcement:** A schema-comparison test loads the JSON Schema and verifies that every `required` field exists in the Swift struct, every nullable field is `Optional`, and all enum values match. This test fails if the schema and struct diverge.
 
+### 6.3 DoorState decode (`frunkOpen` / `trunkOpen`) — MYR-252
+
+Tesla proto field 58 (`DoorState`) is NOT a scalar. It is emitted via the `Doors` protobuf message (the `door_value` oneof variant, tag 21) — a struct of six booleans:
+
+```
+message Doors {
+  bool DriverFront    = 1;
+  bool DriverRear     = 2;
+  bool PassengerFront = 3;
+  bool PassengerRear  = 4;
+  bool TrunkFront     = 5;  // the frunk
+  bool TrunkRear      = 6;  // the rear trunk
+}
+```
+
+The telemetry decoder (`internal/telemetry/converters_doors.go`) folds the six booleans into an `int64` **bitmask** carried as the internal `doorState` field, using the shared bit layout in `internal/events/door_bits.go` (bit 0 = DriverFront … bit 4 = frunk = `TrunkFront`, bit 5 = trunk = `TrunkRear`). The WebSocket layer (`internal/ws/door_fields.go`) then unpacks the two bits the contract surfaces — `frunkOpen` (bit 4) and `trunkOpen` (bit 5) — and does NOT emit the raw `doorState` int on the wire. The other four door bits are decoded but intentionally not contracted (the owner controls only read back frunk/trunk). Defining the bit layout in `internal/events` (imported by both the pack and unpack ends) prevents the two sides from drifting.
+
 ---
 
 ## 7. Decisions and open questions
@@ -387,6 +432,7 @@ public enum GearPosition: String, Codable, Sendable {
 
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-07-24 | **MYR-252: contract 21 cabin-control read-back fields** (`locked`, `hvacPower`, `isClimateOn`, `fanSpeed`, `driverTempSetting`, `passengerTempSetting`, `hvacAutoMode`, `hvacAcEnabled`, `seatHeaterLeft`/`Right`, `seatHeaterRearLeft`/`Center`/`Right`, `seatCoolerLeft`/`Right`, `seatVentEnabled`, `chargePortDoorOpen`, `frunkOpen`, `trunkOpen`, `mediaPlaybackStatus`, `mediaVolume`). All optional, P0, individually delivered on the live WS `vehicle_update` stream (added to `internal/mask` `vehicleStateOwnerFields` + rest-api.md §5.2.1). Group A (already decoded, previously mask-stripped) + Group B (newly added to the fleet-telemetry config push + `fieldMap`). Added §1.1 cabin subsection, §6.3 DoorState bit-decode (frunk/trunk from the `Doors` message), integer-rounding note update. **NOT yet on the DB-backed REST `/snapshot`** — Prisma-owned `Vehicle` table; DB hydration tracked in [MYR-253](https://linear.app/myrobotaxi/issue/MYR-253) (21 `expected_failure` rows in `fixtures/rest/snapshot_completeness.json` reference it). Verified every field name/number against the vendored `vehicle_data.proto`. Paired contracts-repo PR bumps `@myrobotaxi/contracts` 0.11.0 → 0.12.0 (additive, minor). | go-engineer + tesla-telemetry |
 | 2026-04-09 | Initial draft -- all fields, atomic groups, consistency predicates, type generation docs | sdk-architect agent |
 | 2026-04-09 | PR #161 review fixes: (1) mark 7 spec-only fields nullable + add §1.1 callout; (2) add §7.2 entry for MYR-24 Go struct gap; (3) clarify §3.1 predicates are `contract-tester`-enforced, not schema-enforced; (4) remove unreachable `$defs` sub-schemas from schema and rewrite §5.2; (5) fix latitude/longitude descriptions to reference the `0,0` convention instead of "nullable"; (6) align schema `chargeLevel: 0` semantics with §2.2 (context-dependent on `status`); update Swift struct in §6.2 to reflect new optionality | sdk-architect agent |
 | 2026-04-13 | **MYR-11 v1 contract freeze, cross-contract updates from WebSocket protocol decisions.** (1) Charge group §1.1 and §2.2: added `chargeState` (Tesla proto field 2, enum) and `timeToFull` (Tesla proto field 43, `double` seconds) as v1 members; both are transitional nullable until server wiring lands. (2) §7.1 resolved decisions: overturned the previous "deferred" rulings for `chargingState` and `timeToFull`; explicitly flagged the prior "not available from Tesla Fleet Telemetry" rationale for `timeToFull` as factually wrong. (3) §7.1 resolved decisions: clarified that `tripStartTime` is relocated from the navigation group to the drive group (carried as `drive_started.payload.startedAt`, not as a vehicle_update field). (4) §7.2 open questions: closed the `chargingState` and `tripStartTime` entries as RESOLVED by MYR-11. Implementation follow-ups for `chargeState`, `timeToFull`, and the NFR-3.1 amendment for `tripStartTime` are tracked in `websocket-protocol.md` §10 as DV-03 (RESOLVED), DV-04 (RESOLVED), and DV-13 (amendment pending). | sdk-architect |

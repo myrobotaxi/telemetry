@@ -134,11 +134,46 @@ func convertHvacPower(v *tpb.Value) (events.TelemetryValue, error) {
 		s := hvacPowerString(val.HvacPowerValue)
 		return events.TelemetryValue{StringVal: &s}, nil
 	case *tpb.Value_StringValue:
-		s := val.StringValue
+		s := matchEnum(val.StringValue, hvacPowerEnum)
 		return events.TelemetryValue{StringVal: &s}, nil
 	default:
 		return events.TelemetryValue{}, fmt.Errorf(
 			"%w: expected hvacPower or string, got %T", ErrUnexpectedValueType, v.Value,
+		)
+	}
+}
+
+// convertHvacAutoMode extracts an HvacAutoModeState enum (Tesla proto field
+// 197, MYR-252) and returns it as a string. Older firmware may send a plain
+// string.
+func convertHvacAutoMode(v *tpb.Value) (events.TelemetryValue, error) {
+	switch val := v.Value.(type) {
+	case *tpb.Value_HvacAutoModeValue:
+		s := hvacAutoModeString(val.HvacAutoModeValue)
+		return events.TelemetryValue{StringVal: &s}, nil
+	case *tpb.Value_StringValue:
+		s := matchEnum(val.StringValue, hvacAutoModeEnum)
+		return events.TelemetryValue{StringVal: &s}, nil
+	default:
+		return events.TelemetryValue{}, fmt.Errorf(
+			"%w: expected hvacAutoMode or string, got %T", ErrUnexpectedValueType, v.Value,
+		)
+	}
+}
+
+// convertMediaStatus extracts a MediaStatus enum (Tesla proto field 242,
+// MediaPlaybackStatus, MYR-252) and returns it as a string.
+func convertMediaStatus(v *tpb.Value) (events.TelemetryValue, error) {
+	switch val := v.Value.(type) {
+	case *tpb.Value_MediaStatusValue:
+		s := mediaStatusString(val.MediaStatusValue)
+		return events.TelemetryValue{StringVal: &s}, nil
+	case *tpb.Value_StringValue:
+		s := matchEnum(val.StringValue, mediaStatusEnum)
+		return events.TelemetryValue{StringVal: &s}, nil
+	default:
+		return events.TelemetryValue{}, fmt.Errorf(
+			"%w: expected mediaStatus or string, got %T", ErrUnexpectedValueType, v.Value,
 		)
 	}
 }

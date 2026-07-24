@@ -56,7 +56,7 @@
         },
         "fields": {
           "type": "object",
-          "description": "Map of field name -> value. Field names and per-field classifications are defined in vehicle-state.schema.json. A single vehicle_update message contains the members of at most ONE atomic group plus any individually-delivered fields (speed, odometerMiles, interiorTemp, exteriorTemp, fsdMilesSinceReset, locationName, locationAddress, lastUpdated). v1 atomic groups: navigation = {destinationName, destinationAddress, destinationLatitude, destinationLongitude, originLatitude, originLongitude, etaMinutes, tripDistanceRemaining, navRouteCoordinates}; charge = {chargeLevel, chargeState, estimatedRange, timeToFull}; gps = {latitude, longitude, heading}; gear = {gearPosition, status}. The `drive` atomic group's single member `startedAt` is delivered via the `drive_started` lifecycle message, not via `vehicle_update.fields` — see DV-13 in websocket-protocol.md §10. Server explicitly clears a navigation field by sending it as JSON null; the SDK MUST atomically null all members of the affected group per NFR-3.9. The optional `driveTrailCoordinates` field (array of [lng, lat] pairs) carries an active drive's accumulated GPS trail (\"where the car has been\") and is not part of a normal atomic group — it is always paired with an active drive and routed to dataState.gps. It is semantically distinct from the navigation group's `navRouteCoordinates` (Tesla's planned route polyline; \"where the car is going\") and the two MUST NOT be conflated.",
+          "description": "Map of field name -> value. Field names and per-field classifications are defined in vehicle-state.schema.json. A single vehicle_update message contains the members of at most ONE atomic group plus any individually-delivered fields (speed, odometerMiles, interiorTemp, exteriorTemp, fsdMilesSinceReset, locationName, locationAddress, lastUpdated, and the MYR-252 cabin-control read-back fields: locked, hvacPower, isClimateOn, fanSpeed, driverTempSetting, passengerTempSetting, hvacAutoMode, hvacAcEnabled, seatHeaterLeft, seatHeaterRight, seatHeaterRearLeft, seatHeaterRearCenter, seatHeaterRearRight, seatCoolerLeft, seatCoolerRight, seatVentEnabled, chargePortDoorOpen, frunkOpen, trunkOpen, mediaPlaybackStatus, mediaVolume). v1 atomic groups: navigation = {destinationName, destinationAddress, destinationLatitude, destinationLongitude, originLatitude, originLongitude, etaMinutes, tripDistanceRemaining, navRouteCoordinates}; charge = {chargeLevel, chargeState, estimatedRange, timeToFull}; gps = {latitude, longitude, heading}; gear = {gearPosition, status}. The `drive` atomic group's single member `startedAt` is delivered via the `drive_started` lifecycle message, not via `vehicle_update.fields` — see DV-13 in websocket-protocol.md §10. Server explicitly clears a navigation field by sending it as JSON null; the SDK MUST atomically null all members of the affected group per NFR-3.9. The optional `driveTrailCoordinates` field (array of [lng, lat] pairs) carries an active drive's accumulated GPS trail (\"where the car has been\") and is not part of a normal atomic group — it is always paired with an active drive and routed to dataState.gps. It is semantically distinct from the navigation group's `navRouteCoordinates` (Tesla's planned route polyline; \"where the car is going\") and the two MUST NOT be conflated.",
           "additionalProperties": true,
           "x-classification": "mixed (per-field; see vehicle-state.schema.json)"
         },
@@ -213,7 +213,7 @@
       "properties": {
         "code": {
           "type": "string",
-          "description": "Stable typed error code. Shared enum across the WebSocket and REST transports so the SDK's CoreError is a single union (rest-api.md §4.1.1, §4.1.1.a; ws catalog websocket-protocol.md §6.1.1). Consumer SDKs map these to typed errors per FR-7.1 and MUST NOT string-match on the sibling `message` field. WS emits today: `auth_failed`, `auth_timeout`; the remaining WS values are PLANNED (divergences DV-02 / DV-07 / DV-08 in websocket-protocol.md §10). `not_found` and `invalid_request` are REST-only on the wire (the WS path enforces ownership via silent filtering and has no structured request bodies, rest-api.md §4.1.1.a) but are members of this shared enum by mandate so the SDK union is one enum across transports — they are NOT a WS drift (DV-20 enum slice). `service_unavailable` is intentionally NOT in this enum: it is REST-only and the WS 503 analogue is a close code, not a typed frame (rest-api.md:258); the SDK declares it as a REST-only variant on its side. `rate_limited` has two carriers: (a) HTTP 429 on the WS upgrade (per-IP, pre-auth) and (b) an `error` frame paired with WS close 4003 (per-user, post-auth) — the SDK treats both as the same typed error with the extended backoff in websocket-protocol.md §6.1.1 / §7.1. `key_not_paired`, `vehicle_asleep`, and `command_failed` are REST-only on the wire (MYR-180 vehicle-command surface, rest-api.md §4.1.1 / §7.9): the WS transport is stream-oriented and carries no command requests. They are members of this shared enum so the SDK CoreError union stays one enum across transports. `ride_active` is REST-only on the wire (MYR-230, rest-api.md §4.1.1 / §7.8): `POST /api/ride-requests` returns it when the caller already holds an OPEN instant ride; the WS transport never carries a create. Member of this shared enum so the SDK CoreError union stays one enum across transports.",
+          "description": "Stable typed error code. Shared enum across the WebSocket and REST transports so the SDK's CoreError is a single union (rest-api.md §4.1.1, §4.1.1.a; ws catalog websocket-protocol.md §6.1.1). Consumer SDKs map these to typed errors per FR-7.1 and MUST NOT string-match on the sibling `message` field. WS emits today: `auth_failed`, `auth_timeout`; the remaining WS values are PLANNED (divergences DV-02 / DV-07 / DV-08 in websocket-protocol.md §10). `not_found` and `invalid_request` are REST-only on the wire (the WS path enforces ownership via silent filtering and has no structured request bodies, rest-api.md §4.1.1.a) but are members of this shared enum by mandate so the SDK union is one enum across transports — they are NOT a WS drift (DV-20 enum slice). `conflict` (MYR-174) is likewise REST-only: HTTP 409 when a ride-request state mutation is illegal from the row's current lifecycle state (e.g. cancelling a completed ride, accepting a cancelled one — rest-api.md §4.1.1); the WS transport never emits it. `key_not_paired`, `vehicle_asleep`, and `command_failed` (MYR-180) are likewise REST-only (the vehicle-command surface, rest-api.md §4.1.1 / §7.9): the WS transport is stream-oriented and carries no command requests, so it never emits them; they are members of this shared enum so the SDK CoreError union stays one enum across transports. `service_unavailable` is intentionally NOT in this enum: it is REST-only and the WS 503 analogue is a close code, not a typed frame (rest-api.md:258); the SDK declares it as a REST-only variant on its side. `rate_limited` has two carriers: (a) HTTP 429 on the WS upgrade (per-IP, pre-auth) and (b) an `error` frame paired with WS close 4003 (per-user, post-auth) — the SDK treats both as the same typed error with the extended backoff in websocket-protocol.md §6.1.1 / §7.1. `ride_active` (MYR-230) is REST-only: HTTP 409 returned from POST /api/ride-requests when the rider already has an open (non-terminal) ride request — the response body carries the existing open RideRequest so the client can adopt it in place of submitting a duplicate. Distinct from the generic `conflict` code, which covers an illegal STATUS TRANSITION on an existing row; `ride_active` instead blocks CREATION of a new row while one is already open. The Go server already emits this code on the wire — this member closes a pre-existing contract drift, it does not introduce new server behavior. Appended LAST to preserve the existing member order (enum-order codegen trap, CONTRIBUTING.md).",
           "enum": [
             "auth_failed",
             "auth_timeout",
@@ -224,6 +224,7 @@
             "snapshot_required",
             "not_found",
             "invalid_request",
+            "conflict",
             "key_not_paired",
             "vehicle_asleep",
             "command_failed",
@@ -240,6 +241,95 @@
           "type": "string",
           "description": "Optional typed sub-code for branching consumer-visible UI when the primary code is ambiguous across carriers. v1 enum: `device_cap` (WS-only) and `reauth_required` (REST-only). `device_cap`: WS server rejected a connection because it breached the per-user cap (post-auth, close 4003); the error frame carries `subCode: \"device_cap\"` so SDKs surface an actionable 'Too many devices signed in' message instead of a generic rate-limit toast (per-IP HTTP 429 breaches carry no sub-code — see websocket-protocol.md §6.1.1). `reauth_required`: REST-only, emitted with `code: auth_failed` by rest-api.md §7.6 / §7.7 when the bearer token is valid but the most recent fresh OAuth sign-in is older than the recent-auth window — the SDK MUST surface this to the consumer's auth layer to trigger a fresh interactive sign-in and MUST NOT silently retry via getToken() (a silent refresh cannot advance the `auth_time` claim). Declared on this shared enum for single-union SDK typing; the WS transport never emits `reauth_required`.",
           "enum": ["device_cap", "reauth_required"],
+          "x-classification": "P0"
+        }
+      }
+    },
+    "RideRequestCreatedPayload": {
+      "type": "object",
+      "description": "Server->client message announcing a NEW ride request (P10 ride-hailing, MYR-174). Delivered to the connections of the two parties only: the vehicle owner (drives the IncomingRequestSheet — design/app/ride-request.jsx:1266-1421, both the 'now' and scheduled variants) and the requesting rider (echo, so a rider with multiple devices converges). Like drive_ended (DV-11), the wire payload is intentionally a SUMMARY: it carries the ids + enough to badge the right card; the full RideRequest (pickup/dropoff places, passenger, timestamps) is fetched on demand via REST GET /api/ride-requests/{id} — pickup/dropoff labels and the booked-for passenger are P1 and are deliberately kept off the broadcast path. Anchored by FR-9.3, NFR-3.21.",
+      "required": ["rideRequestId", "vehicleId", "riderId", "status", "timestamp"],
+      "additionalProperties": false,
+      "properties": {
+        "rideRequestId": {
+          "type": "string",
+          "description": "Opaque ride-request cuid (matches the persisted go_ride_requests row id and RideRequest.id in ride-request.schema.json). Input to GET /api/ride-requests/{id} for the full record.",
+          "x-classification": "P0"
+        },
+        "vehicleId": {
+          "type": "string",
+          "description": "Opaque vehicle cuid the ride was requested on — lets the owner client badge the right car without a fetch.",
+          "x-classification": "P0"
+        },
+        "riderId": {
+          "type": "string",
+          "description": "Opaque user cuid of the requesting rider. Both recipients already know their own id; this field lets the owner client attribute the request ('{requester} wants a ride', ride-request.jsx:1312) after the detail fetch resolves the display name. P1 per data-classification.md §1.1 User.id handling in AuthOkPayload.userId.",
+          "x-classification": "P1"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["requested", "accepted", "declined", "enroute", "arrived", "completed", "cancelled"],
+          "description": "Lifecycle status at creation — always 'requested' today; typed as the full ride lifecycle enum with member order identical to ride-request.schema.json $defs.RideRequestStatus, so the raw wire values are interchangeable across the REST and WS surfaces (Swift codegen mints a per-payload nested tolerant enum, same as VehicleSummary.Status vs VehicleState.Status) and future create-time states never break the frame.",
+          "x-classification": "P0"
+        },
+        "scheduledFor": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 / RFC 3339 UTC reserved pickup instant for a scheduled request ('Scheduled ride request' header variant, ride-request.jsx:1302). OPTIONAL on the wire: omitted for an on-demand ('Now') request. Included in the summary because the owner sheet's now-vs-scheduled fork is its primary rendering decision.",
+          "x-classification": "P0"
+        },
+        "requesterName": {
+          "type": "string",
+          "description": "The requesting rider's display name (first name), shown to the OWNER on the incoming ride card (IncomingRequestSheet '{requester} wants a ride', design/app/ride-request.jsx:1312 — MYR-229; mirrors RideRequest.requesterName in ride-request.schema.json). Populated server-side from the requester's identity: first name -> email local-part -> \"Rider\" fallback. Delivered ONLY on this party-scoped unicast (the per-user WS delivery to the rider and owner connections described above) — never on any broadcast. OPTIONAL and additive on the wire: omitted when the identity lookup has not resolved a name; older clients ignore it. Deliberately the only PII-shaped addition to this SUMMARY frame — pickup/dropoff/passenger fields stay off the broadcast path per the class comment above (kept off since v0.9.0). P1 — PII (a person's name).",
+          "x-classification": "P1",
+          "examples": ["Maya"]
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server-authoritative ISO 8601 UTC timestamp at which the ride request row was created.",
+          "x-classification": "P0"
+        }
+      }
+    },
+    "RideStatusChangedPayload": {
+      "type": "object",
+      "description": "Server->client message announcing a MUTATION of an existing ride request (P10 ride-hailing, MYR-174): a main-lifecycle transition (owner accept/decline — OutcomeContent/DeclinedNotice, design/app/ride-request.jsx:670-716,1042-1065; rider cancel; dispatch progress in MYR-176) or a reschedule sub-state change (MYR-192). Delivered to the connections of the rider and the vehicle owner only. Summary-only like drive_ended (DV-11): clients needing the full record (updated scheduledFor, timestamps) refetch GET /api/ride-requests/{id}. Anchored by FR-9.3, NFR-3.21.",
+      "required": ["rideRequestId", "vehicleId", "status", "timestamp"],
+      "additionalProperties": false,
+      "properties": {
+        "rideRequestId": {
+          "type": "string",
+          "description": "Opaque ride-request cuid (matches RideRequest.id).",
+          "x-classification": "P0"
+        },
+        "vehicleId": {
+          "type": "string",
+          "description": "Opaque vehicle cuid.",
+          "x-classification": "P0"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["requested", "accepted", "declined", "enroute", "arrived", "completed", "cancelled"],
+          "description": "Main lifecycle status AFTER the mutation. Member order identical to ride-request.schema.json $defs.RideRequestStatus (and RideRequestCreatedPayload.status) so raw wire values are interchangeable across surfaces. On a reschedule-only mutation this is unchanged from the previous frame — consumers key on (status, rescheduleStatus) as a pair.",
+          "x-classification": "P0"
+        },
+        "rescheduleStatus": {
+          "type": "string",
+          "enum": ["requested", "confirmed", "declined"],
+          "description": "Reschedule-negotiation sub-state AFTER the mutation (ride-request.schema.json $defs.RescheduleStatus, identical member order). OPTIONAL on the wire: omitted when the ride has no reschedule history. Present-and-'requested' is the rider's 'Reschedule requested / waiting to re-confirm' moment (design/app/shared-screens.jsx:316-338).",
+          "x-classification": "P0"
+        },
+        "requesterName": {
+          "type": "string",
+          "description": "The requesting rider's display name (first name), shown to the OWNER on the incoming ride card (IncomingRequestSheet '{requester} wants a ride', design/app/ride-request.jsx:1312 — MYR-229; mirrors RideRequest.requesterName in ride-request.schema.json). Populated server-side from the requester's identity: first name -> email local-part -> \"Rider\" fallback. Delivered ONLY on this party-scoped unicast (the per-user WS delivery to the rider and owner connections described above) — never on any broadcast. OPTIONAL and additive on the wire: omitted when the identity lookup has not resolved a name; older clients ignore it. Deliberately the only PII-shaped addition to this SUMMARY frame — pickup/dropoff/passenger fields stay off the broadcast path per the class comment above (kept off since v0.9.0). P1 — PII (a person's name).",
+          "x-classification": "P1",
+          "examples": ["Maya"]
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server-authoritative ISO 8601 UTC timestamp of the mutation (the row's updated_at).",
           "x-classification": "P0"
         }
       }

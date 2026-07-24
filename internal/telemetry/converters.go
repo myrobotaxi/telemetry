@@ -8,40 +8,52 @@ import (
 	tpb "github.com/myrobotaxi/telemetry/internal/telemetry/proto/tesla"
 )
 
-// convertValue dispatches to the appropriate converter based on the
-// Tesla field's expected type. Tesla's proto Value is a big oneof;
-// the actual variant used depends on both the field and the firmware
-// version.
-func convertValue(field tpb.Field, v *tpb.Value) (events.TelemetryValue, error) {
-	switch field {
-	case tpb.Field_Location, tpb.Field_OriginLocation, tpb.Field_DestinationLocation:
-		return convertLocation(v)
-	case tpb.Field_Gear:
-		return convertShiftState(v)
+// fieldConverters maps a Tesla proto field to the converter for its value
+// variant. Fields absent from the table fall back to convertNumericOrString
+// (the common numeric-or-string case — speed, odometer, seat levels, media
+// volume, etc.). A table keeps convertValue flat: adding a field is a
+// one-line entry, not another switch case (which pushed cyclomatic
+// complexity past the cyclop cap when MYR-252 added the cabin fields).
+// Mirrors the existing package-level lookup tables (fieldMap, fields.go).
+var fieldConverters = map[tpb.Field]func(*tpb.Value) (events.TelemetryValue, error){
+	tpb.Field_Location:            convertLocation,
+	tpb.Field_OriginLocation:      convertLocation,
+	tpb.Field_DestinationLocation: convertLocation,
+	tpb.Field_Gear:                convertShiftState,
 	// MYR-42: chargeState sources from proto 179 DetailedChargeState only.
 	// Proto 2 ChargeState is not in fieldMap and therefore not dispatched.
-	case tpb.Field_DetailedChargeState:
-		return convertChargeState(v)
-	case tpb.Field_CarType:
-		return convertCarType(v)
-	case tpb.Field_SentryMode:
-		return convertSentryMode(v)
-	case tpb.Field_Locked:
-		return convertBool(v)
-	case tpb.Field_DefrostMode:
-		return convertDefrostMode(v)
-	case tpb.Field_ClimateKeeperMode:
-		return convertClimateKeeperMode(v)
-	case tpb.Field_HvacPower:
-		return convertHvacPower(v)
-	case tpb.Field_InsideTemp, tpb.Field_OutsideTemp,
-		tpb.Field_HvacLeftTemperatureRequest, tpb.Field_HvacRightTemperatureRequest:
-		return convertTemperature(v)
-	case tpb.Field_RouteLine:
-		return convertRouteLine(v)
-	default:
-		return convertNumericOrString(v)
+	tpb.Field_DetailedChargeState: convertChargeState,
+	tpb.Field_CarType:             convertCarType,
+	tpb.Field_SentryMode:          convertSentryMode,
+	// MYR-252: boolean cabin-control fields. Locked (Group A) plus the
+	// Group B HvacACEnabled / SeatVentEnabled / ChargePortDoorOpen.
+	tpb.Field_Locked:             convertBool,
+	tpb.Field_HvacACEnabled:      convertBool,
+	tpb.Field_SeatVentEnabled:    convertBool,
+	tpb.Field_ChargePortDoorOpen: convertBool,
+	tpb.Field_DefrostMode:        convertDefrostMode,
+	tpb.Field_ClimateKeeperMode:  convertClimateKeeperMode,
+	tpb.Field_HvacPower:          convertHvacPower,
+	// MYR-252 Group B enum + Doors decode.
+	tpb.Field_HvacAutoMode:        convertHvacAutoMode,
+	tpb.Field_MediaPlaybackStatus: convertMediaStatus,
+	tpb.Field_DoorState:           convertDoorState,
+	// Temperatures (incl. driver/passenger setpoints) — Celsius→Fahrenheit.
+	tpb.Field_InsideTemp:                  convertTemperature,
+	tpb.Field_OutsideTemp:                 convertTemperature,
+	tpb.Field_HvacLeftTemperatureRequest:  convertTemperature,
+	tpb.Field_HvacRightTemperatureRequest: convertTemperature,
+	tpb.Field_RouteLine:                   convertRouteLine,
+}
+
+// convertValue dispatches to the appropriate converter based on the Tesla
+// field's expected type. Tesla's proto Value is a big oneof; the actual
+// variant used depends on both the field and the firmware version.
+func convertValue(field tpb.Field, v *tpb.Value) (events.TelemetryValue, error) {
+	if conv, ok := fieldConverters[field]; ok {
+		return conv(v)
 	}
+	return convertNumericOrString(v)
 }
 
 // convertLocation extracts a LocationValue. Tesla sends location fields

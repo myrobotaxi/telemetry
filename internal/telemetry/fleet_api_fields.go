@@ -35,14 +35,14 @@ const (
 // --- Battery / Charging ---
 
 const (
-	FleetFieldSOC                               = "Soc"
-	FleetFieldBatteryLevel                      = "BatteryLevel"
-	FleetFieldEstBatteryRange                   = "EstBatteryRange"
-	FleetFieldIdealBatteryRange                 = "IdealBatteryRange"
-	FleetFieldRatedRange                        = "RatedRange"
-	FleetFieldEnergyRemaining                   = "EnergyRemaining"
-	FleetFieldPackVoltage                       = "PackVoltage"
-	FleetFieldPackCurrent                       = "PackCurrent"
+	FleetFieldSOC               = "Soc"
+	FleetFieldBatteryLevel      = "BatteryLevel"
+	FleetFieldEstBatteryRange   = "EstBatteryRange"
+	FleetFieldIdealBatteryRange = "IdealBatteryRange"
+	FleetFieldRatedRange        = "RatedRange"
+	FleetFieldEnergyRemaining   = "EnergyRemaining"
+	FleetFieldPackVoltage       = "PackVoltage"
+	FleetFieldPackCurrent       = "PackCurrent"
 	// MYR-42: FleetFieldChargeState (proto 2) removed from DefaultFieldConfig
 	// because Tesla firmware no longer populates it. chargeState wire field
 	// now sources from DetailedChargeState (proto 179).
@@ -64,17 +64,36 @@ const (
 	FleetFieldSeatHeaterLeft       = "SeatHeaterLeft"
 	FleetFieldSeatHeaterRight      = "SeatHeaterRight"
 	FleetFieldClimateKeeperMode    = "ClimateKeeperMode"
+	// MYR-252 Group B cabin-control read-back fields (added to the
+	// fleet-telemetry config + server field map so Tesla emits them).
+	FleetFieldHvacAutoMode         = "HvacAutoMode"
+	FleetFieldHvacACEnabled        = "HvacACEnabled"
+	FleetFieldSeatHeaterRearLeft   = "SeatHeaterRearLeft"
+	FleetFieldSeatHeaterRearCenter = "SeatHeaterRearCenter"
+	FleetFieldSeatHeaterRearRight  = "SeatHeaterRearRight"
+	FleetFieldSeatCoolerLeft       = "ClimateSeatCoolingFrontLeft"
+	FleetFieldSeatCoolerRight      = "ClimateSeatCoolingFrontRight"
+	FleetFieldSeatVentEnabled      = "SeatVentEnabled"
 )
 
 // --- Vehicle State ---
 
 const (
-	FleetFieldOdometer    = "Odometer"
-	FleetFieldVehicleName = "VehicleName"
-	FleetFieldCarType     = "CarType"
-	FleetFieldVersion     = "Version"
-	FleetFieldLocked      = "Locked"
-	FleetFieldSentryMode  = "SentryMode"
+	FleetFieldOdometer           = "Odometer"
+	FleetFieldVehicleName        = "VehicleName"
+	FleetFieldCarType            = "CarType"
+	FleetFieldVersion            = "Version"
+	FleetFieldLocked             = "Locked"
+	FleetFieldSentryMode         = "SentryMode"
+	FleetFieldChargePortDoorOpen = "ChargePortDoorOpen" // MYR-252 Group B
+	FleetFieldDoorState          = "DoorState"          // MYR-252 Group B (trunk/frunk decode)
+)
+
+// --- Media (MYR-252 Group B) ---
+
+const (
+	FleetFieldMediaPlaybackStatus = "MediaPlaybackStatus"
+	FleetFieldMediaVolume         = "MediaAudioVolume"
 )
 
 // --- Safety / ADAS ---
@@ -146,6 +165,17 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		FleetFieldSeatHeaterLeft:       {IntervalSeconds: 30},
 		FleetFieldSeatHeaterRight:      {IntervalSeconds: 30},
 		FleetFieldClimateKeeperMode:    {IntervalSeconds: 60},
+		// MYR-252 Group B — cabin comfort read-back. Low-churn comfort
+		// state; ResendIntervalSeconds re-warms the value after a
+		// parked-window reconnect (Tesla only emits on change).
+		FleetFieldHvacAutoMode:         {IntervalSeconds: 30, ResendIntervalSeconds: intPtr(120)},
+		FleetFieldHvacACEnabled:        {IntervalSeconds: 30, ResendIntervalSeconds: intPtr(120)},
+		FleetFieldSeatHeaterRearLeft:   {IntervalSeconds: 30},
+		FleetFieldSeatHeaterRearCenter: {IntervalSeconds: 30},
+		FleetFieldSeatHeaterRearRight:  {IntervalSeconds: 30},
+		FleetFieldSeatCoolerLeft:       {IntervalSeconds: 30},
+		FleetFieldSeatCoolerRight:      {IntervalSeconds: 30},
+		FleetFieldSeatVentEnabled:      {IntervalSeconds: 30, ResendIntervalSeconds: intPtr(120)},
 
 		// Vehicle state — low frequency
 		//
@@ -161,6 +191,17 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		FleetFieldVersion:     {IntervalSeconds: 300},
 		FleetFieldLocked:      {IntervalSeconds: 30},
 		FleetFieldSentryMode:  {IntervalSeconds: 30},
+		// MYR-252 Group B — door/charge-port state. Resend re-warms after
+		// a parked-window reconnect so a client that connects to a static
+		// car still learns whether the trunk/frunk/charge-port is open.
+		FleetFieldChargePortDoorOpen: {IntervalSeconds: 30, ResendIntervalSeconds: intPtr(120)},
+		FleetFieldDoorState:          {IntervalSeconds: 30, ResendIntervalSeconds: intPtr(120)},
+
+		// Media (MYR-252 Group B) — higher churn than comfort state, so a
+		// tighter interval; no resend (a stale media state self-corrects on
+		// the next play/pause/volume change).
+		FleetFieldMediaPlaybackStatus: {IntervalSeconds: 10},
+		FleetFieldMediaVolume:         {IntervalSeconds: 10},
 
 		// Safety / ADAS.
 		//
