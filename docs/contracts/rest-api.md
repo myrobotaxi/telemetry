@@ -73,6 +73,7 @@ Every FR/NFR listed here is anchored in at least one section of this doc. The ta
    7. `GET /api/users/me/export`
    10. Authentication (identity module — MYR-193)
    11. In-app Tesla account link (MYR-246)
+   12. `DELETE /api/tesla/vehicles/{vehicleId}` (owner car offboarding — MYR-258)
 8. Resource schemas
 9. Observability
 10. Code <-> spec divergences
@@ -1773,6 +1774,99 @@ appear in the redirect URL or logs.** Outcome classification:
 
 ---
 
+### 7.12 `DELETE /api/tesla/vehicles/{vehicleId}` (owner car offboarding — MYR-258)
+
+Owner-authenticated "Remove this car" full teardown — the reverse of the
+in-app link/onboarding flow (§7.11). The caller MUST own the vehicle. It removes
+the car from our backend **authoritatively and immediately**, does the
+automatable Tesla-side cleanup **best-effort**, and returns the two Tesla-side
+steps only the owner can complete. Design + Fleet-API verification:
+[`../architecture/car-offboarding.md`](../architecture/car-offboarding.md).
+
+**Enablement.** The route is ALWAYS mounted (the authoritative teardown is a
+local DB transaction that needs no proxy). The best-effort Tesla stream-config
+delete is wired only when the tesla-http-proxy (`TESLA_PROXY_URL`) is configured;
+otherwise it is skipped and the local teardown still completes.
+
+**Request.**
+
+```
+DELETE /api/tesla/vehicles/{vehicleId}
+Authorization: Bearer <app session JWT>        # owner identity = JWT sub
+```
+
+`{vehicleId}` is the Prisma cuid (NOT a VIN — browsers never receive a full VIN).
+
+**Behavior / sequence** (car-offboarding.md §5.1):
+
+1. Validate the bearer → `userId`; resolve `vehicleId` → (VIN, owner) via
+   `VehicleRepo.GetByID`. Unknown vehicle → `404 not_found` (indistinguishable
+   from ownership-filtered — never leaks existence). A real ownership mismatch →
+   `403 vehicle_not_owned`. No teardown runs on either.
+2. Resolve the owner's Tesla token (best-effort, with auto-refresh). If absent,
+   skip step 3.
+3. Best-effort `DELETE …/fleet_telemetry_config` at Tesla (`FleetAPIClient.DeleteTelemetryConfig`,
+   which rides the same forwarded/unsigned proxy path as the GET status read, NOT
+   the JWS-signed POST push). Any failure/404 is **non-fatal** — logged, then
+   `streamConfigDeleted:false`; the local teardown still runs.
+4. Authoritative local teardown transaction (`store.OwnerTeardown`, owner-scoped):
+   DELETE the `Vehicle` (cascades `Drive`/`TripStop`/vehicle-scoped `Invite` +
+   encrypted route blobs; fires the `vehicle_deleted` NOTIFY that closes WS/mTLS
+   streams + evicts caches — data-lifecycle.md §3.5). On the owner's **last**
+   vehicle it also DELETEs the Tesla `Account` tokens and resets `Settings`
+   (`teslaLinked=false`, `virtualKeyPaired=false`). Writes the user-initiated
+   `vehicle_deleted` AuditLog row in the same transaction (CG-DL-3).
+5. Respond `200` with the honest post-state + owner-action items.
+
+**Idempotent.** Removing an already-removed car is a clean no-op: the writer
+affects zero rows and returns success with no duplicate audit row (a repeated
+DELETE typically 404s once the row is gone).
+
+**OAuth revoke & virtual key — owner-only, by design.** Deleting our `Account`
+tokens removes OUR access; it does NOT revoke the Tesla grant (there is no
+partner machine call — car-offboarding.md §1.2). The response returns the
+owner-confirmed consent-revoke deep link `revokeUrl`. Virtual-key removal has
+no Fleet API and no deep link (§1.3) — it is returned as **instructions only**.
+
+**Response `200`** (`application/json`):
+
+```json
+{
+  "removed": true,
+  "wasLastVehicle": true,
+  "teslaTokensCleared": true,
+  "streamConfigDeleted": true,
+  "revokeUrl": "https://auth.tesla.com/user/revoke/consent?back_url=myrobotaxi%3A%2F%2Ftesla-unlinked&revoke_client_id=<CLIENT_ID>",
+  "virtualKeyRemoval": {
+    "required": true,
+    "automatable": false,
+    "steps": [
+      "Open the Tesla app or your car's touchscreen",
+      "Go to Controls → Locks",
+      "Tap the “MyRoboTaxi” key",
+      "Tap Remove/Delete Key",
+      "Authenticate by tapping a key card on the center console"
+    ]
+  }
+}
+```
+
+| Field | Type | Classification | Notes |
+|-------|------|----------------|-------|
+| `removed` | `boolean` | P0 | Authoritative: the car is gone from the app (true on both a fresh removal and an already-gone no-op). |
+| `wasLastVehicle` | `boolean` | P0 | True when this was the owner's last linked vehicle (Account tokens cleared + Settings reset). |
+| `teslaTokensCleared` | `boolean` | P0 | Mirrors `wasLastVehicle`: our stored Tesla tokens were deleted. Removes OUR access, not the grant. |
+| `streamConfigDeleted` | `boolean` | P0 | Whether the best-effort Tesla `fleet_telemetry_config` delete succeeded. `false` on skip/failure — non-fatal. |
+| `revokeUrl` | `string` | P0 | Owner-confirmed consent-revoke deep link (public URL, no secret). Omitted when no Tesla `client_id` is configured. |
+| `virtualKeyRemoval` | `object` | P0 | Owner-manual key-removal instructions. `automatable` is always `false` (no API, no deep link). |
+
+**Errors:** `401 auth_failed` (missing/invalid bearer), `403 vehicle_not_owned`
+(caller does not own the vehicle), `404 not_found` (unknown vehicle),
+`405 invalid_request` (non-DELETE method), `500 internal_error` (local teardown
+transaction failed — atomic: nothing deleted, no audit row; retryable).
+
+---
+
 ## 8. Resource schemas
 
 The canonical v1 `VehicleState` schema is [`schemas/vehicle-state.schema.json`](schemas/vehicle-state.schema.json). The REST snapshot endpoint returns that shape directly via `$ref` in the OpenAPI spec -- it is NOT re-declared.
@@ -1843,6 +1937,7 @@ Same as [`websocket-protocol.md`](websocket-protocol.md) §10 divergence managem
 ## 11. Change log
 
 | Date | Change | Author |
+| 2026-07-24 | **Owner car offboarding — full teardown ([MYR-258](https://linear.app/myrobotaxi/issue/MYR-258)).** New owner-authenticated endpoint §7.12 `DELETE /api/tesla/vehicles/{vehicleId}` ("Remove this car"), the exact inverse of the §7.11 onboarding link. Backed by a new `store.OwnerTeardown` writer — a single, transactional, idempotent, audited owner-scoped teardown that mirrors MYR-257's `store.OwnerProvisioner` in reverse: it DELETEs one `Vehicle` (`WHERE "id"=… AND "userId"=…`, cascading `Drive`/`TripStop`/vehicle-scoped `Invite` + encrypted route blobs and firing the existing `vehicle_deleted` NOTIFY that closes WS/mTLS streams + evicts caches) and, on the owner's **last** vehicle, DELETEs the Tesla `Account` tokens + resets `Settings` (`teslaLinked`/`virtualKeyPaired=false`), writing the user-initiated `vehicle_deleted` AuditLog row in the same transaction (CG-DL-3; P0 `{driveCount, wasLastVehicle}` metadata). Ownership is enforced at the SQL layer (owner-scoped predicate on every mutating statement) — a teardown can never touch another user's rows. Sequence: resolve token → best-effort `DELETE fleet_telemetry_config` at Tesla (new `FleetAPIClient.DeleteTelemetryConfig`, a near-copy of `GetTelemetryConfig` — same forwarded/unsigned proxy path, NOT the JWS-signed POST push; non-fatal on failure) → authoritative local teardown → return the honest post-state + owner-only follow-ups (the consent-revoke deep link and the manual virtual-key-removal steps; neither is a partner machine call — car-offboarding.md §1.2/§1.3). Idempotent (re-remove is a clean no-op, no duplicate audit). `data-lifecycle.md` §1.4 grants the Go server owner-scoped DELETE on `Vehicle`/`Account` + the `vehicle_deleted` audit INSERT; §4.2 `vehicle_deleted` action now emitted by Go. No live Tesla call fires in tests/CI (the config-deleter is nil/faked). | go-engineer |
 | 2026-07-24 | **Fully self-serve owner onboarding — provision on Tesla link ([MYR-257](https://linear.app/myrobotaxi/issue/MYR-257)).** §7.11.2 `GET /api/tesla/link/callback` behavior change: on a successful code→token exchange the callback now PROVISIONS the caller's minimal Prisma owner rows instead of requiring a pre-seeded `Account`. New `store.OwnerProvisioner` (a single, audited, idempotent, transactional writer — NOT the identity module, keeping ADR-001 §4's identity/`User`-read-only boundary intact) **resolves the canonical Prisma user** — (a) existing Tesla-`Account` owner (never rewritten; caller's Apple identity converges via a `go_identity_apple` re-point), (b) existing `"User"` by email (adopted, preventing a `User.email @unique` collision on the Apple Hide-My-Email crossover), or (c) fresh `"User"` on the go_users id — then upserts `"Settings"` (`teslaLinked=true`) and `"Account"` (`ON CONFLICT (provider, providerAccountId) DO UPDATE` tokens only, never `userId`; dual-write-encrypted; `providerAccountId` = Tesla OIDC `sub` from a new `teslaauth.FetchUserInfo` call) for that canonical user, in one transaction — never duplicating a user or reassigning a Tesla account/vehicle across users. A brand-new go_users-native Apple user becomes a working owner with **zero ops steps** (`AUTH_APPLE_BOOTSTRAP` + pre-seeded-`Account` MVP steps deleted); a denied/failed link provisions nothing (no orphan `"User"`). A best-effort post-link hook lists the owner's vehicles (Fleet `GET /api/1/vehicles`, new `FleetAPIClient.ListVehicles`), seeds `"Vehicle"` identity rows **for owned vehicles only** (Fleet `access_type == "OWNER"`; shared-driver cars skipped + audited, and a `teslaVehicleId` owned by another user is never reassigned), and — only when the tesla-http-proxy is configured at runtime — pushes the fleet-telemetry config per VIN so the car streams without an ops `fleet-config push` (guarded so no live push ever runs in tests). `account_not_provisioned` is now legacy (unreachable on the happy path); `persist_failed` widens to cover userinfo/transaction failure. Data-lifecycle §1.4 updated: `User`/`Settings`/`Vehicle` gain narrow Go INSERT/upsert access, `Account` widens to upsert. Cross-repo Prisma-schema verification is a required `sdk-architect` gate — see [`../architecture/self-serve-onboarding.md`](../architecture/self-serve-onboarding.md). No new endpoint or request/response shape; no new persisted column. | go-engineer |
 | 2026-07-24 | **Registered the owner-app charge-port, seat-climate, and media commands ([MYR-249](https://linear.app/myrobotaxi/issue/MYR-249)).** §7.9 command catalog gains eight signed commands the owner app needs: `charge_port_door_open`/`charge_port_door_close` (`vehicle_charging_cmds`, no params), `remote_seat_heater_request` (`seat_position` int 0–8, `level` int 0–3), `remote_seat_cooler_request` (`seat_position` **1 front-left / 2 front-right** — front seats only, a different numbering from the heater; `seat_cooler_level` **int 1–4**: 1 off/2 low/3 med/4 high, asymmetric with the heater's 0–3 `level` because the proxy's `Level(x-1)` and `SetSeatCooler`'s `+1` cancel to a 1:1 map onto the `HvacSeatCoolerLevel` enum), `media_toggle_playback`/`media_next_track`/`media_prev_track` (no params), and `adjust_volume` (`volume` float 0–11). All are `SignerRequired: true` and route the proxy path. **MYR-245 lesson applied:** every one was verified present in the **pinned** tesla-http-proxy (v0.4.1) `ExtractCommandAction` switch (and confirmed signed, not `ErrCommandUseRESTAPI`), so none 400s locally as `invalid_command` before the car is dialed — no proxy upgrade required. Body builders validate seat position/level and volume ranges (out-of-range → `400 invalid_request`, no Tesla call) following the existing `buildSetTemps`/`paramInt` patterns. **No stored-data / data-classification change** — command params are transit-only, never persisted or logged (VIN still redacted to last-4). Implementation: `internal/commands/registry.go` (entries + `buildSeatHeater`/`buildSeatCooler`/`buildAdjustVolume`) + `registry_test.go`. | go-engineer |
 | 2026-07-23 | **User-facing in-app Tesla OAuth link — owner onboarding ([MYR-246](https://linear.app/myrobotaxi/issue/MYR-246)).** New §7.11: `POST /api/tesla/link/start` (owner-authenticated; mints a 10-min single-use PKCE+state session bound to the caller and returns the Tesla authorize URL — full scope set `openid offline_access user_data vehicle_device_data vehicle_location vehicle_cmds vehicle_charging_cmds` + `prompt_missing_scopes=true`, MYR-242) and `GET /api/tesla/link/callback` (unauthenticated Tesla redirect; validates `state`, exchanges the code, persists tokens via the existing encrypted `AccountRepo.UpdateTeslaToken` dual-write, then `302`s to the `myrobotaxi://tesla-linked?status=…` app deep link — no tokens/PII in the URL or logs). Lets the iOS app link a Tesla account in-app (`ASWebAuthenticationSession`) instead of the localhost `ops auth link` dev flow; the `client_secret` stays server-side. OAuth primitives factored out of `cmd/ops/auth_oauth.go` into shared `internal/teslaauth` (PKCE, authorize URL, code→token exchange); endpoints in new `internal/teslalink` (single-use TTL session store + handler). New config `TESLA_LINK_REDIRECT_BASE_URL` (enables the surface; its `/api/tesla/link/callback` must be registered on the Tesla app) + `TESLA_LINK_APP_REDIRECT` (default `myrobotaxi://tesla-linked`). No new persisted fields, WS messages, or error codes (start uses `auth_failed`/`internal_error`; callback redirects rather than emitting the error envelope). MVP requires the callee `Account` row to be pre-provisioned (ops step, bound via `AUTH_APPLE_BOOTSTRAP`) — self-serve `Account` upsert + server-side vehicle sync are documented follow-ups in [`../architecture/owner-onboarding.md`](../architecture/owner-onboarding.md). Wired in `cmd/telemetry-server/wiring_tesla_link.go`. | go-engineer |
