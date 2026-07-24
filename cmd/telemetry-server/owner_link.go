@@ -56,21 +56,22 @@ func (o *ownerLink) UpdateTeslaToken(ctx context.Context, userID, accessToken, r
 		return err
 	}
 
-	// Best-effort P1 display values for the "User" row. Prefer the identity
-	// profile (Apple-side), fall back to the Tesla account email. Never logged.
-	name, email, perr := o.profiles.GetUserProfile(ctx, userID)
+	// Best-effort P1 display value for the "User" row. Use ONLY our own
+	// Apple-verified email (from the identity profile). The Tesla-account email
+	// (info.Email) is deliberately NOT used: it would make an identity merge
+	// (email-adoption onto an existing User) rely on an email we did not verify.
+	// Tesla-ownership convergence still works via the verified sub (path (a));
+	// info.Email is display-only and is not passed to provisioning. Never logged.
+	name, appleEmail, perr := o.profiles.GetUserProfile(ctx, userID)
 	if perr != nil {
 		o.logger.Warn("owner provision: profile lookup failed (continuing)", slog.String("user_id", userID))
-	}
-	if email == "" {
-		email = info.Email
 	}
 
 	res, err := o.provisioner.ProvisionTeslaOwner(ctx, store.ProvisionInput{
 		UserID:            userID,
 		ProviderAccountID: info.Sub,
 		Name:              name,
-		Email:             email,
+		Email:             appleEmail,
 		AccessToken:       accessToken,
 		RefreshToken:      refreshToken,
 		ExpiresAt:         expiresAt,

@@ -79,12 +79,16 @@ converging identities rather than creating duplicates or reassigning ownership:
    authoritative: **`Account.userId` is never rewritten.** If the caller's
    identity differs, the caller's Apple binding is *converged* onto that owner
    (a `go_identity_apple` re-point — see below).
-2. **(b) A `"User"` with the resolved email exists** → adopt it (reuse its id,
-   converge the Apple binding). **No `"User"` INSERT.** This is what makes the
-   Apple Hide-My-Email crossover resolve instead of colliding on
-   `User.email @unique`: an existing web user whose email surfaces only via the
-   Tesla account (their fresh go_users id had a null/relay email) is *reused*, not
-   duplicated.
+2. **(b) A `"User"` with our Apple-VERIFIED email exists** → adopt it (reuse its
+   id, converge the Apple binding). **No `"User"` INSERT.** The match email is
+   strictly our own Apple-verified value (from the identity pipeline —
+   `go_identity_apple`/`go_users`, only ever populated when Apple asserted
+   `email_verified`). The **Tesla-account email is NEVER a match source**: an
+   identity merge onto an existing `"User"` must not rely on an address we did
+   not verify ourselves. If Apple hid the email (relay / unverified), this path
+   is skipped — the caller converges via the verified Tesla sub (a) or provisions
+   a fresh user (c). This is also what avoids a `User.email @unique` collision for
+   the returning-web-user case.
 3. **(c) Otherwise** INSERT a fresh `"User"` with the caller's `go_users` id —
    now guaranteed collision-free on **both** id and email (neither matched above).
 
@@ -141,8 +145,10 @@ token (collision-safe against a later web link on the same Tesla account).
   `AccountRepo.UpdateTeslaToken` (NFR-3.23/3.25, data-classification §3.3). No new
   plaintext credential surface.
 - **`name`/`email` on `"User"`:** P1 PII. Sourced from the identity module's
-  best-effort profile (the go_users / go_identity_apple row); may be empty when
-  Apple used a hidden relay with no name. Never logged.
+  best-effort profile (the go_users / go_identity_apple row) — the `email` is our
+  **Apple-verified** value only, never the Tesla-account email (which is used for
+  display/projection elsewhere but is not a merge/persist anchor here). May be
+  empty when Apple used a hidden relay. Never logged.
 - **New cuids** for `Settings.id` and `Account.id` are generated Go-side (cuid
   shape, same generator class as `go_users` ids).
 
@@ -151,8 +157,10 @@ token (collision-safe against a later web link on the same Tesla account).
 - **New owner (c):** fresh `"User"` + Settings + Account created.
 - **Returning owner re-link (a):** resolves to self via the Tesla account;
   Settings stays linked; Account tokens refreshed in place. No duplicates.
-- **Hide-My-Email crossover (b):** existing web user reused by email, Apple
-  binding converged — **no colliding `"User"` INSERT**, one User row.
+- **Returning web user by Apple-verified email (b):** existing web user reused,
+  Apple binding converged — **no colliding `"User"` INSERT**, one User row. Fires
+  only on our verified email; an Apple hidden-relay caller (empty verified email)
+  never adopts here even if a Tesla-provided email would have matched.
 - **Cross-user relink (a, different caller):** existing owner kept,
   `Account.userId` **not rewritten**, caller's Apple binding converged onto the
   owner, only the owner's `Settings` flipped. Audited.
@@ -236,12 +244,14 @@ in prod, `sdk-architect` must confirm against `prisma/schema.prisma`:
 
 1. **`"User"."email"` is `@unique`.** This is load-bearing for the canonical
    resolver (§2): a naive `INSERT User ON CONFLICT ("id")` would still raise
-   `23505` on the email index for the Apple Hide-My-Email crossover (an existing
-   web user whose email surfaces only via the Tesla account, under a fresh
-   go_users id). The resolver's precedence (a)→(b) **adopts** the existing
-   email-owner instead of inserting, so the collision cannot happen. Verify the
-   `@unique` still holds and that email is the only unique column the INSERT path
-   could collide on.
+   `23505` on the email index when a returning web user's Apple-verified email
+   matches an existing row under a fresh go_users id. The resolver's precedence
+   (a)→(b) **adopts** the existing email-owner instead of inserting, so the
+   collision cannot happen. Note the match uses **only our Apple-verified email**
+   (never the Tesla-account email), so a fresh-user INSERT (c) writes only a
+   verified email (or NULL) into the unique column — it can never introduce an
+   unverified Tesla email that later collides. Verify `@unique` still holds and
+   that email is the only unique column the INSERT path could collide on.
 2. `"Settings"."userId"` carries a UNIQUE constraint (the `ON CONFLICT ("userId")`
    target) and every other NOT-NULL `Settings` column has a DB-level `@default`.
 3. `"Account"` has the compound `@@unique([provider, providerAccountId])` (the

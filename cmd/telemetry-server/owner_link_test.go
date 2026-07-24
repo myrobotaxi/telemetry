@@ -138,20 +138,20 @@ func TestOwnerLink_UpdateTeslaToken(t *testing.T) {
 		}
 	})
 
-	t.Run("empty profile email falls back to tesla email", func(t *testing.T) {
+	t.Run("empty Apple email is NOT replaced by the Tesla email (no unverified merge)", func(t *testing.T) {
 		prov := &fakeProvisioner{}
 		link := &ownerLink{
 			provisioner:   prov,
-			profiles:      &fakeProfiles{name: "Ada", email: ""},
-			fetchUserInfo: func(context.Context, string) (teslaauth.UserInfo, error) { return teslaauth.UserInfo{Sub: "s", Email: "fallback@tesla.example"}, nil },
+			profiles:      &fakeProfiles{name: "Ada", email: ""}, // Apple hidden relay
+			fetchUserInfo: func(context.Context, string) (teslaauth.UserInfo, error) { return teslaauth.UserInfo{Sub: "s", Email: "tesla@tesla.example"}, nil },
 			hook:          nil, // nil hook must be safe
 			logger:        testLogger(),
 		}
 		if err := link.UpdateTeslaToken(ctx, "cuser4", "acc", "ref", 1); err != nil {
 			t.Fatalf("UpdateTeslaToken: %v", err)
 		}
-		if prov.last.Email != "fallback@tesla.example" {
-			t.Errorf("email = %q, want tesla fallback", prov.last.Email)
+		if prov.last.Email != "" {
+			t.Errorf("email = %q, want empty (Tesla email must never be used as the match/persist anchor)", prov.last.Email)
 		}
 	})
 }

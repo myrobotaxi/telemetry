@@ -204,18 +204,18 @@ func TestOwnerProvisioner_ProvisionTeslaOwner(t *testing.T) {
 		}
 	})
 
-	t.Run("Hide-My-Email crossover: Tesla email matches existing web user -> adopt, one User row", func(t *testing.T) {
+	t.Run("Apple-verified email matches existing web user -> adopt, one User row", func(t *testing.T) {
 		cleanOwnerTables(t)
 		// Existing web user (created via NextAuth long ago).
 		const webID, webEmail = "cwebuser0001", "crossover@web.example"
 		seedOwnerUser(t, webID, "Web Ada", webEmail)
-		// Caller: a fresh go_users id from Apple Hide-My-Email (null email at mint),
-		// bound in go_identity_apple. Their Tesla account email == the web email.
+		// Caller: a fresh go_users id whose Apple-VERIFIED email equals the web
+		// email (e.g. they signed in with Apple sharing their real address).
 		const appleID, appleSub = "cappleid0001", "apple-sub-xyz"
 		seedAppleBinding(t, appleSub, appleID)
 
 		in := newProvisionInput(appleID)
-		in.Email = webEmail // resolved from the Tesla account (userinfo)
+		in.Email = webEmail // OUR Apple-verified email (never a Tesla-provided one)
 		res, err := prov.ProvisionTeslaOwner(ctx, in)
 		if err != nil {
 			t.Fatalf("provision: %v", err)
@@ -246,6 +246,46 @@ func TestOwnerProvisioner_ProvisionTeslaOwner(t *testing.T) {
 		// Account + Settings live under the canonical web user.
 		if got := countRows(t, `"Account"`, `"userId"`, webID); got != 1 {
 			t.Errorf("Account rows for webID = %d, want 1", got)
+		}
+	})
+
+	t.Run("unverified Tesla email does NOT auto-adopt: empty Apple email -> fresh user", func(t *testing.T) {
+		cleanOwnerTables(t)
+		// Existing web user whose email equals what Tesla would report. The caller
+		// signed in with Apple Hide-My-Email, so their Apple-verified email is
+		// empty. owner_link never passes the Tesla email as the match anchor — the
+		// provisioner sees Email="" — so path (b) must NOT fire. With no matching
+		// Tesla account either, the caller provisions a FRESH user (c).
+		const webID, sharedEmail = "cwebuser0002", "shared@web.example"
+		seedOwnerUser(t, webID, "Web Bob", sharedEmail)
+		const appleID, appleSub = "chidden00001", "apple-sub-hidden"
+		seedAppleBinding(t, appleSub, appleID)
+
+		in := newProvisionInput(appleID)
+		in.Email = "" // Apple hidden relay — no verified email; Tesla email NOT used
+		res, err := prov.ProvisionTeslaOwner(ctx, in)
+		if err != nil {
+			t.Fatalf("provision: %v", err)
+		}
+		if res.CanonicalUserID != appleID || res.Outcome != store.OutcomeNewUser {
+			t.Fatalf("result = %+v, want canonical=%s outcome=new_user (no unverified adopt)", res, appleID)
+		}
+		// The existing web user must be untouched (not adopted, not merged).
+		if got := countRows(t, `"Account"`, `"userId"`, webID); got != 0 {
+			t.Errorf("Account rows for webID = %d, want 0 (web user untouched)", got)
+		}
+		// A fresh User exists for the caller, distinct from the web user.
+		if got := countRows(t, `"User"`, `"id"`, appleID); got != 1 {
+			t.Errorf("User rows for appleID = %d, want 1 (fresh user)", got)
+		}
+		// Apple binding stays on the caller (not converged onto the web user).
+		var boundTo string
+		if err := testPool.QueryRow(ctx,
+			`SELECT user_id FROM go_identity_apple WHERE apple_sub=$1`, appleSub).Scan(&boundTo); err != nil {
+			t.Fatalf("read binding: %v", err)
+		}
+		if boundTo != appleID {
+			t.Errorf("apple binding = %s, want %s (unchanged)", boundTo, appleID)
 		}
 	})
 

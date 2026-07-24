@@ -63,9 +63,16 @@ func NewOwnerProvisioner(pool *pgxpool.Pool, encryptor cryptox.Encryptor, logger
 
 // ProvisionInput carries the resolved caller identity plus the freshly linked
 // Tesla token set. UserID is the caller's JWT sub (their go_users / Prisma id).
-// ProviderAccountID is the Tesla OIDC subject from userinfo. Name/Email are
-// best-effort P1 display values (may be empty for an Apple hidden-relay sign-in)
-// — never logged.
+// ProviderAccountID is the Tesla OIDC subject from userinfo. Name is a
+// best-effort P1 display value.
+//
+// Email MUST be our own Apple-verified email (or empty for an Apple
+// hidden-relay sign-in) — NEVER a Tesla-provided email. It is the trust anchor
+// for the (b) email-adoption merge: adopting an existing "User" by email must
+// only fire on an address we verified ourselves. An empty Email disables path
+// (b) entirely (the caller then converges via the verified Tesla sub (a) or
+// provisions a fresh user (c)). Email is also the value persisted to a fresh
+// "User".email in case (c). Never logged.
 type ProvisionInput struct {
 	UserID            string
 	ProviderAccountID string
@@ -231,7 +238,10 @@ func (p *OwnerProvisioner) resolveCanonicalUser(ctx context.Context, tx pgx.Tx, 
 		return "", "", fmt.Errorf("store.ProvisionTeslaOwner(user=%s): find tesla account: %w", in.UserID, err)
 	}
 
-	// (b) Existing user by email — adopt it (no colliding User INSERT).
+	// (b) Existing user by our Apple-VERIFIED email — adopt it (no colliding
+	// User INSERT). in.Email is guaranteed Apple-verified (never a Tesla email),
+	// so an identity merge onto an existing User never trusts an unverified
+	// address. Empty email skips this path entirely.
 	if in.Email != "" {
 		var uid string
 		err := tx.QueryRow(ctx, queryFindUserByEmail, in.Email).Scan(&uid)

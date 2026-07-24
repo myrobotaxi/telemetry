@@ -1733,9 +1733,10 @@ appear in the redirect URL or logs.** Outcome classification:
   first **resolves the canonical Prisma user** — (a) the existing owner of the
   Tesla `Account`(provider, providerAccountId) if any (its `userId` is authoritative
   and **never rewritten**; the caller's Apple identity converges onto it via a
-  `go_identity_apple` re-point), else (b) an existing `"User"` matched by email
-  (adopted, not re-inserted — this is what prevents a `User.email @unique`
-  collision for the Apple Hide-My-Email crossover), else (c) INSERT a fresh
+  `go_identity_apple` re-point), else (b) an existing `"User"` matched by our
+  **Apple-verified** email only (adopted, not re-inserted — prevents a
+  `User.email @unique` collision for a returning web user; the Tesla-account
+  email is never a merge anchor), else (c) INSERT a fresh
   `"User"` on the go_users id — then upserts `"Settings"`(`teslaLinked=true`) and
   `"Account"` (`ON CONFLICT ("provider","providerAccountId") DO UPDATE` tokens
   only, **never `userId`**; dual-write-encrypted; `providerAccountId` = Tesla OIDC
