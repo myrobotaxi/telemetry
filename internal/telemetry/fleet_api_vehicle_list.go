@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 )
 
 // FleetVehicle is the minimal per-vehicle identity the owner-onboarding sync
@@ -18,6 +19,19 @@ type FleetVehicle struct {
 	ID          json.Number `json:"id"`
 	VIN         string      `json:"vin"`
 	DisplayName string      `json:"display_name"`
+	// AccessType is the caller's access level for this vehicle — "OWNER" or
+	// "DRIVER" (shared driver). Only OWNER vehicles may be provisioned to the
+	// caller; a shared driver must never have someone else's car attached to
+	// their account (MYR-257 review finding 3).
+	AccessType string `json:"access_type"`
+}
+
+// IsOwner reports whether the caller is the vehicle's owner (not a shared
+// driver). Tesla returns access_type "OWNER" for owned vehicles; any other
+// value (including empty, which older Fleet responses may omit) is treated as
+// non-owner and is NOT provisioned.
+func (v FleetVehicle) IsOwner() bool {
+	return strings.EqualFold(strings.TrimSpace(v.AccessType), "OWNER")
 }
 
 // fleetVehicleListResponse mirrors GET /api/1/vehicles.
