@@ -77,8 +77,15 @@ func discardLogger() *slog.Logger {
 }
 
 // newTestFleetClient creates a FleetAPIClient with zero retries for fast tests.
+// It injects a DEDICATED http.Transport (not the shared http.DefaultTransport)
+// so a parallel test's httptest srv.Close() cannot close idle keep-alive
+// connections this client is reusing — which otherwise surfaces as a spurious
+// "CloseIdleConnections called" transport error carrying the full request URL.
 func newTestFleetClient(baseURL string) *FleetAPIClient {
-	c := NewFleetAPIClient(FleetAPIConfig{BaseURL: baseURL}, discardLogger())
+	c := NewFleetAPIClient(FleetAPIConfig{
+		BaseURL:    baseURL,
+		HTTPClient: &http.Client{Transport: &http.Transport{}},
+	}, discardLogger())
 	c.retry.MaxRetries = 0
 	return c
 }

@@ -80,27 +80,44 @@ func (b *Broadcaster) handleTelemetry(ctx context.Context, event events.Event) {
 // invariant from vehicle-state-schema.md §2.4: `status` MUST never
 // appear on the wire without its companion `gearPosition`.
 //
-// Two paths reach `status`:
+// Paths that reach `status`:
 //
 //   - Frame carries gearPosition: cache the new value and derive
 //     status from the current frame's fields.
 //
-//   - Frame is speed-only: pull cached gearPosition for this VIN,
-//     inject it into `fields`, and derive status. The companion
-//     gearPosition rides on the same wire frame, preserving the
-//     atomic-emission invariant.
+//   - Frame is speed-only OR carries a ServiceMode change (MYR-259):
+//     pull the cached gearPosition for this VIN, inject it into
+//     `fields`, and derive status. The companion gearPosition rides on
+//     the same wire frame, preserving the atomic-emission invariant.
+//     Recomputing on a bare ServiceMode toggle is what lets a car flip
+//     to/from `in_service` live while parked (no gear/speed churn).
 //
-// No cache hit on the speed-only path means the server has not yet
-// seen a gear frame for this VIN since startup or the last connectivity
-// drop — leave status off the frame so the SDK keeps its previous
-// value rather than receiving a partial group.
+// No cache hit on the injected path means the server has not yet seen a
+// gear frame for this VIN since startup or the last connectivity drop —
+// leave status off the frame so the SDK keeps its previous value rather
+// than receiving a partial group.
+//
+// ServiceMode (proto 159) is an INTERNAL signal: it is cached, folded
+// into the in_service derivation, and then deleted so it never appears
+// as an uncontracted wire field.
 func (b *Broadcaster) ensureGearGroupAtomic(vin string, fields map[string]any) {
+	// Absorb the internal ServiceMode signal: cache it, remember whether
+	// this frame carried it, and strip it from the outgoing payload.
+	smInFrame := false
+	if sm, ok := fields["serviceMode"].(bool); ok {
+		b.serviceMode.Store(vin, sm)
+		smInFrame = true
+	}
+	delete(fields, "serviceMode")
+
 	if gear, hasGear := fields["gearPosition"].(string); hasGear {
 		b.gear.Store(vin, gear)
-		fields["status"] = deriveVehicleStatus(fields)
+		fields["status"] = deriveVehicleStatus(fields, b.inServiceFor(vin))
 		return
 	}
-	if _, hasSpeed := fields["speed"]; !hasSpeed {
+
+	_, hasSpeed := fields["speed"]
+	if !hasSpeed && !smInFrame {
 		return
 	}
 	cached, ok := b.gear.Load(vin)
@@ -108,7 +125,18 @@ func (b *Broadcaster) ensureGearGroupAtomic(vin string, fields map[string]any) {
 		return
 	}
 	fields["gearPosition"] = cached
-	fields["status"] = deriveVehicleStatus(fields)
+	fields["status"] = deriveVehicleStatus(fields, b.inServiceFor(vin))
+}
+
+// inServiceFor reports the cached ServiceMode (proto 159) state for a VIN,
+// defaulting to false when none has been seen since the last (re)connect.
+func (b *Broadcaster) inServiceFor(vin string) bool {
+	if v, ok := b.serviceMode.Load(vin); ok {
+		if sm, ok := v.(bool); ok {
+			return sm
+		}
+	}
+	return false
 }
 
 // flushGroup is the callback invoked by the groupAccumulator when an

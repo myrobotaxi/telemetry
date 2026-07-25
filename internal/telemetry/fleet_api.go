@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	neturl "net/url"
 	"time"
 )
 
@@ -166,9 +168,12 @@ func (c *FleetAPIClient) doWithRetry(
 		// base (see note above); no attacker control of scheme/host.
 		resp, err := c.httpClient.Do(req) //nolint:gosec // host is fixed config
 		if err != nil {
-			lastErr = fmt.Errorf("http request: %w", err)
-			// Network errors are not retried — they are likely transient
-			// DNS/TLS issues that won't resolve within retry window.
+			// A transport error from Do is a *url.Error whose Error() embeds the
+			// full request URL — which carries the VIN as a path segment. Strip
+			// the URL and surface only the underlying cause so the VIN never
+			// leaks into an error string (and thus logs). Network errors are not
+			// retried — they are likely transient DNS/TLS issues.
+			lastErr = fmt.Errorf("http %s request failed: %w", method, transportCause(err))
 			return nil, lastErr
 		}
 
@@ -208,6 +213,17 @@ func (c *FleetAPIClient) doWithRetry(
 	}
 
 	return nil, lastErr
+}
+
+// transportCause unwraps a *url.Error so its embedded request URL (which
+// carries the VIN as a path segment) never reaches the returned error string.
+// Non-url errors pass through unchanged.
+func transportCause(err error) error {
+	var uerr *neturl.Error
+	if errors.As(err, &uerr) && uerr.Err != nil {
+		return uerr.Err
+	}
+	return err
 }
 
 // newBodyReader returns a reader for the given body bytes, or nil if

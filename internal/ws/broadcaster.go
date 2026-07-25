@@ -30,6 +30,14 @@ type Broadcaster struct {
 	// connectivity disconnect to avoid leaking stale gear across a
 	// reconnect.
 	gear sync.Map // VIN string → gearPosition string
+	// serviceMode caches the most recently seen ServiceMode (proto 159)
+	// bool per VIN (MYR-259). It feeds status derivation (in_service) so a
+	// gear/speed frame — or a bare ServiceMode toggle on an otherwise-static
+	// parked car — recomputes `status`. It is an INTERNAL-only signal:
+	// never emitted as its own wire field (stripped in ensureGearGroupAtomic).
+	// Cleared on connectivity disconnect alongside gear so a stale
+	// service-mode flag cannot leak across a reconnect.
+	serviceMode sync.Map // VIN string → bool
 }
 
 // NewBroadcaster creates a Broadcaster ready to start. Call Start to begin
@@ -242,6 +250,7 @@ func (b *Broadcaster) handleConnectivity(ctx context.Context, event events.Event
 	if payload.Status == events.StatusDisconnected {
 		b.groups.Clear(groupNavigation, payload.VIN)
 		b.gear.Delete(payload.VIN)
+		b.serviceMode.Delete(payload.VIN)
 	}
 }
 

@@ -69,6 +69,12 @@ const (
 	FieldDoorState            FieldName = "doorState"
 	FieldMediaPlaybackStatus  FieldName = "mediaPlaybackStatus"
 	FieldMediaVolume          FieldName = "mediaVolume"
+	// FieldServiceMode is Tesla proto 159 (ServiceMode, bool). MYR-259: an
+	// INTERNAL-only signal — decoded and fed into status derivation
+	// (in_service) by internal/ws, but never emitted as its own wire field
+	// (stripped before broadcast in ensureGearGroupAtomic). See
+	// vehicle-state-schema.md §2.4 and data-classification.md.
+	FieldServiceMode FieldName = "serviceMode"
 )
 
 // fieldMap maps Tesla's proto Field enum values to our internal field names.
@@ -138,6 +144,10 @@ var fieldMap = map[tpb.Field]FieldName{
 	tpb.Field_DoorState:                    FieldDoorState,
 	tpb.Field_MediaPlaybackStatus:          FieldMediaPlaybackStatus,
 	tpb.Field_MediaAudioVolume:             FieldMediaVolume,
+	// MYR-259: ServiceMode (proto 159, bool). Decoded so the broadcaster can
+	// derive status=in_service; the raw signal is stripped before it reaches
+	// the wire (internal/ws/nav_broadcast.go), so no uncontracted field leaks.
+	tpb.Field_ServiceMode: FieldServiceMode,
 	// Field_EstimatedHoursToChargeTermination (190) is intentionally NOT in fieldMap
 	// — it remains observation-only via the MYR-25 debug log in decoder.go pending
 	// the Trip Planner Supercharger capture that MYR-28's §7.1 flip condition
