@@ -63,9 +63,15 @@ import (
 // AuditAction is the enum-like string written to the AuditLog.action column.
 // The full enum is defined by docs/contracts/data-lifecycle.md §4.2; the
 // constants below cover the actions emitted by the Go telemetry server.
-// User-initiated actions (account_deleted, vehicle_deleted, drive_deleted,
-// invite_revoked) are emitted by the Next.js app inside its Prisma
-// $transaction and are intentionally NOT exposed here.
+//
+// Most user-initiated actions (account_deleted, drive_deleted, invite_revoked)
+// are emitted by the Next.js app inside its Prisma $transaction and are
+// intentionally NOT exposed here. The ONE sanctioned exception is
+// vehicle_deleted (MYR-258): the Go server owns the per-vehicle owner-teardown
+// endpoint (DELETE /api/tesla/vehicles/{vehicleId}), so store.OwnerTeardown
+// writes that user-initiated row inside its own delete transaction — the exact
+// reverse of MYR-257's owner-provisioning carve-out. See
+// docs/contracts/data-lifecycle.md §1.4 / §4.2 and CG-DL-3.
 type AuditAction string
 
 const (
@@ -75,6 +81,13 @@ const (
 	// downstream Go consumers (e.g., metric labels) can use the same
 	// constant set.
 	AuditActionAccountDeleted AuditAction = "account_deleted"
+
+	// AuditActionVehicleDeleted records a user-initiated per-vehicle
+	// teardown (MYR-258, data-lifecycle.md §4.2). UNLIKE account_deleted,
+	// this one IS emitted by the Go telemetry server: store.OwnerTeardown
+	// writes it inside the same transaction as the owner-scoped Vehicle
+	// delete (CG-DL-3). targetType='vehicle', initiator='user'.
+	AuditActionVehicleDeleted AuditAction = "vehicle_deleted"
 
 	// AuditActionMaskApplied records a 1%-sampled event in which a
 	// role-based field mask removed at least one field from a REST
@@ -88,6 +101,16 @@ const (
 	// AuditActionDrivesPruned records a batch of drives deleted by the
 	// NFR-3.27 retention pruning job.
 	AuditActionDrivesPruned AuditAction = "drives_pruned"
+)
+
+// AuditLog targetType / initiator enum values used by Go-emitted rows
+// (data-lifecycle.md §4.2). Kept as typed constants so callers never
+// hand-write the literal at the INSERT site.
+const (
+	// auditTargetTypeVehicle marks a Vehicle record as the affected entity.
+	auditTargetTypeVehicle = "vehicle"
+	// auditInitiatorUser marks an action the end user triggered via UI/API.
+	auditInitiatorUser = "user"
 )
 
 // AuditEntry mirrors the AuditLog table one-to-one. Every field maps to a

@@ -298,6 +298,8 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 
 	setupTeslaLinkEndpoints(deps.cfg, deps.srv, deps.authenticator, deps.pool, deps.encryptor, deps.logger)
 
+	setupVehicleTeardownEndpoint(deps)
+
 	setupVehicleCommandEndpoint(deps, snapshotAdapter)
 
 	setupDebugFieldsEndpoint(deps)

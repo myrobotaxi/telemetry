@@ -385,6 +385,28 @@ func (a *teslaTokenUpdaterAdapter) UpdateTeslaToken(ctx context.Context, userID,
 	return a.repo.UpdateTeslaToken(ctx, userID, accessToken, refreshToken, expiresAt)
 }
 
+// ownerTeardownAdapter adapts store.OwnerTeardown to the
+// telemetry.VehicleTeardownWriter interface, mapping the store-layer
+// TeardownResult onto the telemetry-layer VehicleTeardownResult at the
+// package boundary (MYR-258).
+type ownerTeardownAdapter struct {
+	teardown *store.OwnerTeardown
+}
+
+func (a *ownerTeardownAdapter) RemoveVehicle(ctx context.Context, userID, vehicleID string) (telemetry.VehicleTeardownResult, error) {
+	res, err := a.teardown.RemoveVehicle(ctx, userID, vehicleID)
+	if err != nil {
+		return telemetry.VehicleTeardownResult{}, err
+	}
+	return telemetry.VehicleTeardownResult{
+		Removed:            res.Removed,
+		AlreadyGone:        res.AlreadyGone,
+		WasLastVehicle:     res.WasLastVehicle,
+		TeslaTokensCleared: res.TeslaTokensCleared,
+		DriveCount:         res.DriveCount,
+	}, nil
+}
+
 // proxyTimeout matches the default Fleet API timeout for consistency.
 const proxyTimeout = 30 * time.Second
 
