@@ -88,7 +88,7 @@ func cleanTeardownTables(t *testing.T) {
 	// mask-audit integration test installs the prevent-mutation triggers, so a
 	// DELETE would raise SQLSTATE P0001). Every audit assertion below filters
 	// by a per-test-unique userId/targetId, so residual rows never collide.
-	for _, tbl := range []string{`go_ride_requests`, `"TripStop"`, `"Drive"`, `"Vehicle"`, `"Account"`, `"Settings"`, `"User"`} {
+	for _, tbl := range []string{`go_ride_requests`, `go_removed_vehicles`, `"TripStop"`, `"Drive"`, `"Vehicle"`, `"Account"`, `"Settings"`, `"User"`} {
 		if _, err := testPool.Exec(ctx, "DELETE FROM "+tbl); err != nil {
 			t.Fatalf("clean %s: %v", tbl, err)
 		}
@@ -106,6 +106,26 @@ func seedTeardownVehicle(t *testing.T, id, userID, vin string) {
 		id, userID, vin); err != nil {
 		t.Fatalf("seed vehicle %s: %v", id, err)
 	}
+}
+
+func seedTeardownVehicleWithTesla(t *testing.T, id, userID, vin, teslaVehicleID string) {
+	t.Helper()
+	if _, err := testPool.Exec(context.Background(),
+		`INSERT INTO "Vehicle" ("id","userId","vin","name","status","teslaVehicleId") VALUES ($1,$2,$3,'Test','parked',$4)`,
+		id, userID, vin, teslaVehicleID); err != nil {
+		t.Fatalf("seed vehicle %s: %v", id, err)
+	}
+}
+
+func tombstoneExists(t *testing.T, userID, teslaVehicleID string) bool {
+	t.Helper()
+	var ok bool
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT EXISTS(SELECT 1 FROM go_removed_vehicles WHERE user_id=$1 AND tesla_vehicle_id=$2)`,
+		userID, teslaVehicleID).Scan(&ok); err != nil {
+		t.Fatalf("tombstone exists check: %v", err)
+	}
+	return ok
 }
 
 func seedTeardownDrive(t *testing.T, id, vehicleID string) {
@@ -396,7 +416,7 @@ func assertVehicleDeletedAudit(t *testing.T, userID, vehicleID string, wantDrive
 	t.Helper()
 	var (
 		action, targetType, targetID, initiator string
-		metadata                                 []byte
+		metadata                                []byte
 	)
 	err := testPool.QueryRow(context.Background(),
 		`SELECT "action","targetType","targetId","initiator","metadata"
@@ -418,4 +438,117 @@ func assertVehicleDeletedAudit(t *testing.T, userID, vehicleID string, wantDrive
 	if meta.DriveCount != wantDriveCount || meta.WasLastVehicle != wantLast {
 		t.Errorf("audit metadata = %+v, want driveCount=%d wasLastVehicle=%v", meta, wantDriveCount, wantLast)
 	}
+}
+
+// TestOwnerTeardown_WritesTombstone verifies the teardown writes a
+// removed-vehicle tombstone in the SAME transaction as the delete (MYR-261),
+// records it on the vehicle_deleted audit metadata, and skips the tombstone for
+// a car with no Tesla vehicle id.
+func TestOwnerTeardown_WritesTombstone(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable")
+	}
+	ensureTeardownSchema(t)
+	cleanTeardownTables(t)
+
+	const userID, vehicleID, vin, tvid = "user_tomb", "veh_tomb", "5YJ3E1EA1PF000210", "tesla-veh-210"
+	seedOwnerUser(t, userID, "Owner", userID+"@example.com")
+	seedTeardownVehicleWithTesla(t, vehicleID, userID, vin, tvid)
+
+	res, err := newTestTeardown().RemoveVehicle(context.Background(), userID, vehicleID)
+	if err != nil {
+		t.Fatalf("RemoveVehicle: %v", err)
+	}
+	if !res.Removed || !res.Tombstoned {
+		t.Errorf("result = %+v, want Removed && Tombstoned", res)
+	}
+	if !tombstoneExists(t, userID, tvid) {
+		t.Errorf("no tombstone written for (%s, %s)", userID, tvid)
+	}
+	// Tombstone create recorded on the vehicle_deleted audit metadata.
+	var metadata []byte
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT "metadata" FROM "AuditLog" WHERE "userId"=$1 AND "targetId"=$2`, userID, vehicleID).
+		Scan(&metadata); err != nil {
+		t.Fatalf("read audit metadata: %v", err)
+	}
+	if !containsTombstonedTrue(metadata) {
+		t.Errorf("audit metadata = %s, want tombstoned:true", metadata)
+	}
+}
+
+// TestOwnerTeardown_NoTeslaId_NoTombstone confirms a car with no Tesla vehicle
+// id is removed but NOT tombstoned (nothing a Fleet-API sync could resurrect).
+func TestOwnerTeardown_NoTeslaId_NoTombstone(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable")
+	}
+	ensureTeardownSchema(t)
+	cleanTeardownTables(t)
+
+	const userID, vehicleID, vin = "user_notesla", "veh_notesla", "5YJ3E1EA1PF000211"
+	seedOwnerUser(t, userID, "Owner", userID+"@example.com")
+	seedTeardownVehicle(t, vehicleID, userID, vin) // no teslaVehicleId
+
+	res, err := newTestTeardown().RemoveVehicle(context.Background(), userID, vehicleID)
+	if err != nil {
+		t.Fatalf("RemoveVehicle: %v", err)
+	}
+	if !res.Removed || res.Tombstoned {
+		t.Errorf("result = %+v, want Removed && !Tombstoned", res)
+	}
+	var n int
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT count(*) FROM go_removed_vehicles WHERE user_id=$1`, userID).Scan(&n); err != nil {
+		t.Fatalf("count tombstones: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("tombstone rows = %d, want 0 (no Tesla id → nothing to resurrect)", n)
+	}
+}
+
+// TestOwnerTeardown_RemoveThenSync_StaysGone is the exact reappearance repro:
+// remove a car, then run the Tesla-link sync (UpsertOwnedVehicle) for the same
+// still-Tesla-owned id — it must stay gone.
+func TestOwnerTeardown_RemoveThenSync_StaysGone(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable")
+	}
+	ensureTeardownSchema(t)
+	cleanTeardownTables(t)
+
+	const userID, vehicleID, vin, tvid = "user_repro", "veh_repro", "5YJ3E1EA1PF000212", "tesla-veh-212"
+	seedOwnerUser(t, userID, "Owner", userID+"@example.com")
+	// A second vehicle so the removed one is NOT the last (tokens stay intact —
+	// the exact condition under which the resurrection bug fired).
+	seedTeardownVehicleWithTesla(t, vehicleID, userID, vin, tvid)
+	seedTeardownVehicleWithTesla(t, "veh_keep", userID, "5YJ3E1EA1PF000213", "tesla-veh-213")
+
+	if _, err := newTestTeardown().RemoveVehicle(context.Background(), userID, vehicleID); err != nil {
+		t.Fatalf("RemoveVehicle: %v", err)
+	}
+
+	// Simulate the post-link Fleet-API sync re-offering the still-owned id.
+	out, err := newTestProvisioner(t).UpsertOwnedVehicle(context.Background(), store.OwnedVehicleInput{
+		UserID: userID, TeslaVehicleID: tvid, VIN: vin, Name: "Resurrected?",
+	})
+	if err != nil {
+		t.Fatalf("UpsertOwnedVehicle (sync): %v", err)
+	}
+	if out != store.VehicleSkippedTombstoned {
+		t.Errorf("sync outcome = %q, want skipped_tombstoned (car must stay gone)", out)
+	}
+	if n := countRows(t, `"Vehicle"`, `"teslaVehicleId"`, tvid); n != 0 {
+		t.Errorf("removed vehicle rows = %d, want 0 (must not reappear)", n)
+	}
+}
+
+func containsTombstonedTrue(metadata []byte) bool {
+	var m struct {
+		Tombstoned bool `json:"tombstoned"`
+	}
+	if err := json.Unmarshal(metadata, &m); err != nil {
+		return false
+	}
+	return m.Tombstoned
 }

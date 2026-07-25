@@ -63,6 +63,11 @@ type TeardownResult struct {
 	// DriveCount is the number of Drive rows that cascaded away with the
 	// vehicle (P0 count; recorded in the audit metadata).
 	DriveCount int
+	// Tombstoned is true when a removed-vehicle tombstone was written for this
+	// car (MYR-261) — i.e. the vehicle had a Tesla vehicle id, so a future
+	// re-link sync must not resurrect it. False for a car with no Tesla vehicle
+	// id (nothing a Fleet-API sync could re-add).
+	Tombstoned bool
 }
 
 // queryTeardownLockOwnerVehicles reads AND row-locks the owner's entire
@@ -80,6 +85,14 @@ SELECT "id" FROM "Vehicle" WHERE "userId" = $1 FOR UPDATE`
 // vehicle. Read before the delete so the count lands in the audit metadata.
 const queryTeardownDriveCount = `
 SELECT count(*) FROM "Drive" WHERE "vehicleId" = $1`
+
+// queryTeardownVehicleIdentity reads the removed vehicle's Tesla identity so a
+// removed-vehicle tombstone can be written (MYR-261). Both columns are nullable
+// in the Prisma schema (a car may have no linked Tesla vehicle id yet), so they
+// scan into pointers. Read while the row is still FOR UPDATE-locked, before the
+// delete.
+const queryTeardownVehicleIdentity = `
+SELECT "teslaVehicleId", "vin" FROM "Vehicle" WHERE "id" = $1`
 
 // queryTeardownDeleteRideRequests deletes the Go-owned ride-request rows for
 // the vehicle. These hold P1 encrypted pickup/dropoff GPS + passenger PII and
@@ -120,6 +133,11 @@ SET "teslaLinked" = FALSE, "virtualKeyPaired" = FALSE, "keyPairingReminderCount"
 type teardownAuditMetadata struct {
 	DriveCount     int  `json:"driveCount"`
 	WasLastVehicle bool `json:"wasLastVehicle"`
+	// Tombstoned records whether a removed-vehicle tombstone was written in this
+	// same transaction (MYR-261). It documents the tombstone create on the
+	// existing user-initiated vehicle_deleted row rather than emitting a second
+	// audit row for the same targetId.
+	Tombstoned bool `json:"tombstoned"`
 }
 
 // RemoveVehicle removes a single vehicle owned by userID, transactionally,
@@ -179,32 +197,34 @@ func (t *OwnerTeardown) RemoveVehicle(ctx context.Context, userID, vehicleID str
 		return TeardownResult{}, fmt.Errorf("store.RemoveVehicle(user=%s): drive count: %w", userID, err)
 	}
 
+	// (2a) Read the car's Tesla identity (still FOR UPDATE-locked) so we can
+	// tombstone the removed VIN (MYR-261). A car with no Tesla vehicle id has
+	// nothing a Fleet-API sync could resurrect, so tombstoning is skipped for it.
+	teslaVehicleID, vin, err := readVehicleTeslaIdentity(ctx, tx, userID, vehicleID)
+	if err != nil {
+		return TeardownResult{}, err
+	}
+	tombstone := teslaVehicleID != ""
+
 	// (3) Audit FIRST (CG-DL-3: the audit row must be written before the
 	// destructive delete so it captures the action even if the delete fails).
-	if err := t.insertAudit(ctx, tx, userID, vehicleID, driveCount, wasLast); err != nil {
+	// The tombstone create is recorded on this same vehicle_deleted row.
+	if err := t.insertAudit(ctx, tx, userID, vehicleID, driveCount, wasLast, tombstone); err != nil {
 		return TeardownResult{}, err
 	}
 
-	// (4a) Delete the Go-owned ride-request rows for this vehicle (P1 GPS +
-	// passenger PII) — no FK to "Vehicle" so the cascade never reaches them;
-	// a complete removal must delete them explicitly.
-	if _, err := tx.Exec(ctx, queryTeardownDeleteRideRequests, vehicleID); err != nil {
-		return TeardownResult{}, fmt.Errorf("store.RemoveVehicle(user=%s): delete ride requests: %w", userID, err)
-	}
-
-	// (4b) Delete the vehicle (owner-scoped; cascades + fires the NOTIFY).
-	if _, err := tx.Exec(ctx, queryTeardownDeleteVehicle, vehicleID, userID); err != nil {
-		return TeardownResult{}, fmt.Errorf("store.RemoveVehicle(user=%s): delete vehicle: %w", userID, err)
-	}
-
-	// (5) Last-vehicle-only: clear Tesla tokens + reset link/pairing flags.
-	if wasLast {
-		if _, err := tx.Exec(ctx, queryTeardownDeleteAccount, userID); err != nil {
-			return TeardownResult{}, fmt.Errorf("store.RemoveVehicle(user=%s): delete account: %w", userID, err)
-		}
-		if _, err := tx.Exec(ctx, queryTeardownResetSettings, newProvisionID(), userID); err != nil {
-			return TeardownResult{}, fmt.Errorf("store.RemoveVehicle(user=%s): reset settings: %w", userID, err)
-		}
+	// (4-5) Apply the destructive mutations (ride-requests + vehicle delete,
+	// removed-vehicle tombstone, last-vehicle Account/Settings cleanup) in this
+	// same tx.
+	if err := applyTeardownDeletes(ctx, tx, teardownDeletion{
+		userID:         userID,
+		vehicleID:      vehicleID,
+		teslaVehicleID: teslaVehicleID,
+		vin:            vin,
+		wasLast:        wasLast,
+		tombstone:      tombstone,
+	}); err != nil {
+		return TeardownResult{}, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -218,6 +238,7 @@ func (t *OwnerTeardown) RemoveVehicle(ctx context.Context, userID, vehicleID str
 		slog.String("vehicle_id", vehicleID),
 		slog.Int("drive_count", driveCount),
 		slog.Bool("was_last_vehicle", wasLast),
+		slog.Bool("tombstoned", tombstone),
 	)
 
 	return TeardownResult{
@@ -225,7 +246,77 @@ func (t *OwnerTeardown) RemoveVehicle(ctx context.Context, userID, vehicleID str
 		WasLastVehicle:     wasLast,
 		TeslaTokensCleared: wasLast,
 		DriveCount:         driveCount,
+		Tombstoned:         tombstone,
 	}, nil
+}
+
+// teardownDeletion carries the parameters of the destructive teardown phase.
+type teardownDeletion struct {
+	userID         string
+	vehicleID      string
+	teslaVehicleID string
+	vin            string
+	wasLast        bool
+	tombstone      bool
+}
+
+// applyTeardownDeletes runs the destructive tail of RemoveVehicle inside the
+// open transaction: (4a) delete the Go-owned ride-request rows (P1 GPS +
+// passenger PII, no FK cascade reaches them), (4b) delete the vehicle
+// (owner-scoped; cascades + fires the NOTIFY), (4c) write the removed-vehicle
+// tombstone (MYR-261) so a later re-link sync cannot resurrect the still-Tesla-
+// owned VIN, and (5) on the owner's last vehicle clear the Tesla tokens + reset
+// the link/pairing flags.
+func applyTeardownDeletes(ctx context.Context, tx pgx.Tx, d teardownDeletion) error {
+	if _, err := tx.Exec(ctx, queryTeardownDeleteRideRequests, d.vehicleID); err != nil {
+		return fmt.Errorf("store.RemoveVehicle(user=%s): delete ride requests: %w", d.userID, err)
+	}
+	if _, err := tx.Exec(ctx, queryTeardownDeleteVehicle, d.vehicleID, d.userID); err != nil {
+		return fmt.Errorf("store.RemoveVehicle(user=%s): delete vehicle: %w", d.userID, err)
+	}
+	if d.tombstone {
+		if err := insertRemovedVehicleTombstone(ctx, tx, d.userID, d.teslaVehicleID, d.vin); err != nil {
+			return err
+		}
+	}
+	if d.wasLast {
+		if err := clearLastVehicleState(ctx, tx, d.userID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// clearLastVehicleState deletes the owner's Tesla Account tokens and resets the
+// Settings link/pairing flags — the last-vehicle-only tail of a teardown. It
+// removes OUR access; it does NOT revoke the grant at Tesla (data-lifecycle
+// §1.2). Runs inside the teardown transaction.
+func clearLastVehicleState(ctx context.Context, tx pgx.Tx, userID string) error {
+	if _, err := tx.Exec(ctx, queryTeardownDeleteAccount, userID); err != nil {
+		return fmt.Errorf("store.RemoveVehicle(user=%s): delete account: %w", userID, err)
+	}
+	if _, err := tx.Exec(ctx, queryTeardownResetSettings, newProvisionID(), userID); err != nil {
+		return fmt.Errorf("store.RemoveVehicle(user=%s): reset settings: %w", userID, err)
+	}
+	return nil
+}
+
+// readVehicleTeslaIdentity reads the removed vehicle's Tesla vehicle id and VIN
+// within the teardown transaction (the row is already FOR UPDATE-locked). Both
+// Prisma columns are nullable, so a car with no linked Tesla vehicle id returns
+// an empty teslaVehicleID and the caller skips the tombstone.
+func readVehicleTeslaIdentity(ctx context.Context, tx pgx.Tx, userID, vehicleID string) (teslaVehicleID, vin string, err error) {
+	var tvid, v *string
+	if err := tx.QueryRow(ctx, queryTeardownVehicleIdentity, vehicleID).Scan(&tvid, &v); err != nil {
+		return "", "", fmt.Errorf("store.RemoveVehicle(user=%s): read vehicle identity: %w", userID, err)
+	}
+	if tvid != nil {
+		teslaVehicleID = *tvid
+	}
+	if v != nil {
+		vin = *v
+	}
+	return teslaVehicleID, vin, nil
 }
 
 // lockOwnerVehicleSet FOR UPDATE-locks and reads the owner's vehicle ids,
@@ -258,22 +349,22 @@ func lockOwnerVehicleSet(ctx context.Context, tx pgx.Tx, userID, targetID string
 // the teardown transaction, reusing the same-package queryAuditInsert column
 // list (single source of truth shared with AuditRepo — keeps CG-DL-8 column
 // parity automatic). Metadata is P0-only per CG-DL-5.
-func (t *OwnerTeardown) insertAudit(ctx context.Context, tx pgx.Tx, userID, vehicleID string, driveCount int, wasLast bool) error {
-	meta, err := json.Marshal(teardownAuditMetadata{DriveCount: driveCount, WasLastVehicle: wasLast})
+func (t *OwnerTeardown) insertAudit(ctx context.Context, tx pgx.Tx, userID, vehicleID string, driveCount int, wasLast, tombstone bool) error {
+	meta, err := json.Marshal(teardownAuditMetadata{DriveCount: driveCount, WasLastVehicle: wasLast, Tombstoned: tombstone})
 	if err != nil {
 		return fmt.Errorf("store.RemoveVehicle(user=%s): marshal audit metadata: %w", userID, err)
 	}
 	now := time.Now().UTC()
 	if _, err := tx.Exec(ctx, queryAuditInsert,
-		newProvisionID(),                    // id (cuid)
-		userID,                              // userId (owner of the affected data)
-		now,                                 // timestamp
-		string(AuditActionVehicleDeleted),   // action
-		auditTargetTypeVehicle,              // targetType
-		vehicleID,                           // targetId
-		auditInitiatorUser,                  // initiator
-		meta,                                // metadata (P0 counts only)
-		now,                                 // createdAt
+		newProvisionID(),                  // id (cuid)
+		userID,                            // userId (owner of the affected data)
+		now,                               // timestamp
+		string(AuditActionVehicleDeleted), // action
+		auditTargetTypeVehicle,            // targetType
+		vehicleID,                         // targetId
+		auditInitiatorUser,                // initiator
+		meta,                              // metadata (P0 counts only)
+		now,                               // createdAt
 	); err != nil {
 		return fmt.Errorf("store.RemoveVehicle(user=%s): insert audit: %w", userID, err)
 	}

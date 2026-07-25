@@ -106,6 +106,18 @@ func (h *ownerStreamHook) AfterLink(ctx context.Context, userID, accessToken str
 				slog.String("user_id", userID), slog.String("error", err.Error()))
 			continue
 		}
+		if outcome == store.VehicleSkippedTombstoned {
+			// The owner deliberately removed this VIN (MYR-261 tombstone). A
+			// passive re-link must NOT resurrect it — skip and do NOT push
+			// config for a car the owner offboarded. Cleared only by a
+			// deliberate re-add.
+			h.logger.Info("owner_vehicle_skipped",
+				slog.String("event", "owner_vehicle_skipped"),
+				slog.String("user_id", userID),
+				slog.String("reason", "removed_tombstone"),
+				slog.String("vin", redactVIN(vin)))
+			continue
+		}
 		if outcome == store.VehicleSkippedCrossUser {
 			// The teslaVehicleId already belongs to another user — never
 			// reassigned. Audit and do NOT push config for a car we don't own.

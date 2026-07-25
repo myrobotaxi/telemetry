@@ -61,6 +61,14 @@ CREATE TABLE IF NOT EXISTS go_identity_apple (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_login_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- MYR-261 removed-vehicle tombstone (migration 0006). Composite natural key.
+CREATE TABLE IF NOT EXISTS go_removed_vehicles (
+    user_id           TEXT        NOT NULL,
+    tesla_vehicle_id  TEXT        NOT NULL,
+    vin               TEXT,
+    removed_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (user_id, tesla_vehicle_id)
+);
 `
 
 func newTestProvisioner(t *testing.T) *store.OwnerProvisioner {
@@ -79,7 +87,7 @@ func ensureOwnerSchema(t *testing.T) {
 func cleanOwnerTables(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
-	for _, tbl := range []string{`"Account"`, `"Settings"`, `go_identity_apple`, `"User"`} {
+	for _, tbl := range []string{`"Account"`, `"Settings"`, `go_identity_apple`, `go_removed_vehicles`, `"User"`} {
 		if _, err := testPool.Exec(ctx, "DELETE FROM "+tbl); err != nil {
 			t.Fatalf("clean %s: %v", tbl, err)
 		}
