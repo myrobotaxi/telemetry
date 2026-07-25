@@ -41,8 +41,8 @@ type CommandExecutor interface {
 
 // OutcomeStore is the persistence seam: the exactly-once dispatch claim plus
 // the resolved-outcome write, for BOTH nav legs. Leg 1 (pickup, on accept)
-// uses ClaimDispatch/RecordDispatchOutcome; leg 2 (dropoff, on board — MYR-265)
-// uses the Dropoff* pair, which write independent columns so neither leg
+// uses ClaimDispatch/RecordDispatchOutcome; leg 2 (dropoff, on rider start —
+// MYR-270) uses the Dropoff* pair, which write independent columns so neither leg
 // clobbers the other's history. Satisfied by the ride-request repo via a cmd/
 // adapter (status crosses as the dispatch.Outcome string).
 type OutcomeStore interface {
@@ -154,12 +154,13 @@ func (d *Dispatcher) Subscribe(bus events.Bus) (events.Subscription, error) {
 	if err != nil {
 		return events.Subscription{}, fmt.Errorf("dispatch.Subscribe(accepted): %w", err)
 	}
-	// Leg 2 (MYR-265): the same dispatcher also pushes the DROPOFF when the
-	// rider boards. Both handlers feed one bounded worker pool and are drained
-	// by Wait; the caller relies on bus.Close for unsubscribe on shutdown, so
-	// only the leg-1 subscription is returned (both are torn down together).
-	if _, err := bus.Subscribe(events.TopicRideBoarded, d.handleBoarded); err != nil {
-		return events.Subscription{}, fmt.Errorf("dispatch.Subscribe(boarded): %w", err)
+	// Leg 2 (MYR-270, was ride.boarded in MYR-265): the same dispatcher also
+	// pushes the DROPOFF when the RIDER starts the ride. Both handlers feed one
+	// bounded worker pool and are drained by Wait; the caller relies on bus.Close
+	// for unsubscribe on shutdown, so only the leg-1 subscription is returned
+	// (both are torn down together).
+	if _, err := bus.Subscribe(events.TopicRideStarted, d.handleStarted); err != nil {
+		return events.Subscription{}, fmt.Errorf("dispatch.Subscribe(started): %w", err)
 	}
 	return sub, nil
 }
@@ -184,14 +185,14 @@ func (d *Dispatcher) handle(evt events.Event) {
 	d.dispatchAsync(func(ctx context.Context) { d.process(ctx, ev) })
 }
 
-// handleBoarded is the events.Handler for ride.boarded (leg 2, MYR-265): it
-// type-asserts the RideBoardedEvent and hands the dropoff push to the same
+// handleStarted is the events.Handler for ride.started (leg 2, MYR-270): it
+// type-asserts the RideStartedEvent and hands the dropoff push to the same
 // bounded worker pool as leg 1, returning immediately so the bus loop is never
 // blocked.
-func (d *Dispatcher) handleBoarded(evt events.Event) {
-	ev, ok := evt.Payload.(events.RideBoardedEvent)
+func (d *Dispatcher) handleStarted(evt events.Event) {
+	ev, ok := evt.Payload.(events.RideStartedEvent)
 	if !ok {
-		d.logger.Error("dispatch: unexpected payload type on ride.boarded",
+		d.logger.Error("dispatch: unexpected payload type on ride.started",
 			slog.String("event_id", evt.ID),
 		)
 		return
@@ -218,7 +219,7 @@ func (d *Dispatcher) dispatchAsync(fn func(context.Context)) {
 }
 
 // dispatchLeg is one nav push. The two legs — pickup (on accept) and dropoff
-// (on board, MYR-265) — share the whole pipeline (claim → resolve → command →
+// (on rider start, MYR-270) — share the whole pipeline (claim → resolve → command →
 // record) and differ ONLY in: the exactly-once latch to claim, the coordinate
 // to push, the outcome column to write, and a label for the audit line. process
 // and processDropoff build a leg and hand it to runLeg.
@@ -246,10 +247,10 @@ func (d *Dispatcher) process(ctx context.Context, ev events.RideAcceptedEvent) {
 	})
 }
 
-// processDropoff runs the leg-2 (dropoff) dispatch for one boarded ride
-// (MYR-265): identical pipeline to process, claiming/recording the independent
+// processDropoff runs the leg-2 (dropoff) dispatch for one started ride
+// (MYR-270): identical pipeline to process, claiming/recording the independent
 // dropoff_* columns and pushing the DROPOFF coordinate. Safe to call in tests.
-func (d *Dispatcher) processDropoff(ctx context.Context, ev events.RideBoardedEvent) {
+func (d *Dispatcher) processDropoff(ctx context.Context, ev events.RideStartedEvent) {
 	d.runLeg(ctx, dispatchLeg{
 		name:      "dropoff",
 		rideID:    ev.RideRequestID,

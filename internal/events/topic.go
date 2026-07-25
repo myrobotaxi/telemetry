@@ -62,13 +62,14 @@ const (
 	// zero subscribers.
 	TopicRideAccepted Topic = "ride.accepted"
 
-	// TopicRideBoarded is the leg-2 dispatch seam (MYR-265): published once
-	// when a rider boards (the guarded accepted→enroute transition), carrying
-	// the DROPOFF place the nav-dispatch pipeline pushes as the car's new
-	// destination. Internal-only — never broadcast to WS clients (the WS board
-	// signal travels on TopicRideStatusChanged as an `enroute` summary frame).
-	// Exactly-once per board: only the winning board write publishes it.
-	TopicRideBoarded Topic = "ride.boarded"
+	// TopicRideStarted is the leg-2 dispatch seam (MYR-270, was ride.boarded in
+	// MYR-265): published once when the RIDER starts the ride (the guarded
+	// arrived→enroute transition), carrying the DROPOFF place the nav-dispatch
+	// pipeline pushes as the car's new destination. Internal-only — never
+	// broadcast to WS clients (the WS start signal travels on
+	// TopicRideStatusChanged as an `enroute` summary frame). Exactly-once per
+	// start: only the winning arrived→enroute write publishes it.
+	TopicRideStarted Topic = "ride.started"
 
 	// TopicVehicleDeleted is published when a Vehicle row is deleted from
 	// the Prisma-owned "Vehicle" table (sourced from a Postgres

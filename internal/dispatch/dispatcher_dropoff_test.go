@@ -8,11 +8,11 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
 )
 
-// testBoardedEvent is the leg-2 (dropoff) analogue of testEvent: a ride.boarded
+// testStartedEvent is the leg-2 (dropoff) analogue of testEvent: a ride.started
 // carrying a DROPOFF place distinct from the pickup so tests can prove leg 2
 // pushes the dropoff, not the pickup.
-func testBoardedEvent() events.RideBoardedEvent {
-	return events.RideBoardedEvent{
+func testStartedEvent() events.RideStartedEvent {
+	return events.RideStartedEvent{
 		RideRequestID: "cride123",
 		VehicleID:     "cveh456",
 		OwnerID:       "cowner789",
@@ -20,7 +20,7 @@ func testBoardedEvent() events.RideBoardedEvent {
 	}
 }
 
-// TestProcessDropoff_Success proves a board pushes the DROPOFF coordinate
+// TestProcessDropoff_Success proves a rider start pushes the DROPOFF coordinate
 // exactly once and records the outcome on the independent leg-2 columns —
 // leaving leg-1 (pickup) tracking untouched.
 func TestProcessDropoff_Success(t *testing.T) {
@@ -28,7 +28,7 @@ func TestProcessDropoff_Success(t *testing.T) {
 	st := &fakeStore{dropClaimed: true}
 	d := newTestDispatcher(exec, st, Config{Enabled: true, MaxRetries: 2})
 
-	d.processDropoff(context.Background(), testBoardedEvent())
+	d.processDropoff(context.Background(), testStartedEvent())
 
 	if len(exec.calls) != 1 {
 		t.Fatalf("want 1 executor call, got %d", len(exec.calls))
@@ -51,21 +51,21 @@ func TestProcessDropoff_Success(t *testing.T) {
 }
 
 // TestProcessDropoff_ExactlyOnce_DuplicateDelivery proves the dropoff nav push
-// fires exactly once across duplicate ride.boarded deliveries — the leg-2 claim
+// fires exactly once across duplicate ride.started deliveries — the leg-2 claim
 // latch wins only the first time.
 func TestProcessDropoff_ExactlyOnce_DuplicateDelivery(t *testing.T) {
 	exec := &fakeExecutor{errs: []error{nil}}
 	st := &fakeStore{dropClaimed: true}
 	d := newTestDispatcher(exec, st, Config{Enabled: true, MaxRetries: 2})
 
-	d.processDropoff(context.Background(), testBoardedEvent())
-	d.processDropoff(context.Background(), testBoardedEvent())
+	d.processDropoff(context.Background(), testStartedEvent())
+	d.processDropoff(context.Background(), testStartedEvent())
 
 	if len(exec.calls) != 1 {
-		t.Errorf("executor calls = %d across duplicate boards, want exactly 1", len(exec.calls))
+		t.Errorf("executor calls = %d across duplicate starts, want exactly 1", len(exec.calls))
 	}
 	if len(st.dropRecorded) != 1 {
-		t.Errorf("dropRecorded = %d across duplicate boards, want 1", len(st.dropRecorded))
+		t.Errorf("dropRecorded = %d across duplicate starts, want 1", len(st.dropRecorded))
 	}
 }
 
@@ -76,7 +76,7 @@ func TestProcessDropoff_Idempotent_AlreadyDispatched(t *testing.T) {
 	st := &fakeStore{dropClaimed: false} // claim loses
 	d := newTestDispatcher(exec, st, Config{Enabled: true, MaxRetries: 2})
 
-	d.processDropoff(context.Background(), testBoardedEvent())
+	d.processDropoff(context.Background(), testStartedEvent())
 
 	if len(exec.calls) != 0 || len(st.dropRecorded) != 0 {
 		t.Errorf("lost dropoff claim must not dispatch/record: calls=%d recorded=%+v", len(exec.calls), st.dropRecorded)
@@ -90,7 +90,7 @@ func TestProcessDropoff_KillSwitch(t *testing.T) {
 	st := &fakeStore{dropClaimed: true}
 	d := newTestDispatcher(exec, st, Config{Enabled: false, MaxRetries: 2})
 
-	d.processDropoff(context.Background(), testBoardedEvent())
+	d.processDropoff(context.Background(), testStartedEvent())
 
 	if len(exec.calls) != 0 {
 		t.Errorf("executor called with kill-switch off, want 0")
@@ -110,7 +110,7 @@ func TestProcessDropoff_OutOfRangeIsTerminal(t *testing.T) {
 	st := &fakeStore{dropClaimed: true}
 	d := newTestDispatcher(exec, st, Config{Enabled: true, MaxRetries: 2})
 
-	ev := testBoardedEvent()
+	ev := testStartedEvent()
 	ev.Dropoff = events.RidePlace{Latitude: 91.0, Longitude: 10.0}
 	d.processDropoff(context.Background(), ev)
 
@@ -123,14 +123,14 @@ func TestProcessDropoff_OutOfRangeIsTerminal(t *testing.T) {
 	}
 }
 
-// TestHandleBoarded_WrongPayloadType proves a non-ride.boarded payload is
+// TestHandleStarted_WrongPayloadType proves a non-ride.started payload is
 // ignored without claiming or panicking.
-func TestHandleBoarded_WrongPayloadType(t *testing.T) {
+func TestHandleStarted_WrongPayloadType(t *testing.T) {
 	exec := &fakeExecutor{errs: []error{nil}}
 	st := &fakeStore{dropClaimed: true}
 	d := newTestDispatcher(exec, st, Config{Enabled: true, MaxRetries: 2})
 
-	d.handleBoarded(events.Event{ID: "x", Payload: events.RideStatusChangedEvent{}})
+	d.handleStarted(events.Event{ID: "x", Payload: events.RideStatusChangedEvent{}})
 	d.Wait()
 
 	if st.dropClaimCnt != 0 {
