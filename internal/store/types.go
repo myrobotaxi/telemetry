@@ -57,7 +57,7 @@ type Vehicle struct {
 	NavRouteCoordinates  json.RawMessage // nullable JSONB
 	LastUpdated          time.Time
 
-	// MYR-269 owner-control read-backs, hydrated from the Go-owned
+	// MYR-269 / MYR-273 owner-control read-backs, hydrated from the Go-owned
 	// go_vehicle_control_state side table via a LEFT JOIN on the GetByID
 	// (snapshot) read path. All nullable — a nil pointer means the field was
 	// never read for this vehicle. Populated only by GetByID; GetByVIN and
@@ -67,6 +67,21 @@ type Vehicle struct {
 	TrunkOpen      *bool
 	IsClimateOn    *bool
 	ChargePortOpen *bool
+
+	// MYR-273 cabin-setting levels (temp setpoints, fan speed, seat heater/
+	// cooler levels, media volume). Same side table, same nil-means-never-read
+	// semantics.
+	DriverTempSetting    *int
+	PassengerTempSetting *int
+	FanSpeed             *int
+	SeatHeaterLeft       *int
+	SeatHeaterRight      *int
+	SeatHeaterRearLeft   *int
+	SeatHeaterRearCenter *int
+	SeatHeaterRearRight  *int
+	SeatCoolerLeft       *int
+	SeatCoolerRight      *int
+	MediaVolume          *float64
 }
 
 // VehicleUpdate holds the subset of vehicle fields that can change from

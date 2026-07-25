@@ -48,13 +48,27 @@ type VehicleSnapshotRow struct {
 	NavRouteCoordinates  json.RawMessage
 	LastUpdated          time.Time
 
-	// MYR-269 owner-control read-backs, hydrated from the go_vehicle_control_state
-	// side table on the snapshot read path. Nullable — nil means never read.
+	// MYR-269 / MYR-273 owner-control read-backs, hydrated from the
+	// go_vehicle_control_state side table on the snapshot read path. Nullable —
+	// nil means never read.
 	Locked             *bool
 	FrunkOpen          *bool
 	TrunkOpen          *bool
 	IsClimateOn        *bool
 	ChargePortDoorOpen *bool
+
+	// MYR-273 cabin-setting levels.
+	DriverTempSetting    *int
+	PassengerTempSetting *int
+	FanSpeed             *int
+	SeatHeaterLeft       *int
+	SeatHeaterRight      *int
+	SeatHeaterRearLeft   *int
+	SeatHeaterRearCenter *int
+	SeatHeaterRearRight  *int
+	SeatCoolerLeft       *int
+	SeatCoolerRight      *int
+	MediaVolume          *float64
 }
 
 // VehicleSnapshotReader returns the snapshot row for a Prisma cuid.
@@ -120,6 +134,23 @@ type vehicleSnapshotResponse struct {
 	TrunkOpen          *bool `json:"trunkOpen"`
 	IsClimateOn        *bool `json:"isClimateOn"`
 	ChargePortDoorOpen *bool `json:"chargePortDoorOpen"`
+
+	// MYR-273: cabin-setting levels, now persisted (go_vehicle_control_state) and
+	// returned on the DB-backed /snapshot for non-streaming cars. Wire names match
+	// the live WS vehicle_update fields (internal/ws/field_mapping.go) so the
+	// client's Vehicle model reconciles REST and WS. All nullable: null == never
+	// read (honest "—"). On the owner mask allow-list (internal/mask/tables.go).
+	DriverTempSetting    *int     `json:"driverTempSetting"`
+	PassengerTempSetting *int     `json:"passengerTempSetting"`
+	FanSpeed             *int     `json:"fanSpeed"`
+	SeatHeaterLeft       *int     `json:"seatHeaterLeft"`
+	SeatHeaterRight      *int     `json:"seatHeaterRight"`
+	SeatHeaterRearLeft   *int     `json:"seatHeaterRearLeft"`
+	SeatHeaterRearCenter *int     `json:"seatHeaterRearCenter"`
+	SeatHeaterRearRight  *int     `json:"seatHeaterRearRight"`
+	SeatCoolerLeft       *int     `json:"seatCoolerLeft"`
+	SeatCoolerRight      *int     `json:"seatCoolerRight"`
+	MediaVolume          *float64 `json:"mediaVolume"`
 }
 
 // toMaskMap returns the response as a wire-name-keyed map suitable for
@@ -172,6 +203,19 @@ func (r vehicleSnapshotResponse) toMaskMap() map[string]any {
 	m["trunkOpen"] = derefOrNil(r.TrunkOpen)
 	m["isClimateOn"] = derefOrNil(r.IsClimateOn)
 	m["chargePortDoorOpen"] = derefOrNil(r.ChargePortDoorOpen)
+	// MYR-273 cabin-setting levels — keyed by the live WS wire names so the owner
+	// mask allow-list (which already lists these from MYR-252) permits them.
+	m["driverTempSetting"] = derefOrNil(r.DriverTempSetting)
+	m["passengerTempSetting"] = derefOrNil(r.PassengerTempSetting)
+	m["fanSpeed"] = derefOrNil(r.FanSpeed)
+	m["seatHeaterLeft"] = derefOrNil(r.SeatHeaterLeft)
+	m["seatHeaterRight"] = derefOrNil(r.SeatHeaterRight)
+	m["seatHeaterRearLeft"] = derefOrNil(r.SeatHeaterRearLeft)
+	m["seatHeaterRearCenter"] = derefOrNil(r.SeatHeaterRearCenter)
+	m["seatHeaterRearRight"] = derefOrNil(r.SeatHeaterRearRight)
+	m["seatCoolerLeft"] = derefOrNil(r.SeatCoolerLeft)
+	m["seatCoolerRight"] = derefOrNil(r.SeatCoolerRight)
+	m["mediaVolume"] = derefOrNil(r.MediaVolume)
 	return m
 }
 
@@ -215,5 +259,16 @@ func buildSnapshotResponse(row VehicleSnapshotRow) vehicleSnapshotResponse {
 		TrunkOpen:            row.TrunkOpen,
 		IsClimateOn:          row.IsClimateOn,
 		ChargePortDoorOpen:   row.ChargePortDoorOpen,
+		DriverTempSetting:    row.DriverTempSetting,
+		PassengerTempSetting: row.PassengerTempSetting,
+		FanSpeed:             row.FanSpeed,
+		SeatHeaterLeft:       row.SeatHeaterLeft,
+		SeatHeaterRight:      row.SeatHeaterRight,
+		SeatHeaterRearLeft:   row.SeatHeaterRearLeft,
+		SeatHeaterRearCenter: row.SeatHeaterRearCenter,
+		SeatHeaterRearRight:  row.SeatHeaterRearRight,
+		SeatCoolerLeft:       row.SeatCoolerLeft,
+		SeatCoolerRight:      row.SeatCoolerRight,
+		MediaVolume:          row.MediaVolume,
 	}
 }

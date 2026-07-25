@@ -256,6 +256,17 @@ func (a *vehicleSnapshotAdapter) GetByID(ctx context.Context, vehicleID string) 
 		TrunkOpen:            v.TrunkOpen,
 		IsClimateOn:          v.IsClimateOn,
 		ChargePortDoorOpen:   v.ChargePortOpen,
+		DriverTempSetting:    v.DriverTempSetting,
+		PassengerTempSetting: v.PassengerTempSetting,
+		FanSpeed:             v.FanSpeed,
+		SeatHeaterLeft:       v.SeatHeaterLeft,
+		SeatHeaterRight:      v.SeatHeaterRight,
+		SeatHeaterRearLeft:   v.SeatHeaterRearLeft,
+		SeatHeaterRearCenter: v.SeatHeaterRearCenter,
+		SeatHeaterRearRight:  v.SeatHeaterRearRight,
+		SeatCoolerLeft:       v.SeatCoolerLeft,
+		SeatCoolerRight:      v.SeatCoolerRight,
+		MediaVolume:          v.MediaVolume,
 	}, nil
 }
 

@@ -153,14 +153,24 @@ func (r *VehicleRepo) GetByID(ctx context.Context, id string) (Vehicle, error) {
 
 // scanVehicleByID runs the snapshot read (queryVehicleByID, which LEFT JOINs the
 // go_vehicle_control_state side table) and scans the base vehicle row plus the
-// five MYR-269 owner-control columns. A NULL control column (no side-table row,
-// or a field never observed) scans into a nil *bool, which the snapshot surfaces
-// as an absent/unknown control — never a fabricated on/off.
+// owner-control columns: the five MYR-269 booleans and the eleven MYR-273
+// cabin-setting levels. A NULL control column (no side-table row, or a field
+// never observed) scans into a nil pointer, which the snapshot surfaces as an
+// absent/unknown control — never a fabricated value.
 func (r *VehicleRepo) scanVehicleByID(ctx context.Context, id string) (Vehicle, error) {
 	row := r.pool.QueryRow(ctx, queryVehicleByID, id)
 	var isLocked, frunkOpen, trunkOpen, isClimateOn, chargePortOpen *bool
+	var driverTemp, passengerTemp, fanSpeed *int
+	var seatHeaterLeft, seatHeaterRight *int
+	var seatHeaterRearLeft, seatHeaterRearCenter, seatHeaterRearRight *int
+	var seatCoolerLeft, seatCoolerRight *int
+	var mediaVolume *float64
 	v, err := r.scanVehicleRowExtra(row,
-		&isLocked, &frunkOpen, &trunkOpen, &isClimateOn, &chargePortOpen)
+		&isLocked, &frunkOpen, &trunkOpen, &isClimateOn, &chargePortOpen,
+		&driverTemp, &passengerTemp, &fanSpeed,
+		&seatHeaterLeft, &seatHeaterRight,
+		&seatHeaterRearLeft, &seatHeaterRearCenter, &seatHeaterRearRight,
+		&seatCoolerLeft, &seatCoolerRight, &mediaVolume)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Vehicle{}, ErrVehicleNotFound
 	}
@@ -172,6 +182,17 @@ func (r *VehicleRepo) scanVehicleByID(ctx context.Context, id string) (Vehicle, 
 	v.TrunkOpen = trunkOpen
 	v.IsClimateOn = isClimateOn
 	v.ChargePortOpen = chargePortOpen
+	v.DriverTempSetting = driverTemp
+	v.PassengerTempSetting = passengerTemp
+	v.FanSpeed = fanSpeed
+	v.SeatHeaterLeft = seatHeaterLeft
+	v.SeatHeaterRight = seatHeaterRight
+	v.SeatHeaterRearLeft = seatHeaterRearLeft
+	v.SeatHeaterRearCenter = seatHeaterRearCenter
+	v.SeatHeaterRearRight = seatHeaterRearRight
+	v.SeatCoolerLeft = seatCoolerLeft
+	v.SeatCoolerRight = seatCoolerRight
+	v.MediaVolume = mediaVolume
 	return v, nil
 }
 
