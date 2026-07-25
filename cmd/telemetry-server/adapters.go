@@ -251,6 +251,11 @@ func (a *vehicleSnapshotAdapter) GetByID(ctx context.Context, vehicleID string) 
 		TripDistRemaining:    v.TripDistRemaining,
 		NavRouteCoordinates:  v.NavRouteCoordinates,
 		LastUpdated:          v.LastUpdated,
+		Locked:               v.IsLocked,
+		FrunkOpen:            v.FrunkOpen,
+		TrunkOpen:            v.TrunkOpen,
+		IsClimateOn:          v.IsClimateOn,
+		ChargePortDoorOpen:   v.ChargePortOpen,
 	}, nil
 }
 

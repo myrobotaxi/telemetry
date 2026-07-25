@@ -234,6 +234,20 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"routePoints"      JSONB NOT NULL DEFAULT '[]',
 		"routePointsEnc"   TEXT,
 		"createdAt"        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+
+	-- go_vehicle_control_state: Go-owned owner-control side table (migration
+	-- 0008, MYR-269). VehicleRepo.GetByID LEFT-JOINs it for the /snapshot
+	-- read, so the harness MUST provision it or the snapshot + drives
+	-- ownership-check reads hit a missing relation and 500. Mirrors 0008.
+	CREATE TABLE go_vehicle_control_state (
+		"vehicle_id"       TEXT PRIMARY KEY,
+		"is_locked"        BOOLEAN,
+		"frunk_open"       BOOLEAN,
+		"trunk_open"       BOOLEAN,
+		"is_climate_on"    BOOLEAN,
+		"charge_port_open" BOOLEAN,
+		"updated_at"       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);`
 	if _, err := pool.Exec(ctx, schema); err != nil {
 		return fmt.Errorf("create schema: %w", err)

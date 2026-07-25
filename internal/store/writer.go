@@ -16,6 +16,10 @@ import (
 type vehicleUpdater interface {
 	UpdateTelemetry(ctx context.Context, vin string, update VehicleUpdate) error
 	UpdateStatus(ctx context.Context, vin string, status VehicleStatus) error
+	// UpsertControlState persists the MYR-269 owner-control read-backs (lock,
+	// trunk/frunk, climate, charge-port) to the Go-owned side table, keyed by
+	// vehicle cuid. Nil fields are left untouched (per-field last-writer-wins).
+	UpsertControlState(ctx context.Context, vehicleID string, update ControlStateUpdate) error
 }
 
 // drivePersister is the consumer-site interface for persisting drive

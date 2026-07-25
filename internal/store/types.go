@@ -56,6 +56,17 @@ type Vehicle struct {
 	TripDistRemaining    *float64        // nullable
 	NavRouteCoordinates  json.RawMessage // nullable JSONB
 	LastUpdated          time.Time
+
+	// MYR-269 owner-control read-backs, hydrated from the Go-owned
+	// go_vehicle_control_state side table via a LEFT JOIN on the GetByID
+	// (snapshot) read path. All nullable — a nil pointer means the field was
+	// never read for this vehicle. Populated only by GetByID; GetByVIN and
+	// ListByUser leave them nil (they do not join the side table).
+	IsLocked       *bool
+	FrunkOpen      *bool
+	TrunkOpen      *bool
+	IsClimateOn    *bool
+	ChargePortOpen *bool
 }
 
 // VehicleUpdate holds the subset of vehicle fields that can change from
@@ -95,6 +106,13 @@ type VehicleUpdate struct {
 	NavRouteCoordinates  *json.RawMessage // [lng, lat] pairs as JSON array
 	ClearFields          []string         // DB column names to explicitly SET NULL
 	LastUpdated          time.Time        // always set
+
+	// ControlState carries the MYR-269 owner-control read-backs (lock, trunk/
+	// frunk, climate, charge-port) destined for the Go-owned
+	// go_vehicle_control_state SIDE table — NOT the Prisma-owned "Vehicle"
+	// table. buildTelemetryUpdate ignores it; the writer flush upserts it
+	// separately (writer_flush.go). Nil when a frame carries no control fields.
+	ControlState *ControlStateUpdate
 }
 
 // DriveRecord maps to the Prisma "Drive" table.
