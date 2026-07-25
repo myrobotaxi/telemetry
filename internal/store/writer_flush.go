@@ -98,7 +98,6 @@ func (w *Writer) flush(ctx context.Context) {
 	}
 }
 
-
 // persistControlState upserts the MYR-269 owner-control read-backs for one VIN
 // into the Go-owned side table. It resolves the vehicle cuid via the VIN cache
 // (the side table is keyed by cuid, not VIN). A resolve or upsert failure is
