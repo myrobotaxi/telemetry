@@ -155,8 +155,11 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		FleetFieldTimeToFullCharge:                  {IntervalSeconds: 30}, // proto 43, hours (decimal double) — v1 charge atomic group member
 		FleetFieldEstimatedHoursToChargeTermination: {IntervalSeconds: 30}, // MYR-25 observation: proto 190, MYR-28 flip-condition guard
 
-		// Climate — medium/low frequency
-		FleetFieldInsideTemp:           {IntervalSeconds: 60, ResendIntervalSeconds: intPtr(120)},
+		// Climate. InsideTemp at 10s so the owner sees the cabin temperature
+		// change as climate runs (MYR-276: client saw it lag ~a minute at 60s —
+		// interior temp moves visibly while cooling/heating). OutsideTemp stays
+		// low-frequency (ambient changes slowly).
+		FleetFieldInsideTemp:           {IntervalSeconds: 10, ResendIntervalSeconds: intPtr(120)},
 		FleetFieldOutsideTemp:          {IntervalSeconds: 60, ResendIntervalSeconds: intPtr(120)},
 		FleetFieldHvacPower:            {IntervalSeconds: 10},
 		FleetFieldHvacFanSpeed:         {IntervalSeconds: 30},
