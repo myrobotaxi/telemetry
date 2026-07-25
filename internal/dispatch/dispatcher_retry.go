@@ -22,9 +22,10 @@ import (
 // dispatch_error invalid_request outage (MYR-245).
 const commandNavigationRequest = "navigation_request"
 
-// pickupShareValue builds the text destination for the navigation_request
-// share (it lands in android.intent.extra.TEXT). The value is text the CAR's
-// own nav geocoder resolves — NOT a machine coordinate field. A raw
+// coordShareValue builds the text destination for the navigation_request
+// share (it lands in android.intent.extra.TEXT). Used for BOTH legs — the
+// pickup on accept and the dropoff on board (MYR-265). The value is text the
+// CAR's own nav geocoder resolves — NOT a machine coordinate field. A raw
 // "<lat>,<lon>" coordinate pair (full precision, strconv 'f', -1 — never
 // truncated) is chosen as the LEAST-AMBIGUOUS text, matching how
 // Teslemetry/Tessie-class clients pass coordinates: they forward the raw
@@ -32,17 +33,17 @@ const commandNavigationRequest = "navigation_request"
 // the car reliably resolves a maps-URL share into a nav destination, and a
 // failure would be silent — the Fleet REST share returns success even if the
 // car cannot parse it). On-car acceptance of this shape is settled by the
-// MYR-245 live verification; if it fails on-car the fallbacks are the pickup
+// MYR-245 live verification; if it fails on-car the fallbacks are the place
 // address label or a maps URL.
-func pickupShareValue(lat, lon float64) string {
+func coordShareValue(lat, lon float64) string {
 	return strconv.FormatFloat(lat, 'f', -1, 64) + "," + strconv.FormatFloat(lon, 'f', -1, 64)
 }
 
-// validPickupCoord reports whether a pickup coordinate is within the valid
-// WGS-84 range. An out-of-range coordinate is a permanent bad input: we refuse
-// it before building the share value, so no malformed destination is ever
-// dialed to the car.
-func validPickupCoord(p events.RidePlace) bool {
+// validCoord reports whether a leg coordinate (pickup or dropoff) is within the
+// valid WGS-84 range. An out-of-range coordinate is a permanent bad input: we
+// refuse it before building the share value, so no malformed destination is
+// ever dialed to the car.
+func validCoord(p events.RidePlace) bool {
 	return p.Latitude >= -90 && p.Latitude <= 90 &&
 		p.Longitude >= -180 && p.Longitude <= 180
 }
@@ -144,25 +145,26 @@ func isContextErr(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
-// executeWithRetry runs the navigation_request share under the bounded retry
-// policy. Retryable codes (transport / asleep-after-wake) back off and retry
-// up to MaxRetries; every other code is terminal. It also returns the opaque
-// Tesla-side detail (CommandError.Detail, e.g. `invalid_command`) so the
-// outcome log can explain WHY a command was rejected.
-func (d *Dispatcher) executeWithRetry(ctx context.Context, vin, token string, pickup events.RidePlace) (outcome Outcome, errCode *string, detail string) {
+// executeWithRetry runs the navigation_request share for a leg's coordinate
+// (pickup or dropoff, MYR-265) under the bounded retry policy. Retryable codes
+// (transport / asleep-after-wake) back off and retry up to MaxRetries; every
+// other code is terminal. It also returns the opaque Tesla-side detail
+// (CommandError.Detail, e.g. `invalid_command`) so the outcome log can explain
+// WHY a command was rejected.
+func (d *Dispatcher) executeWithRetry(ctx context.Context, vin, token string, place events.RidePlace) (outcome Outcome, errCode *string, detail string) {
 	// Guard the coordinate before building the share value: an out-of-range
-	// pickup is a permanent bad input, so fail terminally with the typed
+	// coordinate is a permanent bad input, so fail terminally with the typed
 	// invalid_request code WITHOUT dialing Tesla.
-	if !validPickupCoord(pickup) {
+	if !validCoord(place) {
 		code := string(wserrors.ErrCodeInvalidRequest)
-		return OutcomeFailed, &code, "pickup_coordinate_out_of_range"
+		return OutcomeFailed, &code, "coordinate_out_of_range"
 	}
 
 	req := commands.Request{
 		VIN:     vin,
 		Command: commandNavigationRequest,
 		Params: map[string]any{
-			"value": pickupShareValue(pickup.Latitude, pickup.Longitude),
+			"value": coordShareValue(place.Latitude, place.Longitude),
 		},
 		AccessToken: token,
 		Scopes:      commands.ParseScopes(token),

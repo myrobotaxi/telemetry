@@ -40,14 +40,21 @@ type CommandExecutor interface {
 }
 
 // OutcomeStore is the persistence seam: the exactly-once dispatch claim plus
-// the resolved-outcome write. Satisfied by the ride-request repo via a cmd/
+// the resolved-outcome write, for BOTH nav legs. Leg 1 (pickup, on accept)
+// uses ClaimDispatch/RecordDispatchOutcome; leg 2 (dropoff, on board — MYR-265)
+// uses the Dropoff* pair, which write independent columns so neither leg
+// clobbers the other's history. Satisfied by the ride-request repo via a cmd/
 // adapter (status crosses as the dispatch.Outcome string).
 type OutcomeStore interface {
-	// ClaimDispatch returns true iff THIS call won the exactly-once claim.
+	// ClaimDispatch returns true iff THIS call won the exactly-once leg-1 claim.
 	ClaimDispatch(ctx context.Context, rideID string) (bool, error)
-	// RecordDispatchOutcome persists the resolved status; errCode is nil for
-	// sent/skipped and the opaque failure code for failed.
+	// RecordDispatchOutcome persists the resolved leg-1 status; errCode is nil
+	// for sent/skipped and the opaque failure code for failed.
 	RecordDispatchOutcome(ctx context.Context, rideID string, status Outcome, errCode *string) error
+	// ClaimDropoffDispatch is the leg-2 (dropoff) exactly-once claim.
+	ClaimDropoffDispatch(ctx context.Context, rideID string) (bool, error)
+	// RecordDropoffDispatchOutcome persists the resolved leg-2 status.
+	RecordDropoffDispatchOutcome(ctx context.Context, rideID string, status Outcome, errCode *string) error
 }
 
 // Config tunes the dispatcher. Zero values get sane defaults via withDefaults.
@@ -145,7 +152,14 @@ func New(
 func (d *Dispatcher) Subscribe(bus events.Bus) (events.Subscription, error) {
 	sub, err := bus.Subscribe(events.TopicRideAccepted, d.handle)
 	if err != nil {
-		return events.Subscription{}, fmt.Errorf("dispatch.Subscribe: %w", err)
+		return events.Subscription{}, fmt.Errorf("dispatch.Subscribe(accepted): %w", err)
+	}
+	// Leg 2 (MYR-265): the same dispatcher also pushes the DROPOFF when the
+	// rider boards. Both handlers feed one bounded worker pool and are drained
+	// by Wait; the caller relies on bus.Close for unsubscribe on shutdown, so
+	// only the leg-1 subscription is returned (both are torn down together).
+	if _, err := bus.Subscribe(events.TopicRideBoarded, d.handleBoarded); err != nil {
+		return events.Subscription{}, fmt.Errorf("dispatch.Subscribe(boarded): %w", err)
 	}
 	return sub, nil
 }
@@ -167,7 +181,28 @@ func (d *Dispatcher) handle(evt events.Event) {
 		)
 		return
 	}
+	d.dispatchAsync(func(ctx context.Context) { d.process(ctx, ev) })
+}
 
+// handleBoarded is the events.Handler for ride.boarded (leg 2, MYR-265): it
+// type-asserts the RideBoardedEvent and hands the dropoff push to the same
+// bounded worker pool as leg 1, returning immediately so the bus loop is never
+// blocked.
+func (d *Dispatcher) handleBoarded(evt events.Event) {
+	ev, ok := evt.Payload.(events.RideBoardedEvent)
+	if !ok {
+		d.logger.Error("dispatch: unexpected payload type on ride.boarded",
+			slog.String("event_id", evt.ID),
+		)
+		return
+	}
+	d.dispatchAsync(func(ctx context.Context) { d.processDropoff(ctx, ev) })
+}
+
+// dispatchAsync runs fn on a bounded worker goroutine under a fresh
+// OverallTimeout-bounded context, shared by both legs. Returns immediately so
+// the bus's serial per-subscriber loop is never blocked by a slow dispatch.
+func (d *Dispatcher) dispatchAsync(fn func(context.Context)) {
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
@@ -178,51 +213,98 @@ func (d *Dispatcher) handle(evt events.Event) {
 
 		ctx, cancel := context.WithTimeout(context.Background(), d.cfg.OverallTimeout)
 		defer cancel()
-		d.process(ctx, ev)
+		fn(ctx)
 	}()
 }
 
-// process runs claim → (kill-switch | resolve → command) → record for one
-// accepted ride. It is safe to call directly in tests.
+// dispatchLeg is one nav push. The two legs — pickup (on accept) and dropoff
+// (on board, MYR-265) — share the whole pipeline (claim → resolve → command →
+// record) and differ ONLY in: the exactly-once latch to claim, the coordinate
+// to push, the outcome column to write, and a label for the audit line. process
+// and processDropoff build a leg and hand it to runLeg.
+type dispatchLeg struct {
+	name      string // "pickup" | "dropoff" — audit label only
+	rideID    string
+	vehicleID string
+	ownerID   string
+	coord     events.RidePlace
+	claim     func(context.Context, string) (bool, error)
+	record    func(context.Context, string, Outcome, *string) error
+}
+
+// process runs the leg-1 (pickup) dispatch for one accepted ride. It is safe to
+// call directly in tests.
 func (d *Dispatcher) process(ctx context.Context, ev events.RideAcceptedEvent) {
-	claimed, err := d.store.ClaimDispatch(ctx, ev.RideRequestID)
+	d.runLeg(ctx, dispatchLeg{
+		name:      "pickup",
+		rideID:    ev.RideRequestID,
+		vehicleID: ev.VehicleID,
+		ownerID:   ev.OwnerID,
+		coord:     ev.Pickup,
+		claim:     d.store.ClaimDispatch,
+		record:    d.store.RecordDispatchOutcome,
+	})
+}
+
+// processDropoff runs the leg-2 (dropoff) dispatch for one boarded ride
+// (MYR-265): identical pipeline to process, claiming/recording the independent
+// dropoff_* columns and pushing the DROPOFF coordinate. Safe to call in tests.
+func (d *Dispatcher) processDropoff(ctx context.Context, ev events.RideBoardedEvent) {
+	d.runLeg(ctx, dispatchLeg{
+		name:      "dropoff",
+		rideID:    ev.RideRequestID,
+		vehicleID: ev.VehicleID,
+		ownerID:   ev.OwnerID,
+		coord:     ev.Dropoff,
+		claim:     d.store.ClaimDropoffDispatch,
+		record:    d.store.RecordDropoffDispatchOutcome,
+	})
+}
+
+// runLeg runs claim → (kill-switch | resolve → command) → record for one nav
+// leg. Shared by both legs; the leg struct supplies the per-leg claim/record
+// seams and the coordinate.
+func (d *Dispatcher) runLeg(ctx context.Context, leg dispatchLeg) {
+	claimed, err := leg.claim(ctx, leg.rideID)
 	if err != nil {
 		// Could not claim safely — do not push nav (we cannot guarantee
-		// exactly-once). Log and drop; the ride stays un-dispatched.
+		// exactly-once). Log and drop; the leg stays un-dispatched.
 		d.logger.Error("dispatch: claim failed",
-			slog.String("ride_id", ev.RideRequestID),
-			slog.String("vehicle_id", ev.VehicleID),
+			slog.String("leg", leg.name),
+			slog.String("ride_id", leg.rideID),
+			slog.String("vehicle_id", leg.vehicleID),
 			slog.String("error", err.Error()),
 		)
 		return
 	}
 	if !claimed {
 		// Already dispatched by a prior delivery — exactly-once guard.
-		d.logger.Debug("dispatch: ride already dispatched, skipping",
-			slog.String("ride_id", ev.RideRequestID),
+		d.logger.Debug("dispatch: leg already dispatched, skipping",
+			slog.String("leg", leg.name),
+			slog.String("ride_id", leg.rideID),
 		)
 		return
 	}
 
 	if !d.cfg.Enabled {
-		d.record(ctx, ev, "", OutcomeSkipped, nil, "")
+		d.record(ctx, leg, "", OutcomeSkipped, nil, "")
 		return
 	}
 
-	vin, code := d.resolveVIN(ctx, ev.VehicleID)
+	vin, code := d.resolveVIN(ctx, leg.vehicleID)
 	if code != nil {
-		d.record(ctx, ev, "", OutcomeFailed, code, "")
+		d.record(ctx, leg, "", OutcomeFailed, code, "")
 		return
 	}
 
-	token, code := d.resolveToken(ctx, ev.OwnerID)
+	token, code := d.resolveToken(ctx, leg.ownerID)
 	if code != nil {
-		d.record(ctx, ev, vin, OutcomeFailed, code, "")
+		d.record(ctx, leg, vin, OutcomeFailed, code, "")
 		return
 	}
 
-	outcome, ecode, detail := d.executeWithRetry(ctx, vin, token, ev.Pickup)
-	d.record(ctx, ev, vin, outcome, ecode, detail)
+	outcome, ecode, detail := d.executeWithRetry(ctx, vin, token, leg.coord)
+	d.record(ctx, leg, vin, outcome, ecode, detail)
 }
 
 // resolveVIN resolves the vehicle's VIN under the bounded retry policy,
@@ -269,23 +351,26 @@ func (d *Dispatcher) resolveToken(ctx context.Context, ownerID string) (token st
 // detail is the opaque Tesla-side reason (e.g. `invalid_command`) surfaced on
 // the audit line as error_detail. It is empty for non-command outcomes and is
 // NOT persisted (no DB column — the detail lives only in the structured log).
-func (d *Dispatcher) record(ctx context.Context, ev events.RideAcceptedEvent, vin string, outcome Outcome, code *string, detail string) {
+func (d *Dispatcher) record(ctx context.Context, leg dispatchLeg, vin string, outcome Outcome, code *string, detail string) {
 	recCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
-	if err := d.store.RecordDispatchOutcome(recCtx, ev.RideRequestID, outcome, code); err != nil {
+	if err := leg.record(recCtx, leg.rideID, outcome, code); err != nil {
 		d.logger.Error("dispatch: failed to record outcome",
-			slog.String("ride_id", ev.RideRequestID),
+			slog.String("leg", leg.name),
+			slog.String("ride_id", leg.rideID),
 			slog.String("outcome", string(outcome)),
 			slog.String("error", err.Error()),
 		)
 	}
 
 	attrs := []any{
-		slog.String("ride_id", ev.RideRequestID),
-		slog.String("vehicle_id", ev.VehicleID),
+		slog.String("leg", leg.name),
+		slog.String("ride_id", leg.rideID),
+		slog.String("vehicle_id", leg.vehicleID),
 		slog.String("vin", redactVIN(vin)),
 		slog.String("outcome", string(outcome)),
 	}
+
 	if code != nil {
 		attrs = append(attrs, slog.String("error_code", *code))
 	}
