@@ -34,6 +34,10 @@ const defaultServiceReadCooldown = 45 * time.Second
 // call ever fires from a test (safety invariant, MYR-259).
 type FleetVehicleReader interface {
 	GetVehicle(ctx context.Context, token, vin string) (*FleetVehicleState, error)
+	// GetVehicleData reads the full-state REST object (vehicle_data) used to
+	// backfill stream-only owner-control fields for a non-streaming vehicle
+	// (MYR-260). Satisfied by *FleetAPIClient.GetVehicleData.
+	GetVehicleData(ctx context.Context, token, vin string) (*VehicleData, error)
 }
 
 // VehicleStatusUpdater persists a vehicle's derived status enum. Satisfied
@@ -260,11 +264,21 @@ func (m *ServiceStatusMonitor) resolveViaRead(ctx context.Context, vin, edge str
 			slog.String("vin", redactVIN(vin)), slog.String("edge", edge))
 		return
 	}
-	inService, ok := m.readInService(ctx, vin)
+	state, token, ok := m.readVehicleREST(ctx, vin)
 	if !ok {
 		return // non-fatal; leave last-known status
 	}
-	m.persist(ctx, vin, resolveStatus(inService))
+	m.persist(ctx, vin, resolveStatus(state.InService))
+
+	// MYR-260: a non-streaming vehicle (in service, asleep, or offline) never
+	// sends the stream-only owner-control fields (Lock/Trunk/Climate/Charge/
+	// Odometer/Temps), so the app shows "— Syncing" forever. Backfill them
+	// once from a single REST vehicle_data read. This shares the connectivity-
+	// edge debounce already stamped by allow() above, so at most one
+	// /vehicle_data call fires per VIN per cooldown; streaming cars are skipped.
+	if notStreaming(state) {
+		m.refreshFromVehicleData(ctx, vin, token)
+	}
 }
 
 // reconcileServiceModeOff is the guaranteed transition-OUT for a
@@ -296,25 +310,38 @@ func resolveStatus(inService bool) string {
 // in_service flag. ok is false (and the read is skipped/failed) on any error —
 // every failure is logged and non-fatal.
 func (m *ServiceStatusMonitor) readInService(ctx context.Context, vin string) (inService, ok bool) {
-	userID, err := m.owners.GetVehicleOwner(ctx, vin)
-	if err != nil {
-		m.logger.Warn("service-status: owner lookup failed — skipping in_service read",
-			slog.String("vin", redactVIN(vin)), slog.String("error", err.Error()))
-		return false, false
-	}
-	tok, err := m.tokens.Resolve(ctx, userID)
-	if err != nil {
-		m.logger.Warn("service-status: no Tesla token — skipping in_service read",
-			slog.String("vin", redactVIN(vin)), slog.String("user_id", userID))
-		return false, false
-	}
-	state, err := m.reader.GetVehicle(ctx, tok.AccessToken, vin)
-	if err != nil {
-		m.logger.Warn("service-status: in_service read failed (non-fatal)",
-			slog.String("vin", redactVIN(vin)), slog.String("error", err.Error()))
+	state, _, ok := m.readVehicleREST(ctx, vin)
+	if !ok {
 		return false, false
 	}
 	return state.InService, true
+}
+
+// readVehicleREST resolves the owner token and reads Tesla's authoritative REST
+// vehicle object (GET /api/1/vehicles/{vin}). It returns the state plus the
+// resolved owner access token so a follow-up vehicle_data backfill (MYR-260)
+// can reuse the token without a second owner/token resolution. ok is false (the
+// read is skipped/failed) on any error — every failure is logged and non-fatal.
+func (m *ServiceStatusMonitor) readVehicleREST(ctx context.Context, vin string) (state *FleetVehicleState, token string, ok bool) {
+	userID, err := m.owners.GetVehicleOwner(ctx, vin)
+	if err != nil {
+		m.logger.Warn("service-status: owner lookup failed — skipping read",
+			slog.String("vin", redactVIN(vin)), slog.String("error", err.Error()))
+		return nil, "", false
+	}
+	tok, err := m.tokens.Resolve(ctx, userID)
+	if err != nil {
+		m.logger.Warn("service-status: no Tesla token — skipping read",
+			slog.String("vin", redactVIN(vin)), slog.String("user_id", userID))
+		return nil, "", false
+	}
+	st, err := m.reader.GetVehicle(ctx, tok.AccessToken, vin)
+	if err != nil {
+		m.logger.Warn("service-status: vehicle read failed (non-fatal)",
+			slog.String("vin", redactVIN(vin)), slog.String("error", err.Error()))
+		return nil, "", false
+	}
+	return st, tok.AccessToken, true
 }
 
 // persist writes the resolved status, non-fatal on failure.
