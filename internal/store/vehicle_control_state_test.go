@@ -215,3 +215,185 @@ func cleanControlState(t *testing.T) {
 		t.Fatalf("clean go_vehicle_control_state: %v", err)
 	}
 }
+
+func ip(i int) *int         { return &i }
+func fp(f float64) *float64 { return &f }
+
+func wantIntPtr(t *testing.T, field string, want, got *int) {
+	t.Helper()
+	switch {
+	case want == nil && got == nil:
+		return
+	case want == nil || got == nil:
+		t.Errorf("%s: want %v, got %v", field, fmtIP(want), fmtIP(got))
+	case *want != *got:
+		t.Errorf("%s: want %d, got %d", field, *want, *got)
+	}
+}
+
+func wantFloatPtr(t *testing.T, field string, want, got *float64) {
+	t.Helper()
+	switch {
+	case want == nil && got == nil:
+		return
+	case want == nil || got == nil:
+		t.Errorf("%s: want %v, got %v", field, want, got)
+	case *want != *got:
+		t.Errorf("%s: want %v, got %v", field, *want, *got)
+	}
+}
+
+func fmtIP(p *int) string {
+	if p == nil {
+		return "nil"
+	}
+	return "set"
+}
+
+// TestControlState_CabinLevelsPersistThenSnapshotAcrossSocketGap is the MYR-273
+// headline: the cabin SETTINGS (temp setpoints, fan speed, seat heater/cooler
+// levels, media volume) are persisted (live persist path or /vehicle_data
+// backfill), THEN a later GET /snapshot — with no live socket — returns them.
+// Before MYR-273 these showed "—" on a non-streaming snapshot.
+func TestControlState_CabinLevelsPersistThenSnapshotAcrossSocketGap(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping store integration test")
+	}
+	ensureControlMigration(t)
+	cleanTables(t, testPool)
+	cleanControlState(t)
+
+	const (
+		vehID = "veh_ctl_cabin_1"
+		vin   = "5YJ3E1EA1NF00CAB1"
+	)
+	seedVehicle(t, testPool, vehID, vin)
+	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+	ctx := context.Background()
+
+	if err := repo.UpsertControlState(ctx, vehID, store.ControlStateUpdate{
+		DriverTempSetting:    ip(68),
+		PassengerTempSetting: ip(70),
+		FanSpeed:             ip(3),
+		SeatHeaterLeft:       ip(2),
+		SeatHeaterRight:      ip(1),
+		SeatHeaterRearLeft:   ip(0),
+		SeatHeaterRearCenter: ip(0),
+		SeatHeaterRearRight:  ip(0),
+		SeatCoolerLeft:       ip(1),
+		SeatCoolerRight:      ip(2),
+		MediaVolume:          fp(5.5),
+	}); err != nil {
+		t.Fatalf("UpsertControlState: %v", err)
+	}
+
+	// The socket gap: no writer, no live stream — just a later snapshot read.
+	v, err := repo.GetByID(ctx, vehID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	wantIntPtr(t, "DriverTempSetting", ip(68), v.DriverTempSetting)
+	wantIntPtr(t, "PassengerTempSetting", ip(70), v.PassengerTempSetting)
+	wantIntPtr(t, "FanSpeed", ip(3), v.FanSpeed)
+	wantIntPtr(t, "SeatHeaterLeft", ip(2), v.SeatHeaterLeft)
+	wantIntPtr(t, "SeatHeaterRight", ip(1), v.SeatHeaterRight)
+	wantIntPtr(t, "SeatHeaterRearLeft", ip(0), v.SeatHeaterRearLeft)
+	wantIntPtr(t, "SeatHeaterRearCenter", ip(0), v.SeatHeaterRearCenter)
+	wantIntPtr(t, "SeatHeaterRearRight", ip(0), v.SeatHeaterRearRight)
+	wantIntPtr(t, "SeatCoolerLeft", ip(1), v.SeatCoolerLeft)
+	wantIntPtr(t, "SeatCoolerRight", ip(2), v.SeatCoolerRight)
+	wantFloatPtr(t, "MediaVolume", fp(5.5), v.MediaVolume)
+}
+
+// TestControlState_CabinLevelsPerFieldLastWriterWins proves the COALESCE upsert
+// updates only the cabin-level fields present in a frame and leaves the rest
+// intact — including that a real 0 (seat heater off / muted) overwrites a prior
+// level, and that bool + level fields coexist in the same row without clobbering.
+func TestControlState_CabinLevelsPerFieldLastWriterWins(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping store integration test")
+	}
+	ensureControlMigration(t)
+	cleanTables(t, testPool)
+	cleanControlState(t)
+
+	const (
+		vehID = "veh_ctl_cabin_lww_1"
+		vin   = "5YJ3E1EA1NF00CAB2"
+	)
+	seedVehicle(t, testPool, vehID, vin)
+	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+	ctx := context.Background()
+
+	// Frame 1: a bool control + fan speed 3.
+	if err := repo.UpsertControlState(ctx, vehID, store.ControlStateUpdate{
+		IsLocked: bp(true),
+		FanSpeed: ip(3),
+	}); err != nil {
+		t.Fatalf("upsert 1: %v", err)
+	}
+	// Frame 2: only seat heater arrives (fan speed + lock absent → preserved).
+	if err := repo.UpsertControlState(ctx, vehID, store.ControlStateUpdate{
+		SeatHeaterLeft: ip(2),
+	}); err != nil {
+		t.Fatalf("upsert 2: %v", err)
+	}
+	v, err := repo.GetByID(ctx, vehID)
+	if err != nil {
+		t.Fatalf("GetByID after frame 2: %v", err)
+	}
+	wantBoolPtr(t, "IsLocked (preserved)", bp(true), v.IsLocked)
+	wantIntPtr(t, "FanSpeed (preserved)", ip(3), v.FanSpeed)
+	wantIntPtr(t, "SeatHeaterLeft (new)", ip(2), v.SeatHeaterLeft)
+	wantIntPtr(t, "SeatHeaterRight (never read)", nil, v.SeatHeaterRight)
+
+	// Frame 3: fan speed flips to a real 0 — must overwrite, not be treated as absent.
+	if err := repo.UpsertControlState(ctx, vehID, store.ControlStateUpdate{
+		FanSpeed:    ip(0),
+		MediaVolume: fp(0),
+	}); err != nil {
+		t.Fatalf("upsert 3: %v", err)
+	}
+	v, err = repo.GetByID(ctx, vehID)
+	if err != nil {
+		t.Fatalf("GetByID after frame 3: %v", err)
+	}
+	wantIntPtr(t, "FanSpeed (overwritten 0)", ip(0), v.FanSpeed)
+	wantFloatPtr(t, "MediaVolume (overwritten 0)", fp(0), v.MediaVolume)
+	wantIntPtr(t, "SeatHeaterLeft (still preserved)", ip(2), v.SeatHeaterLeft)
+}
+
+// TestControlState_CabinLevelsNeverReadIsNil proves a vehicle with no side-table
+// row returns nil for every cabin-level field — the honest "—", never a
+// fabricated 0.
+func TestControlState_CabinLevelsNeverReadIsNil(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping store integration test")
+	}
+	ensureControlMigration(t)
+	cleanTables(t, testPool)
+	cleanControlState(t)
+
+	const (
+		vehID = "veh_ctl_cabin_nil_1"
+		vin   = "5YJ3E1EA1NF00CAB3"
+	)
+	seedVehicle(t, testPool, vehID, vin)
+	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+
+	v, err := repo.GetByID(context.Background(), vehID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	wantIntPtr(t, "DriverTempSetting", nil, v.DriverTempSetting)
+	wantIntPtr(t, "PassengerTempSetting", nil, v.PassengerTempSetting)
+	wantIntPtr(t, "FanSpeed", nil, v.FanSpeed)
+	wantIntPtr(t, "SeatHeaterLeft", nil, v.SeatHeaterLeft)
+	wantIntPtr(t, "SeatHeaterRight", nil, v.SeatHeaterRight)
+	wantIntPtr(t, "SeatHeaterRearLeft", nil, v.SeatHeaterRearLeft)
+	wantIntPtr(t, "SeatHeaterRearCenter", nil, v.SeatHeaterRearCenter)
+	wantIntPtr(t, "SeatHeaterRearRight", nil, v.SeatHeaterRearRight)
+	wantIntPtr(t, "SeatCoolerLeft", nil, v.SeatCoolerLeft)
+	wantIntPtr(t, "SeatCoolerRight", nil, v.SeatCoolerRight)
+	wantFloatPtr(t, "MediaVolume", nil, v.MediaVolume)
+}

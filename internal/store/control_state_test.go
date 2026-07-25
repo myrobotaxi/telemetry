@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/myrobotaxi/telemetry/internal/events"
@@ -195,4 +196,134 @@ func derefControl(c *ControlStateUpdate) string {
 		" TrunkOpen:" + fmtBoolPtr(c.TrunkOpen) +
 		" IsClimateOn:" + fmtBoolPtr(c.IsClimateOn) +
 		" ChargePortOpen:" + fmtBoolPtr(c.ChargePortOpen) + "}"
+}
+
+// TestMapTelemetryToControlState_CabinLevels covers the MYR-273 cabin-setting
+// derivation: temp setpoints, fan speed, seat heater/cooler levels arrive as
+// either IntVal or FloatVal (a float is rounded to nearest int, matching the WS
+// roundIfInteger); mediaVolume stays fractional (never rounded); an Invalid
+// field is ignored.
+func TestMapTelemetryToControlState_CabinLevels(t *testing.T) {
+	t.Run("int level from IntVal", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldSeatHeaterLeft): {IntVal: int64Ptr(3)},
+		})
+		eqIntPtr(t, "SeatHeaterLeft", intPtr(3), got.SeatHeaterLeft)
+	})
+
+	t.Run("int level from FloatVal is rounded", func(t *testing.T) {
+		// Temp setpoints flow through convertTemperature → FloatVal (Fahrenheit).
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldDriverTempSetting): {FloatVal: floatPtr(68.4)},
+			string(telemetry.FieldHvacFanSpeed):      {FloatVal: floatPtr(2.5)},
+		})
+		eqIntPtr(t, "DriverTempSetting", intPtr(68), got.DriverTempSetting)
+		eqIntPtr(t, "FanSpeed (2.5 rounds to 3)", intPtr(3), got.FanSpeed)
+	})
+
+	t.Run("media volume stays fractional", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldMediaVolume): {FloatVal: floatPtr(5.5)},
+		})
+		eqFloatPtr(t, "MediaVolume", floatPtr(5.5), got.MediaVolume)
+	})
+
+	t.Run("media volume zero is a real observation", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldMediaVolume): {FloatVal: floatPtr(0)},
+		})
+		eqFloatPtr(t, "MediaVolume", floatPtr(0), got.MediaVolume)
+	})
+
+	t.Run("invalid level field is ignored", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldSeatCoolerLeft): {IntVal: int64Ptr(2), Invalid: true},
+		})
+		if got != nil {
+			t.Fatalf("invalid-only frame should map to nil, got %+v", got)
+		}
+	})
+
+	t.Run("all cabin levels together", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldDriverTempSetting):    {IntVal: int64Ptr(68)},
+			string(telemetry.FieldPassengerTempSetting): {IntVal: int64Ptr(70)},
+			string(telemetry.FieldHvacFanSpeed):         {IntVal: int64Ptr(3)},
+			string(telemetry.FieldSeatHeaterLeft):       {IntVal: int64Ptr(2)},
+			string(telemetry.FieldSeatHeaterRight):      {IntVal: int64Ptr(1)},
+			string(telemetry.FieldSeatHeaterRearLeft):   {IntVal: int64Ptr(0)},
+			string(telemetry.FieldSeatHeaterRearCenter): {IntVal: int64Ptr(0)},
+			string(telemetry.FieldSeatHeaterRearRight):  {IntVal: int64Ptr(0)},
+			string(telemetry.FieldSeatCoolerLeft):       {IntVal: int64Ptr(1)},
+			string(telemetry.FieldSeatCoolerRight):      {IntVal: int64Ptr(2)},
+			string(telemetry.FieldMediaVolume):          {FloatVal: floatPtr(7.5)},
+		})
+		eqIntPtr(t, "DriverTempSetting", intPtr(68), got.DriverTempSetting)
+		eqIntPtr(t, "PassengerTempSetting", intPtr(70), got.PassengerTempSetting)
+		eqIntPtr(t, "FanSpeed", intPtr(3), got.FanSpeed)
+		eqIntPtr(t, "SeatHeaterLeft", intPtr(2), got.SeatHeaterLeft)
+		eqIntPtr(t, "SeatHeaterRight", intPtr(1), got.SeatHeaterRight)
+		eqIntPtr(t, "SeatHeaterRearLeft", intPtr(0), got.SeatHeaterRearLeft)
+		eqIntPtr(t, "SeatHeaterRearCenter", intPtr(0), got.SeatHeaterRearCenter)
+		eqIntPtr(t, "SeatHeaterRearRight", intPtr(0), got.SeatHeaterRearRight)
+		eqIntPtr(t, "SeatCoolerLeft", intPtr(1), got.SeatCoolerLeft)
+		eqIntPtr(t, "SeatCoolerRight", intPtr(2), got.SeatCoolerRight)
+		eqFloatPtr(t, "MediaVolume", floatPtr(7.5), got.MediaVolume)
+	})
+}
+
+// TestMergeControlState_CabinLevelsLastWriteWins proves per-field last-writer-
+// wins folds the MYR-273 levels too: a present src level overwrites, an absent
+// src level preserves the prior dst value.
+func TestMergeControlState_CabinLevelsLastWriteWins(t *testing.T) {
+	dst := &ControlStateUpdate{
+		FanSpeed:       intPtr(2),
+		SeatHeaterLeft: intPtr(1),
+		MediaVolume:    floatPtr(3.0),
+	}
+	src := &ControlStateUpdate{
+		FanSpeed:        intPtr(4),     // overwrite
+		MediaVolume:     floatPtr(6.5), // overwrite
+		SeatCoolerRight: intPtr(2),     // new
+		// SeatHeaterLeft absent in src → preserved from dst
+	}
+	mergeControlState(dst, src)
+
+	eqIntPtr(t, "FanSpeed (overwritten)", intPtr(4), dst.FanSpeed)
+	eqIntPtr(t, "SeatHeaterLeft (preserved)", intPtr(1), dst.SeatHeaterLeft)
+	eqIntPtr(t, "SeatCoolerRight (new)", intPtr(2), dst.SeatCoolerRight)
+	eqFloatPtr(t, "MediaVolume (overwritten)", floatPtr(6.5), dst.MediaVolume)
+}
+
+// eqIntPtr compares two *int (nil-safe).
+func eqIntPtr(t *testing.T, field string, want, got *int) {
+	t.Helper()
+	switch {
+	case want == nil && got == nil:
+		return
+	case want == nil || got == nil:
+		t.Errorf("%s: want %v, got %v", field, fmtIntPtr(want), fmtIntPtr(got))
+	case *want != *got:
+		t.Errorf("%s: want %d, got %d", field, *want, *got)
+	}
+}
+
+// eqFloatPtr compares two *float64 (nil-safe, exact).
+func eqFloatPtr(t *testing.T, field string, want, got *float64) {
+	t.Helper()
+	switch {
+	case want == nil && got == nil:
+		return
+	case want == nil || got == nil:
+		t.Errorf("%s: want %v, got %v", field, want, got)
+	case *want != *got:
+		t.Errorf("%s: want %v, got %v", field, *want, *got)
+	}
+}
+
+func fmtIntPtr(p *int) string {
+	if p == nil {
+		return "nil"
+	}
+	return fmt.Sprintf("%d", *p)
 }
