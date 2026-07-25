@@ -163,6 +163,17 @@ func (a *dispatchOutcomeStoreAdapter) RecordDispatchOutcome(ctx context.Context,
 	return a.repo.RecordDispatchOutcome(ctx, rideID, store.DispatchStatus(status), errCode)
 }
 
+// ClaimDropoffDispatch / RecordDropoffDispatchOutcome are the leg-2 (dropoff)
+// seams (MYR-265) — the same shape as the leg-1 pair, over the independent
+// dropoff_* columns so neither leg clobbers the other's dispatch history.
+func (a *dispatchOutcomeStoreAdapter) ClaimDropoffDispatch(ctx context.Context, rideID string) (bool, error) {
+	return a.repo.ClaimDropoffDispatch(ctx, rideID)
+}
+
+func (a *dispatchOutcomeStoreAdapter) RecordDropoffDispatchOutcome(ctx context.Context, rideID string, status dispatch.Outcome, errCode *string) error {
+	return a.repo.RecordDropoffDispatchOutcome(ctx, rideID, store.DispatchStatus(status), errCode)
+}
+
 // ListInterruptedDispatches satisfies dispatch.InterruptedDispatchLister for
 // the startup reconciler.
 func (a *dispatchOutcomeStoreAdapter) ListInterruptedDispatches(ctx context.Context, olderThan time.Duration) ([]string, error) {

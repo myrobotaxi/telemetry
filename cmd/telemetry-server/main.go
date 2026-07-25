@@ -356,6 +356,14 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 		return fmt.Errorf("setting up nav dispatcher: %w", err)
 	}
 
+	// --- Drive-end ride completion (MYR-265) ---
+	// Subscribes to drive.ended and closes the vehicle's in-flight `enroute`
+	// ride (leg 2 arrival at dropoff): enroute→completed + ride_status_changed.
+	// A drive-end for a car with no active ride is a no-op.
+	if err := setupRideCompletion(bus, vinCache, rideRepo, logger.With(slog.String("component", "ride-completion"))); err != nil {
+		return fmt.Errorf("setting up ride completion: %w", err)
+	}
+
 	// --- HTTP server + route registration ---
 	srv := server.New(cfg.Server(), logger, db, reg, cfg.TeslaPublicKey())
 	originPatterns := resolveWSOriginPatterns(cfg.WebSocket().AllowedOrigins, *devMode, logger)
