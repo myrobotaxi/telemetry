@@ -77,6 +77,17 @@ func mapTelemetryToUpdate(fields map[string]events.TelemetryValue) *VehicleUpdat
 		}
 	}
 
+	// MYR-269: derive the owner-control side-table fields (lock, trunk/frunk,
+	// climate, charge-port) from the same field map. These land in the Go-owned
+	// go_vehicle_control_state table, not the Vehicle table, so they are carried
+	// on VehicleUpdate.ControlState and upserted separately by the writer flush.
+	// Their presence also counts as "has fields" so a control-only frame (e.g. a
+	// lone lock toggle, or the MYR-260 /vehicle_data backfill) is not dropped.
+	if cs := mapTelemetryToControlState(fields); cs != nil {
+		u.ControlState = cs
+		hasFields = true
+	}
+
 	if !hasFields {
 		return nil
 	}

@@ -76,6 +76,12 @@ func (w *Writer) flush(ctx context.Context) {
 
 	for vin, update := range batch {
 		w.applyDestinationAddress(ctx, vin, update)
+		// MYR-269: persist the owner-control side-table fields first, so a
+		// non-streaming car's lock/trunk/climate/charge-port state lands durably
+		// even if the Vehicle-table write below is a no-op or fails. This is the
+		// write half of the fix — the snapshot read (GetByID LEFT JOIN) returns
+		// these with no live socket.
+		w.persistControlState(ctx, vin, update)
 		if err := w.vehicles.UpdateTelemetry(ctx, vin, *update); err != nil {
 			w.logger.Warn("failed to write telemetry update",
 				slog.String("vin", redactVIN(vin)),
@@ -89,5 +95,32 @@ func (w *Writer) flush(ctx context.Context) {
 		// applies a per-VIN time + distance debounce, so a stable
 		// parked vehicle does not burn the Mapbox quota.
 		w.scheduleLocationGeocode(vin, update)
+	}
+}
+
+
+// persistControlState upserts the MYR-269 owner-control read-backs for one VIN
+// into the Go-owned side table. It resolves the vehicle cuid via the VIN cache
+// (the side table is keyed by cuid, not VIN). A resolve or upsert failure is
+// logged and swallowed — control-state persistence is best-effort and must not
+// stall the flush loop or drop the Vehicle-table write. A frame with no control
+// fields is a cheap no-op.
+func (w *Writer) persistControlState(ctx context.Context, vin string, update *VehicleUpdate) {
+	if update.ControlState == nil || !update.ControlState.HasAny() {
+		return
+	}
+	vehicleID, err := w.vinCache.ResolveID(ctx, vin)
+	if err != nil {
+		w.logger.Warn("failed to resolve vehicle id for control-state persist",
+			slog.String("vin", redactVIN(vin)),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	if err := w.vehicles.UpsertControlState(ctx, vehicleID, *update.ControlState); err != nil {
+		w.logger.Warn("failed to persist owner control state",
+			slog.String("vin", redactVIN(vin)),
+			slog.String("error", err.Error()),
+		)
 	}
 }

@@ -53,6 +53,16 @@ func mergeUpdate(dst, src *VehicleUpdate) {
 	dst.TripDistRemaining = mergePtr(dst.TripDistRemaining, src.TripDistRemaining)
 	dst.NavRouteCoordinates = mergePtr(dst.NavRouteCoordinates, src.NavRouteCoordinates)
 
+	// MYR-269: merge the owner-control side-table fields (per-field last-write-
+	// wins), so a control value survives coalescing within a flush window.
+	if src.ControlState != nil {
+		if dst.ControlState == nil {
+			dst.ControlState = src.ControlState
+		} else {
+			mergeControlState(dst.ControlState, src.ControlState)
+		}
+	}
+
 	// Append ClearFields from source so NULL writes survive coalescing.
 	// Deduplicate to avoid redundant SET NULL clauses.
 	for _, col := range src.ClearFields {
