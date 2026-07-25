@@ -86,6 +86,16 @@ func TestServiceStatusMonitor_VehicleDataBackfillOnInService(t *testing.T) {
 		if _, ok := te.Fields[string(FieldChargeState)]; !ok {
 			t.Errorf("chargeState not in published event")
 		}
+		// Charge % must be emitted under FieldSOC ("soc") — the only internal
+		// name that translates to wire "chargeLevel" and is on the owner mask
+		// allow-list. "batteryLevel" is dropped by mask.Apply, so emitting it
+		// there means the charge % never reaches the app (MYR-260 review).
+		if v, ok := te.Fields[string(FieldSOC)]; !ok || v.FloatVal == nil || *v.FloatVal != 80 {
+			t.Errorf("charge %% not emitted under FieldSOC (=80): %+v", te.Fields)
+		}
+		if _, bad := te.Fields[string(FieldBatteryLevel)]; bad {
+			t.Errorf("charge %% emitted under FieldBatteryLevel — dropped by the owner mask")
+		}
 		if te.CreatedAt.IsZero() {
 			t.Errorf("CreatedAt not set (needed for wire lastUpdated)")
 		}

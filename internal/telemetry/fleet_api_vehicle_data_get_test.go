@@ -206,8 +206,13 @@ func TestVehicleDataToFields(t *testing.T) {
 	if v := fields[string(FieldChargePortDoorOpen)]; v.BoolVal == nil || !*v.BoolVal {
 		t.Errorf("FieldChargePortDoorOpen = %+v", v)
 	}
-	if v := fields[string(FieldBatteryLevel)]; v.FloatVal == nil || *v.FloatVal != 55 {
-		t.Errorf("FieldBatteryLevel = %+v", v)
+	// Charge % is emitted under FieldSOC ("soc") — the name that survives the
+	// owner mask (translates to wire "chargeLevel"); NOT FieldBatteryLevel.
+	if v := fields[string(FieldSOC)]; v.FloatVal == nil || *v.FloatVal != 55 {
+		t.Errorf("FieldSOC = %+v", v)
+	}
+	if _, bad := fields[string(FieldBatteryLevel)]; bad {
+		t.Errorf("charge %% emitted under FieldBatteryLevel — dropped by the owner mask")
 	}
 }
 

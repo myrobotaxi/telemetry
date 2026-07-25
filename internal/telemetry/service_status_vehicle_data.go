@@ -151,8 +151,13 @@ func addChargeStateFields(fields map[string]events.TelemetryValue, ch *VehicleDa
 		fields[string(FieldChargePortDoorOpen)] = events.TelemetryValue{BoolVal: ch.ChargePortDoorOpen}
 	}
 	if ch.BatteryLevel != nil {
+		// Emit under FieldSOC ("soc"), NOT FieldBatteryLevel: only "soc"
+		// translates to the wire "chargeLevel" (field_mapping.go) and is on the
+		// owner mask allow-list. "batteryLevel" is dropped by mask.Apply, so the
+		// charge % would never reach the app over live WS (MYR-260 review). Tesla
+		// REST battery_level is the same usable SOC %.
 		bl := float64(*ch.BatteryLevel)
-		fields[string(FieldBatteryLevel)] = events.TelemetryValue{FloatVal: &bl}
+		fields[string(FieldSOC)] = events.TelemetryValue{FloatVal: &bl}
 	}
 }
 
