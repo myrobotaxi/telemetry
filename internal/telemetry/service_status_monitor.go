@@ -10,11 +10,17 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/events"
 )
 
-// serviceStatusInService is the wire/enum value written to Vehicle.status
-// when Tesla's REST `in_service` flag is true. It MUST equal
-// store.VehicleStatusInService ("in_service", vehicle-state-schema.md §2.4);
-// kept as a local const so this package does not import internal/store.
-const serviceStatusInService = "in_service"
+// Status enum values written to Vehicle.status. They MUST equal the
+// store.VehicleStatus values (vehicle-state-schema.md §2.4); kept as local
+// consts so this package does not import internal/store.
+const (
+	serviceStatusInService = "in_service"
+	serviceStatusParked    = "parked" // neutral connected baseline; the live stream refines to driving/charging
+)
+
+// serviceModeFieldKey is the internal telemetry field name for ServiceMode
+// (proto 159) inside a VehicleTelemetryEvent (fields.go FieldServiceMode).
+const serviceModeFieldKey = "serviceMode"
 
 // defaultServiceReadCooldown is the per-VIN debounce window for the
 // connectivity-edge in_service read. A flapping mTLS connection emits
@@ -39,21 +45,28 @@ type VehicleStatusUpdater interface {
 }
 
 // ServiceStatusMonitor surfaces a vehicle's "In Service" status EVENT-DRIVEN
-// (no polling, no timer). It subscribes to ConnectivityEvent and, on each
-// connect/disconnect EDGE for a vehicle, fires exactly ONE authoritative
-// Tesla REST `in_service` read (GET /api/1/vehicles/{vin}) — debounced
-// per-VIN — and persists status=in_service when the flag is true.
+// (no polling, no timer). It owns the persisted Vehicle.status transition
+// BOTH into and out of `in_service`:
 //
-// This is Leg 2 of MYR-259. Leg 1 (the pushed ServiceMode telemetry field,
-// proto 159) drives the LIVE wire status via ws.deriveVehicleStatus; this
-// leg is the authoritative persistence + reconcile that also covers firmware
-// that never emits ServiceMode.
+//   - Transition IN: a ServiceMode (proto 159) OFF→ON telemetry edge, or a
+//     connectivity edge whose authoritative REST `in_service` read is true.
+//   - Transition OUT — the cases the wire-only live derivation cannot persist:
+//   - any connectivity edge (e.g. reconnect) after leaving service: the
+//     debounced REST read returns not-in-service, so the resolved write
+//     persists `parked` (the neutral connected baseline; the live stream
+//     refines to driving/charging as frames arrive).
+//   - a continuously-connected car that never disconnects: a ServiceMode
+//     ON→OFF telemetry edge triggers an authoritative reconcile that
+//     persists `parked` unless REST independently keeps it in service.
 //
-// Precedence note (vehicle-state-schema.md §2.4): this leg only ever WRITES
-// in_service (never clears to parked). A false REST flag leaves the
-// last-known status untouched — the live pipeline (drive-ended→parked, gear
-// frames) owns the transition back out of in_service, and active driving
-// always wins in the live derivation. Read failures are non-fatal.
+// This closes the "stuck in_service" defect: without the OUT transitions the
+// persisted column would only ever leave in_service via a completed drive, so
+// a car that comes back from service and parks WITHOUT driving would read
+// "In Service" forever on GET /api/vehicles and every on-connect snapshot.
+//
+// A genuinely in-service car (ServiceMode on OR REST in_service true) stays
+// in_service — the reconcile never flaps it out while a signal holds. Reads
+// are debounced per-VIN and every failure mode is non-fatal.
 type ServiceStatusMonitor struct {
 	bus      events.Bus
 	reader   FleetVehicleReader
@@ -63,9 +76,10 @@ type ServiceStatusMonitor struct {
 	cooldown time.Duration
 	logger   *slog.Logger
 
-	now      func() time.Time // injectable clock (debounce tests)
-	lastRead sync.Map         // VIN string → time.Time
-	subs     []events.Subscription
+	now         func() time.Time // injectable clock (debounce tests)
+	lastRead    sync.Map         // VIN string → time.Time
+	serviceMode sync.Map         // VIN string → bool (last-seen ServiceMode from the stream)
+	subs        []events.Subscription
 }
 
 // ServiceStatusMonitorOption configures optional monitor dependencies.
@@ -122,23 +136,37 @@ func NewServiceStatusMonitor(
 	return m
 }
 
-// Start subscribes to the connectivity topic. Each edge is handled in the
-// subscription's dedicated goroutine with serial per-subscription delivery,
-// so the per-VIN debounce needs no locking.
+// Start subscribes to the connectivity topic (edge-triggered reads) and the
+// telemetry topic (ServiceMode ON/OFF edges). Each subscription runs in its
+// own goroutine with serial per-subscription delivery; the per-VIN debounce
+// and caches use sync.Maps to stay safe across the two subscriptions.
 func (m *ServiceStatusMonitor) Start() error {
-	sub, err := m.bus.Subscribe(events.TopicConnectivity, m.makeHandler())
+	conn, err := m.bus.Subscribe(events.TopicConnectivity, m.makeConnHandler())
 	if err != nil {
 		return fmt.Errorf("service-status monitor: subscribe connectivity: %w", err)
 	}
-	m.subs = append(m.subs, sub)
+	m.subs = append(m.subs, conn)
+
+	tel, err := m.bus.Subscribe(events.TopicVehicleTelemetry, m.makeTelemetryHandler())
+	if err != nil {
+		m.unsubscribeAll()
+		return fmt.Errorf("service-status monitor: subscribe telemetry: %w", err)
+	}
+	m.subs = append(m.subs, tel)
+
 	m.logger.Info("service-status monitor started",
 		slog.Duration("read_cooldown", m.cooldown),
 	)
 	return nil
 }
 
-// Stop unsubscribes from the connectivity topic.
+// Stop unsubscribes from all topics.
 func (m *ServiceStatusMonitor) Stop() {
+	m.unsubscribeAll()
+	m.logger.Info("service-status monitor stopped")
+}
+
+func (m *ServiceStatusMonitor) unsubscribeAll() {
 	for _, sub := range m.subs {
 		if err := m.bus.Unsubscribe(sub); err != nil {
 			m.logger.Warn("service-status monitor: unsubscribe failed",
@@ -147,17 +175,16 @@ func (m *ServiceStatusMonitor) Stop() {
 		}
 	}
 	m.subs = nil
-	m.logger.Info("service-status monitor stopped")
 }
 
-// makeHandler adapts handleConnectivity to the bus handler signature, giving
-// each edge a fresh detached context so a slow Fleet API read is bounded and
-// unaffected by the parent lifetime.
-func (m *ServiceStatusMonitor) makeHandler() events.Handler {
+// makeConnHandler adapts handleConnectivity to the bus handler signature,
+// giving each edge a fresh detached context so a slow Fleet API read is
+// bounded and unaffected by the parent lifetime.
+func (m *ServiceStatusMonitor) makeConnHandler() events.Handler {
 	return func(event events.Event) {
 		payload, ok := event.Payload.(events.ConnectivityEvent)
 		if !ok {
-			m.logger.Error("service-status monitor: unexpected payload type",
+			m.logger.Error("service-status monitor: unexpected connectivity payload",
 				slog.String("event_id", event.ID),
 			)
 			return
@@ -168,78 +195,157 @@ func (m *ServiceStatusMonitor) makeHandler() events.Handler {
 	}
 }
 
-// handleConnectivity fires ONE debounced in_service read for the edge's VIN
-// and persists status=in_service when Tesla reports the vehicle in service.
-// Every failure mode (debounced, unknown owner, no token, read error, write
-// error) is non-fatal and logged — the last-known status is preserved.
+// makeTelemetryHandler adapts handleTelemetry to the bus handler signature.
+func (m *ServiceStatusMonitor) makeTelemetryHandler() events.Handler {
+	return func(event events.Event) {
+		payload, ok := event.Payload.(events.VehicleTelemetryEvent)
+		if !ok {
+			return // other telemetry payloads are not our concern
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), defaultFleetAPITimeout)
+		defer cancel()
+		m.handleTelemetry(ctx, payload)
+	}
+}
+
+// handleConnectivity resolves + persists the vehicle status on a connect or
+// disconnect edge, then clears the ServiceMode cache on disconnect so a stale
+// service-mode flag cannot leak across a reconnect (mirrors the broadcaster's
+// per-VIN cache-wipe on disconnect).
 func (m *ServiceStatusMonitor) handleConnectivity(ctx context.Context, evt events.ConnectivityEvent) {
-	vin := evt.VIN
-	if !m.allow(vin) {
-		m.logger.Debug("service-status: connectivity edge debounced",
-			slog.String("vin", redactVIN(vin)),
-			slog.String("edge", evt.Status.String()),
-		)
+	m.resolveViaRead(ctx, evt.VIN, evt.Status.String())
+	if evt.Status == events.StatusDisconnected {
+		m.serviceMode.Delete(evt.VIN)
+	}
+}
+
+// handleTelemetry tracks ServiceMode (proto 159) edges from the stream. An
+// OFF→ON edge persists in_service immediately (a definitive live signal); an
+// ON→OFF edge triggers an authoritative reconcile so a continuously-connected
+// car that leaves service self-corrects out of in_service without needing a
+// connectivity edge or a completed drive. Resend frames (unchanged value) are
+// no-ops — only true value transitions act, so there is no Fleet API spam.
+func (m *ServiceStatusMonitor) handleTelemetry(ctx context.Context, evt events.VehicleTelemetryEvent) {
+	tv, ok := evt.Fields[serviceModeFieldKey]
+	if !ok || tv.BoolVal == nil {
 		return
 	}
+	sm := *tv.BoolVal
+	prev, had := m.serviceMode.Load(evt.VIN)
+	m.serviceMode.Store(evt.VIN, sm)
+	prevOn := had && prev.(bool)
 
+	switch {
+	case sm && !prevOn:
+		// OFF/unknown → ON: definitively in service.
+		m.persist(ctx, evt.VIN, serviceStatusInService)
+	case !sm && prevOn:
+		// ON → OFF: left service — reconcile against an authoritative read.
+		m.reconcileServiceModeOff(ctx, evt.VIN)
+	}
+}
+
+// resolveViaRead fires ONE debounced authoritative in_service read for a
+// connectivity edge and persists the resolved status. A cached ServiceMode-on
+// short-circuits to in_service (definitive live signal, no read). A debounced
+// edge or a failed read is skipped (non-fatal, last-known preserved) — no
+// stale write and no Fleet API spam under a flapping connection.
+func (m *ServiceStatusMonitor) resolveViaRead(ctx context.Context, vin, edge string) {
+	if m.serviceModeOn(vin) {
+		m.persist(ctx, vin, serviceStatusInService)
+		return
+	}
+	if !m.allow(vin) {
+		m.logger.Debug("service-status: connectivity edge debounced",
+			slog.String("vin", redactVIN(vin)), slog.String("edge", edge))
+		return
+	}
+	inService, ok := m.readInService(ctx, vin)
+	if !ok {
+		return // non-fatal; leave last-known status
+	}
+	m.persist(ctx, vin, resolveStatus(inService))
+}
+
+// reconcileServiceModeOff is the guaranteed transition-OUT for a
+// continuously-connected car leaving service. ServiceMode is authoritatively
+// OFF (live); an authoritative read decides whether REST independently keeps
+// it in service. On any read failure we TRUST the live ServiceMode-off signal
+// and persist parked — never leaving the car stuck in_service. The debounce is
+// stamped so a coincident connectivity edge does not double-read.
+func (m *ServiceStatusMonitor) reconcileServiceModeOff(ctx context.Context, vin string) {
+	m.stamp(vin)
+	if inService, ok := m.readInService(ctx, vin); ok && inService {
+		// REST still holds it in service (in_service = ServiceMode OR REST).
+		m.persist(ctx, vin, serviceStatusInService)
+		return
+	}
+	m.persist(ctx, vin, serviceStatusParked)
+}
+
+// resolveStatus maps the REST in_service flag to the persisted status. Called
+// only after ServiceMode has been confirmed off, so the OR reduces to the flag.
+func resolveStatus(inService bool) string {
+	if inService {
+		return serviceStatusInService
+	}
+	return serviceStatusParked
+}
+
+// readInService resolves the owner token and reads Tesla's authoritative REST
+// in_service flag. ok is false (and the read is skipped/failed) on any error —
+// every failure is logged and non-fatal.
+func (m *ServiceStatusMonitor) readInService(ctx context.Context, vin string) (inService, ok bool) {
 	userID, err := m.owners.GetVehicleOwner(ctx, vin)
 	if err != nil {
 		m.logger.Warn("service-status: owner lookup failed — skipping in_service read",
-			slog.String("vin", redactVIN(vin)),
-			slog.String("error", err.Error()),
-		)
-		return
+			slog.String("vin", redactVIN(vin)), slog.String("error", err.Error()))
+		return false, false
 	}
-
 	tok, err := m.tokens.Resolve(ctx, userID)
 	if err != nil {
 		m.logger.Warn("service-status: no Tesla token — skipping in_service read",
-			slog.String("vin", redactVIN(vin)),
-			slog.String("user_id", userID),
-		)
-		return
+			slog.String("vin", redactVIN(vin)), slog.String("user_id", userID))
+		return false, false
 	}
-
 	state, err := m.reader.GetVehicle(ctx, tok.AccessToken, vin)
 	if err != nil {
-		// Non-fatal: leave the last-known status. A flaky Fleet API read
-		// must never crash the edge handler or clobber status.
 		m.logger.Warn("service-status: in_service read failed (non-fatal)",
-			slog.String("vin", redactVIN(vin)),
-			slog.String("error", err.Error()),
-		)
-		return
+			slog.String("vin", redactVIN(vin)), slog.String("error", err.Error()))
+		return false, false
 	}
-
-	if !state.InService {
-		// REST authoritatively says not-in-service. Do NOT clobber the
-		// live driving/parked/charging status — the live pipeline owns the
-		// transition out of in_service (§2.4).
-		m.logger.Debug("service-status: vehicle not in service",
-			slog.String("vin", redactVIN(vin)),
-			slog.String("tesla_state", state.State),
-		)
-		return
-	}
-
-	if err := m.updater.UpdateVehicleStatus(ctx, vin, serviceStatusInService); err != nil {
-		m.logger.Warn("service-status: persist in_service failed (non-fatal)",
-			slog.String("vin", redactVIN(vin)),
-			slog.String("error", err.Error()),
-		)
-		return
-	}
-
-	m.logger.Info("vehicle marked in_service (Tesla REST in_service flag)",
-		slog.String("vin", redactVIN(vin)),
-		slog.String("tesla_state", state.State),
-		slog.String("edge", evt.Status.String()),
-	)
+	return state.InService, true
 }
 
-// allow implements the per-VIN debounce. It returns true (and stamps the
+// persist writes the resolved status, non-fatal on failure.
+func (m *ServiceStatusMonitor) persist(ctx context.Context, vin, status string) {
+	if err := m.updater.UpdateVehicleStatus(ctx, vin, status); err != nil {
+		m.logger.Warn("service-status: persist failed (non-fatal)",
+			slog.String("vin", redactVIN(vin)),
+			slog.String("status", status),
+			slog.String("error", err.Error()))
+		return
+	}
+	m.logger.Info("service-status persisted",
+		slog.String("vin", redactVIN(vin)),
+		slog.String("status", status))
+}
+
+// serviceModeOn reports the cached ServiceMode (proto 159) state for a VIN,
+// defaulting to false when none has been seen since the last (re)connect.
+func (m *ServiceStatusMonitor) serviceModeOn(vin string) bool {
+	if v, ok := m.serviceMode.Load(vin); ok {
+		if sm, ok := v.(bool); ok {
+			return sm
+		}
+	}
+	return false
+}
+
+// allow implements the per-VIN read debounce. It returns true (and stamps the
 // read time) only when the cooldown since the last read has elapsed. Serial
-// per-subscription delivery makes this lock-free.
+// per-subscription delivery plus the sync.Map keep it safe across the two
+// subscriptions (connectivity + telemetry).
 func (m *ServiceStatusMonitor) allow(vin string) bool {
 	now := m.now()
 	if v, ok := m.lastRead.Load(vin); ok {
@@ -249,4 +355,10 @@ func (m *ServiceStatusMonitor) allow(vin string) bool {
 	}
 	m.lastRead.Store(vin, now)
 	return true
+}
+
+// stamp records a read time without gating, so a subsequent connectivity edge
+// within the cooldown is debounced.
+func (m *ServiceStatusMonitor) stamp(vin string) {
+	m.lastRead.Store(vin, m.now())
 }
