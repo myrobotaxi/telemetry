@@ -32,6 +32,13 @@ func setupRideRequestRepo(t *testing.T) (*store.RideRequestRepo, cryptox.Encrypt
 	if _, err := testPool.Exec(ctx, `DELETE FROM "User"`); err != nil {
 		t.Fatalf("clean User: %v", err)
 	}
+	// MYR-264 — the requester-identity join now also reads the Apple-native
+	// identity tables; clean them too so a seeded rider never leaks across tests.
+	for _, tbl := range []string{`go_identity_apple`, `go_users`} {
+		if _, err := testPool.Exec(ctx, `DELETE FROM `+tbl); err != nil {
+			t.Fatalf("clean %s: %v", tbl, err)
+		}
+	}
 	enc := newTestEncryptor(t)
 	return store.NewRideRequestRepo(testPool, store.NoopMetrics{}, enc), enc
 }
