@@ -35,7 +35,13 @@ type DriveEndedEvent struct {
 	VIN     string
 	DriveID string
 	Stats   DriveStats
-	EndedAt time.Time
+	// StartedAt is the drive's start instant (vehicle event time), carried so
+	// consumers can correlate the ended drive to a specific leg. The ride
+	// completer (internal/ridecomplete, MYR-265) uses it to distinguish the
+	// leg-2 dropoff drive (started after board) from a delayed leg-1 pickup
+	// drive-end (started before board) — only the former completes the ride.
+	StartedAt time.Time
+	EndedAt   time.Time
 }
 
 // EventTopic returns TopicDriveEnded.
@@ -73,9 +79,9 @@ type DriveStats struct {
 	EnergyDelta      float64       // kWh consumed (positive = used)
 	StartLocation    Location
 	EndLocation      Location
-	StartChargeLevel int           // SOC percent at drive start
-	EndChargeLevel   int           // SOC percent at drive end
-	FSDMiles         float64       // FSD miles this trip
-	FSDPercentage    float64       // (FSDMiles / Distance) * 100
-	RoutePoints      []RoutePoint  // full route for persistence
+	StartChargeLevel int          // SOC percent at drive start
+	EndChargeLevel   int          // SOC percent at drive end
+	FSDMiles         float64      // FSD miles this trip
+	FSDPercentage    float64      // (FSDMiles / Distance) * 100
+	RoutePoints      []RoutePoint // full route for persistence
 }

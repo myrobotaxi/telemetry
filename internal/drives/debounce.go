@@ -206,17 +206,20 @@ func (d *Detector) endDrive(state *vehicleState, vin string) {
 	)
 
 	driveID := drive.id
+	startedAt := drive.startedAt
 	endedAt := drive.lastTimestamp
 	resetToIdle(state)
 	d.activeCount.Add(-1)
 	d.metrics.SetActiveVehicles(int(d.activeCount.Load()))
 
-	// Publish DriveEndedEvent.
+	// Publish DriveEndedEvent. StartedAt lets ride-completion correlate the
+	// ended drive to the leg-2 dropoff drive (MYR-265).
 	evt := events.NewEvent(events.DriveEndedEvent{
-		VIN:     vin,
-		DriveID: driveID,
-		Stats:   stats,
-		EndedAt: endedAt,
+		VIN:       vin,
+		DriveID:   driveID,
+		Stats:     stats,
+		StartedAt: startedAt,
+		EndedAt:   endedAt,
 	})
 	if err := d.bus.Publish(d.ctx, evt); err != nil {
 		d.logger.Error("failed to publish DriveEndedEvent",

@@ -85,3 +85,40 @@ func (r *RideRequestRepo) ListInterruptedDispatches(ctx context.Context, olderTh
 	}
 	return ids, nil
 }
+
+// ClaimDropoffDispatch is the leg-2 (dropoff) analogue of ClaimDispatch
+// (MYR-265): it stamps dropoff_dispatched_at only when still NULL, returning
+// claimed=true when this call won the exactly-once claim or claimed=false when
+// a prior delivery already claimed it (the caller must skip). A missing id
+// yields claimed=false (nothing to dispatch), not an error.
+func (r *RideRequestRepo) ClaimDropoffDispatch(ctx context.Context, id string) (bool, error) {
+	start := time.Now()
+	var claimedID string
+	err := r.pool.QueryRow(ctx, queryRideRequestClaimDropoffDispatch, id).Scan(&claimedID)
+	r.metrics.ObserveQueryDuration("ride_request.claim_dropoff_dispatch", time.Since(start).Seconds())
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		r.metrics.IncQueryError("ride_request.claim_dropoff_dispatch")
+		return false, fmt.Errorf("RideRequestRepo.ClaimDropoffDispatch(%s): %w", id, err)
+	}
+	return true, nil
+}
+
+// RecordDropoffDispatchOutcome persists the resolved leg-2 dispatch status and,
+// for a failure, the opaque error code (errCode is nil for sent/skipped). The
+// row is expected already claimed; a missing id returns ErrRideRequestNotFound.
+func (r *RideRequestRepo) RecordDropoffDispatchOutcome(ctx context.Context, id string, status DispatchStatus, errCode *string) error {
+	start := time.Now()
+	tag, err := r.pool.Exec(ctx, queryRideRequestRecordDropoffDispatch, id, string(status), errCode)
+	r.metrics.ObserveQueryDuration("ride_request.record_dropoff_dispatch", time.Since(start).Seconds())
+	if err != nil {
+		r.metrics.IncQueryError("ride_request.record_dropoff_dispatch")
+		return fmt.Errorf("RideRequestRepo.RecordDropoffDispatchOutcome(%s): %w", id, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("RideRequestRepo.RecordDropoffDispatchOutcome(%s): %w", id, ErrRideRequestNotFound)
+	}
+	return nil
+}

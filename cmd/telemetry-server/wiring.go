@@ -351,6 +351,12 @@ func setupRideRequestEndpoints(deps httpRouteDeps, vehicles telemetry.VehicleSna
 	deps.srv.HandleFunc("GET /api/ride-requests/{id}", rideHandler.ServeGet)
 	deps.srv.HandleFunc("POST /api/ride-requests/{id}/cancel", rideHandler.ServeCancel)
 
+	// MYR-265: rider board endpoint — the guarded accepted→enroute transition
+	// (leg 2, rider aboard). A successful board publishes the ride.boarded seam
+	// the nav dispatcher subscribes to for the DROPOFF nav push. Rider-only,
+	// idempotent (re-board when already enroute is a 200 no-op).
+	deps.srv.HandleFunc("POST /api/ride-requests/{id}/board", rideHandler.ServeBoard)
+
 	// MYR-175: owner-facing surface. The literal /incoming segment takes
 	// precedence over the {id} wildcard in Go's ServeMux, so both routes
 	// coexist. Accept additionally publishes the ride.accepted dispatch

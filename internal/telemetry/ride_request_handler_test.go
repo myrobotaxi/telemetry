@@ -204,6 +204,7 @@ func rideMux(h *RideRequestHandler) *http.ServeMux {
 	mux.HandleFunc("GET /api/ride-requests", h.ServeList)
 	mux.HandleFunc("GET /api/ride-requests/{id}", h.ServeGet)
 	mux.HandleFunc("POST /api/ride-requests/{id}/cancel", h.ServeCancel)
+	mux.HandleFunc("POST /api/ride-requests/{id}/board", h.ServeBoard)
 	// Owner surface (MYR-175) — mirrors the production wiring, including the
 	// literal-vs-wildcard coexistence of /incoming and /{id}.
 	mux.HandleFunc("GET /api/ride-requests/incoming", h.ServeIncoming)

@@ -69,6 +69,12 @@ type fakeStore struct {
 	recordErr    error
 	recordCtxErr error // ctx.Err() observed at RecordDispatchOutcome time
 	recordCtxSet bool
+
+	// Leg-2 (dropoff) tracking, independent of leg 1 (MYR-265).
+	dropClaimed  bool
+	dropClaimErr error
+	dropClaimCnt int
+	dropRecorded []recordCall
 }
 
 func (f *fakeStore) ClaimDispatch(context.Context, string) (bool, error) {
@@ -98,6 +104,30 @@ func (f *fakeStore) RecordDispatchOutcome(ctx context.Context, _ string, status 
 		rc.code = *errCode
 	}
 	f.recorded = append(f.recorded, rc)
+	return nil
+}
+
+func (f *fakeStore) ClaimDropoffDispatch(context.Context, string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dropClaimCnt++
+	if f.dropClaimErr != nil {
+		return false, f.dropClaimErr
+	}
+	if f.dropClaimCnt == 1 {
+		return f.dropClaimed, nil
+	}
+	return false, nil
+}
+
+func (f *fakeStore) RecordDropoffDispatchOutcome(_ context.Context, _ string, status Outcome, errCode *string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	rc := recordCall{status: status}
+	if errCode != nil {
+		rc.code = *errCode
+	}
+	f.dropRecorded = append(f.dropRecorded, rc)
 	return nil
 }
 
@@ -188,8 +218,8 @@ func TestPickupShareValue_FullPrecision(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := pickupShareValue(tt.lat, tt.lon); got != tt.want {
-				t.Errorf("pickupShareValue(%v,%v) = %q, want %q", tt.lat, tt.lon, got, tt.want)
+			if got := coordShareValue(tt.lat, tt.lon); got != tt.want {
+				t.Errorf("coordShareValue(%v,%v) = %q, want %q", tt.lat, tt.lon, got, tt.want)
 			}
 		})
 	}
@@ -683,6 +713,14 @@ func (s *concurrentStore) RecordDispatchOutcome(_ context.Context, id string, st
 	return nil
 }
 
+func (s *concurrentStore) ClaimDropoffDispatch(ctx context.Context, id string) (bool, error) {
+	return s.ClaimDispatch(ctx, id)
+}
+
+func (s *concurrentStore) RecordDropoffDispatchOutcome(ctx context.Context, id string, status Outcome, code *string) error {
+	return s.RecordDispatchOutcome(ctx, id, status, code)
+}
+
 func (s *concurrentStore) get(id string) (recordCall, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -790,6 +828,14 @@ func (s *reconcileStore) RecordDispatchOutcome(_ context.Context, id string, sta
 	}
 	s.recorded[id] = rc
 	return nil
+}
+
+func (s *reconcileStore) ClaimDropoffDispatch(context.Context, string) (bool, error) {
+	return true, nil
+}
+
+func (s *reconcileStore) RecordDropoffDispatchOutcome(ctx context.Context, id string, status Outcome, code *string) error {
+	return s.RecordDispatchOutcome(ctx, id, status, code)
 }
 
 func TestReconcile(t *testing.T) {
