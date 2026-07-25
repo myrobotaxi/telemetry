@@ -99,6 +99,19 @@ const (
 	// UI rather than surfacing a generic failure (rest-api.md §7.8). SDK
 	// consumers branch on the typed code and MUST NOT auto-retry the create.
 	ErrCodeRideActive ErrorCode = "ride_active"
+	// ErrCodeVehicleUnavailable is REST 409 (MYR-277) — an owner tried to
+	// ACCEPT a ride request whose target vehicle cannot currently fulfill it:
+	// the vehicle's persisted status is `in_service` (owner put it into
+	// service) or `offline` (unreachable). The transition is otherwise legal
+	// (the ride is still `requested`), so this is NOT ErrCodeConflict (an
+	// illegal lifecycle *transition* on a known ride); it is a capability gate
+	// on the target vehicle. The gate reads the CURRENT persisted status at
+	// accept time. `parked`/`driving`/`charging` are dispatchable and allow the
+	// accept. REST-only: the WS transport never emits it. SDK consumers branch
+	// on the typed code and surface the vehicle as unavailable; they MAY retry
+	// once the owner brings the vehicle back out of service / online
+	// (rest-api.md §7.8).
+	ErrCodeVehicleUnavailable ErrorCode = "vehicle_unavailable"
 )
 
 // Vehicle-command codes added by MYR-180 (Tesla signed vehicle-command
@@ -148,6 +161,7 @@ func AllCodes() []ErrorCode {
 		ErrCodeSnapshotRequired,
 		ErrCodeConflict,
 		ErrCodeRideActive,
+		ErrCodeVehicleUnavailable,
 		ErrCodeKeyNotPaired,
 		ErrCodeVehicleAsleep,
 		ErrCodeCommandFailed,

@@ -36,6 +36,7 @@ var reachabilityMatrix = []reachability{
 	{code: ErrCodeInternalError, scenario: "internal/telemetry/vehicle_status_handler_test.go (REST 500 lookup failure)"},
 	{code: ErrCodeConflict, scenario: "internal/telemetry/ride_request_handler_test.go (REST 409 illegal lifecycle transition)"},
 	{code: ErrCodeRideActive, scenario: "internal/telemetry/ride_request_handler_test.go (REST 409 second open instant ride per rider)"},
+	{code: ErrCodeVehicleUnavailable, scenario: "internal/telemetry/ride_request_owner_handler_test.go (REST 409 accept for an in_service/offline vehicle)"},
 	{code: ErrCodeRateLimited, scenario: "internal/ws/handler_ratelimit_test.go (HTTP 429 envelope on upgrade)"},
 	{code: ErrCodePermissionDenied, scenario: "internal/commands/executor_test.go (scope gating + Tesla-rejected), internal/telemetry/vehicle_command_handler_test.go"},
 	{code: ErrCodeKeyNotPaired, scenario: "internal/commands/executor_test.go (transport disabled + not-paired outcome)"},
