@@ -802,8 +802,9 @@ func TestDecoder_DecodePayload_UntrackedFieldsSkipped(t *testing.T) {
 	dec := NewDecoder()
 
 	payload := makePayload([]*tpb.Datum{
-		// SeatHeaterRearLeft is not in our fieldMap — should be silently skipped.
-		makeDatum(tpb.Field_SeatHeaterRearLeft, stringVal("3")),
+		// BrakePedal is not in our fieldMap — should be silently skipped.
+		// (SeatHeaterRearLeft became tracked in MYR-252.)
+		makeDatum(tpb.Field_BrakePedal, stringVal("1")),
 		makeDatum(tpb.Field_VehicleSpeed, stringVal("70")),
 	})
 
@@ -958,7 +959,8 @@ func TestIsTrackedField(t *testing.T) {
 		{tpb.Field_Location, true},
 		{tpb.Field_Gear, true},
 		{tpb.Field_SeatHeaterLeft, true},
-		{tpb.Field_SeatHeaterRearLeft, false},
+		{tpb.Field_SeatHeaterRearLeft, true}, // now tracked (MYR-252 Group B)
+		{tpb.Field_BrakePedal, false},        // still untracked
 		{tpb.Field_Unknown, false},
 	}
 

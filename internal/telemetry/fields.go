@@ -53,18 +53,34 @@ const (
 	FieldLatAccel             FieldName = "lateralAcceleration"
 	FieldLongAccel            FieldName = "longitudinalAcceleration"
 	FieldMilesSinceReset      FieldName = "milesSinceReset"
+	// MYR-252 Group B cabin-control read-back internal names. These equal
+	// the wire field names in vehicle-state.schema.json so mapFieldsForClient
+	// passes them through unchanged — except doorState, which is bit-decoded
+	// into frunkOpen/trunkOpen in internal/ws (see converters_doors.go).
+	FieldHvacAutoMode         FieldName = "hvacAutoMode"
+	FieldHvacACEnabled        FieldName = "hvacAcEnabled"
+	FieldSeatHeaterRearLeft   FieldName = "seatHeaterRearLeft"
+	FieldSeatHeaterRearCenter FieldName = "seatHeaterRearCenter"
+	FieldSeatHeaterRearRight  FieldName = "seatHeaterRearRight"
+	FieldSeatCoolerLeft       FieldName = "seatCoolerLeft"
+	FieldSeatCoolerRight      FieldName = "seatCoolerRight"
+	FieldSeatVentEnabled      FieldName = "seatVentEnabled"
+	FieldChargePortDoorOpen   FieldName = "chargePortDoorOpen"
+	FieldDoorState            FieldName = "doorState"
+	FieldMediaPlaybackStatus  FieldName = "mediaPlaybackStatus"
+	FieldMediaVolume          FieldName = "mediaVolume"
 )
 
 // fieldMap maps Tesla's proto Field enum values to our internal field names.
 // Only fields that MyRoboTaxi cares about are included. Unlisted fields are
 // silently skipped during decoding.
 var fieldMap = map[tpb.Field]FieldName{
-	tpb.Field_VehicleSpeed:                FieldSpeed,
-	tpb.Field_Location:                    FieldLocation,
-	tpb.Field_GpsHeading:                  FieldHeading,
-	tpb.Field_Gear:                        FieldGear,
-	tpb.Field_Soc:                         FieldSOC,
-	tpb.Field_EstBatteryRange:             FieldEstBatteryRange,
+	tpb.Field_VehicleSpeed:    FieldSpeed,
+	tpb.Field_Location:        FieldLocation,
+	tpb.Field_GpsHeading:      FieldHeading,
+	tpb.Field_Gear:            FieldGear,
+	tpb.Field_Soc:             FieldSOC,
+	tpb.Field_EstBatteryRange: FieldEstBatteryRange,
 	// MYR-42 (2026-04-23): chargeState sources from proto 179 DetailedChargeState,
 	// NOT proto 2 ChargeState. Empirical capture showed Tesla's recent firmware
 	// (≥ 2024.44.25) accepts proto 2 in fleet_telemetry_config (synced: true)
@@ -106,6 +122,22 @@ var fieldMap = map[tpb.Field]FieldName{
 	tpb.Field_LateralAcceleration:         FieldLatAccel,
 	tpb.Field_LongitudinalAcceleration:    FieldLongAccel,
 	tpb.Field_MilesSinceReset:             FieldMilesSinceReset,
+	// MYR-252 Group B cabin-control read-back. Group A climate/lock/seat
+	// fields (HvacPower, HvacFanSpeed, Hvac{Left,Right}TemperatureRequest,
+	// Locked, SeatHeater{Left,Right}) were already mapped above; MYR-252
+	// contracts them + adds them to the owner mask allow-list.
+	tpb.Field_HvacAutoMode:                 FieldHvacAutoMode,
+	tpb.Field_HvacACEnabled:                FieldHvacACEnabled,
+	tpb.Field_SeatHeaterRearLeft:           FieldSeatHeaterRearLeft,
+	tpb.Field_SeatHeaterRearCenter:         FieldSeatHeaterRearCenter,
+	tpb.Field_SeatHeaterRearRight:          FieldSeatHeaterRearRight,
+	tpb.Field_ClimateSeatCoolingFrontLeft:  FieldSeatCoolerLeft,
+	tpb.Field_ClimateSeatCoolingFrontRight: FieldSeatCoolerRight,
+	tpb.Field_SeatVentEnabled:              FieldSeatVentEnabled,
+	tpb.Field_ChargePortDoorOpen:           FieldChargePortDoorOpen,
+	tpb.Field_DoorState:                    FieldDoorState,
+	tpb.Field_MediaPlaybackStatus:          FieldMediaPlaybackStatus,
+	tpb.Field_MediaAudioVolume:             FieldMediaVolume,
 	// Field_EstimatedHoursToChargeTermination (190) is intentionally NOT in fieldMap
 	// — it remains observation-only via the MYR-25 debug log in decoder.go pending
 	// the Trip Planner Supercharger capture that MYR-28's §7.1 flip condition
