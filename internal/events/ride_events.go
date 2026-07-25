@@ -97,15 +97,15 @@ type RideAcceptedEvent struct {
 // EventTopic returns TopicRideAccepted.
 func (RideAcceptedEvent) EventTopic() Topic { return TopicRideAccepted }
 
-// RideBoardedEvent is the leg-2 dispatch seam (MYR-265): published once when a
-// rider boards a ride — the guarded accepted→enroute transition (POST
-// /api/ride-requests/{id}/board). It carries the DROPOFF place the nav-dispatch
-// pipeline pushes as the car's new Tesla navigation destination for leg 2
-// (rider aboard, car en route to dropoff). Coordinates are P1 GPS data —
-// internal-only, never logged. Like RideAcceptedEvent it never reaches the WS
-// broadcast path; the client-visible board signal is the summary
+// RideStartedEvent is the leg-2 dispatch seam (MYR-270, was RideBoardedEvent in
+// MYR-265): published once when the RIDER starts the ride — the guarded
+// arrived→enroute transition (POST /api/ride-requests/{id}/start). It carries
+// the DROPOFF place the nav-dispatch pipeline pushes as the car's new Tesla
+// navigation destination for leg 2 (car en route to dropoff). Coordinates are
+// P1 GPS data — internal-only, never logged. Like RideAcceptedEvent it never
+// reaches the WS broadcast path; the client-visible start signal is the summary
 // `ride_status_changed` (status `enroute`).
-type RideBoardedEvent struct {
+type RideStartedEvent struct {
 	BasePayload
 	RideRequestID string
 	VehicleID     string
@@ -113,5 +113,5 @@ type RideBoardedEvent struct {
 	Dropoff       RidePlace
 }
 
-// EventTopic returns TopicRideBoarded.
-func (RideBoardedEvent) EventTopic() Topic { return TopicRideBoarded }
+// EventTopic returns TopicRideStarted.
+func (RideStartedEvent) EventTopic() Topic { return TopicRideStarted }

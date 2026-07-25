@@ -36,10 +36,8 @@ type DriveEndedEvent struct {
 	DriveID string
 	Stats   DriveStats
 	// StartedAt is the drive's start instant (vehicle event time), carried so
-	// consumers can correlate the ended drive to a specific leg. The ride
-	// completer (internal/ridecomplete, MYR-265) uses it to distinguish the
-	// leg-2 dropoff drive (started after board) from a delayed leg-1 pickup
-	// drive-end (started before board) — only the former completes the ride.
+	// consumers (the WS drive_ended frame and the drive persistence mapper) can
+	// stamp the drive's start time without a separate lookup.
 	StartedAt time.Time
 	EndedAt   time.Time
 }
