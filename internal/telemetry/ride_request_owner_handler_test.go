@@ -149,6 +149,88 @@ func TestRideRequestHandler_AcceptDecline(t *testing.T) {
 	}
 }
 
+// TestRideRequestHandler_Accept_VehicleAvailabilityGate seals the MYR-277
+// dispatch-capability gate: an owner may accept a ride only for a vehicle that
+// can currently fulfill it. `in_service` (owner put it into service) and
+// `offline` (unreachable) are blocked with 409 vehicle_unavailable and must
+// NOT transition the ride or publish any event (neither the status change nor
+// the dispatch seam). `parked`/`driving`/`charging` are dispatchable and let
+// the accept proceed to the guarded requested->accepted write. The gate reads
+// the vehicle's CURRENT persisted status at accept time (via the snapshot
+// reader), independent of the ride row's lifecycle state.
+func TestRideRequestHandler_Accept_VehicleAvailabilityGate(t *testing.T) {
+	const owner = rideOtherUsr
+
+	tests := []struct {
+		name          string
+		vehicleStatus string
+		wantStatus    int
+		wantErrCode   wserrors.ErrorCode
+		wantAccepted  bool
+	}{
+		{name: "in_service blocks accept", vehicleStatus: "in_service", wantStatus: http.StatusConflict, wantErrCode: wserrors.ErrCodeVehicleUnavailable},
+		{name: "offline blocks accept", vehicleStatus: "offline", wantStatus: http.StatusConflict, wantErrCode: wserrors.ErrCodeVehicleUnavailable},
+		{name: "parked allows accept", vehicleStatus: "parked", wantStatus: http.StatusOK, wantAccepted: true},
+		{name: "driving allows accept", vehicleStatus: "driving", wantStatus: http.StatusOK, wantAccepted: true},
+		{name: "charging allows accept", vehicleStatus: "charging", wantStatus: http.StatusOK, wantAccepted: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &fakeRideStore{getRec: fixtureRideData(owner, rideStatusRequested)}
+			pub := &fakeRidePublisher{}
+			row := fixtureSnapshotRow(owner)
+			row.Status = tt.vehicleStatus
+			h := newRideHandler(store, &stubVehicleSnapshotReader{row: row}, pub, owner)
+			rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/accept", "", rideAuthOK)
+
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status: got %d want %d. body=%s", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+
+			if !tt.wantAccepted {
+				assertErrEnvelope(t, rec, tt.wantStatus, tt.wantErrCode)
+				// A blocked accept must not transition the ride nor publish
+				// anything (no status-change frame, no dispatch seam).
+				if store.updateCalls != 0 {
+					t.Errorf("blocked accept must not call UpdateStatusFrom, got %d", store.updateCalls)
+				}
+				if len(pub.events) != 0 {
+					t.Errorf("blocked accept must publish no events, got %d", len(pub.events))
+				}
+				return
+			}
+
+			if store.updatedState != rideStatusAccepted {
+				t.Errorf("allowed accept: UpdateStatus arg got %q want %q", store.updatedState, rideStatusAccepted)
+			}
+			// A successful accept emits ride_status_changed + the dispatch seam.
+			if len(pub.events) != 2 {
+				t.Fatalf("allowed accept: events got %d want 2", len(pub.events))
+			}
+		})
+	}
+}
+
+// TestRideRequestHandler_Accept_VehicleLookupFailsClosed asserts the gate fails
+// CLOSED: if the vehicle's status cannot be read at accept time the server
+// returns 500 and does NOT accept the ride (we never dispatch a ride whose
+// vehicle we cannot confirm can serve it).
+func TestRideRequestHandler_Accept_VehicleLookupFailsClosed(t *testing.T) {
+	const owner = rideOtherUsr
+	store := &fakeRideStore{getRec: fixtureRideData(owner, rideStatusRequested)}
+	pub := &fakeRidePublisher{}
+	h := newRideHandler(store, &stubVehicleSnapshotReader{err: fmtNotFound()}, pub, owner)
+	rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/accept", "", rideAuthOK)
+	assertErrEnvelope(t, rec, http.StatusInternalServerError, wserrors.ErrCodeInternalError)
+	if store.updateCalls != 0 {
+		t.Errorf("fail-closed accept must not transition the ride, got %d update calls", store.updateCalls)
+	}
+	if len(pub.events) != 0 {
+		t.Errorf("fail-closed accept must publish no events, got %d", len(pub.events))
+	}
+}
+
 // TestRideRequestHandler_Accept_DispatchExactlyOnce seals the double-accept
 // (owner double-tap / two devices) semantics: the WINNING guarded write
 // publishes the ride.accepted dispatch seam exactly once; a LOSING accept —
