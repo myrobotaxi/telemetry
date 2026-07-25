@@ -17,6 +17,11 @@ type fakeVehicleReader struct {
 	calls int
 	state FleetVehicleState
 	err   error
+
+	// vehicle_data (MYR-260) knobs.
+	dataCalls int
+	data      *VehicleData
+	dataErr   error
 }
 
 func (f *fakeVehicleReader) GetVehicle(_ context.Context, _, vin string) (*FleetVehicleState, error) {
@@ -35,6 +40,22 @@ func (f *fakeVehicleReader) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
+}
+
+func (f *fakeVehicleReader) GetVehicleData(_ context.Context, _, _ string) (*VehicleData, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dataCalls++
+	if f.dataErr != nil {
+		return nil, f.dataErr
+	}
+	return f.data, nil
+}
+
+func (f *fakeVehicleReader) dataCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.dataCalls
 }
 
 // fakeTokenResolver and stubVehicleOwner are shared with the teardown /
