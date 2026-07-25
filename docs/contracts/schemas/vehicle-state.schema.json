@@ -59,7 +59,7 @@
     "status": {
       "type": "string",
       "enum": ["driving", "parked", "charging", "offline", "in_service"],
-      "description": "Derived vehicle status. Part of the gear atomic group -- updated atomically with gearPosition. When gearPosition is D or R, status is 'driving'; otherwise 'parked'. The 'charging', 'offline', and 'in_service' states are set by server-side logic.",
+      "description": "Derived vehicle status. Part of the gear atomic group -- updated atomically with gearPosition. When gearPosition is D or R, status is 'driving' (driving outranks every other state); otherwise 'in_service' when a service signal is set, else 'parked'. The 'in_service' state (MYR-259) is set when the pushed ServiceMode field (Tesla proto 159) is on OR Tesla's REST in_service bool is true, and outranks parked/charging/offline. The 'charging' and 'offline' states are set by other server-side logic. See vehicle-state-schema.md section 2.4.",
       "x-classification": "P0",
       "x-atomic-group": "gear"
     },

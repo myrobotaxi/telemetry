@@ -614,7 +614,7 @@ No request body, no query parameters in v1. Pagination (`cursor`, `limit`) is re
 | `year` | `integer` | P0 | Model year. |
 | `color` | `string` | P0 | Display color. |
 | `vinLast4` | `string` | P0 | Last 4 characters of the VIN — full VIN is never emitted per `data-classification.md` §1.5 + `redactVIN()`. |
-| `status` | `string` (enum) | P0 | One of `driving`, `parked`, `charging`, `offline`, `in_service`. Mirrors `VehicleStatus` Prisma enum. |
+| `status` | `string` (enum) | P0 | One of `driving`, `parked`, `charging`, `offline`, `in_service`. Mirrors `VehicleStatus` Prisma enum. `in_service` is derived + persisted as of MYR-259 (`ServiceMode` proto 159 push OR Tesla REST `in_service`; see `vehicle-state-schema.md` §2.4) — additive, always in the enum. |
 | `chargeLevel` | `integer` | P0 | Battery state of charge, 0–100. Lightweight indicator for the catalog view; full charge group lives in `/snapshot`. |
 | `estimatedRange` | `integer` | P0 | Estimated remaining range in miles. Same lightweight rationale. |
 | `lastUpdated` | `string` (ISO 8601) | P0 | Timestamp of the last telemetry write to this vehicle. The catalog uses it to render "last seen N minutes ago." |
