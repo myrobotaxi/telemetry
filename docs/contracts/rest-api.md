@@ -1809,18 +1809,25 @@ Authorization: Bearer <app session JWT>        # owner identity = JWT sub
    which rides the same forwarded/unsigned proxy path as the GET status read, NOT
    the JWS-signed POST push). Any failure/404 is **non-fatal** — logged, then
    `streamConfigDeleted:false`; the local teardown still runs.
-4. Authoritative local teardown transaction (`store.OwnerTeardown`, owner-scoped):
-   DELETE the `Vehicle` (cascades `Drive`/`TripStop`/vehicle-scoped `Invite` +
-   encrypted route blobs; fires the `vehicle_deleted` NOTIFY that closes WS/mTLS
-   streams + evicts caches — data-lifecycle.md §3.5). On the owner's **last**
-   vehicle it also DELETEs the Tesla `Account` tokens and resets `Settings`
+4. Authoritative local teardown transaction (`store.OwnerTeardown`, owner-scoped).
+   It first `SELECT … FOR UPDATE`-locks the owner's vehicle set (serializing
+   concurrent same-owner teardowns so the last-vehicle decision is race-safe),
+   DELETEs the Go-owned `go_ride_requests` rows for the vehicle (P1 encrypted
+   pickup/dropoff GPS + passenger PII — NO FK to `Vehicle`, so the cascade never
+   reaches them; a complete removal deletes them explicitly), then DELETEs the
+   `Vehicle` (cascades `Drive`/`TripStop`/vehicle-scoped `Invite` + encrypted
+   route blobs; fires the `vehicle_deleted` NOTIFY that closes WS/mTLS streams +
+   evicts caches — data-lifecycle.md §3.5). On the owner's **last** vehicle it
+   also DELETEs the Tesla `Account` tokens and resets `Settings`
    (`teslaLinked=false`, `virtualKeyPaired=false`). Writes the user-initiated
    `vehicle_deleted` AuditLog row in the same transaction (CG-DL-3).
 5. Respond `200` with the honest post-state + owner-action items.
 
-**Idempotent.** Removing an already-removed car is a clean no-op: the writer
-affects zero rows and returns success with no duplicate audit row (a repeated
-DELETE typically 404s once the row is gone).
+**Idempotent (§4.5, "equivalent final state").** A repeated DELETE of an
+already-removed car returns **`404 not_found`** — clients MAY treat that as a
+successful terminal state. No duplicate audit row is written on a re-remove.
+(The writer's zero-rows `AlreadyGone` success path exists only for the narrow
+race where the row is deleted between the ownership lookup and the teardown.)
 
 **OAuth revoke & virtual key — owner-only, by design.** Deleting our `Account`
 tokens removes OUR access; it does NOT revoke the Tesla grant (there is no

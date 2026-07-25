@@ -65,20 +65,30 @@ type TeardownResult struct {
 	DriveCount int
 }
 
-// queryTeardownExists checks the target vehicle exists AND is owned by the
-// caller — the owner scope is baked into every teardown statement.
-const queryTeardownExists = `
-SELECT count(*) FROM "Vehicle" WHERE "id" = $1 AND "userId" = $2`
+// queryTeardownLockOwnerVehicles reads AND row-locks the owner's entire
+// vehicle set (`FOR UPDATE`) in one shot. This is the load-bearing
+// concurrency guard: two teardowns for the SAME owner serialize on these
+// locks, so the last-vehicle decision below cannot race (a plain unlocked
+// count at Read Committed let two concurrent removals of different cars each
+// see count==2, neither clear the Account → orphaned tokens). The returned id
+// set gives both the owner-scoped existence check (target ∈ set) and the
+// last-vehicle test (len==1), with no second query.
+const queryTeardownLockOwnerVehicles = `
+SELECT "id" FROM "Vehicle" WHERE "userId" = $1 FOR UPDATE`
 
 // queryTeardownDriveCount counts the drives that will cascade with the
 // vehicle. Read before the delete so the count lands in the audit metadata.
 const queryTeardownDriveCount = `
 SELECT count(*) FROM "Drive" WHERE "vehicleId" = $1`
 
-// queryTeardownOwnerVehicleCount counts the owner's vehicles. Read before the
-// delete: a count of exactly 1 means the target is the owner's last vehicle.
-const queryTeardownOwnerVehicleCount = `
-SELECT count(*) FROM "Vehicle" WHERE "userId" = $1`
+// queryTeardownDeleteRideRequests deletes the Go-owned ride-request rows for
+// the vehicle. These hold P1 encrypted pickup/dropoff GPS + passenger PII and
+// have NO FK to "Vehicle" (CG-DL-9 forbids a Go migration FK-referencing the
+// Prisma-owned table), so the Vehicle cascade does NOT reach them — a
+// "complete removal" must delete them explicitly. go_ride_requests is the
+// only Go-owned table keyed by vehicle_id (0002_ride_requests migration).
+const queryTeardownDeleteRideRequests = `
+DELETE FROM go_ride_requests WHERE vehicle_id = $1`
 
 // queryTeardownDeleteVehicle deletes the target vehicle, owner-scoped. The
 // Prisma FKs cascade Drive / TripStop / vehicle-scoped Invite / the encrypted
@@ -112,15 +122,20 @@ type teardownAuditMetadata struct {
 	WasLastVehicle bool `json:"wasLastVehicle"`
 }
 
-// RemoveVehicle removes a single vehicle owned by userID, transactionally and
-// idempotently. Sequence (one tx):
+// RemoveVehicle removes a single vehicle owned by userID, transactionally,
+// idempotently, and ISOLATED against concurrent same-owner teardowns. Sequence
+// (one tx):
 //
-//  1. Verify the vehicle exists for this owner — else clean no-op success.
-//  2. Read driveCount + owner vehicle count (→ wasLastVehicle) BEFORE deleting.
+//  1. `SELECT … FOR UPDATE` the owner's vehicle set — row locks serialize
+//     concurrent same-owner teardowns, so the last-vehicle test is race-safe
+//     (not merely atomic). Target ∉ set → clean no-op success.
+//  2. wasLast = the target is the only vehicle in the locked set; read the
+//     cascade drive count for the audit metadata.
 //  3. INSERT the user-initiated `vehicle_deleted` audit row (CG-DL-3 requires
 //     the audit BEFORE the destructive delete, same tx).
-//  4. DELETE the vehicle (owner-scoped; cascades + fires `vehicle_deleted`
-//     NOTIFY).
+//  4. DELETE the Go-owned go_ride_requests rows (P1 GPS + passenger PII, no FK
+//     cascade), then DELETE the vehicle (owner-scoped; cascades Drive/TripStop/
+//     Invite/route blobs + fires `vehicle_deleted` NOTIFY).
 //  5. On a last-vehicle removal: DELETE the Tesla Account tokens + reset the
 //     Settings link/pairing flags.
 //
@@ -139,12 +154,14 @@ func (t *OwnerTeardown) RemoveVehicle(ctx context.Context, userID, vehicleID str
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op after Commit
 
-	// (1) Owner-scoped existence check. Zero rows → idempotent no-op.
-	var exists int
-	if err := tx.QueryRow(ctx, queryTeardownExists, vehicleID, userID).Scan(&exists); err != nil {
-		return TeardownResult{}, fmt.Errorf("store.RemoveVehicle(user=%s): existence check: %w", userID, err)
+	// (1) Lock the owner's whole vehicle set. FOR UPDATE serializes concurrent
+	// same-owner teardowns so the last-vehicle decision below cannot race. The
+	// locked set gives both the existence check and the last-vehicle test.
+	ownerCount, exists, err := lockOwnerVehicleSet(ctx, tx, userID, vehicleID)
+	if err != nil {
+		return TeardownResult{}, err
 	}
-	if exists == 0 {
+	if !exists {
 		// Already gone (or never owned by this user). Commit the empty tx and
 		// report a clean no-op — no delete, no audit row (avoids duplicate
 		// audit rows on re-run; car-offboarding.md §5.3).
@@ -154,16 +171,13 @@ func (t *OwnerTeardown) RemoveVehicle(ctx context.Context, userID, vehicleID str
 		return TeardownResult{AlreadyGone: true}, nil
 	}
 
-	// (2) Read counts BEFORE the delete (drives cascade away; the owner
-	// vehicle count of 1 means this is the last vehicle).
-	var driveCount, ownerVehicleCount int
+	// (2) The target is in the locked set, so a set size of 1 means it is the
+	// owner's last vehicle. Read the cascade drive count for the audit metadata.
+	wasLast := ownerCount == 1
+	var driveCount int
 	if err := tx.QueryRow(ctx, queryTeardownDriveCount, vehicleID).Scan(&driveCount); err != nil {
 		return TeardownResult{}, fmt.Errorf("store.RemoveVehicle(user=%s): drive count: %w", userID, err)
 	}
-	if err := tx.QueryRow(ctx, queryTeardownOwnerVehicleCount, userID).Scan(&ownerVehicleCount); err != nil {
-		return TeardownResult{}, fmt.Errorf("store.RemoveVehicle(user=%s): owner vehicle count: %w", userID, err)
-	}
-	wasLast := ownerVehicleCount == 1
 
 	// (3) Audit FIRST (CG-DL-3: the audit row must be written before the
 	// destructive delete so it captures the action even if the delete fails).
@@ -171,7 +185,14 @@ func (t *OwnerTeardown) RemoveVehicle(ctx context.Context, userID, vehicleID str
 		return TeardownResult{}, err
 	}
 
-	// (4) Delete the vehicle (owner-scoped; cascades + fires the NOTIFY).
+	// (4a) Delete the Go-owned ride-request rows for this vehicle (P1 GPS +
+	// passenger PII) — no FK to "Vehicle" so the cascade never reaches them;
+	// a complete removal must delete them explicitly.
+	if _, err := tx.Exec(ctx, queryTeardownDeleteRideRequests, vehicleID); err != nil {
+		return TeardownResult{}, fmt.Errorf("store.RemoveVehicle(user=%s): delete ride requests: %w", userID, err)
+	}
+
+	// (4b) Delete the vehicle (owner-scoped; cascades + fires the NOTIFY).
 	if _, err := tx.Exec(ctx, queryTeardownDeleteVehicle, vehicleID, userID); err != nil {
 		return TeardownResult{}, fmt.Errorf("store.RemoveVehicle(user=%s): delete vehicle: %w", userID, err)
 	}
@@ -205,6 +226,32 @@ func (t *OwnerTeardown) RemoveVehicle(ctx context.Context, userID, vehicleID str
 		TeslaTokensCleared: wasLast,
 		DriveCount:         driveCount,
 	}, nil
+}
+
+// lockOwnerVehicleSet FOR UPDATE-locks and reads the owner's vehicle ids,
+// returning the set size and whether targetID is among them. The row locks
+// serialize concurrent same-owner teardowns so the last-vehicle test is
+// isolated, not merely atomic.
+func lockOwnerVehicleSet(ctx context.Context, tx pgx.Tx, userID, targetID string) (count int, exists bool, err error) {
+	rows, err := tx.Query(ctx, queryTeardownLockOwnerVehicles, userID)
+	if err != nil {
+		return 0, false, fmt.Errorf("store.RemoveVehicle(user=%s): lock owner vehicles: %w", userID, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return 0, false, fmt.Errorf("store.RemoveVehicle(user=%s): scan vehicle id: %w", userID, err)
+		}
+		count++
+		if id == targetID {
+			exists = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, false, fmt.Errorf("store.RemoveVehicle(user=%s): iterate vehicles: %w", userID, err)
+	}
+	return count, exists, nil
 }
 
 // insertAudit writes the user-initiated `vehicle_deleted` AuditLog row within

@@ -35,6 +35,23 @@ CREATE TABLE IF NOT EXISTS "TripStop" (
     "vehicleId" TEXT NOT NULL REFERENCES "Vehicle"("id") ON DELETE CASCADE,
     "name"      TEXT NOT NULL DEFAULT ''
 );
+-- Go-owned ride-request table (migration 0002). Slim mirror: vehicle_id has NO
+-- FK to "Vehicle" (CG-DL-9), so the teardown must delete these rows explicitly.
+CREATE TABLE IF NOT EXISTS go_ride_requests (
+    id              TEXT PRIMARY KEY,
+    rider_id        TEXT NOT NULL,
+    owner_id        TEXT NOT NULL,
+    vehicle_id      TEXT NOT NULL,
+    pickup_lat_enc  TEXT NOT NULL,
+    pickup_lng_enc  TEXT NOT NULL,
+    pickup_label    TEXT NOT NULL,
+    dropoff_lat_enc TEXT NOT NULL,
+    dropoff_lng_enc TEXT NOT NULL,
+    dropoff_label   TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'requested',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 -- Re-point the shared Drive FK to cascade on Vehicle delete (prod parity).
 ALTER TABLE "Drive" DROP CONSTRAINT IF EXISTS "Drive_vehicleId_fkey";
 ALTER TABLE "Drive" ADD CONSTRAINT "Drive_vehicleId_fkey"
@@ -71,7 +88,7 @@ func cleanTeardownTables(t *testing.T) {
 	// mask-audit integration test installs the prevent-mutation triggers, so a
 	// DELETE would raise SQLSTATE P0001). Every audit assertion below filters
 	// by a per-test-unique userId/targetId, so residual rows never collide.
-	for _, tbl := range []string{`"TripStop"`, `"Drive"`, `"Vehicle"`, `"Account"`, `"Settings"`, `"User"`} {
+	for _, tbl := range []string{`go_ride_requests`, `"TripStop"`, `"Drive"`, `"Vehicle"`, `"Account"`, `"Settings"`, `"User"`} {
 		if _, err := testPool.Exec(ctx, "DELETE FROM "+tbl); err != nil {
 			t.Fatalf("clean %s: %v", tbl, err)
 		}
@@ -97,6 +114,19 @@ func seedTeardownDrive(t *testing.T, id, vehicleID string) {
 		`INSERT INTO "Drive" ("id","vehicleId","date","startTime") VALUES ($1,$2,'2026-07-24','10:00')`,
 		id, vehicleID); err != nil {
 		t.Fatalf("seed drive %s: %v", id, err)
+	}
+}
+
+func seedTeardownRideRequest(t *testing.T, id, ownerID, vehicleID string) {
+	t.Helper()
+	if _, err := testPool.Exec(context.Background(),
+		`INSERT INTO go_ride_requests
+		 (id, rider_id, owner_id, vehicle_id,
+		  pickup_lat_enc, pickup_lng_enc, pickup_label,
+		  dropoff_lat_enc, dropoff_lng_enc, dropoff_label, status)
+		 VALUES ($1,$2,$3,$4,'enc','enc','Pickup','enc','enc','Dropoff','completed')`,
+		id, ownerID, ownerID, vehicleID); err != nil {
+		t.Fatalf("seed ride request %s: %v", id, err)
 	}
 }
 
@@ -138,6 +168,11 @@ func TestOwnerTeardown_RemoveVehicle_HappyPathLastVehicle(t *testing.T) {
 	}
 	seedTeslaAccount(t, userID)
 	seedTeslaLinkedSettings(t, userID)
+	seedTeardownRideRequest(t, "rr_1", userID, vehicleID)
+	// A ride request for a DIFFERENT vehicle must survive.
+	seedTeardownVehicle(t, "veh_other_owner", "user_other_rr", "5YJ3E1EA1PF000099")
+	seedOwnerUser(t, "user_other_rr", "Other", "user_other_rr@example.com")
+	seedTeardownRideRequest(t, "rr_keep", "user_other_rr", "veh_other_owner")
 
 	res, err := newTestTeardown().RemoveVehicle(context.Background(), userID, vehicleID)
 	if err != nil {
@@ -169,6 +204,15 @@ func TestOwnerTeardown_RemoveVehicle_HappyPathLastVehicle(t *testing.T) {
 		t.Errorf("Account rows = %d, want 0 (last vehicle)", n)
 	}
 	assertSettingsReset(t, userID)
+
+	// Ride-request rows (P1 GPS + PII) for this vehicle deleted; another
+	// vehicle's ride request untouched.
+	if n := countRows(t, "go_ride_requests", "vehicle_id", vehicleID); n != 0 {
+		t.Errorf("go_ride_requests for removed vehicle = %d, want 0", n)
+	}
+	if n := countRows(t, "go_ride_requests", "vehicle_id", "veh_other_owner"); n != 1 {
+		t.Errorf("go_ride_requests for other vehicle = %d, want 1 (untouched)", n)
+	}
 
 	// User row is NEVER touched.
 	if n := countRows(t, `"User"`, `"id"`, userID); n != 1 {

@@ -33,7 +33,11 @@ import (
 //  5. Respond with the honest post-state + the two owner-only follow-ups (the
 //     consent-revoke URL and the manual virtual-key-removal steps).
 //
-// Idempotent: removing an already-removed car is a clean 200 no-op.
+// Idempotent in the "equivalent final state" sense (rest-api.md §4.5): a
+// second DELETE of an already-removed car returns 404 not_found, which clients
+// MAY treat as a successful terminal state. The store's AlreadyGone→empty-tx
+// path only covers the narrow race where the row is deleted between the
+// handler's ownership lookup and RemoveVehicle.
 type VehicleTeardownHandler struct {
 	auth     tokenValidator
 	vehicles VehicleSnapshotReader
