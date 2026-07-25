@@ -6,22 +6,43 @@
 package store
 
 // requesterIdentitySelect resolves the requester's display identity (MYR-229)
-// INLINE, in the SAME statement as the ride row, via correlated subselects on
-// the Prisma-owned "User" table keyed on the row's rider_id. Appended to every
-// ride-request projection (plain SELECTs, list scans, and every
-// UPDATE/INSERT ... RETURNING) so there is never a separate lookup — no
-// after-commit window, no extra round trip, no independent outage mode.
+// INLINE, in the SAME statement as the ride row, via correlated subselects
+// keyed on the row's rider_id. Appended to every ride-request projection (plain
+// SELECTs, list scans, and every UPDATE/INSERT ... RETURNING) so there is never
+// a separate lookup — no after-commit window, no extra round trip, no
+// independent outage mode.
 //
-// "User" is READ-ONLY here (CG-DL-9): these SELECT name/email, never write.
-// Both columns are nullable in the Prisma schema, so name/email scan into
-// pointers. requester_exists (a boolean EXISTS) distinguishes a deleted rider
-// (no row → requesterName OMITTED) from a row that has neither name nor email
-// (→ the "Rider" literal). The resolved value is P1 PII — NEVER logged. A
-// NULL/absent identity NEVER fails the surrounding ride operation.
+// The rider's CUID resolves to one of THREE identity sources (MYR-264 — an
+// Apple-native rider has no Prisma "User" row, so a User-only lookup omitted
+// the name and owners saw a placeholder). Precedence mirrors
+// identity.GetUserProfile: Prisma "User" first (legacy/web riders), then the
+// Apple first-consent name in go_identity_apple (the real name for Apple-native
+// riders), then go_users. NULLIF drops empty strings so COALESCE falls through
+// to the next non-empty source.
+//
+// All three are READ-ONLY here (CG-DL-9): these SELECT name/email, never write.
+// Every column is nullable, so name/email scan into pointers.
+// requester_exists (EXISTS across all three tables) distinguishes a deleted
+// rider (no row anywhere → requesterName OMITTED) from a row that has neither
+// name nor email (→ the "Rider" literal). The resolved value is P1 PII — NEVER
+// logged, delivered only on party-scoped surfaces. A NULL/absent identity NEVER
+// fails the surrounding ride operation.
 const requesterIdentitySelect = `,
-	(SELECT u."name" FROM "User" u WHERE u."id" = rider_id) AS requester_name,
-	(SELECT u."email" FROM "User" u WHERE u."id" = rider_id) AS requester_email,
-	EXISTS (SELECT 1 FROM "User" u WHERE u."id" = rider_id) AS requester_exists`
+	COALESCE(
+		NULLIF((SELECT u."name" FROM "User" u WHERE u."id" = rider_id), ''),
+		NULLIF((SELECT a."name" FROM go_identity_apple a WHERE a.user_id = rider_id ORDER BY a.last_login_at DESC LIMIT 1), ''),
+		NULLIF((SELECT g."name" FROM go_users g WHERE g.id = rider_id), '')
+	) AS requester_name,
+	COALESCE(
+		NULLIF((SELECT u."email" FROM "User" u WHERE u."id" = rider_id), ''),
+		NULLIF((SELECT a."email" FROM go_identity_apple a WHERE a.user_id = rider_id ORDER BY a.last_login_at DESC LIMIT 1), ''),
+		NULLIF((SELECT g."email" FROM go_users g WHERE g.id = rider_id), '')
+	) AS requester_email,
+	(
+		EXISTS (SELECT 1 FROM "User" u WHERE u."id" = rider_id)
+		OR EXISTS (SELECT 1 FROM go_identity_apple a WHERE a.user_id = rider_id)
+		OR EXISTS (SELECT 1 FROM go_users g WHERE g.id = rider_id)
+	) AS requester_exists`
 
 // rideRequestColumns is every column read into RideRequestRecord, in scan
 // order. Coordinates travel as *_enc ciphertext; the repo decrypts them

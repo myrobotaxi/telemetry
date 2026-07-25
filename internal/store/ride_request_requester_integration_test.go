@@ -20,6 +20,90 @@ func seedUser(t *testing.T, id string, name, email *string) {
 	}
 }
 
+// seedGoUser inserts a go_users row (Apple-native rider). name/email nullable.
+func seedGoUser(t *testing.T, id string, name, email *string) {
+	t.Helper()
+	if _, err := testPool.Exec(context.Background(),
+		`INSERT INTO go_users ("id", "name", "email") VALUES ($1, $2, $3)`,
+		id, name, email); err != nil {
+		t.Fatalf("seed go_users %s: %v", id, err)
+	}
+}
+
+// seedAppleIdentity inserts a go_identity_apple binding carrying the first-consent
+// name/email — the authoritative identity for an Apple-native rider (MYR-264).
+func seedAppleIdentity(t *testing.T, appleSub, userID string, name, email *string) {
+	t.Helper()
+	if _, err := testPool.Exec(context.Background(),
+		`INSERT INTO go_identity_apple (apple_sub, user_id, name, email) VALUES ($1, $2, $3, $4)`,
+		appleSub, userID, name, email); err != nil {
+		t.Fatalf("seed go_identity_apple %s: %v", userID, err)
+	}
+}
+
+// TestRideRequestRepo_RequesterName_AppleNativeRider covers the MYR-264 gap: a
+// rider with NO Prisma "User" row (Apple-native) must still resolve a real name
+// from go_identity_apple / go_users, instead of being omitted (→ owner sees a
+// placeholder). Also pins the "User" > apple > go_users precedence.
+func TestRideRequestRepo_RequesterName_AppleNativeRider(t *testing.T) {
+	repo, _ := setupRideRequestRepo(t)
+	ctx := context.Background()
+
+	tests := []struct {
+		name string
+		seed func(riderID string)
+		want string
+	}{
+		{
+			name: "apple binding name when no User row",
+			seed: func(id string) { seedAppleIdentity(t, "sub-"+id, id, strPtr("Priya Patel"), strPtr("priya@icloud.com")) },
+			want: "Priya",
+		},
+		{
+			name: "go_users name when only go_users row",
+			seed: func(id string) { seedGoUser(t, id, strPtr("Kenji Watanabe"), strPtr("kenji@icloud.com")) },
+			want: "Kenji",
+		},
+		{
+			name: "apple email local-part when apple name absent",
+			seed: func(id string) { seedAppleIdentity(t, "sub-"+id, id, nil, strPtr("dana.kim@icloud.com")) },
+			want: "dana.kim",
+		},
+		{
+			name: "User row takes precedence over apple binding",
+			seed: func(id string) {
+				seedUser(t, id, strPtr("Ada Lovelace"), strPtr("ada@example.com"))
+				seedAppleIdentity(t, "sub-"+id, id, strPtr("Wrong Name"), strPtr("wrong@icloud.com"))
+			},
+			want: "Ada",
+		},
+	}
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			riderID := "clrider-apple-" + strconv.Itoa(i)
+			tt.seed(riderID)
+
+			rec := minimalRideRequest()
+			rec.RiderID = riderID
+			created, err := repo.Create(ctx, rec)
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if created.RequesterName != tt.want {
+				t.Errorf("Create RequesterName = %q, want %q", created.RequesterName, tt.want)
+			}
+			got, err := repo.GetByID(ctx, created.ID)
+			if err != nil {
+				t.Fatalf("GetByID: %v", err)
+			}
+			if got.RequesterName != tt.want {
+				t.Errorf("GetByID RequesterName = %q, want %q", got.RequesterName, tt.want)
+			}
+		})
+	}
+}
+
 // TestRideRequestRepo_RequesterName_SingleRow exercises the GetByID join/lookup
 // across the whole fallback chain plus the no-user-row omission case.
 func TestRideRequestRepo_RequesterName_SingleRow(t *testing.T) {
