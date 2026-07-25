@@ -47,6 +47,14 @@ type VehicleSnapshotRow struct {
 	TripDistRemaining    *float64
 	NavRouteCoordinates  json.RawMessage
 	LastUpdated          time.Time
+
+	// MYR-269 owner-control read-backs, hydrated from the go_vehicle_control_state
+	// side table on the snapshot read path. Nullable — nil means never read.
+	Locked             *bool
+	FrunkOpen          *bool
+	TrunkOpen          *bool
+	IsClimateOn        *bool
+	ChargePortDoorOpen *bool
 }
 
 // VehicleSnapshotReader returns the snapshot row for a Prisma cuid.
@@ -100,6 +108,18 @@ type vehicleSnapshotResponse struct {
 	TripDistRemaining    *float64        `json:"tripDistanceRemaining"`
 	NavRouteCoordinates  json.RawMessage `json:"navRouteCoordinates"`
 	LastUpdated          string          `json:"lastUpdated"`
+
+	// MYR-269: owner-control read-backs, now persisted (go_vehicle_control_state)
+	// and returned on the DB-backed /snapshot for non-streaming cars. Wire names
+	// match the live WS vehicle_update fields (internal/ws/field_mapping.go,
+	// door_fields.go) so the client's Vehicle model reconciles REST and WS. All
+	// nullable: null == never read (honest "unavailable"), never a fabricated
+	// on/off. On the owner mask allow-list (internal/mask/tables.go).
+	Locked             *bool `json:"locked"`
+	FrunkOpen          *bool `json:"frunkOpen"`
+	TrunkOpen          *bool `json:"trunkOpen"`
+	IsClimateOn        *bool `json:"isClimateOn"`
+	ChargePortDoorOpen *bool `json:"chargePortDoorOpen"`
 }
 
 // toMaskMap returns the response as a wire-name-keyed map suitable for
@@ -145,6 +165,13 @@ func (r vehicleSnapshotResponse) toMaskMap() map[string]any {
 		m["navRouteCoordinates"] = nil
 	}
 	m["lastUpdated"] = r.LastUpdated
+	// MYR-269 owner-control read-backs. Keyed by the live WS wire names so the
+	// owner mask allow-list (which already lists these from MYR-252) permits them.
+	m["locked"] = derefOrNil(r.Locked)
+	m["frunkOpen"] = derefOrNil(r.FrunkOpen)
+	m["trunkOpen"] = derefOrNil(r.TrunkOpen)
+	m["isClimateOn"] = derefOrNil(r.IsClimateOn)
+	m["chargePortDoorOpen"] = derefOrNil(r.ChargePortDoorOpen)
 	return m
 }
 
@@ -183,5 +210,10 @@ func buildSnapshotResponse(row VehicleSnapshotRow) vehicleSnapshotResponse {
 		TripDistRemaining:    row.TripDistRemaining,
 		NavRouteCoordinates:  row.NavRouteCoordinates,
 		LastUpdated:          row.LastUpdated.UTC().Format(time.RFC3339),
+		Locked:               row.Locked,
+		FrunkOpen:            row.FrunkOpen,
+		TrunkOpen:            row.TrunkOpen,
+		IsClimateOn:          row.IsClimateOn,
+		ChargePortDoorOpen:   row.ChargePortDoorOpen,
 	}
 }

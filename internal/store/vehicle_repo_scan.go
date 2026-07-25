@@ -36,6 +36,16 @@ type gpsScanResult struct {
 // into local *string slots, never exposed on the returned struct —
 // consumers only see the resolved float64 / RawMessage values.
 func (r *VehicleRepo) scanVehicleRow(row rowScanner) (Vehicle, error) {
+	return r.scanVehicleRowExtra(row)
+}
+
+// scanVehicleRowExtra is the shared scan core. It scans the canonical wide
+// vehicleSelectColumns projection and applies the GPS/nav dual-read resolution,
+// then scans any `extra` destinations appended to the SELECT after the *Enc
+// columns. GetByID passes the MYR-269 control-state columns (added by a LEFT
+// JOIN on go_vehicle_control_state) as extra so the snapshot read returns the
+// owner controls; GetByVIN / ListByUser pass nothing and are unchanged.
+func (r *VehicleRepo) scanVehicleRowExtra(row rowScanner, extra ...any) (Vehicle, error) {
 	var v Vehicle
 	var status string
 	var (
@@ -47,7 +57,7 @@ func (r *VehicleRepo) scanVehicleRow(row rowScanner) (Vehicle, error) {
 		destLatPT, destLngPT       *float64
 		originLatPT, originLngPT   *float64
 	)
-	err := row.Scan(
+	dests := append(make([]any, 0, 40+len(extra)),
 		&v.ID, &v.UserID, &v.VIN, &v.Name,
 		&v.Model, &v.Year, &v.Color, &status,
 		&v.ChargeLevel, &v.EstimatedRange, &v.ChargeState, &v.TimeToFull,
@@ -66,6 +76,8 @@ func (r *VehicleRepo) scanVehicleRow(row rowScanner) (Vehicle, error) {
 		&originLatEnc, &originLngEnc,
 		&navRouteEnc,
 	)
+	dests = append(dests, extra...)
+	err := row.Scan(dests...)
 	if err != nil {
 		// Caller is scanVehicle (single-row) or ListByUser (rows
 		// iteration). Both wrap with operation context, so we surface
