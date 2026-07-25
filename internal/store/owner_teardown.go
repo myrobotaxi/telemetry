@@ -287,7 +287,7 @@ func applyTeardownDeletes(ctx context.Context, tx pgx.Tx, d teardownDeletion) er
 	return nil
 }
 
-// clearLastVehicleState deletes the owner's Tesla Account tokens// clearLastVehicleState deletes the owner's Tesla Account tokens and resets the
+// clearLastVehicleState deletes the owner's Tesla Account tokens and resets the
 // Settings link/pairing flags — the last-vehicle-only tail of a teardown. It
 // removes OUR access; it does NOT revoke the grant at Tesla (data-lifecycle
 // §1.2). Runs inside the teardown transaction.
