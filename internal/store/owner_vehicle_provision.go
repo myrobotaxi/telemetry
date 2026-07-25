@@ -25,6 +25,11 @@ const (
 	// VehicleSkippedCrossUser: the teslaVehicleId already belongs to a DIFFERENT
 	// user; the row was left untouched (never reassigned) and the caller audits.
 	VehicleSkippedCrossUser VehicleUpsertOutcome = "skipped_cross_user"
+	// VehicleSkippedTombstoned: the owner deliberately removed this teslaVehicleId
+	// (a go_removed_vehicles tombstone exists, MYR-261). The upsert is skipped so a
+	// passive Tesla re-link can NOT resurrect a removed car. Cleared only by a
+	// deliberate re-add (RemovedVehicleRegistry.ClearTombstone).
+	VehicleSkippedTombstoned VehicleUpsertOutcome = "skipped_tombstoned"
 )
 
 // queryUpsertOwnedVehicle inserts the minimal identity columns for a newly
@@ -51,9 +56,11 @@ SET "vin"       = EXCLUDED."vin",
 WHERE "Vehicle"."userId" = EXCLUDED."userId"`
 
 // UpsertOwnedVehicle seeds (or reconciles) a "Vehicle" identity row for a linked
-// owner. Idempotent on "teslaVehicleId". Returns VehicleSkippedCrossUser (and no
-// error) when the teslaVehicleId is already owned by a different user — the row
-// is never reassigned; the caller emits an audit line.
+// owner. Idempotent on "teslaVehicleId". Returns VehicleSkippedTombstoned (and no
+// error) when the owner deliberately removed this teslaVehicleId (MYR-261 — the
+// tombstone gate that stops a passive re-link from resurrecting a removed car),
+// and VehicleSkippedCrossUser when the teslaVehicleId is already owned by a
+// different user — the row is never reassigned; the caller emits an audit line.
 func (p *OwnerProvisioner) UpsertOwnedVehicle(ctx context.Context, in OwnedVehicleInput) (VehicleUpsertOutcome, error) {
 	if strings.TrimSpace(in.UserID) == "" {
 		return "", fmt.Errorf("store.UpsertOwnedVehicle: empty user id")
@@ -61,6 +68,20 @@ func (p *OwnerProvisioner) UpsertOwnedVehicle(ctx context.Context, in OwnedVehic
 	if strings.TrimSpace(in.TeslaVehicleID) == "" {
 		return "", fmt.Errorf("store.UpsertOwnedVehicle(user=%s): empty teslaVehicleId", in.UserID)
 	}
+	// Removed-vehicle tombstone gate (MYR-261): if the owner deliberately removed
+	// this teslaVehicleId, SKIP the upsert. This is the fix for the reappearance
+	// bug — the teardown leaves Tesla access intact, so without this gate the
+	// best-effort AfterLink sync would re-INSERT the still-owned VIN. The check
+	// lives here so it covers EVERY re-add sync route through UpsertOwnedVehicle,
+	// not just AfterLink. A deliberate re-add clears the tombstone first.
+	tombstoned, err := isVehicleTombstoned(ctx, p.pool, in.UserID, in.TeslaVehicleID)
+	if err != nil {
+		return "", fmt.Errorf("store.UpsertOwnedVehicle(user=%s, vin=%s): %w", in.UserID, redactVIN(in.VIN), err)
+	}
+	if tombstoned {
+		return VehicleSkippedTombstoned, nil
+	}
+
 	name := in.Name
 	if strings.TrimSpace(name) == "" {
 		name = "Tesla"
