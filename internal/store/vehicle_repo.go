@@ -142,12 +142,36 @@ func (r *VehicleRepo) ListByUser(ctx context.Context, userID string) ([]Vehicle,
 // Returns ErrVehicleNotFound if no vehicle has that ID.
 func (r *VehicleRepo) GetByID(ctx context.Context, id string) (Vehicle, error) {
 	start := time.Now()
-	v, err := r.scanVehicle(ctx, queryVehicleByID, id)
+	v, err := r.scanVehicleByID(ctx, id)
 	r.metrics.ObserveQueryDuration("vehicle.get_by_id", time.Since(start).Seconds())
 	if err != nil {
 		r.metrics.IncQueryError("vehicle.get_by_id")
 		return Vehicle{}, fmt.Errorf("VehicleRepo.GetByID(%s): %w", id, err)
 	}
+	return v, nil
+}
+
+// scanVehicleByID runs the snapshot read (queryVehicleByID, which LEFT JOINs the
+// go_vehicle_control_state side table) and scans the base vehicle row plus the
+// five MYR-269 owner-control columns. A NULL control column (no side-table row,
+// or a field never observed) scans into a nil *bool, which the snapshot surfaces
+// as an absent/unknown control — never a fabricated on/off.
+func (r *VehicleRepo) scanVehicleByID(ctx context.Context, id string) (Vehicle, error) {
+	row := r.pool.QueryRow(ctx, queryVehicleByID, id)
+	var isLocked, frunkOpen, trunkOpen, isClimateOn, chargePortOpen *bool
+	v, err := r.scanVehicleRowExtra(row,
+		&isLocked, &frunkOpen, &trunkOpen, &isClimateOn, &chargePortOpen)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Vehicle{}, ErrVehicleNotFound
+	}
+	if err != nil {
+		return Vehicle{}, fmt.Errorf("scan vehicle: %w", err)
+	}
+	v.IsLocked = isLocked
+	v.FrunkOpen = frunkOpen
+	v.TrunkOpen = trunkOpen
+	v.IsClimateOn = isClimateOn
+	v.ChargePortOpen = chargePortOpen
 	return v, nil
 }
 

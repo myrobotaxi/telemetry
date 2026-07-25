@@ -25,10 +25,16 @@ type recordedStatusWrite struct {
 	Status VehicleStatus
 }
 
+type recordedControlWrite struct {
+	VehicleID string
+	Update    ControlStateUpdate
+}
+
 type mockVehicleUpdater struct {
 	mu             sync.Mutex
 	telemetryWrites []recordedTelemetryWrite
 	statusWrites    []recordedStatusWrite
+	controlWrites   []recordedControlWrite
 	err             error
 }
 
@@ -44,6 +50,21 @@ func (m *mockVehicleUpdater) UpdateStatus(_ context.Context, vin string, status 
 	defer m.mu.Unlock()
 	m.statusWrites = append(m.statusWrites, recordedStatusWrite{VIN: vin, Status: status})
 	return m.err
+}
+
+func (m *mockVehicleUpdater) UpsertControlState(_ context.Context, vehicleID string, update ControlStateUpdate) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.controlWrites = append(m.controlWrites, recordedControlWrite{VehicleID: vehicleID, Update: update})
+	return m.err
+}
+
+func (m *mockVehicleUpdater) getControlWrites() []recordedControlWrite {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := make([]recordedControlWrite, len(m.controlWrites))
+	copy(cp, m.controlWrites)
+	return cp
 }
 
 func (m *mockVehicleUpdater) getTelemetryWrites() []recordedTelemetryWrite {

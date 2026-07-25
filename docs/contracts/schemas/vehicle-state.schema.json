@@ -263,20 +263,20 @@
     },
     "locked": {
       "type": ["boolean", "null"],
-      "description": "Whether the vehicle is locked. Sourced from Tesla proto field 59 (Locked, boolean). Added by MYR-252 as an owner cabin-control read-back field. Delivered live on the WebSocket vehicle_update stream (individually-delivered field, no atomic group); the value is absent from a frame until the vehicle emits a change. NOT persisted to the DB-backed REST /snapshot in this iteration — see vehicle-state-schema.md §6 and rest-api.md §7.1 for the /snapshot hydration follow-up (requires a Prisma migration).",
+      "description": "Whether the vehicle is locked. Sourced from Tesla proto field 59 (Locked, boolean). Added by MYR-252 as an owner cabin-control read-back field. Delivered live on the WebSocket vehicle_update stream (individually-delivered field, no atomic group); the value is absent from a frame until the vehicle emits a change. **MYR-269 (NFR-3.5 hydration):** now persisted server-side to the Go-owned `go_vehicle_control_state` side table (keyed by vehicle id, no Prisma FK per CG-DL-9) whenever it arrives — live stream OR the MYR-260 `/vehicle_data` backfill — and returned on the DB-backed REST `/snapshot` (LEFT-joined by `VehicleRepo.GetByID`), so a non-streaming car (in service / asleep / offline) surfaces the last-known value with no live socket instead of a perpetual \"unavailable\". Null when never read.",
       "x-classification": "P0",
       "x-tesla-proto-field": 59
     },
     "hvacPower": {
       "type": ["string", "null"],
       "enum": ["Off", "On", "Precondition", "OverheatProtect", "Unknown", null],
-      "description": "Climate (HVAC) system power state. Sourced from Tesla proto field 201 (HvacPower, HvacPowerState enum). Added by MYR-252. Live WS vehicle_update field (see `locked` for the delivery/snapshot note).",
+      "description": "Climate (HVAC) system power state. Sourced from Tesla proto field 201 (HvacPower, HvacPowerState enum). Added by MYR-252. Live WS vehicle_update field. MYR-269: the `hvacPower` enum string itself stays WS-only, but its server-derived `isClimateOn` boolean is now persisted and returned on the DB-backed REST `/snapshot` for non-streaming cars.",
       "x-classification": "P0",
       "x-tesla-proto-field": 201
     },
     "isClimateOn": {
       "type": ["boolean", "null"],
-      "description": "Convenience boolean derived server-side from `hvacPower`: false when hvacPower is 'Off', true when it is 'On'/'Precondition'/'OverheatProtect'. When hvacPower is 'Unknown' this field is OMITTED entirely (not sent as any value) so the client renders an honest 'unknown' rather than a fabricated on/off state (MYR-251/252). Added by MYR-252 so consumers can render a climate on/off toggle without interpreting the HvacPowerState enum. Derived from Tesla proto field 201; no dedicated proto field.",
+      "description": "Convenience boolean derived server-side from `hvacPower`: false when hvacPower is 'Off', true when it is 'On'/'Precondition'/'OverheatProtect'. When hvacPower is 'Unknown' this field is OMITTED entirely (not sent as any value) so the client renders an honest 'unknown' rather than a fabricated on/off state (MYR-251/252). Added by MYR-252 so consumers can render a climate on/off toggle without interpreting the HvacPowerState enum. Derived from Tesla proto field 201; no dedicated proto field. **MYR-269 (NFR-3.5 hydration):** now persisted server-side to the Go-owned `go_vehicle_control_state` side table (keyed by vehicle id, no Prisma FK per CG-DL-9) whenever it arrives — live stream OR the MYR-260 `/vehicle_data` backfill — and returned on the DB-backed REST `/snapshot` (LEFT-joined by `VehicleRepo.GetByID`), so a non-streaming car (in service / asleep / offline) surfaces the last-known value with no live socket instead of a perpetual \"unavailable\". Null when never read.",
       "x-classification": "P0"
     },
     "fanSpeed": {
@@ -377,19 +377,19 @@
     },
     "chargePortDoorOpen": {
       "type": ["boolean", "null"],
-      "description": "Whether the charge-port door is open. Sourced from Tesla proto field 183 (ChargePortDoorOpen, boolean). Added by MYR-252 (Group B). Individually-delivered — intentionally NOT a member of the `charge` atomic group (it is a door state, not a battery/charge-session value). Live WS vehicle_update field.",
+      "description": "Whether the charge-port door is open. Sourced from Tesla proto field 183 (ChargePortDoorOpen, boolean). Added by MYR-252 (Group B). Individually-delivered — intentionally NOT a member of the `charge` atomic group (it is a door state, not a battery/charge-session value). Live WS vehicle_update field. **MYR-269 (NFR-3.5 hydration):** now persisted server-side to the Go-owned `go_vehicle_control_state` side table (keyed by vehicle id, no Prisma FK per CG-DL-9) whenever it arrives — live stream OR the MYR-260 `/vehicle_data` backfill — and returned on the DB-backed REST `/snapshot` (LEFT-joined by `VehicleRepo.GetByID`), so a non-streaming car (in service / asleep / offline) surfaces the last-known value with no live socket instead of a perpetual \"unavailable\". Null when never read.",
       "x-classification": "P0",
       "x-tesla-proto-field": 183
     },
     "frunkOpen": {
       "type": ["boolean", "null"],
-      "description": "Whether the front trunk (frunk) is open. Decoded from Tesla proto field 58 (DoorState) — the `Doors` message's TrunkFront boolean. Added by MYR-252 (Group B). See vehicle-state-schema.md §6.1 for the DoorState bit decode. Live WS vehicle_update field.",
+      "description": "Whether the front trunk (frunk) is open. Decoded from Tesla proto field 58 (DoorState) — the `Doors` message's TrunkFront boolean. Added by MYR-252 (Group B). See vehicle-state-schema.md §6.1 for the DoorState bit decode. Live WS vehicle_update field. **MYR-269 (NFR-3.5 hydration):** now persisted server-side to the Go-owned `go_vehicle_control_state` side table (keyed by vehicle id, no Prisma FK per CG-DL-9) whenever it arrives — live stream OR the MYR-260 `/vehicle_data` backfill — and returned on the DB-backed REST `/snapshot` (LEFT-joined by `VehicleRepo.GetByID`), so a non-streaming car (in service / asleep / offline) surfaces the last-known value with no live socket instead of a perpetual \"unavailable\". Null when never read.",
       "x-classification": "P0",
       "x-tesla-proto-field": 58
     },
     "trunkOpen": {
       "type": ["boolean", "null"],
-      "description": "Whether the rear trunk is open. Decoded from Tesla proto field 58 (DoorState) — the `Doors` message's TrunkRear boolean. Added by MYR-252 (Group B). See vehicle-state-schema.md §6.1 for the DoorState bit decode. Live WS vehicle_update field.",
+      "description": "Whether the rear trunk is open. Decoded from Tesla proto field 58 (DoorState) — the `Doors` message's TrunkRear boolean. Added by MYR-252 (Group B). See vehicle-state-schema.md §6.1 for the DoorState bit decode. Live WS vehicle_update field. **MYR-269 (NFR-3.5 hydration):** now persisted server-side to the Go-owned `go_vehicle_control_state` side table (keyed by vehicle id, no Prisma FK per CG-DL-9) whenever it arrives — live stream OR the MYR-260 `/vehicle_data` backfill — and returned on the DB-backed REST `/snapshot` (LEFT-joined by `VehicleRepo.GetByID`), so a non-streaming car (in service / asleep / offline) surfaces the last-known value with no live socket instead of a perpetual \"unavailable\". Null when never read.",
       "x-classification": "P0",
       "x-tesla-proto-field": 58
     },

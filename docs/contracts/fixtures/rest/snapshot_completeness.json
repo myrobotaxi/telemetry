@@ -221,7 +221,7 @@
       "synthetic": { "kind": "vehicleUpdate", "field": "Locked", "value": true },
       "nullableInSteadyState": false,
       "linearIssue": "MYR-253",
-      "comment": "MYR-252 cabin-control read-back. Contracted + delivered live on the WS vehicle_update stream, but NOT persisted to the DB-backed /snapshot yet — the Vehicle table is Prisma-owned and column additions are a cross-repo migration tracked in MYR-253. Synthetic names a VehicleUpdate field that does not exist yet, so the writer-pipeline gap surfaces as an EXPECTED-GAP log line and the gate stays green until MYR-253 lands."
+      "comment": "MYR-252 cabin-control read-back. Contracted + delivered live on the WS vehicle_update stream, but NOT persisted to the DB-backed /snapshot yet — the Vehicle table is Prisma-owned and column additions are a cross-repo migration tracked in MYR-253. Synthetic names a VehicleUpdate field that does not exist yet, so the writer-pipeline gap surfaces as an EXPECTED-GAP log line and the gate stays green until MYR-253 lands. MYR-269 now persists this to the Go-owned go_vehicle_control_state SIDE table (not the Prisma Vehicle table) and returns it on /snapshot via VehicleRepo.GetByID's LEFT JOIN; this MYR-48 completeness harness exercises the Vehicle-table writer pipeline via GetByVIN (no side-table join), so this row stays expected_failure here — the side-table round-trip is covered by internal/store/vehicle_control_state_test.go."
     },
     "hvacPower": {
       "category": "expected_failure",
@@ -237,7 +237,7 @@
       "synthetic": { "kind": "vehicleUpdate", "field": "IsClimateOn", "value": true },
       "nullableInSteadyState": false,
       "linearIssue": "MYR-253",
-      "comment": "MYR-252 derived cabin field (from hvacPower) — WS-live only; DB /snapshot persistence tracked in MYR-253."
+      "comment": "MYR-252 derived cabin field (from hvacPower) — WS-live only; DB /snapshot persistence tracked in MYR-253. MYR-269 now persists this to the Go-owned go_vehicle_control_state SIDE table (not the Prisma Vehicle table) and returns it on /snapshot via VehicleRepo.GetByID's LEFT JOIN; this MYR-48 completeness harness exercises the Vehicle-table writer pipeline via GetByVIN (no side-table join), so this row stays expected_failure here — the side-table round-trip is covered by internal/store/vehicle_control_state_test.go."
     },
     "fanSpeed": {
       "category": "expected_failure",
@@ -269,7 +269,7 @@
       "synthetic": { "kind": "vehicleUpdate", "field": "HvacAutoMode", "value": "On" },
       "nullableInSteadyState": false,
       "linearIssue": "MYR-253",
-      "comment": "MYR-252 Group B cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253."
+      "comment": "MYR-252 Group B cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253. MYR-269 now persists this to the Go-owned go_vehicle_control_state SIDE table (not the Prisma Vehicle table) and returns it on /snapshot via VehicleRepo.GetByID's LEFT JOIN; this MYR-48 completeness harness exercises the Vehicle-table writer pipeline via GetByVIN (no side-table join), so this row stays expected_failure here — the side-table round-trip is covered by internal/store/vehicle_control_state_test.go."
     },
     "hvacAcEnabled": {
       "category": "expected_failure",
@@ -357,7 +357,7 @@
       "synthetic": { "kind": "vehicleUpdate", "field": "FrunkOpen", "value": true },
       "nullableInSteadyState": false,
       "linearIssue": "MYR-253",
-      "comment": "MYR-252 Group B — decoded from DoorState (proto 58) TrunkFront bit. WS-live only; DB /snapshot persistence tracked in MYR-253."
+      "comment": "MYR-252 Group B — decoded from DoorState (proto 58) TrunkFront bit. WS-live only; DB /snapshot persistence tracked in MYR-253. MYR-269 now persists this to the Go-owned go_vehicle_control_state SIDE table (not the Prisma Vehicle table) and returns it on /snapshot via VehicleRepo.GetByID's LEFT JOIN; this MYR-48 completeness harness exercises the Vehicle-table writer pipeline via GetByVIN (no side-table join), so this row stays expected_failure here — the side-table round-trip is covered by internal/store/vehicle_control_state_test.go."
     },
     "trunkOpen": {
       "category": "expected_failure",
@@ -365,7 +365,7 @@
       "synthetic": { "kind": "vehicleUpdate", "field": "TrunkOpen", "value": true },
       "nullableInSteadyState": false,
       "linearIssue": "MYR-253",
-      "comment": "MYR-252 Group B — decoded from DoorState (proto 58) TrunkRear bit. WS-live only; DB /snapshot persistence tracked in MYR-253."
+      "comment": "MYR-252 Group B — decoded from DoorState (proto 58) TrunkRear bit. WS-live only; DB /snapshot persistence tracked in MYR-253. MYR-269 now persists this to the Go-owned go_vehicle_control_state SIDE table (not the Prisma Vehicle table) and returns it on /snapshot via VehicleRepo.GetByID's LEFT JOIN; this MYR-48 completeness harness exercises the Vehicle-table writer pipeline via GetByVIN (no side-table join), so this row stays expected_failure here — the side-table round-trip is covered by internal/store/vehicle_control_state_test.go."
     },
     "mediaPlaybackStatus": {
       "category": "expected_failure",

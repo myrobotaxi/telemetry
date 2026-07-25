@@ -291,6 +291,22 @@ Hash-only refresh-token store with single-use rotation and family reuse-detectio
 
 > **Token secrecy (MYR-193).** The ES256 access token and the raw refresh token are **P1** (credentials, same tier as `AuthPayload.token`). Neither is stored server-side (access tokens are stateless; refresh tokens are stored only as a SHA-256 hash). The identity module's auth audit trail (`slog`, ADR-001 §6) records the event + opaque user/family ids only — never an email, name, raw token, or token hash. The `/api/auth/*` error envelopes carry a generic `auth_failed` / `invalid_request` message with no PII and no reuse/linkage oracle (Rule CG-DC-2).
 
+### 1.13 go_vehicle_control_state table (Go-owned, MYR-269)
+
+Durable last-known owner-control read-back state — the four owner controls the app renders (Lock, Trunk/Frunk, Climate, Charge-port). These are the MYR-252 cabin read-backs that were stream-only with no persistence, so a `/snapshot` for a non-streaming car (in service / asleep / offline) always showed "Unavailable". Created by `internal/store/migrations/0008_vehicle_control_state.up.sql` under the CG-DL-9 `go_` namespace; written on both the live persist path and the MYR-260 `/vehicle_data` backfill (per-field COALESCE upsert, last-writer-wins) and LEFT-joined into `VehicleRepo.GetByID` for the REST `/snapshot`. Anchored: NFR-3.5 (snapshot completeness), NFR-3.9 (classification tiers). Every control column is nullable — NULL means "never read", surfaced as an honest "unavailable", never a fabricated on/off.
+
+| Column | Type | Tier | Encrypt | Log-safe | Rationale |
+|--------|------|------|---------|----------|-----------|
+| `vehicle_id` | `TEXT` (cuid) | P0 | No | Yes | Owning vehicle cuid — opaque; no Prisma FK (CG-DL-9) |
+| `is_locked` | `BOOLEAN?` | P0 | No | Yes | Lock state — same tier as the MYR-252 `locked` wire field; not identifying, no GPS |
+| `frunk_open` | `BOOLEAN?` | P0 | No | Yes | Front-trunk open state (`frunkOpen`) — cabin/door state |
+| `trunk_open` | `BOOLEAN?` | P0 | No | Yes | Rear-trunk open state (`trunkOpen`) — cabin/door state |
+| `is_climate_on` | `BOOLEAN?` | P0 | No | Yes | Derived climate on/off (`isClimateOn`) — cabin comfort state |
+| `charge_port_open` | `BOOLEAN?` | P0 | No | Yes | Charge-port door open state (`chargePortDoorOpen`) — door state |
+| `updated_at` | `TIMESTAMPTZ` | P0 | No | Yes | Non-sensitive timestamp |
+
+> **No GPS, no PII (MYR-269).** All columns are P0 cabin/lock/door state — the same tier as the MYR-252 fields they persist, consistent with `speed`/`chargeLevel`/`gearPosition`. No coordinates, tokens, addresses, or names are stored, so no encryption or log-redaction is required.
+
 ---
 
 ## 2. Redaction rules by tier
