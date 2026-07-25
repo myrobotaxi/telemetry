@@ -79,6 +79,13 @@ func (h *RideRequestHandler) ServeAccept(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// MYR-277: a vehicle that is in service or offline cannot fulfill the
+	// ride — block the accept before the guarded transition + dispatch seam
+	// fire. Decline is intentionally NOT gated (an owner may always decline).
+	if h.rejectIfVehicleUnavailable(ctx, w, rec) {
+		return
+	}
+
 	updated, ok := h.mutateStatus(ctx, w, rec, rideDecidableFrom, rideStatusAccepted)
 	if !ok {
 		return
@@ -143,6 +150,46 @@ func (h *RideRequestHandler) loadForOwnerDecision(ctx context.Context, w http.Re
 	}
 
 	return rec, true
+}
+
+// vehicleStatusOffline is the persisted status for a vehicle the server
+// cannot currently reach. Together with serviceStatusInService it is the
+// blocked set for an owner accept (MYR-277): neither state can fulfill a ride.
+// `parked`/`driving`/`charging` are dispatchable and pass the gate.
+const vehicleStatusOffline = "offline"
+
+// rejectIfVehicleUnavailable is the MYR-277 dispatch-capability gate on
+// accept. It reads the ride's target vehicle's CURRENT persisted status (via
+// the same VehicleSnapshotReader the create path uses) and refuses the accept
+// with 409 vehicle_unavailable when the vehicle is `in_service` (owner put it
+// into service) or `offline` (unreachable) — a car in either state cannot be
+// dispatched to fulfill the ride. This is a capability gate, distinct from the
+// `requested`-only lifecycle 409 (ErrCodeConflict): the transition is legal,
+// the vehicle just can't serve it. Reading the status HERE (not caching the
+// loadForOwnerDecision read) keeps the gate current under a status flip
+// between list and accept. On a status-lookup failure it fails CLOSED (500):
+// we do not accept a ride we cannot confirm the vehicle can serve. Returns
+// true (response already written) when the accept must stop.
+func (h *RideRequestHandler) rejectIfVehicleUnavailable(ctx context.Context, w http.ResponseWriter, rec RideRequestData) bool {
+	row, err := h.vehicles.GetByID(ctx, rec.VehicleID)
+	if err != nil {
+		h.logger.Error("ride-request accept: vehicle status lookup failed",
+			slog.String("ride_request_id", rec.ID),
+			slog.String("vehicle_id", rec.VehicleID),
+			slog.String("error", err.Error()),
+		)
+		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
+		return true
+	}
+	switch row.Status {
+	case serviceStatusInService:
+		h.writeError(w, http.StatusConflict, wserrors.ErrCodeVehicleUnavailable, "Vehicle is in service and can't be dispatched")
+		return true
+	case vehicleStatusOffline:
+		h.writeError(w, http.StatusConflict, wserrors.ErrCodeVehicleUnavailable, "Vehicle is offline and can't be dispatched")
+		return true
+	}
+	return false
 }
 
 // buildRideAcceptedEvent projects the accepted record onto the dispatch-seam
