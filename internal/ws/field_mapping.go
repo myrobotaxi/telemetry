@@ -236,9 +236,25 @@ func translateFieldName(internal string) string {
 	return internal
 }
 
-// deriveVehicleStatus infers the vehicle status from the mapped client fields.
-// The frontend reads vehicle.status to decide which UI to render.
-func deriveVehicleStatus(fields map[string]any) string {
+// deriveVehicleStatus infers the vehicle status from the mapped client
+// fields and the vehicle's in-service signal. The frontend reads
+// vehicle.status to decide which UI to render.
+//
+// Precedence (vehicle-state-schema.md §2.4, MYR-259):
+//
+//   - driving (gear D/R, or speed > 0) ALWAYS wins — a service tech
+//     test-driving a car must surface as `driving`, not `in_service`.
+//   - in_service (inService true) outranks parked/charging/offline — a
+//     car a tech has put into service mode is not "just parked".
+//   - otherwise parked. (charging / offline are set by other server-side
+//     logic — the drive/connectivity paths — not derived here.)
+//
+// inService is the OR of the two sources documented in §2.4: the pushed
+// ServiceMode telemetry field (proto 159) and Tesla's REST `in_service`
+// bool. This function is the single place that encodes the precedence for
+// the live wire status; the connectivity-edge REST reader persists the
+// same in_service verdict to Vehicle.status directly.
+func deriveVehicleStatus(fields map[string]any, inService bool) string {
 	gear, _ := fields["gearPosition"].(string)
 
 	var speed float64
@@ -254,6 +270,8 @@ func deriveVehicleStatus(fields map[string]any) string {
 		return "driving"
 	case speed > 0:
 		return "driving"
+	case inService:
+		return "in_service"
 	default:
 		return "parked"
 	}

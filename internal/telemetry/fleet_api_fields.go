@@ -87,6 +87,7 @@ const (
 	FleetFieldSentryMode         = "SentryMode"
 	FleetFieldChargePortDoorOpen = "ChargePortDoorOpen" // MYR-252 Group B
 	FleetFieldDoorState          = "DoorState"          // MYR-252 Group B (trunk/frunk decode)
+	FleetFieldServiceMode        = "ServiceMode"        // MYR-259 proto 159 — in_service status source
 )
 
 // --- Media (MYR-252 Group B) ---
@@ -196,6 +197,15 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		// car still learns whether the trunk/frunk/charge-port is open.
 		FleetFieldChargePortDoorOpen: {IntervalSeconds: 30, ResendIntervalSeconds: intPtr(120)},
 		FleetFieldDoorState:          {IntervalSeconds: 30, ResendIntervalSeconds: intPtr(120)},
+
+		// MYR-259: ServiceMode (proto 159, bool). A vehicle enters/exits
+		// service mode rarely, so a comfort-ish 60s interval is plenty; the
+		// 300s resend re-warms the value after a parked-window reconnect
+		// (Tesla only emits on change) so a server that missed the initial
+		// emission still learns the car is in service before the next toggle.
+		// This is the LIVE signal for status=in_service; the REST
+		// in_service read (connectivity-edge) is the authoritative persist.
+		FleetFieldServiceMode: {IntervalSeconds: 60, ResendIntervalSeconds: intPtr(300)},
 
 		// Media (MYR-252 Group B) — higher churn than comfort state, so a
 		// tighter interval; no resend (a stale media state self-corrects on

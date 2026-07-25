@@ -960,27 +960,34 @@ func TestMarshalWSMessage_Connectivity_Payload(t *testing.T) {
 
 func TestDeriveVehicleStatus(t *testing.T) {
 	tests := []struct {
-		name   string
-		fields map[string]any
-		want   string
+		name      string
+		fields    map[string]any
+		inService bool
+		want      string
 	}{
-		{"gear D speed 0 (red light)", map[string]any{"gearPosition": "D", "speed": 0.0}, "driving"},
-		{"gear D speed 35", map[string]any{"gearPosition": "D", "speed": 35.0}, "driving"},
-		{"gear R speed 0", map[string]any{"gearPosition": "R", "speed": 0.0}, "driving"},
-		{"gear R speed 5", map[string]any{"gearPosition": "R", "speed": 5.0}, "driving"},
-		{"gear P speed 0", map[string]any{"gearPosition": "P", "speed": 0.0}, "parked"},
-		{"no gear speed 0", map[string]any{"speed": 0.0}, "parked"},
-		{"no gear speed 65 float", map[string]any{"speed": 65.0}, "driving"},
-		{"no gear speed 65 int", map[string]any{"speed": 65}, "driving"},
-		{"gear N speed 0", map[string]any{"gearPosition": "N", "speed": 0.0}, "parked"},
-		{"empty fields", map[string]any{}, "parked"},
+		{"gear D speed 0 (red light)", map[string]any{"gearPosition": "D", "speed": 0.0}, false, "driving"},
+		{"gear D speed 35", map[string]any{"gearPosition": "D", "speed": 35.0}, false, "driving"},
+		{"gear R speed 0", map[string]any{"gearPosition": "R", "speed": 0.0}, false, "driving"},
+		{"gear R speed 5", map[string]any{"gearPosition": "R", "speed": 5.0}, false, "driving"},
+		{"gear P speed 0", map[string]any{"gearPosition": "P", "speed": 0.0}, false, "parked"},
+		{"no gear speed 0", map[string]any{"speed": 0.0}, false, "parked"},
+		{"no gear speed 65 float", map[string]any{"speed": 65.0}, false, "driving"},
+		{"no gear speed 65 int", map[string]any{"speed": 65}, false, "driving"},
+		{"gear N speed 0", map[string]any{"gearPosition": "N", "speed": 0.0}, false, "parked"},
+		{"empty fields", map[string]any{}, false, "parked"},
+		// MYR-259 in_service precedence.
+		{"in_service while parked", map[string]any{"gearPosition": "P", "speed": 0.0}, true, "in_service"},
+		{"in_service no gear", map[string]any{}, true, "in_service"},
+		{"driving overrides in_service (gear D)", map[string]any{"gearPosition": "D", "speed": 0.0}, true, "driving"},
+		{"driving overrides in_service (speed)", map[string]any{"speed": 12.0}, true, "driving"},
+		{"gear N in_service", map[string]any{"gearPosition": "N", "speed": 0.0}, true, "in_service"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := deriveVehicleStatus(tt.fields)
+			got := deriveVehicleStatus(tt.fields, tt.inService)
 			if got != tt.want {
-				t.Fatalf("deriveVehicleStatus(%v) = %q, want %q", tt.fields, got, tt.want)
+				t.Fatalf("deriveVehicleStatus(%v, %v) = %q, want %q", tt.fields, tt.inService, got, tt.want)
 			}
 		})
 	}
@@ -1491,6 +1498,84 @@ func TestEnsureGearGroupAtomic_ColdStart(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestEnsureGearGroupAtomic_ServiceMode covers MYR-259: the internal
+// ServiceMode (proto 159) signal folds into status=in_service, is stripped
+// from the outgoing wire fields, and is outranked by active driving.
+func TestEnsureGearGroupAtomic_ServiceMode(t *testing.T) {
+	t.Run("serviceMode true with gear P -> in_service, serviceMode stripped", func(t *testing.T) {
+		b := &Broadcaster{}
+		fields := mapFieldsForClient(map[string]events.TelemetryValue{
+			"gear":        {StringVal: ptrString("P")},
+			"serviceMode": {BoolVal: ptrBool(true)},
+		})
+		b.ensureGearGroupAtomic("vin-1", fields)
+
+		if got := fields["status"]; got != "in_service" {
+			t.Fatalf("status = %v, want in_service", got)
+		}
+		if _, present := fields["serviceMode"]; present {
+			t.Fatalf("serviceMode leaked to wire fields: %v", fields)
+		}
+	})
+
+	t.Run("driving overrides serviceMode (gear D)", func(t *testing.T) {
+		b := &Broadcaster{}
+		fields := mapFieldsForClient(map[string]events.TelemetryValue{
+			"gear":        {StringVal: ptrString("D")},
+			"serviceMode": {BoolVal: ptrBool(true)},
+		})
+		b.ensureGearGroupAtomic("vin-1", fields)
+
+		if got := fields["status"]; got != "driving" {
+			t.Fatalf("status = %v, want driving (driving outranks in_service)", got)
+		}
+	})
+
+	t.Run("cached serviceMode applies to a later speed-only frame", func(t *testing.T) {
+		b := &Broadcaster{}
+		// Seed gear P + serviceMode true.
+		seed := mapFieldsForClient(map[string]events.TelemetryValue{
+			"gear":        {StringVal: ptrString("P")},
+			"serviceMode": {BoolVal: ptrBool(true)},
+		})
+		b.ensureGearGroupAtomic("vin-1", seed)
+
+		// A later speed-0 frame (parked, no gear) must still surface
+		// in_service from the cached serviceMode, carrying the cached gear.
+		speed := mapFieldsForClient(map[string]events.TelemetryValue{
+			"speed": {FloatVal: ptrFloat64(0)},
+		})
+		b.ensureGearGroupAtomic("vin-1", speed)
+
+		if got := speed["status"]; got != "in_service" {
+			t.Fatalf("status = %v, want in_service (cached serviceMode)", got)
+		}
+		if got, _ := speed["gearPosition"].(string); got != "P" {
+			t.Fatalf("gearPosition = %q, want P (atomic invariant)", got)
+		}
+	})
+
+	t.Run("bare serviceMode toggle recomputes status against cached gear", func(t *testing.T) {
+		b := &Broadcaster{}
+		// Seed a gear frame so a gear companion exists.
+		b.ensureGearGroupAtomic("vin-1", mapFieldsForClient(map[string]events.TelemetryValue{
+			"gear": {StringVal: ptrString("P")},
+		}))
+		// A frame carrying ONLY serviceMode must recompute + emit status.
+		sm := mapFieldsForClient(map[string]events.TelemetryValue{
+			"serviceMode": {BoolVal: ptrBool(true)},
+		})
+		b.ensureGearGroupAtomic("vin-1", sm)
+
+		if got := sm["status"]; got != "in_service" {
+			t.Fatalf("status = %v, want in_service", got)
+		}
+		if got, _ := sm["gearPosition"].(string); got != "P" {
+			t.Fatalf("gearPosition = %q, want P (atomic invariant)", got)
+		}
+	})
 }
 
 // TestEnsureGearGroupAtomic_SpeedOnlyAfterCachedGear is the MYR-61
