@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/events"
 	"github.com/myrobotaxi/telemetry/internal/ridecomplete"
@@ -54,8 +55,8 @@ type rideCompletionStoreAdapter struct {
 	repo *store.RideRequestRepo
 }
 
-func (a *rideCompletionStoreAdapter) CompleteEnrouteByVehicle(ctx context.Context, vehicleID string) ([]ridecomplete.CompletedRide, error) {
-	recs, err := a.repo.CompleteEnrouteByVehicle(ctx, vehicleID)
+func (a *rideCompletionStoreAdapter) CompleteEnrouteByVehicle(ctx context.Context, vehicleID string, driveStartedAt time.Time) ([]ridecomplete.CompletedRide, error) {
+	recs, err := a.repo.CompleteEnrouteByVehicle(ctx, vehicleID, driveStartedAt)
 	if err != nil {
 		return nil, err
 	}

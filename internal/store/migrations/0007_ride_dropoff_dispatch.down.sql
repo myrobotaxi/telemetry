@@ -2,4 +2,5 @@
 ALTER TABLE go_ride_requests
     DROP COLUMN IF EXISTS dropoff_dispatch_status,
     DROP COLUMN IF EXISTS dropoff_dispatched_at,
-    DROP COLUMN IF EXISTS dropoff_dispatch_error;
+    DROP COLUMN IF EXISTS dropoff_dispatch_error,
+    DROP COLUMN IF EXISTS enroute_at;

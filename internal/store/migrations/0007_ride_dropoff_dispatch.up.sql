@@ -29,6 +29,17 @@
 -- dropoff_dispatch_status NULL; impact is low (the car keeps its valid pickup
 -- nav and the ride still completes on drive-end), and a follow-up can extend
 -- the reconciler if leg-2 interruptions prove material in production.
+--
+-- enroute_at (drive-end correlation): stamped in the SAME guarded UPDATE that
+-- transitions accepted→enroute (the board path), enroute_at pins WHEN leg 2
+-- began. The drive-end completer only completes a ride when the ENDED drive
+-- STARTED AT/AFTER enroute_at (drive_started_at >= enroute_at) — so a DELAYED
+-- leg-1 (pickup) drive-end debounce, whose drive started well before board,
+-- can no longer false-complete the ride at the pickup while it is already
+-- enroute (reviewer edge 4d). Consequence kept on purpose: if the leg-2 push
+-- failed and the car never departs, there is no leg-2 drive, so the ride stays
+-- enroute (open) rather than false-completing — the honest v1 behavior. P0,
+-- off-wire.
 
 ALTER TABLE go_ride_requests
     ADD COLUMN IF NOT EXISTS dropoff_dispatch_status TEXT
@@ -36,4 +47,5 @@ ALTER TABLE go_ride_requests
             dropoff_dispatch_status IN ('sent', 'failed', 'skipped')
         ),
     ADD COLUMN IF NOT EXISTS dropoff_dispatched_at   TIMESTAMPTZ,
-    ADD COLUMN IF NOT EXISTS dropoff_dispatch_error  TEXT;
+    ADD COLUMN IF NOT EXISTS dropoff_dispatch_error  TEXT,
+    ADD COLUMN IF NOT EXISTS enroute_at              TIMESTAMPTZ;

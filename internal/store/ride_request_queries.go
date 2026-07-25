@@ -142,14 +142,19 @@ LIMIT $5`
 
 // queryRideRequestUpdateStatus persists a lifecycle transition with its
 // timestamp side-effects in one statement: entering 'accepted' stamps
-// accepted_at, entering 'completed' stamps completed_at (each only on
-// first entry — re-updates never move an already-set stamp), and every
-// transition touches updated_at.
+// accepted_at, entering 'enroute' stamps enroute_at (the board timestamp that
+// the drive-end completer correlates against — MYR-265), entering 'completed'
+// stamps completed_at (each only on first entry — re-updates never move an
+// already-set stamp), and every transition touches updated_at.
 const queryRideRequestUpdateStatus = `UPDATE go_ride_requests SET
 	status = $2,
 	accepted_at = CASE
 		WHEN $2 = 'accepted' AND accepted_at IS NULL THEN NOW()
 		ELSE accepted_at
+	END,
+	enroute_at = CASE
+		WHEN $2 = 'enroute' AND enroute_at IS NULL THEN NOW()
+		ELSE enroute_at
 	END,
 	completed_at = CASE
 		WHEN $2 = 'completed' AND completed_at IS NULL THEN NOW()
@@ -173,6 +178,10 @@ const queryRideRequestUpdateStatusFrom = `UPDATE go_ride_requests SET
 	accepted_at = CASE
 		WHEN $2 = 'accepted' AND accepted_at IS NULL THEN NOW()
 		ELSE accepted_at
+	END,
+	enroute_at = CASE
+		WHEN $2 = 'enroute' AND enroute_at IS NULL THEN NOW()
+		ELSE enroute_at
 	END,
 	completed_at = CASE
 		WHEN $2 = 'completed' AND completed_at IS NULL THEN NOW()
@@ -271,12 +280,20 @@ WHERE id = $1`
 // status = 'enroute' so a drive-end for a vehicle with no in-flight ride
 // affects zero rows (a no-op) and concurrent drive-ends serialize — only the
 // first completes the ride, stamping completed_at first-entry-only. Keyed on
-// vehicle_id (the VIN is resolved to the vehicle cuid upstream). RETURNING the
-// full projection so the caller can publish a ride_status_changed frame per
-// completed row.
+// vehicle_id (the VIN is resolved to the vehicle cuid upstream).
+//
+// LEG CORRELATION ($2 = the ended drive's start time): the ride only completes
+// when the ended drive STARTED AT/AFTER the board timestamp (enroute_at <= $2).
+// This is what distinguishes the leg-2 (dropoff) drive — which begins after the
+// rider boards — from a DELAYED leg-1 (pickup) drive-end whose drive started
+// before board and would otherwise false-complete the ride at the pickup
+// (reviewer edge 4d). A row with enroute_at NULL (never boarded) never matches.
+// RETURNING the full projection so the caller can publish a ride_status_changed
+// frame per completed row.
 const queryRideRequestCompleteEnrouteByVehicle = `UPDATE go_ride_requests SET
 	status = 'completed',
 	completed_at = CASE WHEN completed_at IS NULL THEN NOW() ELSE completed_at END,
 	updated_at = NOW()
 WHERE vehicle_id = $1 AND status = 'enroute'
+  AND enroute_at IS NOT NULL AND enroute_at <= $2
 RETURNING ` + rideRequestColumns

@@ -46,9 +46,12 @@ type CompletedRide struct {
 
 // Store performs the guarded enroute→completed transition for a vehicle.
 // Satisfied by the ride-request repo via a cmd/ adapter. Returns the completed
-// ride(s) — 0 rows when the vehicle has no in-flight enroute ride (a no-op).
+// ride(s) — 0 rows when the vehicle has no in-flight enroute ride, or when the
+// ended drive predates the board (a no-op). driveStartedAt is the ended drive's
+// start instant; only a ride boarded AT/BEFORE it (the leg-2 dropoff drive) may
+// complete (see queryRideRequestCompleteEnrouteByVehicle).
 type Store interface {
-	CompleteEnrouteByVehicle(ctx context.Context, vehicleID string) ([]CompletedRide, error)
+	CompleteEnrouteByVehicle(ctx context.Context, vehicleID string, driveStartedAt time.Time) ([]CompletedRide, error)
 }
 
 // Publisher publishes the ride status-change event onto the process bus.
@@ -105,14 +108,16 @@ func (c *Completer) handle(evt events.Event) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
-	c.complete(ctx, ev.VIN, ev.DriveID)
+	c.complete(ctx, ev.VIN, ev.DriveID, ev.StartedAt)
 }
 
 // complete resolves VIN→vehicle, transitions the vehicle's in-flight enroute
-// ride to completed, and publishes a ride_status_changed per completed row. A
-// drive-end for a vehicle with no active ride resolves to zero rows and is a
-// clean no-op. Safe to call directly in tests.
-func (c *Completer) complete(ctx context.Context, vin, driveID string) {
+// ride to completed, and publishes a ride_status_changed per completed row. The
+// store guards on the leg correlation (driveStartedAt >= the ride's board
+// timestamp), so a delayed leg-1 pickup drive-end resolves to zero rows. A
+// drive-end for a vehicle with no active ride is likewise a clean no-op. Safe to
+// call directly in tests.
+func (c *Completer) complete(ctx context.Context, vin, driveID string, driveStartedAt time.Time) {
 	if vin == "" {
 		return
 	}
@@ -128,7 +133,7 @@ func (c *Completer) complete(ctx context.Context, vin, driveID string) {
 		return
 	}
 
-	completed, err := c.store.CompleteEnrouteByVehicle(ctx, vehicleID)
+	completed, err := c.store.CompleteEnrouteByVehicle(ctx, vehicleID, driveStartedAt)
 	if err != nil {
 		c.logger.Error("ridecomplete: complete enroute ride failed",
 			slog.String("vehicle_id", vehicleID),

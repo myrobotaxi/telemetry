@@ -3,17 +3,18 @@ package store_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/store"
 )
 
 // setEnroute forces a created ride to the enroute lifecycle state directly
-// (bypassing the multi-step guarded path) so completion tests have an
-// in-flight ride to act on.
-func setEnroute(t *testing.T, id string) {
+// (bypassing the multi-step guarded path) AND stamps enroute_at — the board
+// timestamp the drive-end completer correlates the ended drive against.
+func setEnroute(t *testing.T, id string, enrouteAt time.Time) {
 	t.Helper()
 	if _, err := testPool.Exec(context.Background(),
-		`UPDATE go_ride_requests SET status = 'enroute' WHERE id = $1`, id); err != nil {
+		`UPDATE go_ride_requests SET status = 'enroute', enroute_at = $2 WHERE id = $1`, id, enrouteAt); err != nil {
 		t.Fatalf("force enroute %s: %v", id, err)
 	}
 }
@@ -104,9 +105,10 @@ func TestRideRequestRepo_RecordDropoffDispatchOutcome(t *testing.T) {
 }
 
 // TestRideRequestRepo_CompleteEnrouteByVehicle verifies the drive-end
-// completion transition: it completes an in-flight enroute ride (stamping
-// completed_at), is a no-op for a vehicle with no enroute ride, and is
-// idempotent (a second call after completion returns zero rows).
+// completion transition: it completes an in-flight enroute ride when the ended
+// drive started after board (stamping completed_at), is a no-op for a vehicle
+// with no enroute ride, and is idempotent (a second call after completion
+// returns zero rows).
 func TestRideRequestRepo_CompleteEnrouteByVehicle(t *testing.T) {
 	repo, _ := setupRideRequestRepo(t)
 	ctx := context.Background()
@@ -116,9 +118,11 @@ func TestRideRequestRepo_CompleteEnrouteByVehicle(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	vehicleID := created.VehicleID
+	boardedAt := time.Date(2026, 7, 25, 18, 0, 0, 0, time.UTC)
+	leg2DriveStart := boardedAt.Add(2 * time.Minute) // dropoff drive began after board
 
 	// No enroute ride yet (status requested): a drive-end is a clean no-op.
-	none, err := repo.CompleteEnrouteByVehicle(ctx, vehicleID)
+	none, err := repo.CompleteEnrouteByVehicle(ctx, vehicleID, leg2DriveStart)
 	if err != nil {
 		t.Fatalf("CompleteEnrouteByVehicle (no enroute): %v", err)
 	}
@@ -126,9 +130,9 @@ func TestRideRequestRepo_CompleteEnrouteByVehicle(t *testing.T) {
 		t.Errorf("completed %d rides with none enroute, want 0", len(none))
 	}
 
-	// Put the ride enroute, then complete it.
-	setEnroute(t, created.ID)
-	done, err := repo.CompleteEnrouteByVehicle(ctx, vehicleID)
+	// Put the ride enroute (board at boardedAt), then complete via the leg-2 drive.
+	setEnroute(t, created.ID, boardedAt)
+	done, err := repo.CompleteEnrouteByVehicle(ctx, vehicleID, leg2DriveStart)
 	if err != nil {
 		t.Fatalf("CompleteEnrouteByVehicle: %v", err)
 	}
@@ -144,12 +148,63 @@ func TestRideRequestRepo_CompleteEnrouteByVehicle(t *testing.T) {
 
 	// Idempotent: the ride is already completed, so a re-fired drive-end
 	// matches zero enroute rows.
-	repeat, err := repo.CompleteEnrouteByVehicle(ctx, vehicleID)
+	repeat, err := repo.CompleteEnrouteByVehicle(ctx, vehicleID, leg2DriveStart)
 	if err != nil {
 		t.Fatalf("CompleteEnrouteByVehicle (repeat): %v", err)
 	}
 	if len(repeat) != 0 {
 		t.Errorf("re-completion returned %d rows, want 0 (already completed)", len(repeat))
+	}
+}
+
+// TestRideRequestRepo_CompleteEnrouteByVehicle_LegCorrelation is the reviewer
+// edge-4d guard: a DELAYED leg-1 (pickup) drive-end — whose drive STARTED
+// BEFORE board — must NOT complete the ride (it stays enroute); only the leg-2
+// (dropoff) drive — STARTED AFTER board — completes it.
+func TestRideRequestRepo_CompleteEnrouteByVehicle_LegCorrelation(t *testing.T) {
+	repo, _ := setupRideRequestRepo(t)
+	ctx := context.Background()
+
+	created, err := repo.Create(ctx, fullRideRequest())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	vehicleID := created.VehicleID
+	boardedAt := time.Date(2026, 7, 25, 18, 0, 0, 0, time.UTC)
+	setEnroute(t, created.ID, boardedAt)
+
+	// (1) DELAYED leg-1 pickup drive-end: the pickup drive started 5 min BEFORE
+	// board, so it must NOT complete the ride (edge 4d).
+	leg1DriveStart := boardedAt.Add(-5 * time.Minute)
+	staleDone, err := repo.CompleteEnrouteByVehicle(ctx, vehicleID, leg1DriveStart)
+	if err != nil {
+		t.Fatalf("CompleteEnrouteByVehicle (stale leg-1): %v", err)
+	}
+	if len(staleDone) != 0 {
+		t.Fatalf("a leg-1 drive-end (started before board) completed %d rides, want 0", len(staleDone))
+	}
+	// The ride must still be enroute (open).
+	got, err := repo.GetByID(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if got.Status != store.RideRequestStatusEnroute {
+		t.Errorf("ride status = %s after a stale leg-1 drive-end, want enroute (still open)", got.Status)
+	}
+
+	// (2) leg-2 dropoff drive-end: started 3 min AFTER board → completes.
+	leg2DriveStart := boardedAt.Add(3 * time.Minute)
+	done, err := repo.CompleteEnrouteByVehicle(ctx, vehicleID, leg2DriveStart)
+	if err != nil {
+		t.Fatalf("CompleteEnrouteByVehicle (leg-2): %v", err)
+	}
+	if len(done) != 1 || done[0].Status != store.RideRequestStatusCompleted {
+		t.Errorf("leg-2 drive-end completed %d rides (status %v), want 1 completed", len(done), func() string {
+			if len(done) == 1 {
+				return string(done[0].Status)
+			}
+			return "n/a"
+		}())
 	}
 }
 
@@ -164,10 +219,11 @@ func TestRideRequestRepo_CompleteEnrouteByVehicle_OtherVehicleUnaffected(t *test
 	if err != nil {
 		t.Fatalf("Create mine: %v", err)
 	}
-	setEnroute(t, mine.ID)
+	boardedAt := time.Date(2026, 7, 25, 18, 0, 0, 0, time.UTC)
+	setEnroute(t, mine.ID, boardedAt)
 
 	// A different vehicle's drive-end must not touch this ride.
-	done, err := repo.CompleteEnrouteByVehicle(ctx, "clOTHERvehicle0000000")
+	done, err := repo.CompleteEnrouteByVehicle(ctx, "clOTHERvehicle0000000", boardedAt.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("CompleteEnrouteByVehicle other: %v", err)
 	}

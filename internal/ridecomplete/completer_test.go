@@ -20,18 +20,20 @@ func (f *fakeResolver) ResolveID(context.Context, string) (string, error) {
 }
 
 type fakeStore struct {
-	mu     sync.Mutex
-	rides  []CompletedRide
-	err    error
-	gotVeh string
-	calls  int
+	mu           sync.Mutex
+	rides        []CompletedRide
+	err          error
+	gotVeh       string
+	gotDriveTime time.Time
+	calls        int
 }
 
-func (f *fakeStore) CompleteEnrouteByVehicle(_ context.Context, vehicleID string) ([]CompletedRide, error) {
+func (f *fakeStore) CompleteEnrouteByVehicle(_ context.Context, vehicleID string, driveStartedAt time.Time) ([]CompletedRide, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
 	f.gotVeh = vehicleID
+	f.gotDriveTime = driveStartedAt
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -85,7 +87,7 @@ func TestComplete_EnrouteRide_Completes(t *testing.T) {
 	pub := &fakePublisher{}
 	c := newCompleter(res, st, pub)
 
-	c.complete(context.Background(), "5YJ3E1EA7KF000000", "cdrive1")
+	c.complete(context.Background(), "5YJ3E1EA7KF000000", "cdrive1", time.Unix(1000, 0))
 
 	if st.gotVeh != "cveh1" {
 		t.Errorf("store queried vehicle %q, want the resolved cuid cveh1", st.gotVeh)
@@ -108,7 +110,7 @@ func TestComplete_NoActiveRide_NoOp(t *testing.T) {
 	pub := &fakePublisher{}
 	c := newCompleter(res, st, pub)
 
-	c.complete(context.Background(), "5YJ3E1EA7KF000000", "cdrive1")
+	c.complete(context.Background(), "5YJ3E1EA7KF000000", "cdrive1", time.Unix(1000, 0))
 
 	if st.calls != 1 {
 		t.Errorf("store calls=%d, want 1 (guarded no-op still queries)", st.calls)
@@ -126,7 +128,7 @@ func TestComplete_VINUnresolved_NoStoreCall(t *testing.T) {
 	pub := &fakePublisher{}
 	c := newCompleter(res, st, pub)
 
-	c.complete(context.Background(), "5YJ3E1EA7KF000000", "cdrive1")
+	c.complete(context.Background(), "5YJ3E1EA7KF000000", "cdrive1", time.Unix(1000, 0))
 
 	if st.calls != 0 {
 		t.Errorf("store must not be called when VIN is unresolved, got %d calls", st.calls)
@@ -143,7 +145,7 @@ func TestComplete_EmptyVIN_NoOp(t *testing.T) {
 	pub := &fakePublisher{}
 	c := newCompleter(res, st, pub)
 
-	c.complete(context.Background(), "", "cdrive1")
+	c.complete(context.Background(), "", "cdrive1", time.Unix(1000, 0))
 	if st.calls != 0 || len(pub.events) != 0 {
 		t.Errorf("empty VIN must be a no-op: store calls=%d events=%d", st.calls, len(pub.events))
 	}
@@ -161,7 +163,7 @@ func TestComplete_MultipleRides_PublishesEach(t *testing.T) {
 	pub := &fakePublisher{}
 	c := newCompleter(res, st, pub)
 
-	c.complete(context.Background(), "5YJ3E1EA7KF000000", "cdrive1")
+	c.complete(context.Background(), "5YJ3E1EA7KF000000", "cdrive1", time.Unix(1000, 0))
 	if got := len(pub.statusChanges()); got != 2 {
 		t.Errorf("published %d status changes, want 2 (one per completed ride)", got)
 	}
@@ -193,5 +195,41 @@ func TestHandle_DriveEnded_DrivesCompletion(t *testing.T) {
 
 	if len(pub.statusChanges()) != 1 {
 		t.Errorf("drive.ended did not drive completion: %d status changes", len(pub.statusChanges()))
+	}
+}
+
+// TestComplete_ThreadsDriveStartTimeToStore proves the completer forwards the
+// ended drive's start instant to the store guard (the DB correlates it against
+// the ride's board timestamp; see the store integration test for the actual
+// leg-1-vs-leg-2 arbitration).
+func TestComplete_ThreadsDriveStartTimeToStore(t *testing.T) {
+	res := &fakeResolver{id: "cveh1"}
+	st := &fakeStore{rides: nil}
+	pub := &fakePublisher{}
+	c := newCompleter(res, st, pub)
+
+	driveStart := time.Date(2026, 7, 25, 18, 30, 0, 0, time.UTC)
+	c.complete(context.Background(), "5YJ3E1EA7KF000000", "cdrive1", driveStart)
+
+	if !st.gotDriveTime.Equal(driveStart) {
+		t.Errorf("store received driveStartedAt = %v, want %v", st.gotDriveTime, driveStart)
+	}
+}
+
+// TestHandle_DriveEnded_PropagatesStartedAt proves the bus-handler path forwards
+// DriveEndedEvent.StartedAt to the store guard.
+func TestHandle_DriveEnded_PropagatesStartedAt(t *testing.T) {
+	res := &fakeResolver{id: "cveh1"}
+	st := &fakeStore{}
+	pub := &fakePublisher{}
+	c := newCompleter(res, st, pub)
+
+	started := time.Date(2026, 7, 25, 19, 0, 0, 0, time.UTC)
+	c.handle(events.Event{ID: "e1", Payload: events.DriveEndedEvent{
+		VIN: "5YJ3E1EA7KF000000", DriveID: "cdrive1", StartedAt: started,
+	}})
+
+	if !st.gotDriveTime.Equal(started) {
+		t.Errorf("store received driveStartedAt = %v, want the event's StartedAt %v", st.gotDriveTime, started)
 	}
 }
