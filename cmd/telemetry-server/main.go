@@ -308,6 +308,17 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 
 	go hub.RunHeartbeat(ctx, cfg.WebSocket().HeartbeatInterval)
 
+	// --- In-service status monitor (MYR-259 Leg 2) ---
+	// Subscribes to connectivity edges and fires ONE debounced authoritative
+	// Tesla REST in_service read per edge, persisting status=in_service.
+	// Event-driven — NO timer/poll. Reads never touch the car, so this is
+	// wired unconditionally (owners without a Tesla token are simply skipped).
+	serviceStatusMonitor, err := setupServiceStatusMonitor(cfg, bus, vinCache, vehicleRepo, accountRepo, logger)
+	if err != nil {
+		return fmt.Errorf("starting service-status monitor: %w", err)
+	}
+	defer serviceStatusMonitor.Stop()
+
 	// --- Identity module keystore (MYR-193, ADR-001) ---
 	// The ES256 signing keystore backs both access-token minting and the
 	// dual-alg validator's ES256 verification. Nil => module disabled

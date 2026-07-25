@@ -144,6 +144,18 @@ func (a *vehicleOwnerAdapter) GetVehicleOwner(ctx context.Context, vin string) (
 	return userID, nil
 }
 
+// vehicleStatusUpdaterAdapter adapts store.VehicleRepo.UpdateStatus to the
+// telemetry.VehicleStatusUpdater interface (MYR-259). The status arrives as
+// its string enum value ("in_service") so internal/telemetry stays free of
+// an internal/store import; the adapter re-types it to store.VehicleStatus.
+type vehicleStatusUpdaterAdapter struct {
+	repo *store.VehicleRepo
+}
+
+func (a *vehicleStatusUpdaterAdapter) UpdateVehicleStatus(ctx context.Context, vin, status string) error {
+	return a.repo.UpdateStatus(ctx, vin, store.VehicleStatus(status))
+}
+
 // vehicleListerAdapter adapts store.VehicleRepo.ListSummariesByUser
 // to the narrow telemetry.VehicleLister interface used by the
 // GET /api/vehicles handler (MYR-91). The adapter exists so the
