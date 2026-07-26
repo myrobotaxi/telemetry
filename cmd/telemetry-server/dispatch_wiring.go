@@ -88,10 +88,20 @@ func setupNavDispatcher(
 	// failure must not stop the server from serving.
 	reconcileCtx, cancel := context.WithTimeout(ctx, dispatchReconcileTimeout)
 	defer cancel()
-	if n, err := d.Reconcile(reconcileCtx, &dispatchOutcomeStoreAdapter{repo: rideRepo}, dispatchReconcileAge); err != nil {
-		logger.Error("nav-dispatch startup reconciliation failed", slog.String("error", err.Error()))
+	reconcileAdapter := &dispatchOutcomeStoreAdapter{repo: rideRepo}
+	if n, err := d.Reconcile(reconcileCtx, reconcileAdapter, dispatchReconcileAge); err != nil {
+		logger.Error("nav-dispatch startup reconciliation failed", slog.String("leg", "pickup"), slog.String("error", err.Error()))
 	} else if n > 0 {
-		logger.Info("nav-dispatch startup reconciliation resolved interrupted dispatches", slog.Int("count", n))
+		logger.Info("nav-dispatch startup reconciliation resolved interrupted dispatches", slog.String("leg", "pickup"), slog.Int("count", n))
+	}
+	// Leg-2 (dropoff) startup reconciliation (MYR-266): symmetric with leg 1 —
+	// resolve any dropoff push orphaned by a crash/SIGTERM in the
+	// claim→record window (dropoff_dispatched_at set, dropoff_dispatch_status
+	// NULL). Log-and-continue on error so a reconcile miss never blocks startup.
+	if n, err := d.ReconcileDropoff(reconcileCtx, reconcileAdapter, dispatchReconcileAge); err != nil {
+		logger.Error("nav-dispatch startup reconciliation failed", slog.String("leg", "dropoff"), slog.String("error", err.Error()))
+	} else if n > 0 {
+		logger.Info("nav-dispatch startup reconciliation resolved interrupted dispatches", slog.String("leg", "dropoff"), slog.Int("count", n))
 	}
 
 	logger.Info("nav-dispatch subscriber enabled",
@@ -178,4 +188,11 @@ func (a *dispatchOutcomeStoreAdapter) RecordDropoffDispatchOutcome(ctx context.C
 // the startup reconciler.
 func (a *dispatchOutcomeStoreAdapter) ListInterruptedDispatches(ctx context.Context, olderThan time.Duration) ([]string, error) {
 	return a.repo.ListInterruptedDispatches(ctx, olderThan)
+}
+
+// ListInterruptedDropoffDispatches satisfies
+// dispatch.InterruptedDropoffDispatchLister for the leg-2 startup reconciler
+// (MYR-266).
+func (a *dispatchOutcomeStoreAdapter) ListInterruptedDropoffDispatches(ctx context.Context, olderThan time.Duration) ([]string, error) {
+	return a.repo.ListInterruptedDropoffDispatches(ctx, olderThan)
 }

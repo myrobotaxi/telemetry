@@ -122,3 +122,36 @@ func (r *RideRequestRepo) RecordDropoffDispatchOutcome(ctx context.Context, id s
 	}
 	return nil
 }
+
+// ListInterruptedDropoffDispatches is the leg-2 (dropoff) analogue of
+// ListInterruptedDispatches (MYR-266): it returns the ids of rides claimed for
+// the dropoff push (dropoff_dispatched_at set) whose outcome never resolved
+// (dropoff_dispatch_status NULL) and whose claim is older than olderThan —
+// dropoff dispatches orphaned by a crash/SIGTERM in the claim→record window.
+// The leg-2 startup reconciler (internal/dispatch) resolves each. A dropoff
+// that already resolved (sent/failed/skipped) has a non-NULL status and is
+// excluded, so a car that already got its dropoff nav is never re-touched. No
+// match is not an error (returns an empty slice).
+func (r *RideRequestRepo) ListInterruptedDropoffDispatches(ctx context.Context, olderThan time.Duration) ([]string, error) {
+	start := time.Now()
+	rows, err := r.pool.Query(ctx, queryRideRequestListInterruptedDropoff, olderThan.Seconds())
+	r.metrics.ObserveQueryDuration("ride_request.list_interrupted_dropoff_dispatches", time.Since(start).Seconds())
+	if err != nil {
+		r.metrics.IncQueryError("ride_request.list_interrupted_dropoff_dispatches")
+		return nil, fmt.Errorf("RideRequestRepo.ListInterruptedDropoffDispatches: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("RideRequestRepo.ListInterruptedDropoffDispatches scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("RideRequestRepo.ListInterruptedDropoffDispatches rows: %w", err)
+	}
+	return ids, nil
+}
