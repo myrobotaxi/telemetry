@@ -234,6 +234,14 @@ func (h *RideRequestHandler) mutateStatus(ctx context.Context, w http.ResponseWr
 	updated, err := h.store.UpdateStatusFrom(ctx, rec.ID, from, to)
 	if err != nil {
 		switch {
+		case errors.Is(err, ErrVehicleRideActive):
+			// Per-vehicle one-active-ride guard (MYR-266): the transition is
+			// legal for THIS ride, but the target vehicle is already committed
+			// to another active ride — a capability gate on the vehicle, the
+			// same 409 vehicle_unavailable class as the MYR-277 in-service /
+			// offline gate (the car cannot serve a second ride at once), NOT the
+			// illegal-transition `conflict`.
+			h.writeError(w, http.StatusConflict, wserrors.ErrCodeVehicleUnavailable, "Vehicle is already on another ride")
 		case errors.Is(err, ErrRideStatusConflict):
 			// Lost the transition race (or the pre-check read was stale):
 			// the row's current status left the allowed-from set between

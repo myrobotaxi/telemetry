@@ -81,6 +81,14 @@ WHERE id = $1`
 // this table would not be misread as an active-ride conflict.
 const constraintRideActiveInstant = "uq_go_ride_requests_active_instant_rider"
 
+// constraintVehicleRideActive is the partial UNIQUE index name from migration
+// 0013. A 23505 (unique_violation) carrying this constraint on the guarded
+// requested->accepted UPDATE means the target VEHICLE is already committed to
+// another active instant ride — the repo maps it to ErrVehicleRideActive
+// (MYR-266). Matching on the constraint name (not just the SQLSTATE) keeps it
+// distinct from the per-rider active-ride conflict on the same table.
+const constraintVehicleRideActive = "uq_go_ride_requests_active_instant_vehicle"
+
 // queryRideRequestActiveInstantByRider fetches the rider's single OPEN
 // instant request, if any — the one row the partial unique index (0004)
 // permits. OPEN = the non-terminal lifecycle states; instant = scheduled_for
@@ -283,3 +291,18 @@ const queryRideRequestRecordDropoffDispatch = `UPDATE go_ride_requests SET
 	dropoff_dispatch_error = $3,
 	updated_at = NOW()
 WHERE id = $1`
+
+// queryRideRequestListInterruptedDropoff is the leg-2 (dropoff) analogue of
+// queryRideRequestListInterrupted (MYR-266): it finds rides claimed for the
+// DROPOFF push (dropoff_dispatched_at set) whose outcome never resolved
+// (dropoff_dispatch_status NULL) and whose claim is older than $1 seconds — the
+// orphan signature of a process that died between ClaimDropoffDispatch and
+// RecordDropoffDispatchOutcome. A dropoff that RESOLVED (status 'sent'/'failed'/
+// 'skipped') has a non-NULL status and is excluded, so the startup reconciler
+// never touches a car that already received its dropoff nav. The age floor
+// keeps a live in-flight dropoff from matching.
+const queryRideRequestListInterruptedDropoff = `SELECT id
+	FROM go_ride_requests
+	WHERE dropoff_dispatched_at IS NOT NULL
+	  AND dropoff_dispatch_status IS NULL
+	  AND dropoff_dispatched_at < NOW() - make_interval(secs => $1)`

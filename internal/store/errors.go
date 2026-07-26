@@ -38,6 +38,17 @@ var (
 	// sdk.ErrNotFound — it is a conflict, not a missing resource.
 	ErrRideRequestActive = errors.New("ride request already active")
 
+	// ErrVehicleRideActive is returned by UpdateStatusFrom when the guarded
+	// requested->accepted transition is rejected because the target VEHICLE is
+	// already committed to another active instant ride — the partial unique
+	// index (uq_go_ride_requests_active_instant_vehicle, migration 0013)
+	// raises 23505 (MYR-266). The HTTP layer maps it to 409 (the accept path,
+	// alongside the MYR-277 vehicle-unavailable gate). Deliberately does NOT
+	// wrap sdk.ErrNotFound — it is a conflict, not a missing resource, and is
+	// distinct from ErrRideRequestConflict (an illegal *transition* on THIS
+	// ride): the transition is legal, the vehicle is just busy.
+	ErrVehicleRideActive = errors.New("vehicle already on an active ride")
+
 	// ErrTeslaTokenNotFound is returned when no Tesla OAuth token exists
 	// for a user in the Prisma-owned Account table.
 	// Wraps sdk.ErrNotFound so callers can use errors.Is(err, sdk.ErrNotFound).

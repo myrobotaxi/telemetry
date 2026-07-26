@@ -168,3 +168,78 @@ func TestRideRequestRepo_RecordDispatchOutcome_UnknownID(t *testing.T) {
 		t.Errorf("RecordDispatchOutcome unknown id err = %v, want ErrRideRequestNotFound", err)
 	}
 }
+
+// TestRideRequestRepo_ListInterruptedDropoffDispatches is the leg-2 analogue of
+// TestRideRequestRepo_ListInterruptedDispatches (MYR-266): the leg-2 startup
+// reconciler's query returns only rides claimed for the DROPOFF push
+// (dropoff_dispatched_at set) but unresolved (dropoff_dispatch_status NULL) AND
+// older than the cutoff — never an in-flight (recent) claim, a RESOLVED dropoff
+// (the idempotency guard: a car that already got its dropoff nav is excluded),
+// or an unclaimed one. Independent of the leg-1 dispatched_at latch.
+func TestRideRequestRepo_ListInterruptedDropoffDispatches(t *testing.T) {
+	repo, _ := setupRideRequestRepo(t)
+	ctx := context.Background()
+
+	backdate := func(id string) {
+		t.Helper()
+		if _, err := testPool.Exec(ctx,
+			`UPDATE go_ride_requests SET dropoff_dispatched_at = NOW() - interval '10 minutes' WHERE id = $1`, id); err != nil {
+			t.Fatalf("backdate %s: %v", id, err)
+		}
+	}
+	mustCreate := func() string {
+		t.Helper()
+		r, err := repo.Create(ctx, fullRideRequest())
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		return r.ID
+	}
+
+	// (1) dropoff-claimed + unresolved + old -> MATCH.
+	interrupted := mustCreate()
+	if _, err := repo.ClaimDropoffDispatch(ctx, interrupted); err != nil {
+		t.Fatalf("ClaimDropoffDispatch: %v", err)
+	}
+	backdate(interrupted)
+
+	// (2) dropoff-claimed + unresolved but RECENT (in-flight) -> no match.
+	inflight := mustCreate()
+	if _, err := repo.ClaimDropoffDispatch(ctx, inflight); err != nil {
+		t.Fatalf("ClaimDropoffDispatch: %v", err)
+	}
+
+	// (3) dropoff-claimed + RESOLVED (sent) + old -> no match (idempotency: a
+	// car that already received its dropoff nav is never re-selected).
+	resolvedSent := mustCreate()
+	if _, err := repo.ClaimDropoffDispatch(ctx, resolvedSent); err != nil {
+		t.Fatalf("ClaimDropoffDispatch: %v", err)
+	}
+	if err := repo.RecordDropoffDispatchOutcome(ctx, resolvedSent, store.DispatchStatusSent, nil); err != nil {
+		t.Fatalf("RecordDropoffDispatchOutcome: %v", err)
+	}
+	backdate(resolvedSent)
+
+	// (4) dropoff-claimed + RESOLVED (failed) + old -> no match (an honestly
+	// failed dropoff is a resolved outcome, not an orphan to re-touch).
+	resolvedFailed := mustCreate()
+	if _, err := repo.ClaimDropoffDispatch(ctx, resolvedFailed); err != nil {
+		t.Fatalf("ClaimDropoffDispatch: %v", err)
+	}
+	failCode := "vehicle_asleep"
+	if err := repo.RecordDropoffDispatchOutcome(ctx, resolvedFailed, store.DispatchStatusFailed, &failCode); err != nil {
+		t.Fatalf("RecordDropoffDispatchOutcome: %v", err)
+	}
+	backdate(resolvedFailed)
+
+	// (5) never dropoff-claimed -> no match (leg-2 latch still NULL).
+	_ = mustCreate()
+
+	ids, err := repo.ListInterruptedDropoffDispatches(ctx, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("ListInterruptedDropoffDispatches: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != interrupted {
+		t.Errorf("ids = %v, want [%s] (only the old dropoff-claimed-unresolved ride)", ids, interrupted)
+	}
+}
