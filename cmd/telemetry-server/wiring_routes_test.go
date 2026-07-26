@@ -122,6 +122,7 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 		{"ride request accept (MYR-175)", "/api/ride-requests/crr0123456789abcdef0123456789abcd/accept"},
 		{"ride request decline (MYR-175)", "/api/ride-requests/crr0123456789abcdef0123456789abcd/decline"},
 		{"vehicle command (MYR-180)", "/api/vehicles/clxyz1234567890abcdef/command/door_lock"},
+		{"vehicle re-add (MYR-262)", "/api/tesla/vehicles/vid-12345/re-add"},
 	}
 	for _, rt := range postRoutes {
 		t.Run(rt.name, func(t *testing.T) {

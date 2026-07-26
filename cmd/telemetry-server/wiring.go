@@ -300,6 +300,8 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 
 	setupVehicleTeardownEndpoint(deps)
 
+	setupVehicleReaddEndpoint(deps)
+
 	setupVehicleCommandEndpoint(deps, snapshotAdapter)
 
 	setupDebugFieldsEndpoint(deps)
