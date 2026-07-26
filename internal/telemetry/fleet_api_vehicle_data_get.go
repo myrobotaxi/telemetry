@@ -16,7 +16,7 @@ import (
 // fields are otherwise stream-fed only, so the app shows "— Syncing" forever
 // when the car does not stream.
 //
-// Only the three sub-objects and the specific fields that map onto the wire
+// Only the four sub-objects and the specific fields that map onto the wire
 // are decoded. The full vehicle_data payload also carries live GPS
 // (drive_state.latitude/longitude) which is P1 — the raw payload is NEVER
 // logged (data-classification.md), so this struct exists purely to pluck the
@@ -25,9 +25,10 @@ import (
 // Each field is a pointer so an absent field decodes to nil and is skipped by
 // the mapper rather than being written as a misleading zero value.
 type VehicleData struct {
-	VehicleState *VehicleDataVehicleState `json:"vehicle_state"`
-	ClimateState *VehicleDataClimateState `json:"climate_state"`
-	ChargeState  *VehicleDataChargeState  `json:"charge_state"`
+	VehicleState  *VehicleDataVehicleState  `json:"vehicle_state"`
+	ClimateState  *VehicleDataClimateState  `json:"climate_state"`
+	ChargeState   *VehicleDataChargeState   `json:"charge_state"`
+	VehicleConfig *VehicleDataVehicleConfig `json:"vehicle_config"`
 }
 
 // VehicleDataVehicleState is the vehicle_state sub-object subset: lock state,
@@ -37,6 +38,19 @@ type VehicleDataVehicleState struct {
 	FrontTrunk *int     `json:"ft"`
 	RearTrunk  *int     `json:"rt"`
 	Odometer   *float64 `json:"odometer"` // miles
+	// CarVersion is the installed Tesla firmware string (e.g. "2026.20.1 9a8b").
+	// MYR-279: the non-streaming counterpart of the streamed Version proto field
+	// so a car that is not streaming still surfaces its software version on the
+	// /snapshot. Absent field decodes to nil and is skipped by the mapper.
+	CarVersion *string `json:"car_version"`
+}
+
+// VehicleDataVehicleConfig is the vehicle_config sub-object subset: the trim
+// badge. MYR-279: trim is NOT a streamed telemetry field, so this REST read is
+// the ONLY source of the trim value (e.g. "Performance", "Long Range"). Absent
+// field decodes to nil and is skipped by the mapper.
+type VehicleDataVehicleConfig struct {
+	TrimBadging *string `json:"trim_badging"`
 }
 
 // VehicleDataClimateState is the climate_state sub-object subset: whether the

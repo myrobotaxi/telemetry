@@ -24,7 +24,9 @@ var fieldConverters = map[tpb.Field]func(*tpb.Value) (events.TelemetryValue, err
 	// Proto 2 ChargeState is not in fieldMap and therefore not dispatched.
 	tpb.Field_DetailedChargeState: convertChargeState,
 	tpb.Field_CarType:             convertCarType,
-	tpb.Field_SentryMode:          convertSentryMode,
+	// MYR-279: keep the firmware Version as a string (never numeric-coerced).
+	tpb.Field_Version:    convertVersion,
+	tpb.Field_SentryMode: convertSentryMode,
 	// MYR-252: boolean cabin-control fields. Locked (Group A) plus the
 	// Group B HvacACEnabled / SeatVentEnabled / ChargePortDoorOpen.
 	tpb.Field_Locked:             convertBool,
@@ -79,6 +81,19 @@ func convertLocation(v *tpb.Value) (events.TelemetryValue, error) {
 			Longitude: loc.GetLongitude(),
 		},
 	}, nil
+}
+
+// convertVersion keeps the firmware version as a string (MYR-279). Tesla sends
+// Version as a string_value (e.g. "2026.20.1 9a8b7c6"); without a dedicated
+// converter the numeric-or-string fallback would ParseFloat first, and would
+// coerce a rare purely-numeric-looking version (e.g. "2026") to a float that the
+// string-typed store column then drops. Forcing StringVal persists it verbatim.
+func convertVersion(v *tpb.Value) (events.TelemetryValue, error) {
+	if sv, ok := v.Value.(*tpb.Value_StringValue); ok {
+		s := sv.StringValue
+		return events.TelemetryValue{StringVal: &s}, nil
+	}
+	return convertNumericOrString(v)
 }
 
 // convertBool handles boolean fields (e.g., Locked).

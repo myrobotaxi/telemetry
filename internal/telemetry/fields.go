@@ -44,6 +44,12 @@ const (
 	FieldVehicleName          FieldName = "vehicleName"
 	FieldCarType              FieldName = "carType"
 	FieldVersion              FieldName = "version"
+	// FieldTrim (MYR-279) is an INTERNAL-only field name (no Tesla proto / no
+	// fieldMap entry): Tesla does NOT stream the trim badge, so it is sourced
+	// ONLY from REST vehicle_data.vehicle_config.trim_badging by the MYR-260
+	// /vehicle_data backfill, routed through the same control-state persist path
+	// as the streamed fields, and surfaced on the REST /snapshot as `trim`.
+	FieldTrim FieldName = "trim"
 	FieldLocked               FieldName = "locked"
 	FieldSentryMode           FieldName = "sentryMode"
 	FieldOriginLocation       FieldName = "originLocation"

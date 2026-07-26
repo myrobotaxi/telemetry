@@ -198,3 +198,40 @@ func TestServiceStatusMonitor_VehicleDataReadFailureStillSkips(t *testing.T) {
 		t.Fatalf("vehicle_data calls = %d, want 0 (primary read failed)", c)
 	}
 }
+
+// TestVehicleDataToFields_VersionAndTrim covers MYR-279: the /vehicle_data reader
+// plucks vehicle_state.car_version onto FieldVersion and
+// vehicle_config.trim_badging onto FieldTrim so a non-streaming car surfaces its
+// software version + trim on the /snapshot via the same persist path.
+func TestVehicleDataToFields_VersionAndTrim(t *testing.T) {
+	ver := "2026.20.1 9a8b"
+	trim := "Performance"
+	data := &VehicleData{
+		VehicleState:  &VehicleDataVehicleState{CarVersion: &ver},
+		VehicleConfig: &VehicleDataVehicleConfig{TrimBadging: &trim},
+	}
+	fields := vehicleDataToFields(data)
+	if v, ok := fields[string(FieldVersion)]; !ok || v.StringVal == nil || *v.StringVal != ver {
+		t.Errorf("car_version not plucked to FieldVersion: %+v", fields)
+	}
+	if v, ok := fields[string(FieldTrim)]; !ok || v.StringVal == nil || *v.StringVal != trim {
+		t.Errorf("trim_badging not plucked to FieldTrim: %+v", fields)
+	}
+}
+
+// TestVehicleDataToFields_EmptyVersionTrimSkipped asserts blank REST strings are
+// skipped so a blank frame never overwrites a known value with "".
+func TestVehicleDataToFields_EmptyVersionTrimSkipped(t *testing.T) {
+	empty := ""
+	data := &VehicleData{
+		VehicleState:  &VehicleDataVehicleState{CarVersion: &empty},
+		VehicleConfig: &VehicleDataVehicleConfig{TrimBadging: &empty},
+	}
+	fields := vehicleDataToFields(data)
+	if _, ok := fields[string(FieldVersion)]; ok {
+		t.Error("empty car_version should be skipped")
+	}
+	if _, ok := fields[string(FieldTrim)]; ok {
+		t.Error("empty trim_badging should be skipped")
+	}
+}
