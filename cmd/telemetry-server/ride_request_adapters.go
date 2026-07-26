@@ -74,6 +74,12 @@ func (a *rideRequestStoreAdapter) UpdateStatusFrom(ctx context.Context, id strin
 		if errors.Is(err, store.ErrRideRequestConflict) {
 			return telemetry.RideRequestData{}, fmt.Errorf("update ride request status: %w", telemetry.ErrRideStatusConflict)
 		}
+		// Per-vehicle one-active-ride guard (0013, MYR-266): the car is already
+		// committed to another active ride. Translate to the handler sentinel so
+		// the accept path can surface a 409 without coupling to internal/store.
+		if errors.Is(err, store.ErrVehicleRideActive) {
+			return telemetry.RideRequestData{}, fmt.Errorf("update ride request status: %w", telemetry.ErrVehicleRideActive)
+		}
 		return telemetry.RideRequestData{}, fmt.Errorf("update ride request status: %w", err)
 	}
 	return fromStoreRideRequest(rec), nil

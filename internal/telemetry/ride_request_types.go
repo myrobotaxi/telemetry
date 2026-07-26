@@ -104,6 +104,16 @@ var ErrRideStatusConflict = errors.New("ride request status conflict")
 // decoupled from internal/store.
 var ErrRideActive = errors.New("ride request already active")
 
+// ErrVehicleRideActive is returned by RideRequestStore.UpdateStatusFrom when
+// the guarded requested->accepted transition is rejected because the target
+// VEHICLE is already committed to another active instant ride (the per-vehicle
+// one-active-ride guard, migration 0013, MYR-266). The accept handler maps it
+// to HTTP 409. The cmd adapter translates store.ErrVehicleRideActive into this
+// sentinel so the handler layer stays decoupled from internal/store. Distinct
+// from ErrRideStatusConflict (an illegal *transition* on THIS ride): the
+// transition is legal, the vehicle is just busy.
+var ErrVehicleRideActive = errors.New("vehicle already on an active ride")
+
 // RideRequestStore is the persistence surface the ride-request handlers
 // need. Implemented by rideRequestStoreAdapter in cmd/telemetry-server over
 // store.RideRequestRepo. MYR-174 uses Create/GetByID/UpdateStatusFrom/
