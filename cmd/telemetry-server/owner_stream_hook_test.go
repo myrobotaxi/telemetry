@@ -169,3 +169,84 @@ func TestOwnerStreamHook_AfterLink(t *testing.T) {
 		}
 	})
 }
+
+// TestOwnerStreamHook_ReaddVehicle covers the targeted, owner-filtered
+// re-provision behind the deliberate re-add (MYR-262). ReaddVehicle re-provisions
+// ONLY the single car matching teslaVehicleID and shares the passive sync's
+// per-vehicle path (provisionVehicle) — the difference from AfterLink is solely
+// that the handler clears the tombstone first (tested in the handler + store).
+func TestOwnerStreamHook_ReaddVehicle(t *testing.T) {
+	ctx := context.Background()
+	const validVIN = "5YJ3E1EA7KF000009" // 17 chars
+
+	t.Run("provisions and pushes only the matching owned car", func(t *testing.T) {
+		lister := &fakeLister{vehicles: []telemetry.FleetVehicle{
+			ownedVehicle("111", "5YJ3E1EA7KF000111", "Other"),
+			ownedVehicle("222", validVIN, "Target"),
+		}}
+		upsert := &fakeUpserter{}
+		pusher := &fakePusher{}
+		hook := &ownerStreamHook{lister: lister, upsert: upsert, pusher: pusher, logger: testLogger()}
+
+		if got := hook.ReaddVehicle(ctx, "cuser1", "token", "222"); !got {
+			t.Fatalf("ReaddVehicle = false, want true (owned target provisioned)")
+		}
+		if len(upsert.inputs) != 1 || upsert.inputs[0].TeslaVehicleID != "222" {
+			t.Fatalf("upsert inputs = %+v, want only the target (id 222)", upsert.inputs)
+		}
+		if len(pusher.vins) != 1 || pusher.vins[0] != validVIN {
+			t.Errorf("pushed vins = %v, want only the target VIN", pusher.vins)
+		}
+	})
+
+	t.Run("shared-driver match is never attached (owner filter)", func(t *testing.T) {
+		lister := &fakeLister{vehicles: []telemetry.FleetVehicle{
+			driverVehicle("333", validVIN, "SharedCar"),
+		}}
+		upsert := &fakeUpserter{}
+		pusher := &fakePusher{}
+		hook := &ownerStreamHook{lister: lister, upsert: upsert, pusher: pusher, logger: testLogger()}
+
+		if got := hook.ReaddVehicle(ctx, "cuser1", "token", "333"); got {
+			t.Errorf("ReaddVehicle = true, want false (caller only shares this car)")
+		}
+		if len(upsert.inputs) != 0 {
+			t.Errorf("upsert inputs = %+v, want none (shared driver must not provision)", upsert.inputs)
+		}
+	})
+
+	t.Run("target not in caller fleet is a no-op false", func(t *testing.T) {
+		lister := &fakeLister{vehicles: []telemetry.FleetVehicle{ownedVehicle("111", validVIN, "A")}}
+		upsert := &fakeUpserter{}
+		hook := &ownerStreamHook{lister: lister, upsert: upsert, pusher: &fakePusher{}, logger: testLogger()}
+
+		if got := hook.ReaddVehicle(ctx, "cuser1", "token", "999"); got {
+			t.Errorf("ReaddVehicle = true, want false (target not owned by caller)")
+		}
+		if len(upsert.inputs) != 0 {
+			t.Errorf("upsert inputs = %+v, want none", upsert.inputs)
+		}
+	})
+
+	t.Run("still-tombstoned target is skipped by the shared upsert gate", func(t *testing.T) {
+		lister := &fakeLister{vehicles: []telemetry.FleetVehicle{ownedVehicle("222", validVIN, "T")}}
+		upsert := &fakeUpserter{outcome: store.VehicleSkippedTombstoned}
+		pusher := &fakePusher{}
+		hook := &ownerStreamHook{lister: lister, upsert: upsert, pusher: pusher, logger: testLogger()}
+
+		if got := hook.ReaddVehicle(ctx, "cuser1", "token", "222"); got {
+			t.Errorf("ReaddVehicle = true, want false (tombstone still present → skipped)")
+		}
+		if len(pusher.vins) != 0 {
+			t.Errorf("pushed vins = %v, want none (tombstoned car not pushed)", pusher.vins)
+		}
+	})
+
+	t.Run("list failure is a best-effort false", func(t *testing.T) {
+		lister := &fakeLister{err: errors.New("fleet unavailable")}
+		hook := &ownerStreamHook{lister: lister, upsert: &fakeUpserter{}, pusher: &fakePusher{}, logger: testLogger()}
+		if got := hook.ReaddVehicle(ctx, "cuser1", "token", "222"); got {
+			t.Errorf("ReaddVehicle = true, want false on list error")
+		}
+	})
+}
