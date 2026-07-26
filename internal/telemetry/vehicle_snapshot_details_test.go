@@ -53,3 +53,44 @@ func TestBuildSnapshotResponse_NilDetailsAreNull(t *testing.T) {
 		t.Errorf("vin should always be present, got %v", m["vin"])
 	}
 }
+
+// TestBuildSnapshotResponse_ClimateMode covers MYR-274: the nullable hvacAutoMode
+// (string) / hvacAcEnabled (bool) read-backs backing the owner Auto/Cool/Heat
+// segment are mapped onto the snapshot response and surface in the mask map under
+// their wire names.
+func TestBuildSnapshotResponse_ClimateMode(t *testing.T) {
+	mode := "Override"
+	acOn := true
+	row := VehicleSnapshotRow{
+		ID:            "veh_1",
+		HvacAutoMode:  &mode,
+		HvacAcEnabled: &acOn,
+	}
+	resp := buildSnapshotResponse(row)
+	if resp.HvacAutoMode == nil || *resp.HvacAutoMode != mode {
+		t.Errorf("HvacAutoMode = %v, want %q", resp.HvacAutoMode, mode)
+	}
+	if resp.HvacAcEnabled == nil || !*resp.HvacAcEnabled {
+		t.Errorf("HvacAcEnabled = %v, want true", resp.HvacAcEnabled)
+	}
+
+	m := resp.toMaskMap()
+	if m["hvacAutoMode"] != mode {
+		t.Errorf("mask map hvacAutoMode = %v, want %q", m["hvacAutoMode"], mode)
+	}
+	if m["hvacAcEnabled"] != true {
+		t.Errorf("mask map hvacAcEnabled = %v, want true", m["hvacAcEnabled"])
+	}
+}
+
+// TestBuildSnapshotResponse_NilClimateModeIsNull asserts a never-read climate mode
+// surfaces as JSON null (nil in the mask map), never a fabricated Auto/Cool/Heat.
+func TestBuildSnapshotResponse_NilClimateModeIsNull(t *testing.T) {
+	m := buildSnapshotResponse(VehicleSnapshotRow{ID: "veh_1"}).toMaskMap()
+	if m["hvacAutoMode"] != nil {
+		t.Errorf("nil hvacAutoMode should map to nil, got %v", m["hvacAutoMode"])
+	}
+	if m["hvacAcEnabled"] != nil {
+		t.Errorf("nil hvacAcEnabled should map to nil, got %v", m["hvacAcEnabled"])
+	}
+}

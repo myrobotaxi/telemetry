@@ -368,3 +368,104 @@ func TestMapTelemetryToControlState_VehicleDetailStrings(t *testing.T) {
 		}
 	})
 }
+
+// TestMapTelemetryToControlState_ClimateMode covers the MYR-274 climate-mode
+// derivation backing the owner Auto/Cool/Heat segment: hvacAutoMode maps to the
+// string field (enum's "On"/"Override" form) and hvacAcEnabled to the bool field;
+// a streamed "Unknown" (or empty) hvacAutoMode is OMITTED (honest-unknown, never a
+// fabricated mode), mirroring how an "Unknown" hvacPower omits isClimateOn; an
+// Invalid field is ignored; a real false hvacAcEnabled persists.
+func TestMapTelemetryToControlState_ClimateMode(t *testing.T) {
+	t.Run("hvacAutoMode On maps to string field", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldHvacAutoMode): {StringVal: strPtr("On")},
+		})
+		if got == nil || got.HvacAutoMode == nil || *got.HvacAutoMode != "On" {
+			t.Fatalf("HvacAutoMode = %v, want On", got)
+		}
+	})
+
+	t.Run("hvacAutoMode Override maps to string field", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldHvacAutoMode): {StringVal: strPtr("Override")},
+		})
+		if got == nil || got.HvacAutoMode == nil || *got.HvacAutoMode != "Override" {
+			t.Fatalf("HvacAutoMode = %v, want Override", got)
+		}
+	})
+
+	t.Run("hvacAutoMode Unknown is omitted (honest-unknown)", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldHvacAutoMode): {StringVal: strPtr("Unknown")},
+		})
+		if got != nil {
+			t.Fatalf("Unknown-only frame should map to nil, got %+v", got)
+		}
+	})
+
+	t.Run("hvacAutoMode empty is omitted", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldHvacAutoMode): {StringVal: strPtr("")},
+		})
+		if got != nil {
+			t.Fatalf("empty-only frame should map to nil, got %+v", got)
+		}
+	})
+
+	t.Run("hvacAcEnabled true maps to bool field", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldHvacACEnabled): {BoolVal: boolPtr(true)},
+		})
+		if got == nil || got.HvacAcEnabled == nil || !*got.HvacAcEnabled {
+			t.Fatalf("HvacAcEnabled = %v, want true", got)
+		}
+	})
+
+	t.Run("hvacAcEnabled false is a real observation", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldHvacACEnabled): {BoolVal: boolPtr(false)},
+		})
+		if got == nil || got.HvacAcEnabled == nil || *got.HvacAcEnabled {
+			t.Fatalf("HvacAcEnabled = %v, want false", got)
+		}
+	})
+
+	t.Run("invalid climate-mode fields are ignored", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldHvacAutoMode):  {StringVal: strPtr("Override"), Invalid: true},
+			string(telemetry.FieldHvacACEnabled): {BoolVal: boolPtr(true), Invalid: true},
+		})
+		if got != nil {
+			t.Fatalf("invalid-only frame should map to nil, got %+v", got)
+		}
+	})
+
+	t.Run("Override + acEnabled together", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldHvacAutoMode):  {StringVal: strPtr("Override")},
+			string(telemetry.FieldHvacACEnabled): {BoolVal: boolPtr(true)},
+		})
+		if got == nil || got.HvacAutoMode == nil || *got.HvacAutoMode != "Override" {
+			t.Fatalf("HvacAutoMode = %v, want Override", got)
+		}
+		if got.HvacAcEnabled == nil || !*got.HvacAcEnabled {
+			t.Fatalf("HvacAcEnabled = %v, want true", got)
+		}
+	})
+}
+
+// TestMergeControlState_ClimateModeLastWriteWins proves per-field last-writer-wins
+// folds the MYR-274 climate-mode fields: a present src value overwrites, an absent
+// src value preserves the prior dst value.
+func TestMergeControlState_ClimateModeLastWriteWins(t *testing.T) {
+	dst := &ControlStateUpdate{HvacAutoMode: strPtr("On"), HvacAcEnabled: boolPtr(true)}
+	src := &ControlStateUpdate{HvacAutoMode: strPtr("Override")} // acEnabled absent → preserved
+	mergeControlState(dst, src)
+
+	if dst.HvacAutoMode == nil || *dst.HvacAutoMode != "Override" {
+		t.Errorf("HvacAutoMode (overwritten) = %v, want Override", dst.HvacAutoMode)
+	}
+	if dst.HvacAcEnabled == nil || !*dst.HvacAcEnabled {
+		t.Errorf("HvacAcEnabled (preserved) = %v, want true", dst.HvacAcEnabled)
+	}
+}

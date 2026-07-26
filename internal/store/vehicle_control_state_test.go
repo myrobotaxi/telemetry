@@ -486,3 +486,130 @@ func TestControlState_VehicleDetailsNeverReadIsNil(t *testing.T) {
 	wantStrPtr(t, "SoftwareVersion", nil, v.SoftwareVersion)
 	wantStrPtr(t, "Trim", nil, v.Trim)
 }
+
+// TestControlState_ClimateModePersistThenSnapshotAcrossSocketGap is the MYR-274
+// headline: the climate MODE read-backs (hvacAutoMode string + hvacAcEnabled bool)
+// backing the owner Auto/Cool/Heat segment persist to the go_vehicle_control_state
+// side table (migration 0012), THEN a later GET /snapshot — no live socket —
+// returns them. Before MYR-274 these were stream-only, so the segment could not
+// reflect the car's real mode on a cold snapshot. Table-driven over the three
+// scenarios: present (On + acEnabled), Override + acEnabled, and absent/NULL.
+func TestControlState_ClimateModePersistThenSnapshotAcrossSocketGap(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping store integration test")
+	}
+	ensureControlMigration(t)
+
+	tests := []struct {
+		name          string
+		vehID         string
+		vin           string
+		persist       *store.ControlStateUpdate // nil = persist nothing (never-read row)
+		wantAutoMode  *string
+		wantAcEnabled *bool
+	}{
+		{
+			name:          "present On + acEnabled",
+			vehID:         "veh_ctl_climate_on",
+			vin:           "5YJ3E1EA1NF00CLM1",
+			persist:       &store.ControlStateUpdate{HvacAutoMode: sp("On"), HvacAcEnabled: bp(true)},
+			wantAutoMode:  sp("On"),
+			wantAcEnabled: bp(true),
+		},
+		{
+			name:          "Override + acEnabled false",
+			vehID:         "veh_ctl_climate_override",
+			vin:           "5YJ3E1EA1NF00CLM2",
+			persist:       &store.ControlStateUpdate{HvacAutoMode: sp("Override"), HvacAcEnabled: bp(false)},
+			wantAutoMode:  sp("Override"),
+			wantAcEnabled: bp(false),
+		},
+		{
+			name:          "absent/NULL never read is nil",
+			vehID:         "veh_ctl_climate_nil",
+			vin:           "5YJ3E1EA1NF00CLM3",
+			persist:       nil,
+			wantAutoMode:  nil,
+			wantAcEnabled: nil,
+		},
+	}
+
+	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+	ctx := context.Background()
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cleanTables(t, testPool)
+			cleanControlState(t)
+			seedVehicle(t, testPool, tt.vehID, tt.vin)
+
+			if tt.persist != nil {
+				if err := repo.UpsertControlState(ctx, tt.vehID, *tt.persist); err != nil {
+					t.Fatalf("UpsertControlState: %v", err)
+				}
+			}
+
+			// The socket gap: no writer, no live stream — just a later snapshot read.
+			v, err := repo.GetByID(ctx, tt.vehID)
+			if err != nil {
+				t.Fatalf("GetByID: %v", err)
+			}
+			wantStrPtr(t, "HvacAutoMode", tt.wantAutoMode, v.HvacAutoMode)
+			wantBoolPtr(t, "HvacAcEnabled", tt.wantAcEnabled, v.HvacAcEnabled)
+		})
+	}
+}
+
+// TestControlState_ClimateModePerFieldLastWriterWins proves the COALESCE upsert
+// updates only the climate-mode fields present in a frame and leaves the rest
+// intact — a mode-only frame must not clobber a previously-persisted acEnabled,
+// and a real false acEnabled overwrites a prior true.
+func TestControlState_ClimateModePerFieldLastWriterWins(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping store integration test")
+	}
+	ensureControlMigration(t)
+	cleanTables(t, testPool)
+	cleanControlState(t)
+
+	const (
+		vehID = "veh_ctl_climate_lww_1"
+		vin   = "5YJ3E1EA1NF00CLM4"
+	)
+	seedVehicle(t, testPool, vehID, vin)
+	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+	ctx := context.Background()
+
+	// Frame 1: auto mode On + A/C on.
+	if err := repo.UpsertControlState(ctx, vehID, store.ControlStateUpdate{
+		HvacAutoMode:  sp("On"),
+		HvacAcEnabled: bp(true),
+	}); err != nil {
+		t.Fatalf("upsert 1: %v", err)
+	}
+	// Frame 2: only mode flips to Override (acEnabled absent → preserved true).
+	if err := repo.UpsertControlState(ctx, vehID, store.ControlStateUpdate{
+		HvacAutoMode: sp("Override"),
+	}); err != nil {
+		t.Fatalf("upsert 2: %v", err)
+	}
+	v, err := repo.GetByID(ctx, vehID)
+	if err != nil {
+		t.Fatalf("GetByID after frame 2: %v", err)
+	}
+	wantStrPtr(t, "HvacAutoMode (overwritten)", sp("Override"), v.HvacAutoMode)
+	wantBoolPtr(t, "HvacAcEnabled (preserved)", bp(true), v.HvacAcEnabled)
+
+	// Frame 3: A/C flips to a real false — must overwrite, not be treated as absent.
+	if err := repo.UpsertControlState(ctx, vehID, store.ControlStateUpdate{
+		HvacAcEnabled: bp(false),
+	}); err != nil {
+		t.Fatalf("upsert 3: %v", err)
+	}
+	v, err = repo.GetByID(ctx, vehID)
+	if err != nil {
+		t.Fatalf("GetByID after frame 3: %v", err)
+	}
+	wantBoolPtr(t, "HvacAcEnabled (overwritten false)", bp(false), v.HvacAcEnabled)
+	wantStrPtr(t, "HvacAutoMode (still preserved)", sp("Override"), v.HvacAutoMode)
+}
