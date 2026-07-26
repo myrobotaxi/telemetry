@@ -3,44 +3,90 @@ package store
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/events"
 	"github.com/myrobotaxi/telemetry/internal/telemetry"
 )
 
-// ControlStateUpdate holds the four owner-control read-back values MYR-269
-// persists to the Go-owned go_vehicle_control_state side table: lock, trunk +
-// frunk, climate, and charge-port state. Every field is a *bool: a nil pointer
-// means "this frame did not carry the value", so the upsert leaves the stored
-// column untouched (last-writer-wins PER FIELD). A non-nil false is a real
-// observation and DOES overwrite.
+// ControlStateUpdate holds the owner-control read-back values persisted to the
+// Go-owned go_vehicle_control_state side table. MYR-269 added the five owner
+// controls the app renders as toggles — lock, trunk + frunk, climate, and
+// charge-port state (all *bool). MYR-273 adds the cabin SETTING levels the owner
+// sheet renders as numbers — the driver/passenger temperature setpoints, fan
+// speed, the front/rear seat heater and front seat cooler levels (all *int), and
+// the media volume (*float64).
+//
+// Every field is a pointer: a nil pointer means "this frame did not carry the
+// value", so the upsert leaves the stored column untouched (last-writer-wins PER
+// FIELD). A non-nil value is a real observation and DOES overwrite (including a
+// bool false or an int/float zero).
 //
 // These are the same MYR-252 cabin read-backs the live WebSocket stream carries
-// as `locked`, `frunkOpen`/`trunkOpen`, `isClimateOn`, and `chargePortDoorOpen`;
-// MYR-269 makes them durable so a /snapshot for a non-streaming car returns the
-// last-known value instead of a perpetual "unavailable".
+// as `locked`, `frunkOpen`/`trunkOpen`, `isClimateOn`, `chargePortDoorOpen`,
+// `driverTempSetting`, `passengerTempSetting`, `fanSpeed`, `seatHeater*`,
+// `seatCooler*`, and `mediaVolume`; MYR-269 + MYR-273 make them durable so a
+// /snapshot for a non-streaming car returns the last-known value instead of a
+// perpetual "—".
 type ControlStateUpdate struct {
 	IsLocked       *bool
 	FrunkOpen      *bool
 	TrunkOpen      *bool
 	IsClimateOn    *bool
 	ChargePortOpen *bool
+
+	// MYR-273 cabin-setting levels. Temp setpoints are Fahrenheit-rounded ints
+	// (converted Celsius→Fahrenheit at the telemetry boundary, like interiorTemp);
+	// fan speed and seat heater/cooler levels are small non-negative ints; media
+	// volume is a fractional level (typically 0-11) so it is a *float64.
+	DriverTempSetting    *int
+	PassengerTempSetting *int
+	FanSpeed             *int
+	SeatHeaterLeft       *int
+	SeatHeaterRight      *int
+	SeatHeaterRearLeft   *int
+	SeatHeaterRearCenter *int
+	SeatHeaterRearRight  *int
+	SeatCoolerLeft       *int
+	SeatCoolerRight      *int
+	MediaVolume          *float64
 }
 
 // HasAny reports whether at least one control field is present. The writer
 // skips the side-table upsert entirely when a telemetry frame carries none of
-// the four controls, so an ordinary speed/location frame never touches the
+// the control fields, so an ordinary speed/location frame never touches the
 // table.
 func (c *ControlStateUpdate) HasAny() bool {
 	if c == nil {
 		return false
 	}
+	return c.hasBoolControl() || c.hasLevelControl()
+}
+
+// hasBoolControl reports whether any MYR-269 owner-control boolean is present.
+// Split out of HasAny to keep each helper under the cyclop complexity cap.
+func (c *ControlStateUpdate) hasBoolControl() bool {
 	return c.IsLocked != nil ||
 		c.FrunkOpen != nil ||
 		c.TrunkOpen != nil ||
 		c.IsClimateOn != nil ||
 		c.ChargePortOpen != nil
+}
+
+// hasLevelControl reports whether any MYR-273 cabin-setting level is present.
+func (c *ControlStateUpdate) hasLevelControl() bool {
+	return c.DriverTempSetting != nil ||
+		c.PassengerTempSetting != nil ||
+		c.FanSpeed != nil ||
+		c.SeatHeaterLeft != nil ||
+		c.SeatHeaterRight != nil ||
+		c.SeatHeaterRearLeft != nil ||
+		c.SeatHeaterRearCenter != nil ||
+		c.SeatHeaterRearRight != nil ||
+		c.SeatCoolerLeft != nil ||
+		c.SeatCoolerRight != nil ||
+		c.MediaVolume != nil
 }
 
 // mergeControlState folds the non-nil fields of src onto dst (latest wins per
@@ -52,9 +98,41 @@ func mergeControlState(dst, src *ControlStateUpdate) {
 	dst.TrunkOpen = mergePtr(dst.TrunkOpen, src.TrunkOpen)
 	dst.IsClimateOn = mergePtr(dst.IsClimateOn, src.IsClimateOn)
 	dst.ChargePortOpen = mergePtr(dst.ChargePortOpen, src.ChargePortOpen)
+	dst.DriverTempSetting = mergePtr(dst.DriverTempSetting, src.DriverTempSetting)
+	dst.PassengerTempSetting = mergePtr(dst.PassengerTempSetting, src.PassengerTempSetting)
+	dst.FanSpeed = mergePtr(dst.FanSpeed, src.FanSpeed)
+	dst.SeatHeaterLeft = mergePtr(dst.SeatHeaterLeft, src.SeatHeaterLeft)
+	dst.SeatHeaterRight = mergePtr(dst.SeatHeaterRight, src.SeatHeaterRight)
+	dst.SeatHeaterRearLeft = mergePtr(dst.SeatHeaterRearLeft, src.SeatHeaterRearLeft)
+	dst.SeatHeaterRearCenter = mergePtr(dst.SeatHeaterRearCenter, src.SeatHeaterRearCenter)
+	dst.SeatHeaterRearRight = mergePtr(dst.SeatHeaterRearRight, src.SeatHeaterRearRight)
+	dst.SeatCoolerLeft = mergePtr(dst.SeatCoolerLeft, src.SeatCoolerLeft)
+	dst.SeatCoolerRight = mergePtr(dst.SeatCoolerRight, src.SeatCoolerRight)
+	dst.MediaVolume = mergePtr(dst.MediaVolume, src.MediaVolume)
 }
 
-// mapTelemetryToControlState derives the four owner-control booleans from a
+// controlIntFields maps each cabin-setting telemetry field that persists as a
+// nullable INT to the pointer slot it fills on a ControlStateUpdate. Keeping the
+// mapping table-driven keeps mapTelemetryToControlState flat (cyclop) — adding a
+// cabin level is a one-line entry, not another if-block. Uses the SAME internal
+// field names the protobuf decoder and the MYR-260 /vehicle_data backfill emit
+// (internal/telemetry/fields.go). Note: FieldHvacFanSpeed's internal name is
+// "hvacFanSpeed"; the WS layer translates it to the wire name "fanSpeed", which
+// is also the column name here (fan_speed).
+var controlIntFields = map[telemetry.FieldName]func(*ControlStateUpdate) **int{
+	telemetry.FieldDriverTempSetting:    func(c *ControlStateUpdate) **int { return &c.DriverTempSetting },
+	telemetry.FieldPassengerTempSetting: func(c *ControlStateUpdate) **int { return &c.PassengerTempSetting },
+	telemetry.FieldHvacFanSpeed:         func(c *ControlStateUpdate) **int { return &c.FanSpeed },
+	telemetry.FieldSeatHeaterLeft:       func(c *ControlStateUpdate) **int { return &c.SeatHeaterLeft },
+	telemetry.FieldSeatHeaterRight:      func(c *ControlStateUpdate) **int { return &c.SeatHeaterRight },
+	telemetry.FieldSeatHeaterRearLeft:   func(c *ControlStateUpdate) **int { return &c.SeatHeaterRearLeft },
+	telemetry.FieldSeatHeaterRearCenter: func(c *ControlStateUpdate) **int { return &c.SeatHeaterRearCenter },
+	telemetry.FieldSeatHeaterRearRight:  func(c *ControlStateUpdate) **int { return &c.SeatHeaterRearRight },
+	telemetry.FieldSeatCoolerLeft:       func(c *ControlStateUpdate) **int { return &c.SeatCoolerLeft },
+	telemetry.FieldSeatCoolerRight:      func(c *ControlStateUpdate) **int { return &c.SeatCoolerRight },
+}
+
+// mapTelemetryToControlState derives the owner-control read-backs from a
 // telemetry field map, using the SAME internal field names the protobuf decoder
 // and the MYR-260 /vehicle_data backfill emit, and the SAME derivation the WS
 // broadcast layer applies (internal/ws/field_mapping.go, door_fields.go) so a
@@ -66,13 +144,29 @@ func mergeControlState(dst, src *ControlStateUpdate) {
 //     "OverheatProtect" ⇒ true; "Unknown" ⇒ OMITTED (nil) so a genuinely-unknown
 //     climate never overwrites a known value with a fabricated on/off (MYR-251/252)
 //   - chargePortDoorOpen (bool)  → ChargePortOpen
+//   - driver/passengerTempSetting, hvacFanSpeed, seatHeater*, seatCooler* (int) →
+//     the matching *int level (MYR-273). Numeric fields arrive as either IntVal or
+//     FloatVal depending on firmware; a float is rounded to nearest int, matching
+//     the WS layer's roundIfInteger.
+//   - mediaVolume (number)       → MediaVolume (*float64, NOT rounded — fractional)
 //
-// Fields marked Invalid by the vehicle are ignored (the four controls are not
+// Fields marked Invalid by the vehicle are ignored (these controls are not
 // atomic-group / clear-on-invalid fields). Returns nil when no control field is
 // present so callers can cheaply skip the side-table write.
 func mapTelemetryToControlState(fields map[string]events.TelemetryValue) *ControlStateUpdate {
 	c := &ControlStateUpdate{}
+	mapControlBooleans(fields, c)
+	mapControlLevels(fields, c)
+	if !c.HasAny() {
+		return nil
+	}
+	return c
+}
 
+// mapControlBooleans derives the MYR-269 owner-control booleans (lock, frunk/
+// trunk, climate, charge-port) onto c. Split from mapTelemetryToControlState to
+// keep each derivation helper under the cognitive-complexity cap.
+func mapControlBooleans(fields map[string]events.TelemetryValue, c *ControlStateUpdate) {
 	if v, ok := fields[string(telemetry.FieldLocked)]; ok && !v.Invalid && v.BoolVal != nil {
 		locked := *v.BoolVal
 		c.IsLocked = &locked
@@ -96,11 +190,60 @@ func mapTelemetryToControlState(fields map[string]events.TelemetryValue) *Contro
 		open := *v.BoolVal
 		c.ChargePortOpen = &open
 	}
+}
 
-	if !c.HasAny() {
+// mapControlLevels derives the MYR-273 cabin-setting levels (temp setpoints, fan
+// speed, seat heater/cooler levels, media volume) onto c. The integer levels are
+// table-driven via controlIntFields; media volume stays fractional (not rounded).
+func mapControlLevels(fields map[string]events.TelemetryValue, c *ControlStateUpdate) {
+	for field, target := range controlIntFields {
+		if v, ok := fields[string(field)]; ok && !v.Invalid {
+			if iv := controlIntFromValue(v); iv != nil {
+				*target(c) = iv
+			}
+		}
+	}
+
+	if v, ok := fields[string(telemetry.FieldMediaVolume)]; ok && !v.Invalid {
+		if fv := controlFloatFromValue(v); fv != nil {
+			c.MediaVolume = fv
+		}
+	}
+}
+
+// controlIntFromValue extracts a nullable int level from a TelemetryValue. The
+// numeric cabin fields arrive as IntVal on newer firmware and FloatVal (or a
+// numeric string parsed to FloatVal) on older firmware; a float is rounded to
+// the nearest int, matching the WS layer's roundIfInteger so the persisted value
+// equals the live wire value. Returns nil when the value carries no number.
+func controlIntFromValue(v events.TelemetryValue) *int {
+	switch {
+	case v.IntVal != nil:
+		i := int(*v.IntVal)
+		return &i
+	case v.FloatVal != nil:
+		i := int(math.Round(*v.FloatVal))
+		return &i
+	default:
 		return nil
 	}
-	return c
+}
+
+// controlFloatFromValue extracts a nullable float level from a TelemetryValue,
+// used for mediaVolume (a fractional level the WS layer intentionally does NOT
+// round). An IntVal is widened to float64 for the rare firmware that sends the
+// volume as an integer. Returns nil when the value carries no number.
+func controlFloatFromValue(v events.TelemetryValue) *float64 {
+	switch {
+	case v.FloatVal != nil:
+		f := *v.FloatVal
+		return &f
+	case v.IntVal != nil:
+		f := float64(*v.IntVal)
+		return &f
+	default:
+		return nil
+	}
 }
 
 // climateOnFromHvacPower maps the HvacPowerState enum string to the derived
@@ -146,19 +289,34 @@ func equalFoldASCII(a, b string) bool {
 // queryUpsertControlState upserts the owner-control side-table row for one
 // vehicle. Each control column uses COALESCE(EXCLUDED.col, existing.col): a NULL
 // bind (field absent from this frame) keeps the stored value, a non-NULL bind
-// (a real observation, including false) overwrites it — per-field
+// (a real observation, including false / 0) overwrites it — per-field
 // last-writer-wins. updated_at is bumped to NOW() on every write.
 const queryUpsertControlState = `
 INSERT INTO go_vehicle_control_state
-    (vehicle_id, is_locked, frunk_open, trunk_open, is_climate_on, charge_port_open, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, NOW())
+    (vehicle_id, is_locked, frunk_open, trunk_open, is_climate_on, charge_port_open,
+     driver_temp_setting, passenger_temp_setting, fan_speed,
+     seat_heater_left, seat_heater_right,
+     seat_heater_rear_left, seat_heater_rear_center, seat_heater_rear_right,
+     seat_cooler_left, seat_cooler_right, media_volume, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW())
 ON CONFLICT (vehicle_id) DO UPDATE SET
-    is_locked        = COALESCE(EXCLUDED.is_locked, go_vehicle_control_state.is_locked),
-    frunk_open       = COALESCE(EXCLUDED.frunk_open, go_vehicle_control_state.frunk_open),
-    trunk_open       = COALESCE(EXCLUDED.trunk_open, go_vehicle_control_state.trunk_open),
-    is_climate_on    = COALESCE(EXCLUDED.is_climate_on, go_vehicle_control_state.is_climate_on),
-    charge_port_open = COALESCE(EXCLUDED.charge_port_open, go_vehicle_control_state.charge_port_open),
-    updated_at       = NOW()`
+    is_locked               = COALESCE(EXCLUDED.is_locked, go_vehicle_control_state.is_locked),
+    frunk_open              = COALESCE(EXCLUDED.frunk_open, go_vehicle_control_state.frunk_open),
+    trunk_open              = COALESCE(EXCLUDED.trunk_open, go_vehicle_control_state.trunk_open),
+    is_climate_on           = COALESCE(EXCLUDED.is_climate_on, go_vehicle_control_state.is_climate_on),
+    charge_port_open        = COALESCE(EXCLUDED.charge_port_open, go_vehicle_control_state.charge_port_open),
+    driver_temp_setting     = COALESCE(EXCLUDED.driver_temp_setting, go_vehicle_control_state.driver_temp_setting),
+    passenger_temp_setting  = COALESCE(EXCLUDED.passenger_temp_setting, go_vehicle_control_state.passenger_temp_setting),
+    fan_speed               = COALESCE(EXCLUDED.fan_speed, go_vehicle_control_state.fan_speed),
+    seat_heater_left        = COALESCE(EXCLUDED.seat_heater_left, go_vehicle_control_state.seat_heater_left),
+    seat_heater_right       = COALESCE(EXCLUDED.seat_heater_right, go_vehicle_control_state.seat_heater_right),
+    seat_heater_rear_left   = COALESCE(EXCLUDED.seat_heater_rear_left, go_vehicle_control_state.seat_heater_rear_left),
+    seat_heater_rear_center = COALESCE(EXCLUDED.seat_heater_rear_center, go_vehicle_control_state.seat_heater_rear_center),
+    seat_heater_rear_right  = COALESCE(EXCLUDED.seat_heater_rear_right, go_vehicle_control_state.seat_heater_rear_right),
+    seat_cooler_left        = COALESCE(EXCLUDED.seat_cooler_left, go_vehicle_control_state.seat_cooler_left),
+    seat_cooler_right       = COALESCE(EXCLUDED.seat_cooler_right, go_vehicle_control_state.seat_cooler_right),
+    media_volume            = COALESCE(EXCLUDED.media_volume, go_vehicle_control_state.media_volume),
+    updated_at              = NOW()`
 
 // UpsertControlState persists the present owner-control fields for the vehicle
 // with the given cuid into the Go-owned go_vehicle_control_state side table.
@@ -178,6 +336,17 @@ func (r *VehicleRepo) UpsertControlState(ctx context.Context, vehicleID string, 
 		update.TrunkOpen,
 		update.IsClimateOn,
 		update.ChargePortOpen,
+		update.DriverTempSetting,
+		update.PassengerTempSetting,
+		update.FanSpeed,
+		update.SeatHeaterLeft,
+		update.SeatHeaterRight,
+		update.SeatHeaterRearLeft,
+		update.SeatHeaterRearCenter,
+		update.SeatHeaterRearRight,
+		update.SeatCoolerLeft,
+		update.SeatCoolerRight,
+		update.MediaVolume,
 	)
 	r.metrics.ObserveQueryDuration("vehicle.upsert_control_state", time.Since(start).Seconds())
 	if err != nil {

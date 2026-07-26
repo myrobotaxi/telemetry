@@ -31,16 +31,22 @@ FROM "Vehicle"
 WHERE "vin" = $1`
 
 // queryVehicleByID is the snapshot (GET /snapshot) read path. It LEFT JOINs the
-// Go-owned go_vehicle_control_state side table (MYR-269) so the response carries
-// the durable owner-control read-backs (lock, trunk/frunk, climate, charge-port)
-// for a non-streaming car. The five control columns are appended AFTER the *Enc
-// columns so scanVehicleRowExtra reads them as trailing `extra` destinations.
+// Go-owned go_vehicle_control_state side table (MYR-269, MYR-273) so the response
+// carries the durable owner-control read-backs for a non-streaming car: the five
+// MYR-269 booleans (lock, trunk/frunk, climate, charge-port) plus the eleven
+// MYR-273 cabin-setting levels (driver/passenger temp setpoints, fan speed, seat
+// heater/cooler levels, media volume). The control columns are appended AFTER the
+// *Enc columns so scanVehicleRowExtra reads them as trailing `extra` destinations.
 // Joining a Go-owned table into a Prisma-owned read is a runtime SELECT, not a
 // migration FK, so CG-DL-9 does not apply. The base columns stay unqualified
 // (unambiguous — the side table's snake_case columns share no name with the
 // quoted camelCase "Vehicle" columns); "id" is qualified to name the join key.
 const queryVehicleByID = `SELECT ` + vehicleSelectColumns + `,
-	gcs.is_locked, gcs.frunk_open, gcs.trunk_open, gcs.is_climate_on, gcs.charge_port_open
+	gcs.is_locked, gcs.frunk_open, gcs.trunk_open, gcs.is_climate_on, gcs.charge_port_open,
+	gcs.driver_temp_setting, gcs.passenger_temp_setting, gcs.fan_speed,
+	gcs.seat_heater_left, gcs.seat_heater_right,
+	gcs.seat_heater_rear_left, gcs.seat_heater_rear_center, gcs.seat_heater_rear_right,
+	gcs.seat_cooler_left, gcs.seat_cooler_right, gcs.media_volume
 FROM "Vehicle"
 LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"
 WHERE "Vehicle"."id" = $1`

@@ -247,6 +247,18 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"trunk_open"       BOOLEAN,
 		"is_climate_on"    BOOLEAN,
 		"charge_port_open" BOOLEAN,
+		-- MYR-273 cabin settings
+		"driver_temp_setting"     INT,
+		"passenger_temp_setting"  INT,
+		"fan_speed"               INT,
+		"seat_heater_left"        INT,
+		"seat_heater_right"       INT,
+		"seat_heater_rear_left"   INT,
+		"seat_heater_rear_center" INT,
+		"seat_heater_rear_right"  INT,
+		"seat_cooler_left"        INT,
+		"seat_cooler_right"       INT,
+		"media_volume"            DOUBLE PRECISION,
 		"updated_at"       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);`
 	if _, err := pool.Exec(ctx, schema); err != nil {
