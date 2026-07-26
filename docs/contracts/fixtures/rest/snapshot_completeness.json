@@ -275,7 +275,7 @@
       "synthetic": { "kind": "vehicleUpdate", "field": "HvacAutoMode", "value": "On" },
       "nullableInSteadyState": false,
       "linearIssue": "MYR-253",
-      "comment": "MYR-252 Group B cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253. MYR-269 now persists this to the Go-owned go_vehicle_control_state SIDE table (not the Prisma Vehicle table) and returns it on /snapshot via VehicleRepo.GetByID's LEFT JOIN; this MYR-48 completeness harness exercises the Vehicle-table writer pipeline via GetByVIN (no side-table join), so this row stays expected_failure here — the side-table round-trip is covered by internal/store/vehicle_control_state_test.go."
+      "comment": "MYR-252 Group B cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253. MYR-274 now persists this climate-mode read-back to the Go-owned go_vehicle_control_state SIDE table (migration 0012, hvac_auto_mode TEXT; not the Prisma Vehicle table) on the live persist path and the /vehicle_data backfill, and returns it on /snapshot via VehicleRepo.GetByID's LEFT JOIN; a streamed \"Unknown\"/empty persists NULL (honest-unknown). This MYR-48 completeness harness exercises the Vehicle-table writer pipeline via GetByVIN (no side-table join), so this row stays expected_failure here — the side-table round-trip is covered by internal/store/vehicle_control_state_test.go."
     },
     "hvacAcEnabled": {
       "category": "expected_failure",
@@ -283,7 +283,7 @@
       "synthetic": { "kind": "vehicleUpdate", "field": "HvacAcEnabled", "value": true },
       "nullableInSteadyState": false,
       "linearIssue": "MYR-253",
-      "comment": "MYR-252 Group B cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253."
+      "comment": "MYR-252 Group B cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253. MYR-274 now persists this climate-mode read-back to the Go-owned go_vehicle_control_state SIDE table (migration 0012, hvac_ac_enabled BOOLEAN; not the Prisma Vehicle table) on the live persist path and the /vehicle_data backfill, and returns it on /snapshot via VehicleRepo.GetByID's LEFT JOIN; a real false overwrites, null when never read. This MYR-48 completeness harness exercises the Vehicle-table writer pipeline via GetByVIN (no side-table join), so this row stays expected_failure here — the side-table round-trip is covered by internal/store/vehicle_control_state_test.go."
     },
     "seatHeaterLeft": {
       "category": "expected_failure",

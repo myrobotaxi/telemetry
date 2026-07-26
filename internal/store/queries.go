@@ -31,11 +31,13 @@ FROM "Vehicle"
 WHERE "vin" = $1`
 
 // queryVehicleByID is the snapshot (GET /snapshot) read path. It LEFT JOINs the
-// Go-owned go_vehicle_control_state side table (MYR-269, MYR-273) so the response
-// carries the durable owner-control read-backs for a non-streaming car: the five
-// MYR-269 booleans (lock, trunk/frunk, climate, charge-port) plus the eleven
-// MYR-273 cabin-setting levels (driver/passenger temp setpoints, fan speed, seat
-// heater/cooler levels, media volume). The control columns are appended AFTER the
+// Go-owned go_vehicle_control_state side table (MYR-269, MYR-273, MYR-279,
+// MYR-274) so the response carries the durable owner-control read-backs for a
+// non-streaming car: the five MYR-269 booleans (lock, trunk/frunk, climate,
+// charge-port), the eleven MYR-273 cabin-setting levels (driver/passenger temp
+// setpoints, fan speed, seat heater/cooler levels, media volume), the two MYR-279
+// vehicle-detail strings (software version, trim), and the two MYR-274 climate-mode
+// read-backs (hvac auto mode, A/C enabled). The control columns are appended AFTER the
 // *Enc columns so scanVehicleRowExtra reads them as trailing `extra` destinations.
 // Joining a Go-owned table into a Prisma-owned read is a runtime SELECT, not a
 // migration FK, so CG-DL-9 does not apply. The base columns stay unqualified
@@ -47,7 +49,8 @@ const queryVehicleByID = `SELECT ` + vehicleSelectColumns + `,
 	gcs.seat_heater_left, gcs.seat_heater_right,
 	gcs.seat_heater_rear_left, gcs.seat_heater_rear_center, gcs.seat_heater_rear_right,
 	gcs.seat_cooler_left, gcs.seat_cooler_right, gcs.media_volume,
-	gcs.software_version, gcs.trim
+	gcs.software_version, gcs.trim,
+	gcs.hvac_auto_mode, gcs.hvac_ac_enabled
 FROM "Vehicle"
 LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"
 WHERE "Vehicle"."id" = $1`

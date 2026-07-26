@@ -262,6 +262,9 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		-- MYR-279 vehicle-detail read-backs (migration 0011)
 		"software_version"        TEXT,
 		"trim"                    TEXT,
+		-- MYR-274 climate-mode read-backs (migration 0012)
+		"hvac_auto_mode"          TEXT,
+		"hvac_ac_enabled"         BOOLEAN,
 		"updated_at"       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);`
 	if _, err := pool.Exec(ctx, schema); err != nil {

@@ -319,13 +319,13 @@
     "hvacAutoMode": {
       "type": ["string", "null"],
       "enum": ["Unknown", "On", "Override", null],
-      "description": "HVAC auto mode state. Sourced from Tesla proto field 197 (HvacAutoMode, HvacAutoModeState enum). Added by MYR-252 (Group B — newly added to the fleet-telemetry field config + server field map). Live WS vehicle_update field.",
+      "description": "HVAC auto mode state. Sourced from Tesla proto field 197 (HvacAutoMode, HvacAutoModeState enum). Added by MYR-252 (Group B — newly added to the fleet-telemetry field config + server field map). Live WS vehicle_update field. **MYR-274 (NFR-3.5 hydration):** now persisted server-side to the Go-owned `go_vehicle_control_state` side table (keyed by vehicle id, no Prisma FK per CG-DL-9) as a nullable TEXT column whenever it arrives — live stream OR the MYR-260 `/vehicle_data` backfill — and returned on the DB-backed REST `/snapshot` (LEFT-joined by `VehicleRepo.GetByID`), so a non-streaming car (in service / asleep / offline) surfaces the last-known Auto/Cool/Heat mode with no live socket instead of an unresolved segment. A streamed \"Unknown\"/empty is OMITTED (persists NULL, honest-unknown — never overwrites a known mode with a fabricated one). Null when never read.",
       "x-classification": "P0",
       "x-tesla-proto-field": 197
     },
     "hvacAcEnabled": {
       "type": ["boolean", "null"],
-      "description": "Whether the air-conditioning compressor is enabled. Sourced from Tesla proto field 196 (HvacACEnabled, boolean). Added by MYR-252 (Group B). Live WS vehicle_update field.",
+      "description": "Whether the air-conditioning compressor is enabled. Sourced from Tesla proto field 196 (HvacACEnabled, boolean). Added by MYR-252 (Group B). Live WS vehicle_update field. **MYR-274 (NFR-3.5 hydration):** now persisted server-side to the Go-owned `go_vehicle_control_state` side table (keyed by vehicle id, no Prisma FK per CG-DL-9) as a nullable BOOLEAN column whenever it arrives — live stream OR the MYR-260 `/vehicle_data` backfill — and returned on the DB-backed REST `/snapshot` (LEFT-joined by `VehicleRepo.GetByID`), so a non-streaming car (in service / asleep / offline) surfaces the last-known value with no live socket. A real false overwrites; null when never read.",
       "x-classification": "P0",
       "x-tesla-proto-field": 196
     },

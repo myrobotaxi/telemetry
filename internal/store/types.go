@@ -88,6 +88,12 @@ type Vehicle struct {
 	// Nullable — nil means never read. Populated only by GetByID.
 	SoftwareVersion *string
 	Trim            *string
+
+	// MYR-274 climate-mode read-backs (hvac auto mode string, A/C enabled bool),
+	// same side table, same nil-means-never-read semantics. Populated only by
+	// GetByID.
+	HvacAutoMode  *string
+	HvacAcEnabled *bool
 }
 
 // VehicleUpdate holds the subset of vehicle fields that can change from

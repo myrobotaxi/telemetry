@@ -269,6 +269,8 @@ func (a *vehicleSnapshotAdapter) GetByID(ctx context.Context, vehicleID string) 
 		MediaVolume:          v.MediaVolume,
 		SoftwareVersion:      v.SoftwareVersion,
 		Trim:                 v.Trim,
+		HvacAutoMode:         v.HvacAutoMode,
+		HvacAcEnabled:        v.HvacAcEnabled,
 	}, nil
 }
 
