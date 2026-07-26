@@ -251,3 +251,25 @@ func contains(haystack, needle string) bool {
 	}
 	return false
 }
+
+// TestFor_VehicleState_MYR279 asserts the MYR-279 gating: the owner sees the full
+// vin plus softwareVersion / trim; a viewer sees softwareVersion / trim (P0,
+// non-identifying) but NOT the full vin (party-scoped, owner-only).
+func TestFor_VehicleState_MYR279(t *testing.T) {
+	owner := For(ResourceVehicleState, auth.RoleOwner)
+	for _, f := range []string{"vin", "softwareVersion", "trim"} {
+		if _, ok := owner.Allowed[f]; !ok {
+			t.Errorf("owner mask must contain %q", f)
+		}
+	}
+
+	viewer := For(ResourceVehicleState, auth.RoleViewer)
+	if _, ok := viewer.Allowed["vin"]; ok {
+		t.Error("viewer mask must NOT contain the full vin (owner-only, MYR-279)")
+	}
+	for _, f := range []string{"softwareVersion", "trim"} {
+		if _, ok := viewer.Allowed[f]; !ok {
+			t.Errorf("viewer mask should retain %q (P0, non-identifying)", f)
+		}
+	}
+}
