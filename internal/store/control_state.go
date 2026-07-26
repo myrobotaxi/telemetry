@@ -36,6 +36,15 @@ type ControlStateUpdate struct {
 	IsClimateOn    *bool
 	ChargePortOpen *bool
 
+	// MYR-274 climate-MODE read-backs backing the owner Auto/Cool/Heat segment.
+	// HvacAutoMode is the wire enum's string form ("On"/"Override"); a streamed
+	// "Unknown"/empty is treated as never-read (nil) so it never overwrites a
+	// known mode with a fabricated one, mirroring how IsClimateOn omits an
+	// "Unknown" hvacPower. HvacAcEnabled is whether the A/C is on (*bool, a real
+	// false overwrites).
+	HvacAutoMode  *string
+	HvacAcEnabled *bool
+
 	// MYR-273 cabin-setting levels. Temp setpoints are Fahrenheit-rounded ints
 	// (converted Celsius→Fahrenheit at the telemetry boundary, like interiorTemp);
 	// fan speed and seat heater/cooler levels are small non-negative ints; media
@@ -71,7 +80,7 @@ func (c *ControlStateUpdate) HasAny() bool {
 	if c == nil {
 		return false
 	}
-	return c.hasBoolControl() || c.hasLevelControl() || c.hasStringControl()
+	return c.hasBoolControl() || c.hasLevelControl() || c.hasStringControl() || c.hasClimateMode()
 }
 
 // hasBoolControl reports whether any MYR-269 owner-control boolean is present.
@@ -105,6 +114,12 @@ func (c *ControlStateUpdate) hasStringControl() bool {
 	return c.SoftwareVersion != nil || c.Trim != nil
 }
 
+// hasClimateMode reports whether any MYR-274 climate-mode read-back (hvac auto
+// mode, A/C enabled) is present.
+func (c *ControlStateUpdate) hasClimateMode() bool {
+	return c.HvacAutoMode != nil || c.HvacAcEnabled != nil
+}
+
 // mergeControlState folds the non-nil fields of src onto dst (latest wins per
 // field), mirroring mergeUpdate's per-field last-write-wins for the Vehicle
 // table. Both dst and src are non-nil.
@@ -127,6 +142,8 @@ func mergeControlState(dst, src *ControlStateUpdate) {
 	dst.MediaVolume = mergePtr(dst.MediaVolume, src.MediaVolume)
 	dst.SoftwareVersion = mergePtr(dst.SoftwareVersion, src.SoftwareVersion)
 	dst.Trim = mergePtr(dst.Trim, src.Trim)
+	dst.HvacAutoMode = mergePtr(dst.HvacAutoMode, src.HvacAutoMode)
+	dst.HvacAcEnabled = mergePtr(dst.HvacAcEnabled, src.HvacAcEnabled)
 }
 
 // controlIntFields maps each cabin-setting telemetry field that persists as a
@@ -176,10 +193,31 @@ func mapTelemetryToControlState(fields map[string]events.TelemetryValue) *Contro
 	mapControlBooleans(fields, c)
 	mapControlLevels(fields, c)
 	mapControlStrings(fields, c)
+	mapControlClimateMode(fields, c)
 	if !c.HasAny() {
 		return nil
 	}
 	return c
+}
+
+// mapControlClimateMode derives the MYR-274 climate-mode read-backs (hvac auto
+// mode, A/C enabled) onto c. hvacAutoMode arrives as the enum's string form
+// ("On"/"Override"/"Unknown"); an empty OR "Unknown" value is OMITTED (left nil)
+// so a genuinely-unknown mode never overwrites a known value with a fabricated
+// one — the same honest-unknown discipline climateOnFromHvacPower applies to
+// "Unknown" hvacPower (MYR-251/252). hvacAcEnabled is a plain bool that persists
+// when present, including a real false.
+func mapControlClimateMode(fields map[string]events.TelemetryValue, c *ControlStateUpdate) {
+	if v, ok := fields[string(telemetry.FieldHvacAutoMode)]; ok && !v.Invalid && v.StringVal != nil {
+		if mode := *v.StringVal; mode != "" && !equalFoldASCII(mode, "Unknown") {
+			c.HvacAutoMode = &mode
+		}
+	}
+
+	if v, ok := fields[string(telemetry.FieldHvacACEnabled)]; ok && !v.Invalid && v.BoolVal != nil {
+		enabled := *v.BoolVal
+		c.HvacAcEnabled = &enabled
+	}
 }
 
 // mapControlBooleans derives the MYR-269 owner-control booleans (lock, frunk/
@@ -333,8 +371,8 @@ INSERT INTO go_vehicle_control_state
      seat_heater_left, seat_heater_right,
      seat_heater_rear_left, seat_heater_rear_center, seat_heater_rear_right,
      seat_cooler_left, seat_cooler_right, media_volume,
-     software_version, trim, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW())
+     software_version, trim, hvac_auto_mode, hvac_ac_enabled, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, NOW())
 ON CONFLICT (vehicle_id) DO UPDATE SET
     is_locked               = COALESCE(EXCLUDED.is_locked, go_vehicle_control_state.is_locked),
     frunk_open              = COALESCE(EXCLUDED.frunk_open, go_vehicle_control_state.frunk_open),
@@ -354,6 +392,8 @@ ON CONFLICT (vehicle_id) DO UPDATE SET
     media_volume            = COALESCE(EXCLUDED.media_volume, go_vehicle_control_state.media_volume),
     software_version        = COALESCE(EXCLUDED.software_version, go_vehicle_control_state.software_version),
     trim                    = COALESCE(EXCLUDED.trim, go_vehicle_control_state.trim),
+    hvac_auto_mode          = COALESCE(EXCLUDED.hvac_auto_mode, go_vehicle_control_state.hvac_auto_mode),
+    hvac_ac_enabled         = COALESCE(EXCLUDED.hvac_ac_enabled, go_vehicle_control_state.hvac_ac_enabled),
     updated_at              = NOW()`
 
 // UpsertControlState persists the present owner-control fields for the vehicle
@@ -387,6 +427,8 @@ func (r *VehicleRepo) UpsertControlState(ctx context.Context, vehicleID string, 
 		update.MediaVolume,
 		update.SoftwareVersion,
 		update.Trim,
+		update.HvacAutoMode,
+		update.HvacAcEnabled,
 	)
 	r.metrics.ObserveQueryDuration("vehicle.upsert_control_state", time.Since(start).Seconds())
 	if err != nil {
