@@ -74,6 +74,11 @@ type VehicleSnapshotRow struct {
 	// go_vehicle_control_state side table, same GetByID LEFT JOIN. Nullable.
 	SoftwareVersion *string
 	Trim            *string
+
+	// MYR-274 climate-mode read-backs (hvac auto mode string, A/C enabled bool),
+	// same side table, same GetByID LEFT JOIN. Nullable — nil means never read.
+	HvacAutoMode  *string
+	HvacAcEnabled *bool
 }
 
 // VehicleSnapshotReader returns the snapshot row for a Prisma cuid.
@@ -163,6 +168,16 @@ type vehicleSnapshotResponse struct {
 	SeatCoolerLeft       *int     `json:"seatCoolerLeft"`
 	SeatCoolerRight      *int     `json:"seatCoolerRight"`
 	MediaVolume          *float64 `json:"mediaVolume"`
+
+	// MYR-274: climate-MODE read-backs backing the owner Auto/Cool/Heat segment,
+	// now persisted (go_vehicle_control_state) and returned on the DB-backed
+	// /snapshot for non-streaming cars. Wire names match the live WS vehicle_update
+	// fields (internal/ws/field_mapping.go — both pass through unchanged) so the
+	// client's Vehicle model reconciles REST and WS. Nullable: null == never read
+	// (honest-unknown — the segment stays unresolved), never a fabricated mode. On
+	// the owner mask allow-list (internal/mask/tables.go, since MYR-252).
+	HvacAutoMode  *string `json:"hvacAutoMode"`
+	HvacAcEnabled *bool   `json:"hvacAcEnabled"`
 }
 
 // toMaskMap returns the response as a wire-name-keyed map suitable for
@@ -236,6 +251,10 @@ func addSnapshotControlFields(m map[string]any, r vehicleSnapshotResponse) {
 	m["seatCoolerLeft"] = derefOrNil(r.SeatCoolerLeft)
 	m["seatCoolerRight"] = derefOrNil(r.SeatCoolerRight)
 	m["mediaVolume"] = derefOrNil(r.MediaVolume)
+	// MYR-274 climate-mode read-backs, keyed by the live WS wire names (on the
+	// owner mask allow-list since MYR-252).
+	m["hvacAutoMode"] = derefOrNil(r.HvacAutoMode)
+	m["hvacAcEnabled"] = derefOrNil(r.HvacAcEnabled)
 }
 
 // buildSnapshotResponse maps the store-layer row into the wire shape.
@@ -292,5 +311,7 @@ func buildSnapshotResponse(row VehicleSnapshotRow) vehicleSnapshotResponse {
 		SeatCoolerLeft:       row.SeatCoolerLeft,
 		SeatCoolerRight:      row.SeatCoolerRight,
 		MediaVolume:          row.MediaVolume,
+		HvacAutoMode:         row.HvacAutoMode,
+		HvacAcEnabled:        row.HvacAcEnabled,
 	}
 }
