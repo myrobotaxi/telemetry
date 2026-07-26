@@ -7,6 +7,7 @@
 //
 //	ops auth token        --user-id <id>
 //	ops vehicles list     --user-id <id>
+//	ops vehicles re-add   --user-id <id> --tesla-vehicle-id <id>
 //	ops fleet-config show
 //	ops fleet-config push --vin <vin> --user-id <id>
 //	ops fields watch      --vin <vin>
@@ -76,6 +77,8 @@ Commands:
   auth token          --user-id <id>                 Print the user's Tesla token (auto-refreshes if expired)
   auth link           --user-id <id> [--port N]      Run the Tesla OAuth browser flow and store fresh tokens
   vehicles list       --user-id <id>                 List vehicles owned by the user
+  vehicles re-add     --user-id <id> --tesla-vehicle-id <id>
+                                                     Clear a removed-vehicle tombstone so the car can be re-added (MYR-262)
   fleet-config show                                  Print DefaultFieldConfig as JSON
   fleet-config push   --vin <vin> --user-id <id>     Push DefaultFieldConfig to Tesla for this VIN
   fields watch        --vin <vin> [--server <url>]   Stream raw decoded fields from /api/debug/fields

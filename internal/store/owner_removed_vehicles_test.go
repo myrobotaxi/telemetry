@@ -146,6 +146,56 @@ func TestClearTombstone_ThenReadd(t *testing.T) {
 	}
 }
 
+// TestClearTombstone_CannotClearAnotherUsersTombstone is the ownership
+// guard-rail (MYR-262): ClearTombstone is scoped `WHERE user_id = caller`, so
+// user A calling it for a teslaVehicleId tombstoned by user B must NOT clear B's
+// tombstone (a clean no-op false), and B's removed car must stay tombstoned.
+func TestClearTombstone_CannotClearAnotherUsersTombstone(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable")
+	}
+	ensureTeardownSchema(t)
+	cleanTeardownTables(t)
+
+	const (
+		ownerB   = "crmvownerB01"
+		attacker = "crmvownerA01"
+		tvid     = "vid-shared-id"
+		vin      = "5YJ3E1EA7KF000204"
+	)
+	seedOwnerUser(t, ownerB, "", "")
+	seedOwnerUser(t, attacker, "", "")
+	seedTombstone(t, ownerB, tvid, vin)
+	ctx := context.Background()
+	reg := newTestRegistry()
+
+	// Attacker A tries to clear B's tombstone for the same teslaVehicleId.
+	cleared, err := reg.ClearTombstone(ctx, attacker, tvid)
+	if err != nil {
+		t.Fatalf("ClearTombstone(attacker): %v", err)
+	}
+	if cleared {
+		t.Errorf("ClearTombstone(attacker) = true, want false (must not clear another user's tombstone)")
+	}
+	// B's tombstone is untouched — the removed car stays trapped for B.
+	if !tombstoneExists(t, ownerB, tvid) {
+		t.Errorf("owner B's tombstone was cleared by another user (ownership breach)")
+	}
+	// No spurious vehicle_readd_allowed audit row for the attacker.
+	if n := countRows(t, `"AuditLog"`, `"userId"`, attacker); n != 0 {
+		t.Errorf("attacker audit rows = %d, want 0 (no clear happened)", n)
+	}
+
+	// B can still clear their own tombstone (the legitimate owner path works).
+	cleared, err = reg.ClearTombstone(ctx, ownerB, tvid)
+	if err != nil {
+		t.Fatalf("ClearTombstone(ownerB): %v", err)
+	}
+	if !cleared {
+		t.Errorf("ClearTombstone(ownerB) = false, want true (owner clears own tombstone)")
+	}
+}
+
 func assertReaddAudit(t *testing.T, userID, teslaVehicleID string) {
 	t.Helper()
 	var action, targetType, initiator string
