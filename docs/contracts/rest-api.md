@@ -74,6 +74,7 @@ Every FR/NFR listed here is anchored in at least one section of this doc. The ta
    10. Authentication (identity module — MYR-193)
    11. In-app Tesla account link (MYR-246)
    12. `DELETE /api/tesla/vehicles/{vehicleId}` (owner car offboarding — MYR-258)
+   13. `POST /api/tesla/vehicles/{teslaVehicleId}/re-add` (owner deliberate re-add — MYR-262)
 8. Resource schemas
 9. Observability
 10. Code <-> spec divergences
@@ -1903,9 +1904,11 @@ incidental re-link, so tombstone-wins is the default and a **deliberate re-add
 is an explicit action**: it must first clear the tombstone via
 `store.RemovedVehicleRegistry.ClearTombstone` (which writes a
 `vehicle_readd_allowed` audit row), after which the next sync provisions the car
-normally. No REST route clears tombstones today — a re-add UI/endpoint is the
-app-side half of MYR-261; the backend exposes `ClearTombstone` as the sanctioned
-entry point.
+normally. Since **MYR-262** the sanctioned deliberate-re-add route is §7.13
+`POST /api/tesla/vehicles/{teslaVehicleId}/re-add` (owner-authenticated), which
+clears the tombstone then best-effort re-provisions the car; an operator stopgap
+`ops vehicles re-add --user-id <id> --tesla-vehicle-id <id>` clears a tombstone
+out-of-band over the same registry.
 
 **OAuth revoke & virtual key — owner-only, by design.** Deleting our `Account`
 tokens removes OUR access; it does NOT revoke the Tesla grant (there is no
@@ -1949,6 +1952,90 @@ no Fleet API and no deep link (§1.3) — it is returned as **instructions only*
 (caller does not own the vehicle), `404 not_found` (unknown vehicle),
 `405 invalid_request` (non-DELETE method), `500 internal_error` (local teardown
 transaction failed — atomic: nothing deleted, no audit row; retryable).
+
+---
+
+### 7.13 `POST /api/tesla/vehicles/{teslaVehicleId}/re-add` (owner deliberate re-add — MYR-262)
+
+Owner-authenticated "Add this car back" — the sanctioned un-trap for the MYR-261
+removed-vehicle tombstone. A car the owner removed via §7.12 gets a
+`go_removed_vehicles` tombstone, and the passive post-link bulk sync
+(`ownerStreamHook.AfterLink` → `store.OwnerProvisioner.UpsertOwnedVehicle`) skips
+any tombstoned `(owner, teslaVehicleId)` so an incidental Tesla re-link can never
+resurrect it (§7.12 "tombstone-wins"). That made a removed car a permanent trap;
+this endpoint is the **only** runtime path that clears a tombstone.
+
+**Deliberate-vs-passive seam.** This endpoint clears the tombstone
+(`store.RemovedVehicleRegistry.ClearTombstone`) **before** provisioning; the
+passive `AfterLink` sync **never** clears one. Everything after the clear (Fleet
+list → owner filter → `UpsertOwnedVehicle` → stream-config push) is the shared
+provisioning path, so the car returns through exactly the code the passive sync
+uses.
+
+**Enablement.** The route is ALWAYS mounted (clearing the tombstone — the durable
+un-trap — is a local DB transaction that needs no proxy). The inline re-provision
+is best-effort and only pushes stream config when the tesla-http-proxy
+(`TESLA_PROXY_URL`) is configured; otherwise the tombstone is still cleared and
+the car is provisioned by the next Tesla link's passive sync.
+
+**Request.**
+
+```
+POST /api/tesla/vehicles/{teslaVehicleId}/re-add
+Authorization: Bearer <app session JWT>        # owner identity = JWT sub
+```
+
+`{teslaVehicleId}` is the **Tesla vehicle id** (NOT a Prisma cuid like §7.12): at
+re-add time the local `Vehicle` row has been deleted, so the tombstone's
+`(user_id, tesla_vehicle_id)` composite is the only stable handle for a removed
+car.
+
+**Behavior / sequence:**
+
+1. Validate the bearer → `userId`. Missing/invalid → `401 auth_failed`. Missing
+   `{teslaVehicleId}` → `400 invalid_request`.
+2. **Clear the tombstone** for the caller's OWN `(userId, teslaVehicleId)`
+   (`ClearTombstone`, scoped `WHERE user_id = <caller>`). Idempotent — an absent
+   tombstone is a clean no-op (`wasTombstoned:false`). On an actual clear it
+   writes a `vehicle_readd_allowed` audit row in the same transaction (§4.2).
+3. **Best-effort re-provision** the single owned car matching `teslaVehicleId`:
+   resolve the owner's Tesla token (with auto-refresh), list the caller's
+   Fleet-API vehicles, and provision only an **OWNER-access** match
+   (`UpsertOwnedVehicle`, owner-scoped and cross-user-safe) + push its stream
+   config. Any failure is non-fatal (`provisioned:false`) — the tombstone clear is
+   the durable un-trap; the next link's passive sync provisions the car.
+4. Respond `200` with the honest post-state.
+
+**Ownership — fail-closed at two layers, neither trusting the path param.**
+`ClearTombstone` is owner-scoped, so a caller can only clear their **own**
+tombstone (never another user's). The re-provision lists the **caller's** fleet
+and provisions only an OWNER-access match, so a caller can never re-add a car they
+do not own even with a guessed `teslaVehicleId`.
+
+**Idempotent.** Re-adding a car with no tombstone is a clean `200`
+(`wasTombstoned:false`); the post-state ("no tombstone blocks this car") is the
+same either way.
+
+**Response `200`** (`application/json`):
+
+```json
+{
+  "readded": true,
+  "wasTombstoned": true,
+  "provisioned": true
+}
+```
+
+| Field | Type | Classification | Notes |
+|-------|------|----------------|-------|
+| `readded` | `boolean` | P0 | Authoritative: after this call no tombstone blocks the car, so it is eligible to return (true on both a real clear and an idempotent no-op). |
+| `wasTombstoned` | `boolean` | P0 | Whether a tombstone was actually cleared (false when the car had no tombstone — a clean no-op). |
+| `provisioned` | `boolean` | P0 | Whether the car was re-provisioned inline. `false` means the un-trap succeeded but the car will be provisioned by the next Tesla link's passive sync (e.g. tokens were cleared on a last-vehicle removal and must be re-linked first). |
+
+**Errors:** `401 auth_failed` (missing/invalid bearer), `400 invalid_request`
+(missing `teslaVehicleId`), `405 invalid_request` (non-POST method),
+`500 internal_error` (tombstone clear transaction failed — atomic: nothing
+cleared, no audit row, no provision; retryable).
 
 ---
 
@@ -2022,6 +2109,7 @@ Same as [`websocket-protocol.md`](websocket-protocol.md) §10 divergence managem
 ## 11. Change log
 
 | Date | Change | Author |
+| 2026-07-25 | **Re-add a previously removed car ([MYR-262](https://linear.app/myrobotaxi/issue/MYR-262)).** Wires the MYR-261 `store.RemovedVehicleRegistry.ClearTombstone` (previously with no runtime caller — a removed car was a permanent trap) to a deliberate re-add path. New owner-authenticated endpoint §7.13 `POST /api/tesla/vehicles/{teslaVehicleId}/re-add`: it clears the caller's OWN removed-vehicle tombstone **before** provisioning (the deliberate-vs-passive seam — the passive `ownerStreamHook.AfterLink` sync **never** clears a tombstone), then best-effort re-provisions the single owned car matching `teslaVehicleId` through the same shared per-vehicle path the passive sync uses (Fleet list → OWNER filter → `UpsertOwnedVehicle` → stream-config push). Path key is the **Tesla vehicle id** (the local `Vehicle` row is gone at re-add time). Fail-closed ownership at two layers: `ClearTombstone` is owner-scoped (`WHERE user_id = caller`, can't clear another user's tombstone), and the re-provision provisions only an OWNER-access match in the caller's own fleet. Idempotent (`wasTombstoned:false` no-op) and best-effort (`provisioned:false` when tokens were cleared on a last-vehicle removal — the next re-link's passive sync then provisions the car). Response `{readded, wasTombstoned, provisioned}` (all P0). Operator stopgap: `ops vehicles re-add --user-id <id> --tesla-vehicle-id <id>` clears a tombstone out-of-band over the same registry. No schema change (tombstone table + `ClearTombstone` + `vehicle_readd_allowed` audit shipped in MYR-261). No live Tesla call fires in tests/CI (the inline provisioner's pusher is nil unless the proxy is configured). See §7.13, §7.12, `data-lifecycle.md` §1.4.1. | go-engineer |
 | 2026-07-25 | **MYR-270: owner-driven dispatch v2 — `picked-up`/`start`/`dropped-off`, retire `board` + drive-end auto-completion.** Supersedes the MYR-265 auto-leg model (§7.8). Removed `POST /api/ride-requests/{id}/board` and the `internal/ridecomplete` drive-end `enroute → completed` auto-completion. Added three guarded, idempotent endpoints over the existing `RideRequestStatus` enum (no new values): `POST .../picked-up` (**owner**, `accepted → arrived`, no nav), `POST .../start` (**rider**, `arrived → enroute`, fires the leg-2 **dropoff** nav push — the `ride.started` seam, renamed from `ride.boarded`), `POST .../dropped-off` (**owner**, `enroute → completed`, no nav). The rider cannot `start` before the owner confirms pickup (start legal only from `arrived`). New nullable `picked_up_at` audit column (migration 0009, P0, off-wire — data-classification.md §1.9); `enroute_at` is retained as a lifecycle timestamp only (no longer feeds drive-end correlation). Updated the §7.8 endpoint table, authorization model, transition matrix (strict linear chain `requested → accepted → arrived → enroute → completed`), and dispatch-outcome prose. No schema/wire-shape change. | go-engineer |
 | 2026-07-25 | **Removed vehicles no longer resurrect on re-link ([MYR-261](https://linear.app/myrobotaxi/issue/MYR-261)).** The §7.12 teardown now writes a per-owner **removed-vehicle tombstone** (`go_removed_vehicles`, Go-owned migration `0006`, composite PK `(user_id, tesla_vehicle_id)`, no Prisma FK — CG-DL-9) in the **same transaction** as the `Vehicle` delete (recorded on `vehicle_deleted.metadata.tombstoned`). The post-link vehicle sync (`store.OwnerProvisioner.UpsertOwnedVehicle`, new `skipped_tombstoned` outcome) skips any tombstoned `(owner, teslaVehicleId)`, so a passive Tesla re-link can no longer re-insert a car the owner removed — the root-cause fix for the reappearance bug. Tombstone-wins is the safe default (the bulk `AfterLink` sync cannot distinguish deliberate re-add from incidental re-link); a **deliberate re-add** is an explicit action that first clears the tombstone via `store.RemovedVehicleRegistry.ClearTombstone`, which writes the new user-initiated `vehicle_readd_allowed` AuditLog row (§4.2). No REST route clears tombstones yet — the re-add UI is the app-side half; the backend exposes `ClearTombstone` as the sanctioned entry point. See §7.12 and `data-lifecycle.md` §1.4.1. | go-engineer |
 | 2026-07-25 | **MYR-265: rider `POST /api/ride-requests/{id}/board` (accepted→enroute) + autonomous two-leg dispatch.** Added the board endpoint (§7.8): rider-only, idempotent (`enroute` re-board is a 200 no-op), guarded `accepted → enroute`, publishing the internal `ride.boarded` seam that fires the leg-2 **dropoff** nav push. Added `enroute → completed` via drive-end detection, **leg-correlated** on a new `enroute_at` board timestamp (only a drive started at/after board completes the ride — a delayed leg-1 pickup drive-end cannot false-complete). New columns `dropoff_dispatch_status`/`dropoff_dispatched_at`/`dropoff_dispatch_error`/`enroute_at` (migration 0007, P0, off-wire; data-classification.md §1.9). Updated the §7.8 endpoint table, transition matrix, and dispatch-outcome prose. No schema/wire-shape change (existing `RideRequestStatus` enum reused). | go-engineer |
