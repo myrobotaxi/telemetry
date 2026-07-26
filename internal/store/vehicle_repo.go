@@ -165,12 +165,14 @@ func (r *VehicleRepo) scanVehicleByID(ctx context.Context, id string) (Vehicle, 
 	var seatHeaterRearLeft, seatHeaterRearCenter, seatHeaterRearRight *int
 	var seatCoolerLeft, seatCoolerRight *int
 	var mediaVolume *float64
+	var softwareVersion, trim *string
 	v, err := r.scanVehicleRowExtra(row,
 		&isLocked, &frunkOpen, &trunkOpen, &isClimateOn, &chargePortOpen,
 		&driverTemp, &passengerTemp, &fanSpeed,
 		&seatHeaterLeft, &seatHeaterRight,
 		&seatHeaterRearLeft, &seatHeaterRearCenter, &seatHeaterRearRight,
-		&seatCoolerLeft, &seatCoolerRight, &mediaVolume)
+		&seatCoolerLeft, &seatCoolerRight, &mediaVolume,
+		&softwareVersion, &trim)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Vehicle{}, ErrVehicleNotFound
 	}
@@ -193,6 +195,8 @@ func (r *VehicleRepo) scanVehicleByID(ctx context.Context, id string) (Vehicle, 
 	v.SeatCoolerLeft = seatCoolerLeft
 	v.SeatCoolerRight = seatCoolerRight
 	v.MediaVolume = mediaVolume
+	v.SoftwareVersion = softwareVersion
+	v.Trim = trim
 	return v, nil
 }
 
