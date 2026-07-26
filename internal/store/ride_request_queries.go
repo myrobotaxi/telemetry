@@ -81,6 +81,14 @@ WHERE id = $1`
 // this table would not be misread as an active-ride conflict.
 const constraintRideActiveInstant = "uq_go_ride_requests_active_instant_rider"
 
+// constraintVehicleRideActive is the partial UNIQUE index name from migration
+// 0013. A 23505 (unique_violation) carrying this constraint on the guarded
+// requested->accepted UPDATE means the target VEHICLE is already committed to
+// another active instant ride — the repo maps it to ErrVehicleRideActive
+// (MYR-266). Matching on the constraint name (not just the SQLSTATE) keeps it
+// distinct from the per-rider active-ride conflict on the same table.
+const constraintVehicleRideActive = "uq_go_ride_requests_active_instant_vehicle"
+
 // queryRideRequestActiveInstantByRider fetches the rider's single OPEN
 // instant request, if any — the one row the partial unique index (0004)
 // permits. OPEN = the non-terminal lifecycle states; instant = scheduled_for

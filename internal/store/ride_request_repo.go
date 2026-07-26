@@ -45,6 +45,18 @@ func isRideActiveViolation(err error) bool {
 		pgErr.ConstraintName == constraintRideActiveInstant
 }
 
+// isVehicleRideActiveViolation reports whether err is the partial-unique-index
+// rejection from migration 0013 — the target VEHICLE is already committed to
+// another active instant ride (MYR-266). Matches on BOTH the SQLSTATE and the
+// constraint name so it is never confused with the per-rider active-ride guard
+// (constraintRideActiveInstant) or any other unique constraint on the table.
+func isVehicleRideActiveViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) &&
+		pgErr.Code == pgUniqueViolation &&
+		pgErr.ConstraintName == constraintVehicleRideActive
+}
+
 // RideRequestRepo manages ride-request records. All coordinate columns are
 // AES-256-GCM ciphertext; the repo is the encrypt/decrypt boundary
 // (NFR-3.25 — callers only ever see plaintext RidePlace values).
@@ -224,6 +236,14 @@ func (r *RideRequestRepo) UpdateStatusFrom(ctx context.Context, id string, from 
 	r.metrics.ObserveQueryDuration("ride_request.update_status_from", time.Since(start).Seconds())
 	if err == nil {
 		return rec, nil
+	}
+	// The per-vehicle one-active-ride guard (0013) losing the race is an
+	// expected outcome, not a query fault — surface the typed sentinel without
+	// incrementing the error counter (mirrors the Create active-ride path). This
+	// fires on the guarded requested->accepted UPDATE when another active
+	// instant ride already holds the target vehicle (MYR-266).
+	if isVehicleRideActiveViolation(err) {
+		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.UpdateStatusFrom(%s): %w", id, ErrVehicleRideActive)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		r.metrics.IncQueryError("ride_request.update_status_from")
