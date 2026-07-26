@@ -38,6 +38,11 @@ Every field below corresponds to a column in the `Vehicle` table or a value deri
 | `model` | `string` | No | -- | P0 | -- | DB `Vehicle.model` |
 | `year` | `integer` | No | -- | P0 | -- | DB `Vehicle.year` |
 | `color` | `string` | No | -- | P0 | -- | DB `Vehicle.color` |
+| `vin` | `string` | No | -- | P0 | -- | DB `Vehicle.vin` (FULL 17-char). **Owner-`/snapshot` only (MYR-279)** — owner mask allow-list only; removed from the viewer allow-list and never on the WS broadcast; the vehicles-list surfaces `vinLast4`. Redacted to `***XXXX` in logs (data-classification.md §1.3/§2.1). Optional (not in `required`). |
+| `softwareVersion` | `string` or `null` | Yes | -- | P0 | -- | Installed Tesla firmware. Streamed proto `Version` OR REST `vehicle_data.vehicle_state.car_version` (MYR-260 backfill). MYR-279: persisted to `go_vehicle_control_state` (migration 0011), returned on `/snapshot`. Null when never read. |
+| `trim` | `string` or `null` | Yes | -- | P0 | -- | Trim badge (e.g. "Performance"). REST `vehicle_data.vehicle_config.trim_badging` ONLY (not streamed). MYR-279: persisted to `go_vehicle_control_state` (migration 0011), returned on `/snapshot`. Null when never read. |
+
+**Vehicle-detail read-backs ([MYR-279](https://linear.app/myrobotaxi/issue/MYR-279)).** `softwareVersion`, `trim`, and the full `vin` are the owner-facing vehicle-details fields the app renders on the details sheet. `softwareVersion` and `trim` had no store column and were dropped upstream (the streamed `Version` field was decoded then discarded; `trim_badging` was never plucked); MYR-279 routes them through the same Go-owned `go_vehicle_control_state` side table + `VehicleRepo.GetByID` LEFT JOIN used by the MYR-269/273 cabin read-backs (no cross-repo Prisma migration; anchored NFR-3.5). `softwareVersion` populates from the live stream OR the `/vehicle_data` backfill; `trim` populates only from the `/vehicle_data` backfill. The full `vin` already lived in the Prisma `Vehicle` table — MYR-279 only newly exposes it on the owner `/snapshot`, gated to the owner mask (party-scoped, FR-4.2); a shared viewer and the WS broadcast see `vinLast4` / nothing. All three are optional (not in the schema `required` array) so older consumers are unaffected.
 
 #### GPS group
 

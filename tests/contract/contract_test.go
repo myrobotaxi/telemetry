@@ -259,6 +259,9 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"seat_cooler_left"        INT,
 		"seat_cooler_right"       INT,
 		"media_volume"            DOUBLE PRECISION,
+		-- MYR-279 vehicle-detail read-backs (migration 0011)
+		"software_version"        TEXT,
+		"trim"                    TEXT,
 		"updated_at"       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);`
 	if _, err := pool.Exec(ctx, schema); err != nil {

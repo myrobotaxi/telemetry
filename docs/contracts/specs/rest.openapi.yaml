@@ -212,9 +212,10 @@ paths:
       x-role-masks:
         owner: ['*']
         viewer:
-          description: All VehicleState fields except licensePlate (forward-looking; licensePlate is not currently a member of VehicleState).
+          description: All VehicleState fields except licensePlate (forward-looking) and the full vin, which is owner-only (party-scoped) per MYR-279. softwareVersion and trim stay visible to viewers (P0, non-identifying).
           excludes:
             - licensePlate
+            - vin
         limited_viewer:
           description: FR-5.5 extension seam -- NOT implemented in v1. Documented for future readiness.
           excludes:
