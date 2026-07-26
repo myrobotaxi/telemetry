@@ -46,7 +46,8 @@ const queryVehicleByID = `SELECT ` + vehicleSelectColumns + `,
 	gcs.driver_temp_setting, gcs.passenger_temp_setting, gcs.fan_speed,
 	gcs.seat_heater_left, gcs.seat_heater_right,
 	gcs.seat_heater_rear_left, gcs.seat_heater_rear_center, gcs.seat_heater_rear_right,
-	gcs.seat_cooler_left, gcs.seat_cooler_right, gcs.media_volume
+	gcs.seat_cooler_left, gcs.seat_cooler_right, gcs.media_volume,
+	gcs.software_version, gcs.trim
 FROM "Vehicle"
 LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"
 WHERE "Vehicle"."id" = $1`

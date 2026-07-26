@@ -71,7 +71,7 @@ Every column in every persisted table is listed below. The **Tier** column is th
 | `id` | `String` (cuid) | P0 | No | Yes | Opaque internal identifier |
 | `userId` | `String` | P0 | No | Yes | FK to User — opaque identifier |
 | `teslaVehicleId` | `String?` | P0 | No | Yes | Tesla-assigned vehicle ID — opaque |
-| `vin` | `String?` | P0 | No | **Last-4 only** | Publicly visible on vehicle exterior; P1 encryption would be overkill for a value stamped on the car. Risk is mitigated by mandatory `redactVIN()` redaction to `***XXXX` in all logs (see §2.1 VIN redaction rule) |
+| `vin` | `String?` | P0 | No | **Last-4 in logs; role-masked on the wire** | Publicly visible on vehicle exterior; P1 encryption would be overkill for a value stamped on the car. Risk is mitigated by mandatory `redactVIN()` redaction to `***XXXX` in all logs (see §2.1 VIN redaction rule). **Wire exposure (MYR-279):** the FULL vin is returned on the REST `/snapshot` to the vehicle's OWNER only — gated to the owner role mask (party-scoped), removed from the viewer allow-list, and NEVER emitted on the WebSocket `vehicle_update` broadcast. The vehicles-list catalog surfaces `vinLast4` only. See `vehicle-state.schema.json` `vin` and `internal/mask/tables.go` `vehicleStateOwnerFields`/`vehicleStateViewerFields` (FR-4.2, NFR-3.9). |
 | `name` | `String` | P0 | No | Yes | User-assigned vehicle name |
 | `model` | `String` | P0 | No | Yes | Vehicle model (e.g., "Model 3") |
 | `year` | `Int` | P0 | No | Yes | Model year |
@@ -292,7 +292,7 @@ Hash-only refresh-token store with single-use rotation and family reuse-detectio
 
 > **Token secrecy (MYR-193).** The ES256 access token and the raw refresh token are **P1** (credentials, same tier as `AuthPayload.token`). Neither is stored server-side (access tokens are stateless; refresh tokens are stored only as a SHA-256 hash). The identity module's auth audit trail (`slog`, ADR-001 §6) records the event + opaque user/family ids only — never an email, name, raw token, or token hash. The `/api/auth/*` error envelopes carry a generic `auth_failed` / `invalid_request` message with no PII and no reuse/linkage oracle (Rule CG-DC-2).
 
-### 1.13 go_vehicle_control_state table (Go-owned, MYR-269)
+### 1.13 go_vehicle_control_state table (Go-owned, MYR-269; extended MYR-273, MYR-279)
 
 Durable last-known owner-control read-back state — the four owner controls the app renders (Lock, Trunk/Frunk, Climate, Charge-port). These are the MYR-252 cabin read-backs that were stream-only with no persistence, so a `/snapshot` for a non-streaming car (in service / asleep / offline) always showed "Unavailable". Created by `internal/store/migrations/0008_vehicle_control_state.up.sql` under the CG-DL-9 `go_` namespace; written on both the live persist path and the MYR-260 `/vehicle_data` backfill (per-field COALESCE upsert, last-writer-wins) and LEFT-joined into `VehicleRepo.GetByID` for the REST `/snapshot`. Anchored: NFR-3.5 (snapshot completeness), NFR-3.9 (classification tiers). Every control column is nullable — NULL means "never read", surfaced as an honest "unavailable", never a fabricated on/off.
 
@@ -304,9 +304,13 @@ Durable last-known owner-control read-back state — the four owner controls the
 | `trunk_open` | `BOOLEAN?` | P0 | No | Yes | Rear-trunk open state (`trunkOpen`) — cabin/door state |
 | `is_climate_on` | `BOOLEAN?` | P0 | No | Yes | Derived climate on/off (`isClimateOn`) — cabin comfort state |
 | `charge_port_open` | `BOOLEAN?` | P0 | No | Yes | Charge-port door open state (`chargePortDoorOpen`) — door state |
+| `software_version` | `TEXT?` | P0 | No | Yes | Installed Tesla firmware string (`softwareVersion`) — a publicly-legible attribute, not identifying, no GPS. MYR-279 (migration 0011). Streamed (proto Version) OR `/vehicle_data` `car_version` |
+| `trim` | `TEXT?` | P0 | No | Yes | Trim badge (`trim`, e.g. "Performance") — a publicly-legible attribute, not identifying. MYR-279 (migration 0011). `/vehicle_data` `vehicle_config.trim_badging` only (not streamed) |
 | `updated_at` | `TIMESTAMPTZ` | P0 | No | Yes | Non-sensitive timestamp |
 
 > **No GPS, no PII (MYR-269).** All columns are P0 cabin/lock/door state — the same tier as the MYR-252 fields they persist, consistent with `speed`/`chargeLevel`/`gearPosition`. No coordinates, tokens, addresses, or names are stored, so no encryption or log-redaction is required.
+
+> **MYR-279 vehicle-detail columns.** `software_version` and `trim` (migration 0011) are the two owner-facing vehicle-DETAIL read-backs the app renders on the details sheet that the Prisma-owned `Vehicle` table does not carry. Both are P0 publicly-legible attributes (a firmware string / a trim badge) — not identifying, no GPS, no PII — so they need no encryption or log-redaction. `software_version` populates from the live stream (Tesla proto Version) OR the `/vehicle_data` `car_version`; `trim` populates ONLY from `/vehicle_data` `vehicle_config.trim_badging` (Tesla does not stream it). Both surface on the owner `/snapshot` (owner mask allow-list) alongside the existing side-table read-backs.
 
 ---
 
@@ -537,11 +541,11 @@ The `contract-guard` agent/CI check enforces the following rules derived from th
 
 | Tier | Count | Description |
 |------|-------|-------------|
-| P0 | 97 | Public — timestamps, opaque IDs, aggregate stats, feature flags, enums |
+| P0 | 100 | Public — timestamps, opaque IDs, aggregate stats, feature flags, enums |
 | P1 | 36 | Sensitive — GPS coordinates, location names/addresses, OAuth tokens, PII, route data |
 | P2 | 0 | Access-logged — reserved for future use |
 
-> **Count audit trail.** The P0 count was bumped from 83 → 85 by [MYR-11](https://linear.app/myrobotaxi/issue/MYR-11) when it added `Vehicle.chargeState` (Tesla proto field **179** `DetailedChargeState`, enum — see DV-19 for the 2026-04-23 empirical finding that switched the source from proto 2 to proto 179) and `Vehicle.timeToFull` (Tesla proto field 43, `Float` **hours (decimal)**) to the v1 charge atomic group. Both fields are P0 because they describe charge state, not identity or location. See §1.3 Vehicle table and `vehicle-state-schema.md` §2.2 for the wire contract. The `timeToFull` unit was empirically verified as hours (1.0667h capture) on 2026-04-22 — [DV-17 RESOLVED](https://linear.app/myrobotaxi/issue/MYR-25#comment-4f1dcee9-ab10-4039-acc5-9e7ef25c3762). Future count changes MUST add a one-line entry here so the total is auditable without `git blame`. P0 85 → 97 and P1 26 → 36 by MYR-173: the new Go-owned `go_ride_requests` table (§1.9) adds 12 P0 columns (ids, status enums, timestamps), 4 P1 encrypted coordinate columns (encrypt-only, §3.1), and 6 P1 log-redaction-only columns (place labels/addresses + booked-for passenger name/phone, §3.2). MYR-270 adds 1 P0 column to §1.9 (`picked_up_at`, the owner-confirmed pickup timestamp; migration 0009) — no P1 change (the pickup/dropoff coordinate classification is unchanged).
+> **Count audit trail.** The P0 count was bumped from 83 → 85 by [MYR-11](https://linear.app/myrobotaxi/issue/MYR-11) when it added `Vehicle.chargeState` (Tesla proto field **179** `DetailedChargeState`, enum — see DV-19 for the 2026-04-23 empirical finding that switched the source from proto 2 to proto 179) and `Vehicle.timeToFull` (Tesla proto field 43, `Float` **hours (decimal)**) to the v1 charge atomic group. Both fields are P0 because they describe charge state, not identity or location. See §1.3 Vehicle table and `vehicle-state-schema.md` §2.2 for the wire contract. The `timeToFull` unit was empirically verified as hours (1.0667h capture) on 2026-04-22 — [DV-17 RESOLVED](https://linear.app/myrobotaxi/issue/MYR-25#comment-4f1dcee9-ab10-4039-acc5-9e7ef25c3762). Future count changes MUST add a one-line entry here so the total is auditable without `git blame`. P0 85 → 97 and P1 26 → 36 by MYR-173: the new Go-owned `go_ride_requests` table (§1.9) adds 12 P0 columns (ids, status enums, timestamps), 4 P1 encrypted coordinate columns (encrypt-only, §3.1), and 6 P1 log-redaction-only columns (place labels/addresses + booked-for passenger name/phone, §3.2). MYR-270 adds 1 P0 column to §1.9 (`picked_up_at`, the owner-confirmed pickup timestamp; migration 0009) — no P1 change (the pickup/dropoff coordinate classification is unchanged). MYR-279 adds 2 P0 columns to §1.13 (`software_version`, `trim`; migration 0011) — no P1 change; it also newly exposes the existing P0 `Vehicle.vin` at FULL length on the owner `/snapshot` (owner-mask only, not a new column, no tier change). **Running total: P0 97 → 100** (MYR-270 `picked_up_at` +1 = 98, MYR-279 `software_version` + `trim` +2 = 100); P1 unchanged at 36.
 
 ### P1 fields requiring AES-256-GCM encryption (15 columns)
 

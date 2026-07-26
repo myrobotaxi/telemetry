@@ -35,6 +35,12 @@
       "nullableInSteadyState": false,
       "comment": "Exterior color (Prisma NOT NULL). Seeded via catalog. Test asserts Vehicle.Color != \"\"."
     },
+    "vin": {
+      "category": "identity",
+      "atomicGroup": "",
+      "nullableInSteadyState": false,
+      "comment": "MYR-279: full VIN, sourced from Prisma Vehicle.vin and read by GetByVIN (which queries WHERE vin=$1, so it is always set on the read-back). Exposed on the owner /snapshot (owner-mask only). Test asserts Vehicle.VIN != \"\"."
+    },
     "status": {
       "category": "derived",
       "atomicGroup": "gear",
@@ -382,6 +388,22 @@
       "nullableInSteadyState": false,
       "linearIssue": "MYR-253",
       "comment": "MYR-252 Group B cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253 (may stay WS-live-only — ephemeral). MYR-273 now persists this to the Go-owned go_vehicle_control_state SIDE table (migration 0010; not the Prisma Vehicle table) on the live persist path and the /vehicle_data backfill, and returns it on /snapshot via VehicleRepo.GetByID's LEFT JOIN; this MYR-48 completeness harness exercises the Vehicle-table writer pipeline via GetByVIN (no side-table join), so this row stays expected_failure here — the side-table round-trip is covered by internal/store/vehicle_control_state_test.go."
+    },
+    "softwareVersion": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "SoftwareVersion", "value": "2026.20.1" },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-279",
+      "comment": "MYR-279 vehicle-detail read-back. Persisted to the Go-owned go_vehicle_control_state SIDE table (migration 0011; not the Prisma Vehicle table) on the live persist path AND the /vehicle_data backfill (car_version), and returned on /snapshot via VehicleRepo.GetByID's LEFT JOIN. The synthetic names SoftwareVersion, which is a ControlStateUpdate field, NOT a VehicleUpdate field, so this MYR-48 harness (which drives the Vehicle-table writer pipeline via GetByVIN, no side-table join) surfaces it as an EXPECTED-GAP; the side-table round-trip is covered by internal/store/vehicle_control_state_test.go."
+    },
+    "trim": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "Trim", "value": "Performance" },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-279",
+      "comment": "MYR-279 vehicle-detail read-back. Persisted to the Go-owned go_vehicle_control_state SIDE table (migration 0011; not the Prisma Vehicle table) via the /vehicle_data backfill ONLY (vehicle_config.trim_badging; Tesla does not stream trim), and returned on /snapshot via VehicleRepo.GetByID's LEFT JOIN. The synthetic names Trim, a ControlStateUpdate field NOT on VehicleUpdate, so this MYR-48 harness (Vehicle-table writer pipeline via GetByVIN) surfaces it as an EXPECTED-GAP; the side-table round-trip is covered by internal/store/vehicle_control_state_test.go."
     }
   }
 }

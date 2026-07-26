@@ -545,6 +545,10 @@ func assertSchemaFieldNonNull(t *testing.T, p schemaProperty, row fixtureRow, v 
 		if v.Name == "" {
 			failure("Vehicle.Name is empty.")
 		}
+	case "vin":
+		if v.VIN == "" {
+			failure("Vehicle.VIN is empty.")
+		}
 	case "model":
 		if v.Model == "" {
 			failure("Vehicle.Model is empty.")
@@ -678,6 +682,10 @@ func assertIdentityField(t *testing.T, name string, v store.Vehicle) {
 		}
 	case "name":
 		if v.Name == "" {
+			t.Errorf("identity field %q is empty after seed", name)
+		}
+	case "vin":
+		if v.VIN == "" {
 			t.Errorf("identity field %q is empty after seed", name)
 		}
 	case "model":

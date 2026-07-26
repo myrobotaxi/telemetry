@@ -267,6 +267,8 @@ func (a *vehicleSnapshotAdapter) GetByID(ctx context.Context, vehicleID string) 
 		SeatCoolerLeft:       v.SeatCoolerLeft,
 		SeatCoolerRight:      v.SeatCoolerRight,
 		MediaVolume:          v.MediaVolume,
+		SoftwareVersion:      v.SoftwareVersion,
+		Trim:                 v.Trim,
 	}, nil
 }
 

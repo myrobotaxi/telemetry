@@ -397,3 +397,92 @@ func TestControlState_CabinLevelsNeverReadIsNil(t *testing.T) {
 	wantIntPtr(t, "SeatCoolerRight", nil, v.SeatCoolerRight)
 	wantFloatPtr(t, "MediaVolume", nil, v.MediaVolume)
 }
+
+// sp returns a pointer to a string. Local helper for the MYR-279 detail tests.
+func sp(s string) *string { return &s }
+
+// wantStrPtr asserts a *string field equals the expected value.
+func wantStrPtr(t *testing.T, field string, want, got *string) {
+	t.Helper()
+	if want == nil {
+		if got != nil {
+			t.Errorf("%s = %v, want nil", field, *got)
+		}
+		return
+	}
+	if got == nil {
+		t.Errorf("%s = nil, want %q", field, *want)
+		return
+	}
+	if *got != *want {
+		t.Errorf("%s = %q, want %q", field, *got, *want)
+	}
+}
+
+// TestControlState_VehicleDetailsPersistThenSnapshotAcrossSocketGap is the MYR-279
+// analogue of the MYR-269/273 gap tests: software_version and trim persist to the
+// go_vehicle_control_state side table (migration 0011) and a LATER snapshot read
+// (GetByID, no live socket) returns them. Per-field last-writer-wins is exercised
+// too: a trim-only frame must not clobber the previously-persisted version.
+func TestControlState_VehicleDetailsPersistThenSnapshotAcrossSocketGap(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping store integration test")
+	}
+	ensureControlMigration(t)
+	cleanTables(t, testPool)
+	cleanControlState(t)
+
+	const (
+		vehID = "veh_ctl_detail_1"
+		vin   = "5YJ3E1EA1NF00DET1"
+	)
+	seedVehicle(t, testPool, vehID, vin)
+	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+	ctx := context.Background()
+
+	// Frame 1: software version only (as the live stream / car_version delivers it).
+	if err := repo.UpsertControlState(ctx, vehID, store.ControlStateUpdate{
+		SoftwareVersion: sp("2026.20.1"),
+	}); err != nil {
+		t.Fatalf("UpsertControlState (version): %v", err)
+	}
+	// Frame 2: trim only (as the /vehicle_data backfill delivers it) — must NOT
+	// clobber the persisted software version.
+	if err := repo.UpsertControlState(ctx, vehID, store.ControlStateUpdate{
+		Trim: sp("Performance"),
+	}); err != nil {
+		t.Fatalf("UpsertControlState (trim): %v", err)
+	}
+
+	v, err := repo.GetByID(ctx, vehID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	wantStrPtr(t, "SoftwareVersion", sp("2026.20.1"), v.SoftwareVersion)
+	wantStrPtr(t, "Trim", sp("Performance"), v.Trim)
+}
+
+// TestControlState_VehicleDetailsNeverReadIsNil asserts a car with no detail
+// read-backs surfaces nil (an honest "unknown"), never a fabricated value.
+func TestControlState_VehicleDetailsNeverReadIsNil(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping store integration test")
+	}
+	ensureControlMigration(t)
+	cleanTables(t, testPool)
+	cleanControlState(t)
+
+	const (
+		vehID = "veh_ctl_detail_2"
+		vin   = "5YJ3E1EA1NF00DET2"
+	)
+	seedVehicle(t, testPool, vehID, vin)
+	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+
+	v, err := repo.GetByID(context.Background(), vehID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	wantStrPtr(t, "SoftwareVersion", nil, v.SoftwareVersion)
+	wantStrPtr(t, "Trim", nil, v.Trim)
+}

@@ -327,3 +327,44 @@ func fmtIntPtr(p *int) string {
 	}
 	return fmt.Sprintf("%d", *p)
 }
+
+// TestMapTelemetryToControlState_VehicleDetailStrings covers the MYR-279
+// vehicle-detail derivation: software version (streamed Version OR /vehicle_data
+// car_version) and trim (/vehicle_data-only) map to the string fields; empty or
+// Invalid strings are ignored so a blank frame never overwrites a known value.
+func TestMapTelemetryToControlState_VehicleDetailStrings(t *testing.T) {
+	t.Run("software version and trim map to string fields", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldVersion): {StringVal: strPtr("2026.20.1")},
+			string(telemetry.FieldTrim):    {StringVal: strPtr("Performance")},
+		})
+		if got == nil {
+			t.Fatal("expected non-nil control state")
+		}
+		if got.SoftwareVersion == nil || *got.SoftwareVersion != "2026.20.1" {
+			t.Errorf("SoftwareVersion = %v, want 2026.20.1", got.SoftwareVersion)
+		}
+		if got.Trim == nil || *got.Trim != "Performance" {
+			t.Errorf("Trim = %v, want Performance", got.Trim)
+		}
+	})
+
+	t.Run("empty strings are ignored", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldVersion): {StringVal: strPtr("")},
+			string(telemetry.FieldTrim):    {StringVal: strPtr("")},
+		})
+		if got != nil {
+			t.Fatalf("empty-only frame should map to nil, got %+v", got)
+		}
+	})
+
+	t.Run("invalid version is ignored", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldVersion): {StringVal: strPtr("2026.20.1"), Invalid: true},
+		})
+		if got != nil {
+			t.Fatalf("invalid-only frame should map to nil, got %+v", got)
+		}
+	})
+}

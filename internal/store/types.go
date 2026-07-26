@@ -82,6 +82,12 @@ type Vehicle struct {
 	SeatCoolerLeft       *int
 	SeatCoolerRight      *int
 	MediaVolume          *float64
+
+	// MYR-279 vehicle-detail read-backs (software version, trim), hydrated from
+	// the same go_vehicle_control_state side table on the GetByID snapshot read.
+	// Nullable — nil means never read. Populated only by GetByID.
+	SoftwareVersion *string
+	Trim            *string
 }
 
 // VehicleUpdate holds the subset of vehicle fields that can change from

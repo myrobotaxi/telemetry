@@ -69,6 +69,11 @@ type VehicleSnapshotRow struct {
 	SeatCoolerLeft       *int
 	SeatCoolerRight      *int
 	MediaVolume          *float64
+
+	// MYR-279 vehicle-detail read-backs (software version + trim), same
+	// go_vehicle_control_state side table, same GetByID LEFT JOIN. Nullable.
+	SoftwareVersion *string
+	Trim            *string
 }
 
 // VehicleSnapshotReader returns the snapshot row for a Prisma cuid.
@@ -96,6 +101,13 @@ type vehicleSnapshotResponse struct {
 	Model                string          `json:"model"`
 	Year                 int             `json:"year"`
 	Color                string          `json:"color"`
+	// VIN (MYR-279): the FULL 17-char VIN, owner-snapshot only. Gated to the
+	// owner mask (never viewer, never WS broadcast); the vehicles-list keeps
+	// vinLast4. See docs/contracts/data-classification.md section 1.3.
+	VIN string `json:"vin"`
+	// SoftwareVersion / Trim (MYR-279): nullable vehicle-detail read-backs.
+	SoftwareVersion      *string         `json:"softwareVersion"`
+	Trim                 *string         `json:"trim"`
 	Status               string          `json:"status"`
 	Speed                int             `json:"speed"`
 	Heading              int             `json:"heading"`
@@ -166,6 +178,9 @@ func (r vehicleSnapshotResponse) toMaskMap() map[string]any {
 	m["model"] = r.Model
 	m["year"] = r.Year
 	m["color"] = r.Color
+	m["vin"] = r.VIN
+	m["softwareVersion"] = derefOrNil(r.SoftwareVersion)
+	m["trim"] = derefOrNil(r.Trim)
 	m["status"] = r.Status
 	m["speed"] = r.Speed
 	m["heading"] = r.Heading
@@ -196,15 +211,20 @@ func (r vehicleSnapshotResponse) toMaskMap() map[string]any {
 		m["navRouteCoordinates"] = nil
 	}
 	m["lastUpdated"] = r.LastUpdated
-	// MYR-269 owner-control read-backs. Keyed by the live WS wire names so the
-	// owner mask allow-list (which already lists these from MYR-252) permits them.
+	addSnapshotControlFields(m, r)
+	return m
+}
+
+// addSnapshotControlFields adds the MYR-269 owner-control read-backs and the
+// MYR-273 cabin-setting levels to the mask map, keyed by their live WS wire names
+// so the owner mask allow-list (which already lists these from MYR-252) permits
+// them. Split out of toMaskMap to keep that method under the funlen cap.
+func addSnapshotControlFields(m map[string]any, r vehicleSnapshotResponse) {
 	m["locked"] = derefOrNil(r.Locked)
 	m["frunkOpen"] = derefOrNil(r.FrunkOpen)
 	m["trunkOpen"] = derefOrNil(r.TrunkOpen)
 	m["isClimateOn"] = derefOrNil(r.IsClimateOn)
 	m["chargePortDoorOpen"] = derefOrNil(r.ChargePortDoorOpen)
-	// MYR-273 cabin-setting levels — keyed by the live WS wire names so the owner
-	// mask allow-list (which already lists these from MYR-252) permits them.
 	m["driverTempSetting"] = derefOrNil(r.DriverTempSetting)
 	m["passengerTempSetting"] = derefOrNil(r.PassengerTempSetting)
 	m["fanSpeed"] = derefOrNil(r.FanSpeed)
@@ -216,7 +236,6 @@ func (r vehicleSnapshotResponse) toMaskMap() map[string]any {
 	m["seatCoolerLeft"] = derefOrNil(r.SeatCoolerLeft)
 	m["seatCoolerRight"] = derefOrNil(r.SeatCoolerRight)
 	m["mediaVolume"] = derefOrNil(r.MediaVolume)
-	return m
 }
 
 // buildSnapshotResponse maps the store-layer row into the wire shape.
@@ -228,6 +247,9 @@ func buildSnapshotResponse(row VehicleSnapshotRow) vehicleSnapshotResponse {
 		Model:                row.Model,
 		Year:                 row.Year,
 		Color:                row.Color,
+		VIN:                  row.VIN,
+		SoftwareVersion:      row.SoftwareVersion,
+		Trim:                 row.Trim,
 		Status:               row.Status,
 		Speed:                row.Speed,
 		Heading:              row.Heading,

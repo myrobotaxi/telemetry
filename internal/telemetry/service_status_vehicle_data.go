@@ -82,6 +82,7 @@ func vehicleDataToFields(data *VehicleData) map[string]events.TelemetryValue {
 	addVehicleStateFields(fields, data.VehicleState)
 	addClimateStateFields(fields, data.ClimateState)
 	addChargeStateFields(fields, data.ChargeState)
+	addVehicleConfigFields(fields, data.VehicleConfig)
 	return fields
 }
 
@@ -102,6 +103,24 @@ func addVehicleStateFields(fields map[string]events.TelemetryValue, vs *VehicleD
 	if vs.Odometer != nil {
 		o := *vs.Odometer
 		fields[string(FieldOdometer)] = events.TelemetryValue{FloatVal: &o}
+	}
+	if vs.CarVersion != nil && *vs.CarVersion != "" {
+		ver := *vs.CarVersion
+		fields[string(FieldVersion)] = events.TelemetryValue{StringVal: &ver}
+	}
+}
+
+// addVehicleConfigFields maps the vehicle_config subset: the trim badge (MYR-279).
+// trim is not a streamed telemetry field, so this REST read is its only source;
+// it flows through the identical control-state persist path as the streamed
+// fields and surfaces on the /snapshot as `trim`.
+func addVehicleConfigFields(fields map[string]events.TelemetryValue, vc *VehicleDataVehicleConfig) {
+	if vc == nil {
+		return
+	}
+	if vc.TrimBadging != nil && *vc.TrimBadging != "" {
+		trim := *vc.TrimBadging
+		fields[string(FieldTrim)] = events.TelemetryValue{StringVal: &trim}
 	}
 }
 

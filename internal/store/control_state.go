@@ -51,6 +51,16 @@ type ControlStateUpdate struct {
 	SeatCoolerLeft       *int
 	SeatCoolerRight      *int
 	MediaVolume          *float64
+
+	// MYR-279 vehicle-DETAIL read-backs. Not cabin controls, but the same
+	// Go-owned side table + snapshot LEFT JOIN carry them (they have no home
+	// in the Prisma-owned "Vehicle" table). Both nullable strings: software
+	// version streams (Tesla proto Version) OR arrives via the MYR-260
+	// /vehicle_data backfill (car_version); trim arrives ONLY via the
+	// /vehicle_data backfill (vehicle_config.trim_badging -- Tesla does not
+	// stream it).
+	SoftwareVersion *string
+	Trim            *string
 }
 
 // HasAny reports whether at least one control field is present. The writer
@@ -61,7 +71,7 @@ func (c *ControlStateUpdate) HasAny() bool {
 	if c == nil {
 		return false
 	}
-	return c.hasBoolControl() || c.hasLevelControl()
+	return c.hasBoolControl() || c.hasLevelControl() || c.hasStringControl()
 }
 
 // hasBoolControl reports whether any MYR-269 owner-control boolean is present.
@@ -89,6 +99,12 @@ func (c *ControlStateUpdate) hasLevelControl() bool {
 		c.MediaVolume != nil
 }
 
+// hasStringControl reports whether any MYR-279 vehicle-detail string (software
+// version, trim) is present.
+func (c *ControlStateUpdate) hasStringControl() bool {
+	return c.SoftwareVersion != nil || c.Trim != nil
+}
+
 // mergeControlState folds the non-nil fields of src onto dst (latest wins per
 // field), mirroring mergeUpdate's per-field last-write-wins for the Vehicle
 // table. Both dst and src are non-nil.
@@ -109,6 +125,8 @@ func mergeControlState(dst, src *ControlStateUpdate) {
 	dst.SeatCoolerLeft = mergePtr(dst.SeatCoolerLeft, src.SeatCoolerLeft)
 	dst.SeatCoolerRight = mergePtr(dst.SeatCoolerRight, src.SeatCoolerRight)
 	dst.MediaVolume = mergePtr(dst.MediaVolume, src.MediaVolume)
+	dst.SoftwareVersion = mergePtr(dst.SoftwareVersion, src.SoftwareVersion)
+	dst.Trim = mergePtr(dst.Trim, src.Trim)
 }
 
 // controlIntFields maps each cabin-setting telemetry field that persists as a
@@ -157,6 +175,7 @@ func mapTelemetryToControlState(fields map[string]events.TelemetryValue) *Contro
 	c := &ControlStateUpdate{}
 	mapControlBooleans(fields, c)
 	mapControlLevels(fields, c)
+	mapControlStrings(fields, c)
 	if !c.HasAny() {
 		return nil
 	}
@@ -208,6 +227,22 @@ func mapControlLevels(fields map[string]events.TelemetryValue, c *ControlStateUp
 		if fv := controlFloatFromValue(v); fv != nil {
 			c.MediaVolume = fv
 		}
+	}
+}
+
+// mapControlStrings derives the MYR-279 vehicle-detail read-backs (software
+// version, trim) onto c. Both are plain strings: software version from the
+// Version telemetry field (streamed OR the /vehicle_data car_version), trim from
+// the /vehicle_data-only trim field. Empty strings are ignored so a blank frame
+// never overwrites a known value with "".
+func mapControlStrings(fields map[string]events.TelemetryValue, c *ControlStateUpdate) {
+	if v, ok := fields[string(telemetry.FieldVersion)]; ok && !v.Invalid && v.StringVal != nil && *v.StringVal != "" {
+		s := *v.StringVal
+		c.SoftwareVersion = &s
+	}
+	if v, ok := fields[string(telemetry.FieldTrim)]; ok && !v.Invalid && v.StringVal != nil && *v.StringVal != "" {
+		s := *v.StringVal
+		c.Trim = &s
 	}
 }
 
@@ -297,8 +332,9 @@ INSERT INTO go_vehicle_control_state
      driver_temp_setting, passenger_temp_setting, fan_speed,
      seat_heater_left, seat_heater_right,
      seat_heater_rear_left, seat_heater_rear_center, seat_heater_rear_right,
-     seat_cooler_left, seat_cooler_right, media_volume, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW())
+     seat_cooler_left, seat_cooler_right, media_volume,
+     software_version, trim, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW())
 ON CONFLICT (vehicle_id) DO UPDATE SET
     is_locked               = COALESCE(EXCLUDED.is_locked, go_vehicle_control_state.is_locked),
     frunk_open              = COALESCE(EXCLUDED.frunk_open, go_vehicle_control_state.frunk_open),
@@ -316,6 +352,8 @@ ON CONFLICT (vehicle_id) DO UPDATE SET
     seat_cooler_left        = COALESCE(EXCLUDED.seat_cooler_left, go_vehicle_control_state.seat_cooler_left),
     seat_cooler_right       = COALESCE(EXCLUDED.seat_cooler_right, go_vehicle_control_state.seat_cooler_right),
     media_volume            = COALESCE(EXCLUDED.media_volume, go_vehicle_control_state.media_volume),
+    software_version        = COALESCE(EXCLUDED.software_version, go_vehicle_control_state.software_version),
+    trim                    = COALESCE(EXCLUDED.trim, go_vehicle_control_state.trim),
     updated_at              = NOW()`
 
 // UpsertControlState persists the present owner-control fields for the vehicle
@@ -347,6 +385,8 @@ func (r *VehicleRepo) UpsertControlState(ctx context.Context, vehicleID string, 
 		update.SeatCoolerLeft,
 		update.SeatCoolerRight,
 		update.MediaVolume,
+		update.SoftwareVersion,
+		update.Trim,
 	)
 	r.metrics.ObserveQueryDuration("vehicle.upsert_control_state", time.Since(start).Seconds())
 	if err != nil {

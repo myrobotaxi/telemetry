@@ -56,6 +56,22 @@
       "x-classification": "P0",
       "examples": ["Midnight Silver Metallic"]
     },
+    "vin": {
+      "type": "string",
+      "description": "Full 17-character Vehicle Identification Number, sourced from DB Vehicle.vin. **Owner-snapshot only (MYR-279):** returned on the REST /snapshot to the vehicle's OWNER, gated to the owner role mask (party-scoped) -- a shared viewer does NOT receive it (removed from the viewer allow-list) and it is NEVER emitted on the WebSocket vehicle_update broadcast. The vehicles-list catalog (vehicle-summary.schema.json) surfaces vinLast4 only. Classified P0 (a VIN is publicly stamped on the car) but MUST be redacted to ***XXXX in all logs because it links to location data (P1) -- see data-classification.md section 1.3 / section 2.1. Optional: not a member of the required set, so older snapshot consumers are unaffected.",
+      "x-classification": "P0",
+      "examples": ["7SAYGDET7TA613795"]
+    },
+    "softwareVersion": {
+      "type": ["string", "null"],
+      "description": "Installed Tesla firmware version string (e.g. '2026.20.1 9a8b7c6'). Sourced from the streamed Tesla proto Version field OR REST vehicle_data.vehicle_state.car_version (the MYR-260 /vehicle_data backfill for a non-streaming car). MYR-279: persisted server-side to the Go-owned go_vehicle_control_state side table (keyed by vehicle id, no Prisma FK per CG-DL-9; migration 0011) and returned on the DB-backed REST /snapshot (LEFT-joined by VehicleRepo.GetByID). Null when never read. Individually delivered -- not a member of any atomic group.",
+      "x-classification": "P0"
+    },
+    "trim": {
+      "type": ["string", "null"],
+      "description": "Vehicle trim badge (e.g. 'Performance', 'Long Range'). Sourced ONLY from REST vehicle_data.vehicle_config.trim_badging -- Tesla does NOT stream the trim, so it is plucked by the MYR-260 /vehicle_data backfill. MYR-279: persisted to the Go-owned go_vehicle_control_state side table (migration 0011) and returned on the DB-backed REST /snapshot (LEFT-joined by VehicleRepo.GetByID). Null when never read (e.g. a car that has only ever streamed and never had a /vehicle_data backfill). Lets the client compose a full model label like '2026 Model Y Performance'.",
+      "x-classification": "P0"
+    },
     "status": {
       "type": "string",
       "enum": ["driving", "parked", "charging", "offline", "in_service"],

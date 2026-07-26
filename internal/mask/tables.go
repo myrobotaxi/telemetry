@@ -89,11 +89,18 @@ var masksByResource = map[ResourceType]map[auth.Role]ResourceMask{
 var vehicleStateOwnerFields = []string{
 	// Identity (DB-sourced, not telemetry).
 	"vehicleId",
+	// vin is the FULL 17-char VIN (MYR-279). Owner-only: it is deliberately
+	// absent from the viewer allow-list (vehicleStateViewerFields removes it)
+	// and never appears on the WS broadcast — the vehicles-list surfaces
+	// vinLast4 instead. See data-classification.md section 1.3.
 	"vin",
 	"name",
 	"model",
 	"year",
 	"color",
+	// MYR-279 vehicle-detail read-backs (P0, non-identifying, side-table sourced).
+	"softwareVersion",
+	"trim",
 	"licensePlate",
 	// Charge atomic group.
 	"chargeLevel",
@@ -181,9 +188,14 @@ var vehicleStateOwnerFields = []string{
 	"lastUpdated",
 }
 
-// vehicleStateViewerFields is owner minus licensePlate, per
-// rest-api.md §5.2.1. Built lazily in init() to avoid drift.
-var vehicleStateViewerFields = removeField(vehicleStateOwnerFields, "licensePlate")
+// vehicleStateViewerFields is owner minus licensePlate AND minus the full vin
+// (MYR-279). The full VIN is owner-only (party-scoped) — a viewer with shared
+// access sees model/year/color/softwareVersion/trim but NOT the full VIN, which
+// links to the physical car / its location history (data-classification.md
+// §1.3, §2.1). softwareVersion and trim stay visible to viewers (P0,
+// non-identifying, same tier as model). Built by exclusion to avoid drift.
+var vehicleStateViewerFields = removeField(
+	removeField(vehicleStateOwnerFields, "licensePlate"), "vin")
 
 // vehicleSummaryOwnerFields is the v1 owner allow-list for the
 // vehicles-list catalog response (rest-api.md §5.2.0 / §7.0). Thin
