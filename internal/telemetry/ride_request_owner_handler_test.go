@@ -279,6 +279,34 @@ func TestRideRequestHandler_Accept_DispatchExactlyOnce(t *testing.T) {
 	})
 }
 
+// TestRideRequestHandler_Accept_VehicleAlreadyOnRide seals the per-vehicle
+// one-active-ride guard's HTTP surface (MYR-266): when the guarded
+// requested->accepted write is rejected because the target car is already on
+// another active ride (store.ErrVehicleRideActive → telemetry.ErrVehicleRide
+// Active), the accept returns 409 vehicle_unavailable and publishes NOTHING —
+// no status-change frame and no dispatch seam (a second nav push to a car
+// already serving a ride is exactly what the guard prevents). The vehicle
+// snapshot is dispatchable, so the MYR-277 gate passes and the request reaches
+// the guarded write where the per-vehicle index arbitrates.
+func TestRideRequestHandler_Accept_VehicleAlreadyOnRide(t *testing.T) {
+	const owner = rideOtherUsr
+	store := &fakeRideStore{
+		getRec:    fixtureRideData(owner, rideStatusRequested),
+		updateErr: ErrVehicleRideActive,
+	}
+	pub := &fakeRidePublisher{}
+	h := newRideHandler(store, &stubVehicleSnapshotReader{}, pub, owner)
+	rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/accept", "", rideAuthOK)
+
+	assertErrEnvelope(t, rec, http.StatusConflict, wserrors.ErrCodeVehicleUnavailable)
+	if store.updateCalls != 1 {
+		t.Errorf("expected the guarded write to be attempted once, got %d", store.updateCalls)
+	}
+	if len(pub.events) != 0 {
+		t.Fatalf("vehicle-busy accept must publish no events (no double dispatch), got %d", len(pub.events))
+	}
+}
+
 // TestRideRequestHandler_Accept_DispatchSeamPayload asserts the ride.accepted
 // event carries everything MYR-176 needs for the Tesla navigation_request:
 // both places (with address flattening), the booked-for passenger contact,
