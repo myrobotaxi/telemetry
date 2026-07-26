@@ -11,11 +11,13 @@ import (
 
 func runVehicles(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("vehicles requires a subcommand (list)")
+		return fmt.Errorf("vehicles requires a subcommand (list | re-add)")
 	}
 	switch args[0] {
 	case "list":
 		return runVehiclesList(ctx, args[1:])
+	case "re-add":
+		return runVehiclesReadd(ctx, args[1:])
 	default:
 		return fmt.Errorf("unknown vehicles subcommand %q", args[0])
 	}
@@ -73,4 +75,55 @@ func runVehiclesList(ctx context.Context, args []string) error {
 		})
 	}
 	return writeJSON(os.Stdout, out)
+}
+
+// vehicleReaddOutput is the JSON printed by `ops vehicles re-add`.
+type vehicleReaddOutput struct {
+	UserID         string `json:"userId"`
+	TeslaVehicleID string `json:"teslaVehicleId"`
+	// Cleared reports whether a removed-vehicle tombstone was actually present
+	// and cleared. False means there was no tombstone (a clean idempotent no-op).
+	Cleared bool `json:"cleared"`
+}
+
+// runVehiclesReadd is the operator stopgap for MYR-262: un-tombstone a specific
+// (userID, teslaVehicleId) on request — useful before the app-side re-add UI
+// lands and for support. It clears ONLY the given owner's tombstone
+// (RemovedVehicleRegistry.ClearTombstone is owner-scoped and idempotent, and
+// writes the vehicle_readd_allowed audit row on an actual clear). It does NOT
+// provision the car — the operator/owner triggers the next Tesla sync (a
+// re-link, or `ops fleet-config push`) which now, with the tombstone gone,
+// provisions the VIN normally.
+func runVehiclesReadd(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("vehicles re-add", flag.ContinueOnError)
+	userID := fs.String("user-id", "", "MyRoboTaxi user id (owner of the removed car)")
+	teslaVehicleID := fs.String("tesla-vehicle-id", "", "Tesla vehicle id (the go_removed_vehicles tombstone key)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := requireFlag("user-id", *userID); err != nil {
+		return err
+	}
+	if err := requireFlag("tesla-vehicle-id", *teslaVehicleID); err != nil {
+		return err
+	}
+
+	logger := newLogger()
+	db, err := openDB(ctx, logger)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	registry := store.NewRemovedVehicleRegistry(db.Pool(), logger)
+	cleared, err := registry.ClearTombstone(ctx, *userID, *teslaVehicleID)
+	if err != nil {
+		return fmt.Errorf("clear tombstone: %w", err)
+	}
+
+	return writeJSON(os.Stdout, vehicleReaddOutput{
+		UserID:         *userID,
+		TeslaVehicleID: *teslaVehicleID,
+		Cleared:        cleared,
+	})
 }
