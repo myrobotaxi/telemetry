@@ -21,9 +21,13 @@ import (
 type stubVehicleSnapshotReader struct {
 	row VehicleSnapshotRow
 	err error
+	// calls counts GetByID invocations — MYR-313 asserts that an accept exempt
+	// from the availability gate never asks the question at all.
+	calls int
 }
 
 func (s *stubVehicleSnapshotReader) GetByID(_ context.Context, _ string) (VehicleSnapshotRow, error) {
+	s.calls++
 	if s.err != nil {
 		return VehicleSnapshotRow{}, s.err
 	}

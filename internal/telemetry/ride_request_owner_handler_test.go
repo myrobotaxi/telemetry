@@ -212,6 +212,92 @@ func TestRideRequestHandler_Accept_VehicleAvailabilityGate(t *testing.T) {
 	}
 }
 
+// TestRideRequestHandler_Accept_ScheduledExemptFromAvailabilityGate seals the
+// MYR-313 narrowing: a ride with scheduledFor set is EXEMPT from the
+// dispatch-capability gate, so an owner can confirm a reservation for Saturday
+// while the car is in service today (the client's report — the accept came back
+// "Vehicle is in service and can't be dispatched"). The instant counterpart in
+// the same table still 409s, so the gate is narrowed, not removed.
+//
+// This matches the two guards the gate is the analogue of (the per-rider
+// `ride_active` index and the per-vehicle one-active-ride index, both partial
+// on `scheduled_for IS NULL`) and what rest-api.md §4.1.1 already documents.
+func TestRideRequestHandler_Accept_ScheduledExemptFromAvailabilityGate(t *testing.T) {
+	const owner = rideOtherUsr
+	scheduled := time.Date(2026, 8, 1, 17, 30, 0, 0, time.UTC)
+
+	tests := []struct {
+		name          string
+		vehicleStatus string
+		scheduled     bool
+		wantStatus    int
+		wantAccepted  bool
+	}{
+		{name: "scheduled accept on in_service vehicle", vehicleStatus: "in_service", scheduled: true, wantStatus: http.StatusOK, wantAccepted: true},
+		{name: "scheduled accept on offline vehicle", vehicleStatus: "offline", scheduled: true, wantStatus: http.StatusOK, wantAccepted: true},
+		{name: "scheduled accept on parked vehicle", vehicleStatus: "parked", scheduled: true, wantStatus: http.StatusOK, wantAccepted: true},
+		{name: "instant accept on in_service vehicle still blocked", vehicleStatus: "in_service", wantStatus: http.StatusConflict},
+		{name: "instant accept on offline vehicle still blocked", vehicleStatus: "offline", wantStatus: http.StatusConflict},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ride := fixtureRideData(owner, rideStatusRequested)
+			if tt.scheduled {
+				ride.ScheduledFor = &scheduled
+			}
+			store := &fakeRideStore{getRec: ride}
+			pub := &fakeRidePublisher{}
+			row := fixtureSnapshotRow(owner)
+			row.Status = tt.vehicleStatus
+			reader := &stubVehicleSnapshotReader{row: row}
+			h := newRideHandler(store, reader, pub, owner)
+			rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/accept", "", rideAuthOK)
+
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status: got %d want %d. body=%s", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+			if !tt.wantAccepted {
+				assertErrEnvelope(t, rec, tt.wantStatus, wserrors.ErrCodeVehicleUnavailable)
+				if store.updateCalls != 0 {
+					t.Errorf("blocked accept must not call UpdateStatusFrom, got %d", store.updateCalls)
+				}
+				return
+			}
+			if store.updatedState != rideStatusAccepted {
+				t.Errorf("scheduled accept: UpdateStatus arg got %q want %q", store.updatedState, rideStatusAccepted)
+			}
+			// The exemption short-circuits BEFORE the vehicle read — an exempt
+			// accept must not depend on the status lookup at all.
+			if reader.calls != 0 {
+				t.Errorf("scheduled accept must not read the vehicle status, got %d lookups", reader.calls)
+			}
+		})
+	}
+}
+
+// TestRideRequestHandler_Accept_ScheduledSurvivesVehicleLookupFailure pairs with
+// the fail-closed instant behaviour: because a scheduled accept never asks the
+// question, a vehicle-status lookup that fails cannot strand a reservation
+// (MYR-313). The instant fail-closed 500 is asserted separately below.
+func TestRideRequestHandler_Accept_ScheduledSurvivesVehicleLookupFailure(t *testing.T) {
+	const owner = rideOtherUsr
+	scheduled := time.Date(2026, 8, 1, 17, 30, 0, 0, time.UTC)
+	ride := fixtureRideData(owner, rideStatusRequested)
+	ride.ScheduledFor = &scheduled
+	store := &fakeRideStore{getRec: ride}
+	pub := &fakeRidePublisher{}
+	h := newRideHandler(store, &stubVehicleSnapshotReader{err: fmtNotFound()}, pub, owner)
+	rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/accept", "", rideAuthOK)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("scheduled accept status: got %d want %d. body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if store.updatedState != rideStatusAccepted {
+		t.Errorf("UpdateStatus arg got %q want %q", store.updatedState, rideStatusAccepted)
+	}
+}
+
 // TestRideRequestHandler_Accept_VehicleLookupFailsClosed asserts the gate fails
 // CLOSED: if the vehicle's status cannot be read at accept time the server
 // returns 500 and does NOT accept the ride (we never dispatch a ride whose

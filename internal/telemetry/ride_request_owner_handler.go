@@ -170,7 +170,24 @@ const vehicleStatusOffline = "offline"
 // between list and accept. On a status-lookup failure it fails CLOSED (500):
 // we do not accept a ride we cannot confirm the vehicle can serve. Returns
 // true (response already written) when the accept must stop.
+//
+// SCHEDULED rides are EXEMPT (MYR-313). "Can this car be dispatched right
+// now?" is only the question an INSTANT accept is asking; a reservation days
+// out says nothing about the car's status today, and refusing it stranded the
+// owner (client report: a Saturday 5:30 PM request refused with "Vehicle is in
+// service and can't be dispatched" while the car was in service that day).
+// This aligns the gate with the two guards it is the analogue of — the
+// per-rider `ride_active` index and the per-vehicle one-active-ride index
+// (MYR-266), both partial on `scheduled_for IS NULL` — and with what §4.1.1
+// already documents ("scheduled rides are exempt from both"). Availability at
+// the reservation instant belongs to the scheduled-dispatch machinery
+// (MYR-179), which must re-check the vehicle THEN; accepting a reservation is
+// not dispatching it.
 func (h *RideRequestHandler) rejectIfVehicleUnavailable(ctx context.Context, w http.ResponseWriter, rec RideRequestData) bool {
+	if rec.ScheduledFor != nil {
+		return false
+	}
+
 	row, err := h.vehicles.GetByID(ctx, rec.VehicleID)
 	if err != nil {
 		h.logger.Error("ride-request accept: vehicle status lookup failed",

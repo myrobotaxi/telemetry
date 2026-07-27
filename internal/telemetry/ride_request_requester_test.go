@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/events"
 )
@@ -79,6 +80,44 @@ func TestRideRequestHandler_RequesterName_RESTList(t *testing.T) {
 	}
 	if body.Items[0]["requesterName"] != "Maya" {
 		t.Errorf("list item requesterName = %v want %q", body.Items[0]["requesterName"], "Maya")
+	}
+}
+
+// TestRideRequestHandler_RequesterName_IncomingScheduled pins the surface the
+// owner's incoming card actually reads (MYR-312): GET /api/ride-requests/incoming
+// must carry requesterName for a SCHEDULED row exactly as it does for an instant
+// one. The join itself is uniform by construction — requesterIdentitySelect is
+// appended to rideRequestColumns, which every ride-request query uses, and the
+// store-level TestRideRequestRepo_RequesterName_ListBatch already exercises
+// ListByOwnerPage over scheduled rows — so this seals the projection end of it
+// against a future scheduled-specific list query.
+func TestRideRequestHandler_RequesterName_IncomingScheduled(t *testing.T) {
+	maya := "Maya"
+	scheduled := time.Date(2026, 8, 1, 17, 30, 0, 0, time.UTC)
+	item := withRequester(fixtureRideData(rideUserID, rideStatusRequested), &maya)
+	item.ScheduledFor = &scheduled
+	store := &fakeRideStore{ownerPage: RideRequestListPage{Items: []RideRequestData{item}, HasMore: false}}
+	h := newRideHandler(store, nil, nil, rideUserID)
+
+	resp := doRequest(t, rideMux(h), http.MethodGet, "/api/ride-requests/incoming", "", rideAuthOK)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200. body=%s", resp.Code, resp.Body.String())
+	}
+
+	var body struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Items) != 1 {
+		t.Fatalf("got %d items want 1", len(body.Items))
+	}
+	if body.Items[0]["scheduledFor"] == nil {
+		t.Fatalf("fixture must be a SCHEDULED row (body=%s)", resp.Body.String())
+	}
+	if body.Items[0]["requesterName"] != "Maya" {
+		t.Errorf("scheduled incoming item requesterName = %v want %q", body.Items[0]["requesterName"], "Maya")
 	}
 }
 
