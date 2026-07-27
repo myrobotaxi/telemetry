@@ -26,9 +26,12 @@ const defaultStreamFreshness = 120 * time.Second
 // fields the freshness gate drops.
 //
 // Fields NOT in this set are REST-only (today: `trim`, MYR-279 — Tesla does
-// not stream the trim badge). The stream can never be their source, so no
-// stale-overwrite is possible and the gate lets them through even while the
-// stream is fresh; otherwise a busily-streaming car could never acquire them.
+// not stream the trim badge; and `seatCoolingCapable`, MYR-308 — a
+// vehicle_config spec fact with no proto at all). The stream can never be their
+// source, so no stale-overwrite is possible and the gate lets them through even
+// while the stream is fresh; otherwise a busily-streaming car could never
+// acquire them. For seatCoolingCapable that pass-through is the entire point:
+// an in-service car must be able to learn it with no stream whatsoever.
 //
 // Derived from fieldMap rather than hand-listed so a future field added to
 // the decoder is covered automatically.

@@ -139,10 +139,28 @@ func addVehicleStateFields(fields map[string]events.TelemetryValue, vs *VehicleD
 	}
 }
 
-// addVehicleConfigFields maps the vehicle_config subset: the trim badge (MYR-279).
-// trim is not a streamed telemetry field, so this REST read is its only source;
-// it flows through the identical control-state persist path as the streamed
-// fields and surfaces on the /snapshot as `trim`.
+// addVehicleConfigFields maps the vehicle_config subset: the trim badge
+// (MYR-279) and the ventilated-seat capability (MYR-308). Neither is a streamed
+// telemetry field, so this REST read is their only source; both flow through the
+// identical control-state persist path as the streamed fields and surface on the
+// /snapshot as `trim` and `seatCoolingCapable`.
+//
+// Being REST-ONLY is precisely what carries them past the MYR-300 stream-recency
+// gate. That gate drops every field in streamSourcedFields, which is built from
+// fieldMap (service_status_stream_freshness.go) — and neither FieldTrim nor
+// FieldSeatCoolingCapable is in fieldMap, because Tesla has no proto for either.
+// So a car that is busily streaming still acquires them, and an IN-SERVICE car —
+// which never streams at all, and is the case MYR-308 exists for — acquires the
+// capability on the ordinary connectivity-edge read with no stream required.
+//
+// vehicle_config needs no `endpoints=` query parameter: GetVehicleData calls
+// /vehicle_data bare, and Tesla's default response already includes the
+// vehicle_config sub-object (that is how MYR-279's trim_badging arrives today).
+//
+// A real FALSE for has_seat_cooling is KEPT, unlike the empty-string skip on
+// trim above: false is the authoritative "this car has no cooled seats", which
+// is the whole value of the field — it lets a client stop offering a control the
+// hardware cannot honour. Only an ABSENT key leaves the column NULL.
 func addVehicleConfigFields(fields map[string]events.TelemetryValue, vc *VehicleDataVehicleConfig) {
 	if vc == nil {
 		return
@@ -150,6 +168,10 @@ func addVehicleConfigFields(fields map[string]events.TelemetryValue, vc *Vehicle
 	if vc.TrimBadging != nil && *vc.TrimBadging != "" {
 		trim := *vc.TrimBadging
 		fields[string(FieldTrim)] = events.TelemetryValue{StringVal: &trim}
+	}
+	if vc.HasSeatCooling != nil {
+		capable := *vc.HasSeatCooling
+		fields[string(FieldSeatCoolingCapable)] = events.TelemetryValue{BoolVal: &capable}
 	}
 }
 
