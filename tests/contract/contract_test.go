@@ -265,6 +265,9 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		-- MYR-274 climate-mode read-backs (migration 0012)
 		"hvac_auto_mode"          TEXT,
 		"hvac_ac_enabled"         BOOLEAN,
+		-- MYR-298 seat-vent + media-playback read-backs (migration 0014)
+		"seat_vent_enabled"       BOOLEAN,
+		"media_playback_status"   TEXT,
 		"updated_at"       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);
 

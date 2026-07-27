@@ -311,3 +311,82 @@ func TestVehicleSnapshotHandler_LatLngOnWire(t *testing.T) {
 		t.Errorf("longitude: got %v, want 20.0", body["longitude"])
 	}
 }
+
+// TestVehicleSnapshotHandler_SeatVentMediaOnWire is the MYR-298 handler-level
+// proof: seatVentEnabled and mediaPlaybackStatus were contracted vehicle_update
+// fields that never reached the DB-backed /snapshot, so a client that missed the
+// live WS frame could not learn them. They now travel end-to-end through the
+// owner projection.
+//
+// Both sub-cases assert the SIBLING absent-vs-null behaviour exactly (verified
+// against hvacAutoMode/hvacAcEnabled, MYR-274): toMaskMap always writes the key,
+// so the owner wire ALWAYS carries it — a never-read value is an explicit JSON
+// null (honest-unknown), never an omitted key and never a fabricated
+// false/"Stopped".
+func TestVehicleSnapshotHandler_SeatVentMediaOnWire(t *testing.T) {
+	const userID = "user-1"
+
+	decodeBody := func(t *testing.T, row VehicleSnapshotRow) map[string]any {
+		t.Helper()
+		h := NewVehicleSnapshotHandler(
+			&stubTokenValidator{userID: userID},
+			&stubVehicleSnapshotReader{row: row},
+			discardLogger(),
+			WithSnapshotRoleResolver(&stubRoleResolver{role: "owner"}),
+		)
+		mux := http.NewServeMux()
+		mux.Handle("GET /api/vehicles/{vehicleId}/snapshot", h)
+
+		req := httptest.NewRequestWithContext(
+			context.Background(),
+			http.MethodGet,
+			"/api/vehicles/"+fixtureSnapshotRowID+"/snapshot",
+			nil,
+		)
+		req.Header.Set("Authorization", "Bearer t")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status: got %d, want 200. Body: %s", rec.Code, rec.Body.String())
+		}
+		var body map[string]any
+		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return body
+	}
+
+	t.Run("persisted values reach the owner wire", func(t *testing.T) {
+		row := fixtureSnapshotRow(userID)
+		vent := true
+		media := "Playing"
+		row.SeatVentEnabled = &vent
+		row.MediaPlaybackStatus = &media
+
+		body := decodeBody(t, row)
+		if got, ok := body["seatVentEnabled"]; !ok || got != true {
+			t.Errorf("seatVentEnabled: got %v (present=%t), want true", got, ok)
+		}
+		if got, ok := body["mediaPlaybackStatus"]; !ok || got != media {
+			t.Errorf("mediaPlaybackStatus: got %v (present=%t), want %q", got, ok, media)
+		}
+	})
+
+	t.Run("never-seen values are explicit null, not fabricated", func(t *testing.T) {
+		// fixtureSnapshotRow leaves both nil — the "never streamed, never
+		// persisted" car. Same shape the MYR-274 siblings produce.
+		body := decodeBody(t, fixtureSnapshotRow(userID))
+
+		for _, key := range []string{"seatVentEnabled", "mediaPlaybackStatus"} {
+			got, ok := body[key]
+			if !ok {
+				t.Errorf("%s: key missing from owner projection; siblings keep the key with a null value", key)
+				continue
+			}
+			if got != nil {
+				t.Errorf("%s: got %v, want explicit null (honest-unknown)", key, got)
+			}
+		}
+	})
+}

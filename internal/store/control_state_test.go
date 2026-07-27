@@ -469,3 +469,96 @@ func TestMergeControlState_ClimateModeLastWriteWins(t *testing.T) {
 		t.Errorf("HvacAcEnabled (preserved) = %v, want true", dst.HvacAcEnabled)
 	}
 }
+
+// TestMapTelemetryToControlState_SeatVentMedia covers the MYR-298 derivation:
+// seatVentEnabled is a plain bool (a real false is a real observation), and
+// mediaPlaybackStatus carries the enum string but OMITS "Unknown"/empty so a
+// genuinely-unknown status never overwrites a known one — the same
+// honest-unknown discipline MYR-274 applies to hvacAutoMode.
+func TestMapTelemetryToControlState_SeatVentMedia(t *testing.T) {
+	t.Run("seatVentEnabled true maps to bool field", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldSeatVentEnabled): {BoolVal: boolPtr(true)},
+		})
+		if got == nil || got.SeatVentEnabled == nil || !*got.SeatVentEnabled {
+			t.Fatalf("SeatVentEnabled = %v, want true", got)
+		}
+	})
+
+	t.Run("seatVentEnabled false is a real observation", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldSeatVentEnabled): {BoolVal: boolPtr(false)},
+		})
+		if got == nil || got.SeatVentEnabled == nil || *got.SeatVentEnabled {
+			t.Fatalf("SeatVentEnabled = %v, want false", got)
+		}
+	})
+
+	for _, status := range []string{"Playing", "Paused", "Stopped"} {
+		t.Run("mediaPlaybackStatus "+status+" maps to string field", func(t *testing.T) {
+			got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+				string(telemetry.FieldMediaPlaybackStatus): {StringVal: strPtr(status)},
+			})
+			if got == nil || got.MediaPlaybackStatus == nil || *got.MediaPlaybackStatus != status {
+				t.Fatalf("MediaPlaybackStatus = %v, want %s", got, status)
+			}
+		})
+	}
+
+	t.Run("mediaPlaybackStatus Unknown is omitted (honest-unknown)", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldMediaPlaybackStatus): {StringVal: strPtr("Unknown")},
+		})
+		if got != nil {
+			t.Fatalf("Unknown-only frame should map to nil, got %+v", got)
+		}
+	})
+
+	t.Run("mediaPlaybackStatus empty is omitted", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldMediaPlaybackStatus): {StringVal: strPtr("")},
+		})
+		if got != nil {
+			t.Fatalf("empty-only frame should map to nil, got %+v", got)
+		}
+	})
+
+	t.Run("invalid seat-vent/media fields are ignored", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldSeatVentEnabled):     {BoolVal: boolPtr(true), Invalid: true},
+			string(telemetry.FieldMediaPlaybackStatus): {StringVal: strPtr("Playing"), Invalid: true},
+		})
+		if got != nil {
+			t.Fatalf("invalid-only frame should map to nil, got %+v", got)
+		}
+	})
+
+	t.Run("seat vent + media together", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldSeatVentEnabled):     {BoolVal: boolPtr(true)},
+			string(telemetry.FieldMediaPlaybackStatus): {StringVal: strPtr("Paused")},
+		})
+		if got == nil || got.SeatVentEnabled == nil || !*got.SeatVentEnabled {
+			t.Fatalf("SeatVentEnabled = %v, want true", got)
+		}
+		if got.MediaPlaybackStatus == nil || *got.MediaPlaybackStatus != "Paused" {
+			t.Fatalf("MediaPlaybackStatus = %v, want Paused", got)
+		}
+	})
+}
+
+// TestMergeControlState_SeatVentMediaLastWriteWins proves per-field
+// last-writer-wins folds the MYR-298 fields: a present src value overwrites, an
+// absent src value preserves the prior dst value.
+func TestMergeControlState_SeatVentMediaLastWriteWins(t *testing.T) {
+	dst := &ControlStateUpdate{SeatVentEnabled: boolPtr(true), MediaPlaybackStatus: strPtr("Playing")}
+	src := &ControlStateUpdate{MediaPlaybackStatus: strPtr("Paused")} // seat vent absent → preserved
+	mergeControlState(dst, src)
+
+	if dst.MediaPlaybackStatus == nil || *dst.MediaPlaybackStatus != "Paused" {
+		t.Errorf("MediaPlaybackStatus (overwritten) = %v, want Paused", dst.MediaPlaybackStatus)
+	}
+	if dst.SeatVentEnabled == nil || !*dst.SeatVentEnabled {
+		t.Errorf("SeatVentEnabled (preserved) = %v, want true", dst.SeatVentEnabled)
+	}
+}
