@@ -168,6 +168,8 @@ func (r *VehicleRepo) scanVehicleByID(ctx context.Context, id string) (Vehicle, 
 	var softwareVersion, trim *string
 	var hvacAutoMode *string
 	var hvacAcEnabled *bool
+	var seatVentEnabled *bool
+	var mediaPlaybackStatus *string
 	v, err := r.scanVehicleRowExtra(row,
 		&isLocked, &frunkOpen, &trunkOpen, &isClimateOn, &chargePortOpen,
 		&driverTemp, &passengerTemp, &fanSpeed,
@@ -175,7 +177,8 @@ func (r *VehicleRepo) scanVehicleByID(ctx context.Context, id string) (Vehicle, 
 		&seatHeaterRearLeft, &seatHeaterRearCenter, &seatHeaterRearRight,
 		&seatCoolerLeft, &seatCoolerRight, &mediaVolume,
 		&softwareVersion, &trim,
-		&hvacAutoMode, &hvacAcEnabled)
+		&hvacAutoMode, &hvacAcEnabled,
+		&seatVentEnabled, &mediaPlaybackStatus)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Vehicle{}, ErrVehicleNotFound
 	}
@@ -202,6 +205,8 @@ func (r *VehicleRepo) scanVehicleByID(ctx context.Context, id string) (Vehicle, 
 	v.Trim = trim
 	v.HvacAutoMode = hvacAutoMode
 	v.HvacAcEnabled = hvacAcEnabled
+	v.SeatVentEnabled = seatVentEnabled
+	v.MediaPlaybackStatus = mediaPlaybackStatus
 	return v, nil
 }
 

@@ -79,6 +79,11 @@ type VehicleSnapshotRow struct {
 	// same side table, same GetByID LEFT JOIN. Nullable — nil means never read.
 	HvacAutoMode  *string
 	HvacAcEnabled *bool
+
+	// MYR-298 seat-ventilation + media-playback read-backs, same side table,
+	// same GetByID LEFT JOIN. Nullable — nil means never read.
+	SeatVentEnabled     *bool
+	MediaPlaybackStatus *string
 }
 
 // VehicleSnapshotReader returns the snapshot row for a Prisma cuid.
@@ -178,6 +183,17 @@ type vehicleSnapshotResponse struct {
 	// the owner mask allow-list (internal/mask/tables.go, since MYR-252).
 	HvacAutoMode  *string `json:"hvacAutoMode"`
 	HvacAcEnabled *bool   `json:"hvacAcEnabled"`
+
+	// MYR-298: the last two MYR-252 cabin read-backs that were live-WS-only, now
+	// persisted (go_vehicle_control_state) and returned on the DB-backed
+	// /snapshot so a client that missed the live vehicle_update frame can still
+	// learn them. Wire names match the live WS fields (internal/ws/
+	// field_mapping.go — both pass through unchanged) so the client's Vehicle
+	// model reconciles REST and WS. Nullable: null == never read (honest-unknown),
+	// never a fabricated value. On the owner mask allow-list (internal/mask/
+	// tables.go, since MYR-252).
+	SeatVentEnabled     *bool   `json:"seatVentEnabled"`
+	MediaPlaybackStatus *string `json:"mediaPlaybackStatus"`
 }
 
 // toMaskMap returns the response as a wire-name-keyed map suitable for
@@ -255,6 +271,13 @@ func addSnapshotControlFields(m map[string]any, r vehicleSnapshotResponse) {
 	// owner mask allow-list since MYR-252).
 	m["hvacAutoMode"] = derefOrNil(r.HvacAutoMode)
 	m["hvacAcEnabled"] = derefOrNil(r.HvacAcEnabled)
+	// MYR-298 seat-ventilation + media-playback read-backs, keyed by the live WS
+	// wire names (on the owner mask allow-list since MYR-252). Same COALESCE-fed
+	// freshness semantics as the siblings above: the key is ALWAYS present, and a
+	// never-read field is an explicit null rather than an omitted key or a
+	// fabricated value.
+	m["seatVentEnabled"] = derefOrNil(r.SeatVentEnabled)
+	m["mediaPlaybackStatus"] = derefOrNil(r.MediaPlaybackStatus)
 }
 
 // buildSnapshotResponse maps the store-layer row into the wire shape.
@@ -313,5 +336,7 @@ func buildSnapshotResponse(row VehicleSnapshotRow) vehicleSnapshotResponse {
 		MediaVolume:          row.MediaVolume,
 		HvacAutoMode:         row.HvacAutoMode,
 		HvacAcEnabled:        row.HvacAcEnabled,
+		SeatVentEnabled:      row.SeatVentEnabled,
+		MediaPlaybackStatus:  row.MediaPlaybackStatus,
 	}
 }

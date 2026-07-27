@@ -94,3 +94,45 @@ func TestBuildSnapshotResponse_NilClimateModeIsNull(t *testing.T) {
 		t.Errorf("nil hvacAcEnabled should map to nil, got %v", m["hvacAcEnabled"])
 	}
 }
+
+// TestBuildSnapshotResponse_SeatVentMedia covers MYR-298: the persisted
+// seatVentEnabled / mediaPlaybackStatus read-backs are mapped onto the snapshot
+// response and surface in the mask map under their live WS wire names.
+func TestBuildSnapshotResponse_SeatVentMedia(t *testing.T) {
+	vent := true
+	media := "Playing"
+	row := VehicleSnapshotRow{
+		ID:                  "veh_1",
+		SeatVentEnabled:     &vent,
+		MediaPlaybackStatus: &media,
+	}
+
+	resp := buildSnapshotResponse(row)
+	if resp.SeatVentEnabled == nil || !*resp.SeatVentEnabled {
+		t.Errorf("SeatVentEnabled = %v, want true", resp.SeatVentEnabled)
+	}
+	if resp.MediaPlaybackStatus == nil || *resp.MediaPlaybackStatus != media {
+		t.Errorf("MediaPlaybackStatus = %v, want %q", resp.MediaPlaybackStatus, media)
+	}
+
+	m := resp.toMaskMap()
+	if m["seatVentEnabled"] != true {
+		t.Errorf("mask map seatVentEnabled = %v, want true", m["seatVentEnabled"])
+	}
+	if m["mediaPlaybackStatus"] != media {
+		t.Errorf("mask map mediaPlaybackStatus = %v, want %q", m["mediaPlaybackStatus"], media)
+	}
+}
+
+// TestBuildSnapshotResponse_NilSeatVentMediaIsNull asserts a never-read seat-vent
+// or media status surfaces as JSON null (nil in the mask map) — the honest-unknown
+// contract, never a fabricated false/"Stopped". Matches the MYR-274 siblings.
+func TestBuildSnapshotResponse_NilSeatVentMediaIsNull(t *testing.T) {
+	m := buildSnapshotResponse(VehicleSnapshotRow{ID: "veh_1"}).toMaskMap()
+	if m["seatVentEnabled"] != nil {
+		t.Errorf("nil seatVentEnabled should map to nil, got %v", m["seatVentEnabled"])
+	}
+	if m["mediaPlaybackStatus"] != nil {
+		t.Errorf("nil mediaPlaybackStatus should map to nil, got %v", m["mediaPlaybackStatus"])
+	}
+}

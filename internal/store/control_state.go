@@ -45,6 +45,16 @@ type ControlStateUpdate struct {
 	HvacAutoMode  *string
 	HvacAcEnabled *bool
 
+	// MYR-298 seat-ventilation + media-playback read-backs — the last two
+	// MYR-252 cabin fields that were live-WebSocket-only, so a client that
+	// missed the live frame could never learn them. SeatVentEnabled is a plain
+	// bool (a real false overwrites). MediaPlaybackStatus is the wire enum's
+	// string form ("Stopped"/"Playing"/"Paused"); a streamed "Unknown"/empty is
+	// treated as never-read (nil) so it never overwrites a known status with a
+	// fabricated one, exactly as HvacAutoMode handles "Unknown".
+	SeatVentEnabled     *bool
+	MediaPlaybackStatus *string
+
 	// MYR-273 cabin-setting levels. Temp setpoints are Fahrenheit-rounded ints
 	// (converted Celsius→Fahrenheit at the telemetry boundary, like interiorTemp);
 	// fan speed and seat heater/cooler levels are small non-negative ints; media
@@ -80,7 +90,8 @@ func (c *ControlStateUpdate) HasAny() bool {
 	if c == nil {
 		return false
 	}
-	return c.hasBoolControl() || c.hasLevelControl() || c.hasStringControl() || c.hasClimateMode()
+	return c.hasBoolControl() || c.hasLevelControl() || c.hasStringControl() ||
+		c.hasClimateMode() || c.hasSeatVentMedia()
 }
 
 // hasBoolControl reports whether any MYR-269 owner-control boolean is present.
@@ -120,6 +131,12 @@ func (c *ControlStateUpdate) hasClimateMode() bool {
 	return c.HvacAutoMode != nil || c.HvacAcEnabled != nil
 }
 
+// hasSeatVentMedia reports whether any MYR-298 read-back (seat ventilation,
+// media playback status) is present.
+func (c *ControlStateUpdate) hasSeatVentMedia() bool {
+	return c.SeatVentEnabled != nil || c.MediaPlaybackStatus != nil
+}
+
 // mergeControlState folds the non-nil fields of src onto dst (latest wins per
 // field), mirroring mergeUpdate's per-field last-write-wins for the Vehicle
 // table. Both dst and src are non-nil.
@@ -144,6 +161,8 @@ func mergeControlState(dst, src *ControlStateUpdate) {
 	dst.Trim = mergePtr(dst.Trim, src.Trim)
 	dst.HvacAutoMode = mergePtr(dst.HvacAutoMode, src.HvacAutoMode)
 	dst.HvacAcEnabled = mergePtr(dst.HvacAcEnabled, src.HvacAcEnabled)
+	dst.SeatVentEnabled = mergePtr(dst.SeatVentEnabled, src.SeatVentEnabled)
+	dst.MediaPlaybackStatus = mergePtr(dst.MediaPlaybackStatus, src.MediaPlaybackStatus)
 }
 
 // controlIntFields maps each cabin-setting telemetry field that persists as a
@@ -194,6 +213,7 @@ func mapTelemetryToControlState(fields map[string]events.TelemetryValue) *Contro
 	mapControlLevels(fields, c)
 	mapControlStrings(fields, c)
 	mapControlClimateMode(fields, c)
+	mapControlSeatVentMedia(fields, c)
 	if !c.HasAny() {
 		return nil
 	}
@@ -217,6 +237,30 @@ func mapControlClimateMode(fields map[string]events.TelemetryValue, c *ControlSt
 	if v, ok := fields[string(telemetry.FieldHvacACEnabled)]; ok && !v.Invalid && v.BoolVal != nil {
 		enabled := *v.BoolVal
 		c.HvacAcEnabled = &enabled
+	}
+}
+
+// mapControlSeatVentMedia derives the MYR-298 read-backs (seat ventilation,
+// media playback status) onto c. seatVentEnabled is a plain bool that persists
+// when present, including a real false. mediaPlaybackStatus arrives as the enum's
+// string form ("Stopped"/"Playing"/"Paused"/"Unknown"); an empty OR "Unknown"
+// value is OMITTED (left nil) so a genuinely-unknown status never overwrites a
+// known one with a fabricated value — the same honest-unknown discipline
+// mapControlClimateMode applies to "Unknown" hvacAutoMode (MYR-251/252/274).
+//
+// Neither field is emitted by the MYR-260 /vehicle_data backfill
+// (vehicleDataToFields) — Tesla's cached vehicle_data climate subset carries
+// neither — so this mapping only ever fires for a live streamed frame.
+func mapControlSeatVentMedia(fields map[string]events.TelemetryValue, c *ControlStateUpdate) {
+	if v, ok := fields[string(telemetry.FieldSeatVentEnabled)]; ok && !v.Invalid && v.BoolVal != nil {
+		enabled := *v.BoolVal
+		c.SeatVentEnabled = &enabled
+	}
+
+	if v, ok := fields[string(telemetry.FieldMediaPlaybackStatus)]; ok && !v.Invalid && v.StringVal != nil {
+		if status := *v.StringVal; status != "" && !equalFoldASCII(status, "Unknown") {
+			c.MediaPlaybackStatus = &status
+		}
 	}
 }
 
@@ -371,8 +415,10 @@ INSERT INTO go_vehicle_control_state
      seat_heater_left, seat_heater_right,
      seat_heater_rear_left, seat_heater_rear_center, seat_heater_rear_right,
      seat_cooler_left, seat_cooler_right, media_volume,
-     software_version, trim, hvac_auto_mode, hvac_ac_enabled, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, NOW())
+     software_version, trim, hvac_auto_mode, hvac_ac_enabled,
+     seat_vent_enabled, media_playback_status, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
+        $22, $23, NOW())
 ON CONFLICT (vehicle_id) DO UPDATE SET
     is_locked               = COALESCE(EXCLUDED.is_locked, go_vehicle_control_state.is_locked),
     frunk_open              = COALESCE(EXCLUDED.frunk_open, go_vehicle_control_state.frunk_open),
@@ -394,6 +440,8 @@ ON CONFLICT (vehicle_id) DO UPDATE SET
     trim                    = COALESCE(EXCLUDED.trim, go_vehicle_control_state.trim),
     hvac_auto_mode          = COALESCE(EXCLUDED.hvac_auto_mode, go_vehicle_control_state.hvac_auto_mode),
     hvac_ac_enabled         = COALESCE(EXCLUDED.hvac_ac_enabled, go_vehicle_control_state.hvac_ac_enabled),
+    seat_vent_enabled       = COALESCE(EXCLUDED.seat_vent_enabled, go_vehicle_control_state.seat_vent_enabled),
+    media_playback_status   = COALESCE(EXCLUDED.media_playback_status, go_vehicle_control_state.media_playback_status),
     updated_at              = NOW()`
 
 // UpsertControlState persists the present owner-control fields for the vehicle
@@ -429,6 +477,8 @@ func (r *VehicleRepo) UpsertControlState(ctx context.Context, vehicleID string, 
 		update.Trim,
 		update.HvacAutoMode,
 		update.HvacAcEnabled,
+		update.SeatVentEnabled,
+		update.MediaPlaybackStatus,
 	)
 	r.metrics.ObserveQueryDuration("vehicle.upsert_control_state", time.Since(start).Seconds())
 	if err != nil {

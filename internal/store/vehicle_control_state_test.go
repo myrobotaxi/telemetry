@@ -613,3 +613,137 @@ func TestControlState_ClimateModePerFieldLastWriterWins(t *testing.T) {
 	wantBoolPtr(t, "HvacAcEnabled (overwritten false)", bp(false), v.HvacAcEnabled)
 	wantStrPtr(t, "HvacAutoMode (still preserved)", sp("Override"), v.HvacAutoMode)
 }
+
+// TestControlState_SeatVentMediaPersistThenSnapshotAcrossSocketGap is the MYR-298
+// scenario: seatVentEnabled / mediaPlaybackStatus were contracted vehicle_update
+// fields that were never persisted, so a client that missed the live frame could
+// never learn them. Persist them (as the live persist path now does), THEN read a
+// later GET /snapshot with no live socket in between. The never-read row proves
+// the honest-unknown NULL semantics: absent stays nil, never a fabricated value.
+func TestControlState_SeatVentMediaPersistThenSnapshotAcrossSocketGap(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping store integration test")
+	}
+	ensureControlMigration(t)
+
+	tests := []struct {
+		name      string
+		vehID     string
+		vin       string
+		persist   *store.ControlStateUpdate // nil = persist nothing (never-read row)
+		wantVent  *bool
+		wantMedia *string
+	}{
+		{
+			name:      "vent on + media Playing",
+			vehID:     "veh_ctl_svm_playing",
+			vin:       "5YJ3E1EA1NF00SVM1",
+			persist:   &store.ControlStateUpdate{SeatVentEnabled: bp(true), MediaPlaybackStatus: sp("Playing")},
+			wantVent:  bp(true),
+			wantMedia: sp("Playing"),
+		},
+		{
+			name:      "vent off + media Paused",
+			vehID:     "veh_ctl_svm_paused",
+			vin:       "5YJ3E1EA1NF00SVM2",
+			persist:   &store.ControlStateUpdate{SeatVentEnabled: bp(false), MediaPlaybackStatus: sp("Paused")},
+			wantVent:  bp(false),
+			wantMedia: sp("Paused"),
+		},
+		{
+			name:      "media Stopped only, vent never read",
+			vehID:     "veh_ctl_svm_stopped",
+			vin:       "5YJ3E1EA1NF00SVM3",
+			persist:   &store.ControlStateUpdate{MediaPlaybackStatus: sp("Stopped")},
+			wantVent:  nil,
+			wantMedia: sp("Stopped"),
+		},
+		{
+			name:      "absent/NULL never read is nil",
+			vehID:     "veh_ctl_svm_nil",
+			vin:       "5YJ3E1EA1NF00SVM4",
+			persist:   nil,
+			wantVent:  nil,
+			wantMedia: nil,
+		},
+	}
+
+	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+	ctx := context.Background()
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cleanTables(t, testPool)
+			cleanControlState(t)
+			seedVehicle(t, testPool, tt.vehID, tt.vin)
+
+			if tt.persist != nil {
+				if err := repo.UpsertControlState(ctx, tt.vehID, *tt.persist); err != nil {
+					t.Fatalf("UpsertControlState: %v", err)
+				}
+			}
+
+			// The socket gap: no writer, no live stream — just a later snapshot read.
+			v, err := repo.GetByID(ctx, tt.vehID)
+			if err != nil {
+				t.Fatalf("GetByID: %v", err)
+			}
+			wantBoolPtr(t, "SeatVentEnabled", tt.wantVent, v.SeatVentEnabled)
+			wantStrPtr(t, "MediaPlaybackStatus", tt.wantMedia, v.MediaPlaybackStatus)
+		})
+	}
+}
+
+// TestControlState_SeatVentMediaPerFieldLastWriterWins proves the COALESCE upsert
+// updates only the MYR-298 fields present in a frame: a media-only frame must not
+// clobber a previously-persisted seat-vent value, and a real false seat-vent
+// overwrites a prior true (a false is an observation, not an absence).
+func TestControlState_SeatVentMediaPerFieldLastWriterWins(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping store integration test")
+	}
+	ensureControlMigration(t)
+	cleanTables(t, testPool)
+	cleanControlState(t)
+
+	const (
+		vehID = "veh_ctl_svm_lww_1"
+		vin   = "5YJ3E1EA1NF00SVM5"
+	)
+	seedVehicle(t, testPool, vehID, vin)
+	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+	ctx := context.Background()
+
+	// Frame 1: seat vent on + media Playing.
+	if err := repo.UpsertControlState(ctx, vehID, store.ControlStateUpdate{
+		SeatVentEnabled:     bp(true),
+		MediaPlaybackStatus: sp("Playing"),
+	}); err != nil {
+		t.Fatalf("upsert 1: %v", err)
+	}
+	// Frame 2: only media flips to Paused (seat vent absent → preserved true).
+	if err := repo.UpsertControlState(ctx, vehID, store.ControlStateUpdate{
+		MediaPlaybackStatus: sp("Paused"),
+	}); err != nil {
+		t.Fatalf("upsert 2: %v", err)
+	}
+	v, err := repo.GetByID(ctx, vehID)
+	if err != nil {
+		t.Fatalf("GetByID after frame 2: %v", err)
+	}
+	wantStrPtr(t, "MediaPlaybackStatus (overwritten)", sp("Paused"), v.MediaPlaybackStatus)
+	wantBoolPtr(t, "SeatVentEnabled (preserved)", bp(true), v.SeatVentEnabled)
+
+	// Frame 3: seat vent flips to a real false — must overwrite, not read as absent.
+	if err := repo.UpsertControlState(ctx, vehID, store.ControlStateUpdate{
+		SeatVentEnabled: bp(false),
+	}); err != nil {
+		t.Fatalf("upsert 3: %v", err)
+	}
+	v, err = repo.GetByID(ctx, vehID)
+	if err != nil {
+		t.Fatalf("GetByID after frame 3: %v", err)
+	}
+	wantBoolPtr(t, "SeatVentEnabled (overwritten false)", bp(false), v.SeatVentEnabled)
+	wantStrPtr(t, "MediaPlaybackStatus (still preserved)", sp("Paused"), v.MediaPlaybackStatus)
+}

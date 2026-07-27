@@ -94,6 +94,11 @@ type Vehicle struct {
 	// GetByID.
 	HvacAutoMode  *string
 	HvacAcEnabled *bool
+
+	// MYR-298 seat-ventilation + media-playback read-backs, same side table,
+	// same nil-means-never-read semantics. Populated only by GetByID.
+	SeatVentEnabled     *bool
+	MediaPlaybackStatus *string
 }
 
 // VehicleUpdate holds the subset of vehicle fields that can change from
