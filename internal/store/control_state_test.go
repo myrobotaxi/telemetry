@@ -562,3 +562,55 @@ func TestMergeControlState_SeatVentMediaLastWriteWins(t *testing.T) {
 		t.Errorf("SeatVentEnabled (preserved) = %v, want true", dst.SeatVentEnabled)
 	}
 }
+
+// TestMapTelemetryToControlState_MYR300GatedBackfillPreservesStreamedClimate is
+// the persist-layer regression for the client-verified MYR-300 defect: the car's
+// screen read "Cooling Down 69" while the app read "Climate off".
+//
+// The overwrite happened HERE. A REST /vehicle_data backfill carrying a stale
+// cached is_climate_on=false mapped to a NON-NIL IsClimateOn=false, which won
+// the per-field COALESCE upsert over the fresher streamed true. The MYR-300
+// stream-recency gate (internal/telemetry) drops hvacPower from the backfill
+// frame while the stream is fresh, so the field maps to NIL and the previously
+// persisted streamed value survives — exactly what COALESCE does per column,
+// modelled here by mergeControlState.
+//
+// The second half asserts the un-gated frame really would have flipped it, so
+// this test fails if the gate is ever removed upstream.
+func TestMapTelemetryToControlState_MYR300GatedBackfillPreservesStreamedClimate(t *testing.T) {
+	streamed := mapTelemetryToControlState(map[string]events.TelemetryValue{
+		string(telemetry.FieldHvacPower): {StringVal: strPtr("On")},
+	})
+	if streamed.IsClimateOn == nil || !*streamed.IsClimateOn {
+		t.Fatalf("streamed hvacPower On => IsClimateOn = %v, want true", streamed.IsClimateOn)
+	}
+
+	// The GATED backfill frame: every stream-sourceable field dropped, only the
+	// REST-only trim left.
+	gated := mapTelemetryToControlState(map[string]events.TelemetryValue{
+		string(telemetry.FieldTrim): {StringVal: strPtr("Performance")},
+	})
+	if gated.IsClimateOn != nil {
+		t.Fatalf("gated backfill produced IsClimateOn = %v, want nil", *gated.IsClimateOn)
+	}
+
+	mergeControlState(streamed, gated)
+	if streamed.IsClimateOn == nil || !*streamed.IsClimateOn {
+		t.Errorf("gated backfill overwrote fresher streamed climate: %v", streamed.IsClimateOn)
+	}
+	if streamed.Trim == nil || *streamed.Trim != "Performance" {
+		t.Errorf("REST-only trim did not land: %v", streamed.Trim)
+	}
+
+	// Contrast: without the gate, the stale Off wins.
+	ungated := mapTelemetryToControlState(map[string]events.TelemetryValue{
+		string(telemetry.FieldHvacPower): {StringVal: strPtr("Off")},
+	})
+	if ungated.IsClimateOn == nil || *ungated.IsClimateOn {
+		t.Fatalf("un-gated backfill Off => IsClimateOn = %v, want non-nil false", ungated.IsClimateOn)
+	}
+	mergeControlState(streamed, ungated)
+	if streamed.IsClimateOn == nil || *streamed.IsClimateOn {
+		t.Error("un-gated backfill should overwrite to false — the defect this gate prevents")
+	}
+}
