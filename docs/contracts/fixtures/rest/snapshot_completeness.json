@@ -356,6 +356,114 @@
       "linearIssue": "MYR-253",
       "comment": "MYR-252 Group B cabin-control read-back — DB /snapshot persistence tracked in MYR-253. MYR-298 now persists this to the Go-owned go_vehicle_control_state SIDE table (migration 0014, seat_vent_enabled BOOLEAN; not the Prisma Vehicle table) on the live persist path — NOT the /vehicle_data backfill, which does not carry it — and returns it on /snapshot via VehicleRepo.GetByID's LEFT JOIN; a real false overwrites, null when never read. This MYR-48 completeness harness exercises the Vehicle-table writer pipeline via GetByVIN (no side-table join), so this row stays expected_failure here — the side-table round-trip is covered by internal/store/vehicle_control_state_test.go."
     },
+    "mediaNowPlayingTitle": {
+          "category": "expected_failure",
+          "atomicGroup": "",
+          "synthetic": {
+                "kind": "vehicleUpdate",
+                "field": "MediaNowPlayingTitle",
+                "value": "Summertime Friends"
+          },
+          "nullableInSteadyState": false,
+          "linearIssue": "MYR-303",
+          "comment": "MYR-303 media now-playing read-back. Persisted to the Go-owned go_vehicle_control_state SIDE table (migration 0015; not the Prisma Vehicle table) on the live persist path — NOT the /vehicle_data backfill, which carries no now-playing block — and returned on /snapshot via VehicleRepo.GetByID's LEFT JOIN. Unlike the sibling mediaPlaybackStatus, an EMPTY string is a real observation (the track ended) and DOES overwrite; only an absent field stays NULL, so \"\" means 'nothing playing' and null means 'never observed'. This MYR-48 completeness harness exercises the Vehicle-table writer pipeline via GetByVIN (no side-table join), so this row stays expected_failure here — the side-table round-trip is covered by internal/store/vehicle_control_state_media_test.go."
+    },
+    "mediaNowPlayingArtist": {
+          "category": "expected_failure",
+          "atomicGroup": "",
+          "synthetic": {
+                "kind": "vehicleUpdate",
+                "field": "MediaNowPlayingArtist",
+                "value": "The Chainsmokers"
+          },
+          "nullableInSteadyState": false,
+          "linearIssue": "MYR-303",
+          "comment": "MYR-303 media now-playing read-back. Persisted to the Go-owned go_vehicle_control_state SIDE table (migration 0015; not the Prisma Vehicle table) on the live persist path — NOT the /vehicle_data backfill, which carries no now-playing block — and returned on /snapshot via VehicleRepo.GetByID's LEFT JOIN. Unlike the sibling mediaPlaybackStatus, an EMPTY string is a real observation (the track ended) and DOES overwrite; only an absent field stays NULL, so \"\" means 'nothing playing' and null means 'never observed'. This MYR-48 completeness harness exercises the Vehicle-table writer pipeline via GetByVIN (no side-table join), so this row stays expected_failure here — the side-table round-trip is covered by internal/store/vehicle_control_state_media_test.go."
+    },
+    "mediaNowPlayingAlbum": {
+          "category": "expected_failure",
+          "atomicGroup": "",
+          "synthetic": {
+                "kind": "vehicleUpdate",
+                "field": "MediaNowPlayingAlbum",
+                "value": "Summertime Friends"
+          },
+          "nullableInSteadyState": false,
+          "linearIssue": "MYR-303",
+          "comment": "MYR-303 media now-playing read-back. Persisted to the Go-owned go_vehicle_control_state SIDE table (migration 0015; not the Prisma Vehicle table) on the live persist path — NOT the /vehicle_data backfill, which carries no now-playing block — and returned on /snapshot via VehicleRepo.GetByID's LEFT JOIN. Unlike the sibling mediaPlaybackStatus, an EMPTY string is a real observation (the track ended) and DOES overwrite; only an absent field stays NULL, so \"\" means 'nothing playing' and null means 'never observed'. This MYR-48 completeness harness exercises the Vehicle-table writer pipeline via GetByVIN (no side-table join), so this row stays expected_failure here — the side-table round-trip is covered by internal/store/vehicle_control_state_media_test.go."
+    },
+    "mediaNowPlayingStation": {
+          "category": "expected_failure",
+          "atomicGroup": "",
+          "synthetic": {
+                "kind": "vehicleUpdate",
+                "field": "MediaNowPlayingStation",
+                "value": "Alt Nation"
+          },
+          "nullableInSteadyState": false,
+          "linearIssue": "MYR-303",
+          "comment": "MYR-303 media now-playing read-back. Persisted to the Go-owned go_vehicle_control_state SIDE table (migration 0015; not the Prisma Vehicle table) on the live persist path — NOT the /vehicle_data backfill, which carries no now-playing block — and returned on /snapshot via VehicleRepo.GetByID's LEFT JOIN. Unlike the sibling mediaPlaybackStatus, an EMPTY string is a real observation (the track ended) and DOES overwrite; only an absent field stays NULL, so \"\" means 'nothing playing' and null means 'never observed'. This MYR-48 completeness harness exercises the Vehicle-table writer pipeline via GetByVIN (no side-table join), so this row stays expected_failure here — the side-table round-trip is covered by internal/store/vehicle_control_state_media_test.go."
+    },
+    "mediaPlaybackSource": {
+          "category": "expected_failure",
+          "atomicGroup": "",
+          "synthetic": {
+                "kind": "vehicleUpdate",
+                "field": "MediaPlaybackSource",
+                "value": "Spotify"
+          },
+          "nullableInSteadyState": false,
+          "linearIssue": "MYR-303",
+          "comment": "MYR-303 media now-playing read-back. Persisted to the Go-owned go_vehicle_control_state SIDE table (migration 0015; not the Prisma Vehicle table) on the live persist path — NOT the /vehicle_data backfill, which carries no now-playing block — and returned on /snapshot via VehicleRepo.GetByID's LEFT JOIN. Unlike the sibling mediaPlaybackStatus, an EMPTY string is a real observation (the track ended) and DOES overwrite; only an absent field stays NULL, so \"\" means 'nothing playing' and null means 'never observed'. This MYR-48 completeness harness exercises the Vehicle-table writer pipeline via GetByVIN (no side-table join), so this row stays expected_failure here — the side-table round-trip is covered by internal/store/vehicle_control_state_media_test.go."
+    },
+    "mediaNowPlayingDurationMs": {
+          "category": "expected_failure",
+          "atomicGroup": "",
+          "synthetic": {
+                "kind": "vehicleUpdate",
+                "field": "MediaNowPlayingDuration",
+                "value": 214000
+          },
+          "nullableInSteadyState": false,
+          "linearIssue": "MYR-303",
+          "comment": "MYR-303 media now-playing read-back. Persisted to the Go-owned go_vehicle_control_state SIDE table (migration 0015; not the Prisma Vehicle table) on the live persist path — NOT the /vehicle_data backfill, which carries no now-playing block — and returned on /snapshot via VehicleRepo.GetByID's LEFT JOIN. Stored in milliseconds as a BIGINT; Tesla's 18000000 radio sentinel is a real emitted value stored verbatim. This MYR-48 completeness harness exercises the Vehicle-table writer pipeline via GetByVIN (no side-table join), so this row stays expected_failure here — the side-table round-trip is covered by internal/store/vehicle_control_state_media_test.go."
+    },
+    "mediaNowPlayingElapsedMs": {
+          "category": "expected_failure",
+          "atomicGroup": "",
+          "synthetic": {
+                "kind": "vehicleUpdate",
+                "field": "MediaNowPlayingElapsed",
+                "value": 42000
+          },
+          "nullableInSteadyState": false,
+          "linearIssue": "MYR-303",
+          "comment": "MYR-303 media now-playing read-back. Persisted to the Go-owned go_vehicle_control_state SIDE table (migration 0015; not the Prisma Vehicle table) on the live persist path — NOT the /vehicle_data backfill, which carries no now-playing block — and returned on /snapshot via VehicleRepo.GetByID's LEFT JOIN. Stored in milliseconds as a BIGINT; a persisted elapsed value is stale by construction (the position at the last frame). This MYR-48 completeness harness exercises the Vehicle-table writer pipeline via GetByVIN (no side-table join), so this row stays expected_failure here — the side-table round-trip is covered by internal/store/vehicle_control_state_media_test.go."
+    },
+    "mediaVolumeMax": {
+          "category": "expected_failure",
+          "atomicGroup": "",
+          "synthetic": {
+                "kind": "vehicleUpdate",
+                "field": "MediaVolumeMax",
+                "value": 11
+          },
+          "nullableInSteadyState": false,
+          "linearIssue": "MYR-303",
+          "comment": "MYR-303 media now-playing read-back. Persisted to the Go-owned go_vehicle_control_state SIDE table (migration 0015; not the Prisma Vehicle table) on the live persist path — NOT the /vehicle_data backfill, which carries no now-playing block — and returned on /snapshot via VehicleRepo.GetByID's LEFT JOIN. DOUBLE PRECISION, deliberately not integer-rounded, matching the media_volume column it bounds so mediaVolume / mediaVolumeMax stays exact. This MYR-48 completeness harness exercises the Vehicle-table writer pipeline via GetByVIN (no side-table join), so this row stays expected_failure here — the side-table round-trip is covered by internal/store/vehicle_control_state_media_test.go."
+    },
+    "seatCoolingCapable": {
+          "category": "expected_failure",
+          "atomicGroup": "",
+          "synthetic": {
+                "kind": "vehicleUpdate",
+                "field": "SeatCoolingCapable",
+                "value": true
+          },
+          "nullableInSteadyState": false,
+          "linearIssue": "MYR-308",
+          "comment": "MYR-308 ventilated-seat CAPABILITY — a spec fact from REST vehicle_data.vehicle_config.has_seat_cooling, not a runtime state (contrast the streamed seatVentEnabled). Tesla does not stream it, so it has no proto and no fieldMap entry, which is exactly what carries it past the MYR-300 stream-recency gate. Persisted to the Go-owned go_vehicle_control_state SIDE table (migration 0015) and returned on /snapshot only. A real false is AUTHORITATIVE; null means never read, NOT 'no seat cooling'. This MYR-48 completeness harness exercises the Vehicle-table writer pipeline via GetByVIN (no side-table join), so this row stays expected_failure here — the side-table round-trip is covered by internal/store/vehicle_control_state_media_test.go."
+    },
     "chargePortDoorOpen": {
       "category": "expected_failure",
       "atomicGroup": "",
