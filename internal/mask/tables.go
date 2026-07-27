@@ -214,6 +214,12 @@ var vehicleSummaryOwnerFields = []string{
 	"estimatedRange",
 	"lastUpdated",
 	"role",
+	// MYR-233 — derived operational state (is the car serving a ride
+	// right now?), P0 like its sibling `status`. Riders need it to
+	// render a Busy badge and route new instant requests to the
+	// scheduling flow, so it is NOT owner-private: the viewer list
+	// below inherits it (owner minus `name`).
+	"hasActiveRide",
 }
 
 // vehicleSummaryViewerFields is owner minus `name` per rest-api.md

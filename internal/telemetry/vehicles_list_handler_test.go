@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -236,6 +237,84 @@ func TestVehiclesListHandler_MultiRowProjectionPreservesOrderAndFields(t *testin
 	if got := resp.Items[1]["vinLast4"]; got != "0002" {
 		t.Errorf("items[1].vinLast4 = %v, want 0002", got)
 	}
+}
+
+// TestVehiclesListHandler_HasActiveRideAlwaysEmitted pins the MYR-233
+// wire behavior: `hasActiveRide` is OPTIONAL in the schema but this
+// server ALWAYS emits it, true or false. That distinction is
+// load-bearing — consumers read absence as "server predates the field →
+// availability unknown → treat as available", so a `false` silently
+// dropped by an `omitempty` (or stripped by the §5.2.0 role mask) would
+// be read as "unknown" rather than "free". Both values must survive the
+// mask projection and the JSON encode.
+func TestVehiclesListHandler_HasActiveRideAlwaysEmitted(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+
+	rows := []VehicleCatalogRow{
+		{
+			ID: "clbusy1234567890abcdef", VIN: "5YJ3E1EA1PF000001", Name: "Busy",
+			Model: "Model 3", Year: 2024, Color: "Red", Status: "driving",
+			ChargeLevel: 60, EstimatedRange: 180, LastUpdated: now,
+			HasActiveRide: true,
+		},
+		{
+			ID: "clfree5678901234ghijkl", VIN: "5YJ3E1EA1PF000002", Name: "Free",
+			Model: "Model Y", Year: 2023, Color: "White", Status: "parked",
+			ChargeLevel: 90, EstimatedRange: 300, LastUpdated: now,
+			HasActiveRide: false,
+		},
+	}
+
+	h := NewVehiclesListHandler(
+		&stubTokenValidator{userID: "user-1"},
+		&stubVehicleLister{rows: rows},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/vehicles", nil)
+	req.Header.Set("Authorization", "Bearer valid")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. Body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Decode into raw maps so a MISSING key is distinguishable from a
+	// present `false` — a typed struct would silently zero both.
+	var resp struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v. Body: %s", err, rec.Body.String())
+	}
+	if len(resp.Items) != 2 {
+		t.Fatalf("want 2 items, got %d. Body: %s", len(resp.Items), rec.Body.String())
+	}
+
+	for i, want := range []bool{true, false} {
+		raw, ok := resp.Items[i]["hasActiveRide"]
+		if !ok {
+			t.Fatalf("items[%d] missing `hasActiveRide`; keys: %v. Body: %s",
+				i, keysOfRow(resp.Items[i]), rec.Body.String())
+		}
+		got, isBool := raw.(bool)
+		if !isBool {
+			t.Fatalf("items[%d].hasActiveRide = %v (%T), want a JSON boolean", i, raw, raw)
+		}
+		if got != want {
+			t.Errorf("items[%d].hasActiveRide = %v, want %v", i, got, want)
+		}
+	}
+}
+
+// keysOfRow returns a row's JSON keys for failure messages.
+func keysOfRow(row map[string]any) []string {
+	keys := make([]string, 0, len(row))
+	for k := range row {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func TestVehiclesListHandler_OwnerProjection(t *testing.T) {

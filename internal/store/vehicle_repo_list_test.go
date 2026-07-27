@@ -23,6 +23,10 @@ import (
 // Sibling to TestVehicleRepo_CatalogFields, which exercises the wide
 // `ListByUser` path that detail/edit consumers still use.
 func TestVehicleRepo_ListSummariesByUser(t *testing.T) {
+	// MYR-233: the lean projection now correlates against the Go-owned
+	// go_ride_requests table for `hasActiveRide`, which TestMain's
+	// Prisma-only createSchema does not create. Idempotent.
+	mustApplyGoMigrations(t)
 	cleanTables(t, testPool)
 
 	// Seed three vehicles for user_001 with a deliberate insertion
@@ -101,6 +105,13 @@ func TestVehicleRepo_ListSummariesByUser(t *testing.T) {
 		}
 		if carlos.LastUpdated.IsZero() {
 			t.Errorf("Carlos.LastUpdated is zero")
+		}
+		// MYR-233: no ride rows are seeded here, so the derived flag
+		// must be false — not a NULL scan error and not a stray true.
+		// The full truth table lives in
+		// vehicle_repo_list_active_ride_test.go.
+		if carlos.HasActiveRide {
+			t.Errorf("Carlos.HasActiveRide = true, want false (no rides seeded)")
 		}
 	})
 

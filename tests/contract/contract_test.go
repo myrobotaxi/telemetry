@@ -266,7 +266,30 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"hvac_auto_mode"          TEXT,
 		"hvac_ac_enabled"         BOOLEAN,
 		"updated_at"       TIMESTAMPTZ NOT NULL DEFAULT NOW()
-	);`
+	);
+
+	-- go_ride_requests: the Go-owned ride table (migration 0002,
+	-- MYR-173). The MYR-233 catalog list query correlates against it for
+	-- the derived hasActiveRide flag, so the harness MUST provision it
+	-- or GET /api/vehicles hits a missing relation and 500s. Minimal
+	-- shape — the columns the flag's predicate reads plus the NOT NULL
+	-- columns any seed must satisfy.
+	CREATE TABLE go_ride_requests (
+		"id"            TEXT PRIMARY KEY,
+		"rider_id"      TEXT NOT NULL,
+		"owner_id"      TEXT NOT NULL,
+		"vehicle_id"    TEXT NOT NULL,
+		"status"        TEXT NOT NULL DEFAULT 'requested',
+		"scheduled_for" TIMESTAMPTZ,
+		"created_at"    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+
+	-- Mirrors migration 0013 (MYR-266) so the harness exercises the same
+	-- partial index the hasActiveRide EXISTS predicate is written against.
+	CREATE UNIQUE INDEX uq_go_ride_requests_active_instant_vehicle
+		ON go_ride_requests (vehicle_id)
+		WHERE scheduled_for IS NULL
+		  AND status IN ('accepted', 'enroute', 'arrived');`
 	if _, err := pool.Exec(ctx, schema); err != nil {
 		return fmt.Errorf("create schema: %w", err)
 	}

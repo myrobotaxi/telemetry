@@ -75,11 +75,45 @@ const vehicleListSummaryColumns = `"id", "userId", "vin", "name",
 	"model", "year", "color", "status",
 	"chargeLevel", "estimatedRange", "lastUpdated"`
 
+// vehicleListHasActiveRideExpr derives the `hasActiveRide` catalog flag
+// (MYR-233): TRUE iff the car holds an OPEN INSTANT ride request.
+//
+// The predicate is character-for-character the predicate of the partial
+// unique index `uq_go_ride_requests_active_instant_vehicle` (migration
+// 0013, MYR-266), which is the whole point:
+//
+//  1. The flag can NEVER disagree with the accept guard — flag true ⇒ an
+//     accept would raise 23505 on that index, and vice versa.
+//  2. Postgres answers the correlated EXISTS from the partial index
+//     (verified: `Index Only Scan using
+//     uq_go_ride_requests_active_instant_vehicle`), so the flag costs
+//     one index probe per row — no extra round trip, no N+1. The index
+//     also bounds the match at ONE row per vehicle.
+//
+// Excluded, mirroring the index: scheduled rides (a reservation never
+// makes the car busy), `requested` (many riders may hold pending
+// requests against one idle car), and the terminal states. A new
+// committed lifecycle state must be added HERE and to 0013's index in
+// the same PR or the flag drifts from the guard it mirrors.
+const vehicleListHasActiveRideExpr = `EXISTS (
+		SELECT 1
+		FROM go_ride_requests r
+		WHERE r.vehicle_id = "Vehicle"."id"
+		  AND r.scheduled_for IS NULL
+		  AND r.status IN ('accepted', 'enroute', 'arrived')
+	) AS "hasActiveRide"`
+
 // queryVehiclesByUserList is the lean read path for the catalog list
 // endpoint. Companion to queryVehiclesByUser (wide read, kept for
 // detail/edit consumers). ORDER BY matches the wide query so the SDK
 // sees stable iteration order across both surfaces.
-const queryVehiclesByUserList = `SELECT ` + vehicleListSummaryColumns + `
+//
+// MYR-233: the derived `hasActiveRide` flag rides along as a correlated
+// EXISTS rather than a follow-up per-vehicle query — one statement
+// serves the whole catalog, preserving the MYR-122 single-round-trip
+// property of this path.
+const queryVehiclesByUserList = `SELECT ` + vehicleListSummaryColumns + `,
+	` + vehicleListHasActiveRideExpr + `
 FROM "Vehicle"
 WHERE "userId" = $1
 ORDER BY "name", "vin"`
