@@ -31,6 +31,12 @@ type VehicleCatalogRow struct {
 	ChargeLevel    int
 	EstimatedRange int
 	LastUpdated    time.Time
+	// HasActiveRide is derived read-time by the store's list query
+	// (MYR-233), not persisted on the vehicle: true iff the car holds
+	// an open INSTANT ride request (`accepted` / `enroute` / `arrived`,
+	// `scheduled_for IS NULL`) — the same predicate the per-vehicle
+	// accept guard races on.
+	HasActiveRide bool
 }
 
 // VehicleLister returns the catalog rows for vehicles owned by a
@@ -87,6 +93,11 @@ type vehicleSummary struct {
 	EstimatedRange int    `json:"estimatedRange"`
 	LastUpdated    string `json:"lastUpdated"`
 	Role           string `json:"role"`
+	// HasActiveRide is OPTIONAL on the wire contract but ALWAYS emitted
+	// by this server version (true or false) — absence signals a server
+	// that predates MYR-233, never "vehicle is free". Consumers treat an
+	// absent value as "availability unknown → treat as available".
+	HasActiveRide bool `json:"hasActiveRide"`
 }
 
 // toMaskMap returns the row as a wire-name-keyed map suitable for
@@ -105,6 +116,7 @@ func (v vehicleSummary) toMaskMap() map[string]any {
 		"estimatedRange": v.EstimatedRange,
 		"lastUpdated":    v.LastUpdated,
 		"role":           v.Role,
+		"hasActiveRide":  v.HasActiveRide,
 	}
 }
 
@@ -175,6 +187,7 @@ func (h *VehiclesListHandler) buildResponse(rows []VehicleCatalogRow, role auth.
 			EstimatedRange: v.EstimatedRange,
 			LastUpdated:    v.LastUpdated.UTC().Format(time.RFC3339),
 			Role:           string(role),
+			HasActiveRide:  v.HasActiveRide,
 		}
 		// `fieldsMasked` is intentionally discarded in v1: §7.0 reads
 		// are not audited per `data-lifecycle.md` §4.2, and the v1

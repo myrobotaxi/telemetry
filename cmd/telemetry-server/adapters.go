@@ -191,6 +191,7 @@ func (a *vehicleListerAdapter) ListByUser(ctx context.Context, userID string) ([
 			ChargeLevel:    v.ChargeLevel,
 			EstimatedRange: v.EstimatedRange,
 			LastUpdated:    v.LastUpdated,
+			HasActiveRide:  v.HasActiveRide,
 		})
 	}
 	return out, nil
