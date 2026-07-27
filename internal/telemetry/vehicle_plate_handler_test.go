@@ -199,6 +199,8 @@ func TestVehiclePlateHandler_Rejects(t *testing.T) {
 		{name: "non-ascii is out of charset", body: `{"plate":"ÅBC123"}`},
 		{name: "interior newline is out of charset", body: "{\"plate\":\"AB\\nCD\"}"},
 		{name: "malformed json", body: `{"plate":`},
+		// Strict decode: a typo'd key must 400, not silently clear the plate.
+		{name: "unknown key", body: `{"licensePlate":"ABC 1234"}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

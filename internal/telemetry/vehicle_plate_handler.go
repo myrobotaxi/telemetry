@@ -154,9 +154,14 @@ func (h *VehiclePlateHandler) handle(w http.ResponseWriter, r *http.Request) {
 // ok=false after writing a 400 for malformed JSON or a plate that violates the
 // charset / length rule AFTER normalization.
 func (h *VehiclePlateHandler) decodePlate(w http.ResponseWriter, r *http.Request) (string, bool) {
+	// Strict decode (unknown keys are a 400), matching the sibling
+	// RideRequestHandler.decodeCreateBody convention — a typo'd key must fail
+	// loudly rather than silently clearing the plate.
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
 	var body vehiclePlateRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		h.writeError(w, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest, "invalid JSON body")
+	if err := dec.Decode(&body); err != nil {
+		h.writeError(w, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest, "malformed request body")
 		return "", false
 	}
 
