@@ -23,13 +23,13 @@ const (
 // Vehicle is a read model of the Prisma "Vehicle" table. Only the fields
 // the telemetry server needs are included.
 type Vehicle struct {
-	ID                   string
-	UserID               string
-	VIN                  string
-	Name                 string
-	Model                string
-	Year                 int
-	Color                string
+	ID     string
+	UserID string
+	VIN    string
+	Name   string
+	Model  string
+	Year   int
+	Color  string
 	// LicensePlate is the owner-entered plate (MYR-286). Prisma-owned
 	// column, NOT NULL DEFAULT '' — empty string means "no plate set",
 	// never "unknown". Server-normalized on write (see
@@ -105,6 +105,25 @@ type Vehicle struct {
 	// same nil-means-never-read semantics. Populated only by GetByID.
 	SeatVentEnabled     *bool
 	MediaPlaybackStatus *string
+
+	// MYR-303 media now-playing block, same side table, populated only by
+	// GetByID. nil means NEVER OBSERVED. For the five text fields that is
+	// distinct from a non-nil EMPTY string, which means "observed, and nothing
+	// is playing" — see mapControlMediaNowPlaying (control_state_media.go).
+	MediaNowPlayingTitle    *string
+	MediaNowPlayingArtist   *string
+	MediaNowPlayingAlbum    *string
+	MediaNowPlayingStation  *string
+	MediaPlaybackSource     *string
+	MediaNowPlayingDuration *int64
+	MediaNowPlayingElapsed  *int64
+	MediaVolumeMax          *float64
+
+	// MYR-308 ventilated-seat capability (a spec fact from REST vehicle_config,
+	// not a runtime state), same side table, populated only by GetByID. nil
+	// means never read — NOT "no seat cooling"; an explicit false is the
+	// authoritative no.
+	SeatCoolingCapable *bool
 }
 
 // VehicleUpdate holds the subset of vehicle fields that can change from
