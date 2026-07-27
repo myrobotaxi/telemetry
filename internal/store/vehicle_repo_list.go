@@ -35,6 +35,9 @@ type VehicleSummary struct {
 	Model          string
 	Year           int
 	Color          string
+	// LicensePlate is the owner-entered plate (MYR-286), read straight
+	// off the Prisma-owned column. Empty string == not set.
+	LicensePlate   string
 	Status         VehicleStatus
 	ChargeLevel    int
 	EstimatedRange int
@@ -139,6 +142,7 @@ func scanVehicleSummaryRow(row rowScanner) (VehicleSummary, error) {
 		&v.Model,
 		&v.Year,
 		&v.Color,
+		&v.LicensePlate,
 		&status,
 		&v.ChargeLevel,
 		&v.EstimatedRange,

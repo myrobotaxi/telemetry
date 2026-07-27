@@ -27,6 +27,10 @@ type VehicleCatalogRow struct {
 	Model          string
 	Year           int
 	Color          string
+	// LicensePlate is the owner-entered plate (MYR-286), an identity-row
+	// field off the Prisma "Vehicle" column like Color/Name — not
+	// telemetry. Empty string == not set.
+	LicensePlate   string
 	Status         string
 	ChargeLevel    int
 	EstimatedRange int
@@ -87,6 +91,12 @@ type vehicleSummary struct {
 	Model          string `json:"model"`
 	Year           int    `json:"year"`
 	Color          string `json:"color"`
+	// LicensePlate (MYR-286) follows the SAME emission convention as its
+	// sibling identity field `color`: plain string, NO omitempty, so the
+	// key is ALWAYS present and "no plate set" is an empty string rather
+	// than a missing key. In BOTH role allow-lists — a rider identifies
+	// the car at pickup from this row (contrast VinLast4/`vin`).
+	LicensePlate   string `json:"licensePlate"`
 	VinLast4       string `json:"vinLast4"`
 	Status         string `json:"status"`
 	ChargeLevel    int    `json:"chargeLevel"`
@@ -110,6 +120,7 @@ func (v vehicleSummary) toMaskMap() map[string]any {
 		"model":          v.Model,
 		"year":           v.Year,
 		"color":          v.Color,
+		"licensePlate":   v.LicensePlate,
 		"vinLast4":       v.VinLast4,
 		"status":         v.Status,
 		"chargeLevel":    v.ChargeLevel,
@@ -181,6 +192,7 @@ func (h *VehiclesListHandler) buildResponse(rows []VehicleCatalogRow, role auth.
 			Model:          v.Model,
 			Year:           v.Year,
 			Color:          v.Color,
+			LicensePlate:   v.LicensePlate,
 			VinLast4:       lastFourOfVIN(v.VIN),
 			Status:         v.Status,
 			ChargeLevel:    v.ChargeLevel,

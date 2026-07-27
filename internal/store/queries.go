@@ -11,7 +11,7 @@ package store
 // and vehicle_repo_scan.go for the read-side preference rules.
 
 const vehicleSelectColumns = `"id", "userId", "vin", "name",
-	"model", "year", "color", "status",
+	"model", "year", "color", "licensePlate", "status",
 	"chargeLevel", "estimatedRange", "chargeState", "timeToFull",
 	"speed", "gearPosition", "heading",
 	"latitude", "longitude", "locationName", "locationAddress",
@@ -74,7 +74,7 @@ ORDER BY "name", "vin"`
 // Anchored by AGENTS.md "Performance invariants": list endpoints use
 // lean projections; wide selects belong only in detail/edit handlers.
 const vehicleListSummaryColumns = `"id", "userId", "vin", "name",
-	"model", "year", "color", "status",
+	"model", "year", "color", "licensePlate", "status",
 	"chargeLevel", "estimatedRange", "lastUpdated"`
 
 // vehicleListHasActiveRideExpr derives the `hasActiveRide` catalog flag

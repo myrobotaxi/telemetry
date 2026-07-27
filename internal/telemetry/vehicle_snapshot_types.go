@@ -21,6 +21,10 @@ type VehicleSnapshotRow struct {
 	Model                string
 	Year                 int
 	Color                string
+	// LicensePlate is the owner-entered plate (MYR-286), an IDENTITY-row
+	// field read straight off the Prisma "Vehicle" column like Color/Name —
+	// not telemetry, never streamed. Empty string == not set.
+	LicensePlate         string
 	Status               string
 	ChargeLevel          int
 	EstimatedRange       int
@@ -111,6 +115,14 @@ type vehicleSnapshotResponse struct {
 	Model                string          `json:"model"`
 	Year                 int             `json:"year"`
 	Color                string          `json:"color"`
+	// LicensePlate (MYR-286): the owner-entered plate. Emitted with the SAME
+	// convention as its sibling identity-row field `color` above — a plain
+	// string with NO omitempty, so the key is ALWAYS present and "not set" is
+	// an empty string rather than a missing key. (The wire contract tolerates
+	// both absent and "" as "no plate set"; this server always sends "".)
+	// Visible to BOTH roles by deliberate product decision (MYR-286) — riders
+	// identify the car at pickup — unlike the owner-only `vin` below.
+	LicensePlate string `json:"licensePlate"`
 	// VIN (MYR-279): the FULL 17-char VIN, owner-snapshot only. Gated to the
 	// owner mask (never viewer, never WS broadcast); the vehicles-list keeps
 	// vinLast4. See docs/contracts/data-classification.md section 1.3.
@@ -209,6 +221,8 @@ func (r vehicleSnapshotResponse) toMaskMap() map[string]any {
 	m["model"] = r.Model
 	m["year"] = r.Year
 	m["color"] = r.Color
+	// Always keyed (never conditional on emptiness) — same as `color`.
+	m["licensePlate"] = r.LicensePlate
 	m["vin"] = r.VIN
 	m["softwareVersion"] = derefOrNil(r.SoftwareVersion)
 	m["trim"] = derefOrNil(r.Trim)
@@ -289,6 +303,7 @@ func buildSnapshotResponse(row VehicleSnapshotRow) vehicleSnapshotResponse {
 		Model:                row.Model,
 		Year:                 row.Year,
 		Color:                row.Color,
+		LicensePlate:         row.LicensePlate,
 		VIN:                  row.VIN,
 		SoftwareVersion:      row.SoftwareVersion,
 		Trim:                 row.Trim,
