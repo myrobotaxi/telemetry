@@ -314,8 +314,8 @@ Durable last-known owner-control read-back state — the four owner controls the
 | `seat_heater_rear_left` | `INT?` | P0 | No | Yes | Rear-left seat heater level (`seatHeaterRearLeft`) — cabin comfort setting. MYR-273 (migration 0010) |
 | `seat_heater_rear_center` | `INT?` | P0 | No | Yes | Rear-center seat heater level (`seatHeaterRearCenter`) — cabin comfort setting. MYR-273 (migration 0010) |
 | `seat_heater_rear_right` | `INT?` | P0 | No | Yes | Rear-right seat heater level (`seatHeaterRearRight`) — cabin comfort setting. MYR-273 (migration 0010) |
-| `seat_cooler_left` | `INT?` | P0 | No | Yes | Front-left seat cooler level (`seatCoolerLeft`) — cabin comfort setting. MYR-273 (migration 0010) |
-| `seat_cooler_right` | `INT?` | P0 | No | Yes | Front-right seat cooler level (`seatCoolerRight`) — cabin comfort setting. MYR-273 (migration 0010) |
+| `seat_cooler_left` | `INT?` | P0 | No | Yes | Front-left seat cooler level (`seatCoolerLeft`) — cabin comfort setting. MYR-273 (migration 0010). MYR-299: its NON-NULLness (including a stored `0`) additionally carries the ventilated-seat capability — same column, same P0 tier, no shape change |
+| `seat_cooler_right` | `INT?` | P0 | No | Yes | Front-right seat cooler level (`seatCoolerRight`) — cabin comfort setting. MYR-273 (migration 0010). MYR-299: its NON-NULLness (including a stored `0`) additionally carries the ventilated-seat capability — same column, same P0 tier, no shape change |
 | `media_volume` | `DOUBLE PRECISION?` | P0 | No | Yes | Media volume level (`mediaVolume`, fractional, typically 0-11) — cabin media setting, carries no content metadata. MYR-273 (migration 0010) |
 | `software_version` | `TEXT?` | P0 | No | Yes | Installed Tesla firmware string (`softwareVersion`) — a publicly-legible attribute, not identifying, no GPS. MYR-279 (migration 0011). Streamed (proto Version) OR `/vehicle_data` `car_version` |
 | `trim` | `TEXT?` | P0 | No | Yes | Trim badge (`trim`, e.g. "Performance") — a publicly-legible attribute, not identifying. MYR-279 (migration 0011). `/vehicle_data` `vehicle_config.trim_badging` only (not streamed) |
