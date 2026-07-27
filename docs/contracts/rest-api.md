@@ -75,6 +75,7 @@ Every FR/NFR listed here is anchored in at least one section of this doc. The ta
    11. In-app Tesla account link (MYR-246)
    12. `DELETE /api/tesla/vehicles/{vehicleId}` (owner car offboarding — MYR-258)
    13. `POST /api/tesla/vehicles/{teslaVehicleId}/re-add` (owner deliberate re-add — MYR-262)
+   14. `PUT /api/tesla/vehicles/{vehicleId}/plate` (owner license-plate entry — MYR-286)
 8. Resource schemas
 9. Observability
 10. Code <-> spec divergences
@@ -434,16 +435,16 @@ The mask is applied at the **handler layer**: the store returns plaintext, fully
 
 | Role | Visible fields | Notes |
 |------|----------------|-------|
-| `owner` | All `VehicleSummary` fields: `vehicleId`, `name`, `model`, `year`, `color`, `vinLast4`, `status`, `chargeLevel`, `estimatedRange`, `lastUpdated`, `role`, `hasActiveRide` | Full catalog visibility. `role` is always `owner` for the row's caller-vehicle relationship. `hasActiveRide` ([MYR-233](https://linear.app/myrobotaxi/issue/MYR-233)) is P0 derived operational state — same tier as `status` — and is in BOTH role allow-lists: a rider needs it to render Busy and route to the scheduling flow. |
-| `viewer` | All `VehicleSummary` fields EXCEPT `name` | The user-assigned nickname (P1, owner-curated) is owner-only. Viewers still see model/year/color so they can identify the vehicle in their list, but the nickname stays with the owner. Forward-looking — see the §7.0 implementation note about the v1 viewer pathway being PLANNED. |
+| `owner` | All `VehicleSummary` fields: `vehicleId`, `name`, `model`, `year`, `color`, `vinLast4`, `status`, `chargeLevel`, `estimatedRange`, `lastUpdated`, `role`, `hasActiveRide`, `licensePlate` | Full catalog visibility. `role` is always `owner` for the row's caller-vehicle relationship. `hasActiveRide` ([MYR-233](https://linear.app/myrobotaxi/issue/MYR-233)) is P0 derived operational state — same tier as `status` — and is in BOTH role allow-lists: a rider needs it to render Busy and route to the scheduling flow. `licensePlate` ([MYR-286](https://linear.app/myrobotaxi/issue/MYR-286)) is P1 but likewise in BOTH allow-lists — see the viewer row. |
+| `viewer` | All `VehicleSummary` fields EXCEPT `name` | The user-assigned nickname (P1, owner-curated) is owner-only. Viewers still see model/year/color so they can identify the vehicle in their list, but the nickname stays with the owner. `licensePlate` ([MYR-286](https://linear.app/myrobotaxi/issue/MYR-286)) is deliberately NOT owner-only despite also being P1: the entire purpose of the plate is that a rider can identify the correct car at pickup, which fails if only the owner can see it. That is a product decision, not an oversight — do not "fix" it by analogy with `name`. The catalog never carries the full `vin` for either role (`vinLast4` only). Forward-looking — see the §7.0 implementation note about the v1 viewer pathway being PLANNED. |
 
 #### 5.2.1 Vehicle snapshot (`GET /api/vehicles/{vehicleId}/snapshot`)
 
 | Role | Visible fields | Notes |
 |------|----------------|-------|
 | `owner` | All fields in [`schemas/vehicle-state.schema.json`](schemas/vehicle-state.schema.json) | Including GPS, nav, charge, gear -- the full v1 `VehicleState` shape. Includes the MYR-252 cabin-control read-back fields (`locked`, `hvacPower`, `isClimateOn`, `fanSpeed`, `driverTempSetting`, `passengerTempSetting`, `hvacAutoMode`, `hvacAcEnabled`, `seatHeaterLeft`/`Right`, `seatHeaterRearLeft`/`Center`/`Right`, `seatCoolerLeft`/`Right`, `seatVentEnabled`, `chargePortDoorOpen`, `frunkOpen`, `trunkOpen`, `mediaPlaybackStatus`, `mediaVolume`) — all P0, all in `internal/mask/tables.go` `vehicleStateOwnerFields`. **Delivery caveat (updated by [MYR-298](https://linear.app/myrobotaxi/issue/MYR-298)):** **20 of the 21** cabin read-backs are now persisted (Go-owned `go_vehicle_control_state` side table, LEFT-joined into `VehicleRepo.GetByID`) and **returned on this DB-backed `/snapshot`** for non-streaming cars (NFR-3.5) — the five owner controls `locked`, `frunkOpen`, `trunkOpen`, `isClimateOn`, `chargePortDoorOpen` ([MYR-269](https://linear.app/myrobotaxi/issue/MYR-269)), the eleven cabin-setting levels ([MYR-273](https://linear.app/myrobotaxi/issue/MYR-273)), the two climate-mode read-backs ([MYR-274](https://linear.app/myrobotaxi/issue/MYR-274)), and `seatVentEnabled` + `mediaPlaybackStatus` ([MYR-298](https://linear.app/myrobotaxi/issue/MYR-298)). Only `hvacPower` stays WS-live-only — its server-derived `isClimateOn` boolean IS persisted, so nothing owner-facing is lost. Every persisted read-back is nullable and surfaces as an explicit `null` when never read (honest-unknown, never a fabricated value). This closes the [MYR-253](https://linear.app/myrobotaxi/issue/MYR-253) hydration. A `/snapshot` omitting optional fields is contract-valid (§7.1). |
-| `viewer` | All fields EXCEPT `licensePlate` | **Note:** `licensePlate` is a Prisma-owned column per [`data-classification.md`](data-classification.md) §1.3 and is NOT currently a member of `vehicle-state.schema.json`, so this mask rule is **forward-looking**: it codifies the behavior the first time `licensePlate` is surfaced over the SDK. Viewers retain full GPS, nav, and charge visibility because the whole point of sharing is to watch the vehicle in real time (FR-5.1, FR-5.4). The MYR-252 cabin-control fields are in the viewer allow-list too (owner-minus-`licensePlate`); the same WS-live-only caveat applies. |
-| `limited_viewer` (FR-5.5 future slot) | All fields EXCEPT `licensePlate`, `navRouteCoordinates`, `destinationName`, `destinationAddress`, `destinationLatitude`, `destinationLongitude`, `originLatitude`, `originLongitude`; `latitude`/`longitude` reduced to a coarse-grained hash (city-block resolution) | Documented here as the extension seam for FR-5.5. NOT implemented in v1. The mask is a static per-role projection; adding the `limited_viewer` row is a one-file handler-layer change in `internal/mask/`. |
+| `viewer` | All fields EXCEPT the full `vin` | **Updated by [MYR-286](https://linear.app/myrobotaxi/issue/MYR-286).** The viewer allow-list is now owner-minus-`vin` and nothing else. The full 17-char `vin` stays owner-only per [MYR-279](https://linear.app/myrobotaxi/issue/MYR-279) — it identifies the physical car and links to its location history ([`data-classification.md`](data-classification.md) §1.3, §2.1) — while `licensePlate`, which this row previously excluded as a *forward-looking* rule written before the field was on the wire, is now **deliberately visible to viewers**: the plate exists so a rider can identify the correct car at pickup, which fails if only the owner can see it. Both fields are P1; the asymmetry is about **who needs the value**, not about tier. Viewers retain full GPS, nav, and charge visibility because the whole point of sharing is to watch the vehicle in real time (FR-5.1, FR-5.4). The MYR-252 cabin-control fields are in the viewer allow-list too; the same WS-live-only caveat applies. |
+| `limited_viewer` (FR-5.5 future slot) | All fields EXCEPT `licensePlate`, `vin`, `navRouteCoordinates`, `destinationName`, `destinationAddress`, `destinationLatitude`, `destinationLongitude`, `originLatitude`, `originLongitude`; `latitude`/`longitude` reduced to a coarse-grained hash (city-block resolution) | Documented here as the extension seam for FR-5.5. NOT implemented in v1. It still excludes `licensePlate` even though the full `viewer` role now receives it (MYR-286): an invited viewer waiting at a pickup needs the plate, whereas `limited_viewer` is the deliberately-degraded tier that also loses precise GPS and the whole navigation group. The mask is a static per-role projection; adding the `limited_viewer` row is a one-file handler-layer change in `internal/mask/`. |
 
 #### 5.2.2 Drive list (`GET /api/vehicles/{vehicleId}/drives`)
 
@@ -510,7 +511,7 @@ Audit entries land in the existing `AuditLog` table per `data-lifecycle.md` §4 
 | `targetType` | `rest_response` for REST, `ws_broadcast` for WebSocket |
 | `targetId` | The `vehicleId` or `driveId` whose response was masked |
 | `initiator` | `user` (the consumer's request triggered the response) |
-| `metadata` | `{ "role": "viewer", "channel": "rest" \| "ws", "fieldsMasked": ["licensePlate", ...], "endpoint": "/api/vehicles/{id}/snapshot" }` |
+| `metadata` | `{ "role": "viewer", "channel": "rest" \| "ws", "fieldsMasked": ["vin", ...], "endpoint": "/api/vehicles/{id}/snapshot" }` |
 
 `metadata.fieldsMasked` is a list of column names. Column names are P0 (they appear in this contract and in `data-classification.md` §1) — the audit log MUST NOT contain any actual masked field values, only their names.
 
@@ -607,7 +608,8 @@ No request body, no query parameters in v1. Pagination (`cursor`, `limit`) is re
       "estimatedRange": 245,
       "lastUpdated": "2026-05-10T17:45:00Z",
       "role": "owner",
-      "hasActiveRide": false
+      "hasActiveRide": false,
+      "licensePlate": "ABC 1234"
     }
   ]
 }
@@ -629,6 +631,7 @@ No request body, no query parameters in v1. Pagination (`cursor`, `limit`) is re
 | `lastUpdated` | `string` (ISO 8601) | P0 | Timestamp of the last telemetry write to this vehicle. The catalog uses it to render "last seen N minutes ago." |
 | `role` | `string` (enum) | P0 | `owner` or `viewer`. The caller's relationship to the vehicle. See RBAC below. |
 | `hasActiveRide` | `boolean` | P0 | **OPTIONAL** ([MYR-233](https://linear.app/myrobotaxi/issue/MYR-233)). `true` iff the vehicle currently has an OPEN INSTANT ride request. **Derivation:** a `go_ride_requests` row with `scheduled_for IS NULL AND status IN ('accepted','arrived','enroute')` — character-for-character the predicate of the per-vehicle partial unique index `uq_go_ride_requests_active_instant_vehicle` (migration 0013, [MYR-266](https://linear.app/myrobotaxi/issue/MYR-266)), so the flag and the accept guard can never disagree (flag true ⇒ an accept would 409; an accept 409s ⇒ flag true). The index also bounds the match at one row per vehicle. Scheduled rides are EXEMPT (a reservation never makes the car busy) and `requested` does NOT count (many riders may hold pending requests against one idle car). Computed in the list query as a correlated `EXISTS` — one statement for the whole catalog, no N+1. **v1 no-WS-push caveat:** derivation is REST-read-time only; §8 pushes no `hasActiveRide` frame to non-party viewers, so a rider's Busy badge refreshes on the next list fetch, not live. **Absence semantics:** this server version always emits the field (`true`/`false`); a missing key means the server predates MYR-233 — consumers MUST read that as "availability unknown → treat as available" and MUST NEVER render Busy from absence. |
+| `licensePlate` | `string` | **P1** | **OPTIONAL** ([MYR-286](https://linear.app/myrobotaxi/issue/MYR-286)). The owner-entered license plate, same value and semantics as `VehicleState.licensePlate` (§7.1). Read off the Prisma-owned `Vehicle.licensePlate` column as an identity-row field alongside `name`/`color` — **not telemetry** and **not from Tesla** (the Fleet API exposes no plate anywhere); it exists only because the owner typed it via §7.14. Already normalized on write (trim, uppercase, ≤ 10 chars, charset `[A-Z0-9 -]`) — consumers MUST NOT re-normalize before display. **Empty-value convention:** this server ALWAYS emits the key and uses an **empty string** for "no plate set", matching the sibling `color` exactly; an ABSENT key means a pre-MYR-286 server. Neither ever means "we could not read the plate" — keep the `VIN ····xxxx` fallback (built from `vinLast4`) for both, and never render an empty plate in a catalog row. **RBAC:** in BOTH role allow-lists (§5.2.0) despite being P1 — the plate exists so a rider can identify the correct car at pickup. **v1 no-WS-push caveat:** no WebSocket delta; the plate refreshes on the next list fetch. |
 
 ##### Excluded from the list response
 
@@ -739,11 +742,16 @@ Example:
   "etaMinutes": null,
   "tripDistanceRemaining": null,
   "navRouteCoordinates": null,
+  "licensePlate": "ABC 1234",
   "lastUpdated": "2026-04-13T18:22:01Z"
 }
 ```
 
 The seven former spec-only catalog fields (`model`, `year`, `color`, `fsdMilesSinceReset`, `locationName`, `locationAddress`, `destinationAddress`) were promoted out of spec-only status by [MYR-24](https://linear.app/myrobotaxi/issue/MYR-24) on 2026-04-23 — the Go `internal/store.Vehicle` read path now loads them from the Prisma-owned `Vehicle` table. Six are non-nullable on snapshot (`model`, `year`, `color`, `fsdMilesSinceReset`, `locationName`, `locationAddress`); `destinationAddress` remains nullable because the Prisma column is `String?`. The charge-group fields `chargeState` and `timeToFull` are persisted to the Prisma-owned `Vehicle` table as of [MYR-41](https://linear.app/myrobotaxi/issue/MYR-41) on 2026-04-25; both columns are nullable (`String?` / `Float?`) so a vehicle that has never charged surfaces `null` on the snapshot. [MYR-40](https://linear.app/myrobotaxi/issue/MYR-40) shipped the live WS wire path for both fields on 2026-04-22; the cold-load snapshot now reads back the same values. See `websocket-protocol.md` §4.1.4 and §10 DV-03 / DV-04.
+
+| Field | Type | Classification | Notes |
+|-------|------|----------------|-------|
+| `licensePlate` | `string` | **P1** | **OPTIONAL** ([MYR-286](https://linear.app/myrobotaxi/issue/MYR-286), contracts v0.15.0). The owner-entered license plate, read off the Prisma-owned `Vehicle.licensePlate` column as an identity-row field alongside `name`/`color` — **not telemetry**. **Not sourced from Tesla:** the Fleet API exposes no plate on any endpoint, telemetry field, or proto, so the value exists only because the owner typed it via §7.14 `PUT /api/tesla/vehicles/{vehicleId}/plate`. **Already normalized** on write (trimmed, uppercased, ≤ 10 chars, charset `[A-Z0-9 -]`) — consumers MUST NOT re-normalize or re-validate before display. **Empty-value convention:** this server ALWAYS emits the key and uses an **empty string** for "no plate set", exactly matching its sibling `color` (a plain non-`omitempty` string). The wire contract additionally tolerates an ABSENT key, which means the server predates MYR-286; neither ever means "this car has a plate we could not read". Consumers keep their existing `VIN ····xxxx` fallback for both cases and MUST NEVER render an empty plate. **RBAC:** visible to BOTH roles (§5.2.1) — unlike the owner-only `vin`. **Delivery:** no WebSocket delta in v1 — a `vehicle_update` frame NEVER carries `licensePlate` and a plate edit fires no push, so the value reaches clients on the next read (this endpoint or §7.0). |
 
 #### Response -- error
 
@@ -757,7 +765,7 @@ The seven former spec-only catalog fields (`model`, `year`, `color`, `fsdMilesSi
 
 #### RBAC
 
-See §5.2.1. Owners see the full `VehicleState`; viewers see all current fields (licensePlate mask is forward-looking because it is not yet a member of `VehicleState`).
+See §5.2.1. Owners see the full `VehicleState`; viewers see everything except the full `vin` (MYR-279). `licensePlate` is visible to BOTH roles (MYR-286) — a rider identifies the car at pickup from it.
 
 #### Implementation notes
 
@@ -2041,6 +2049,116 @@ same either way.
 `500 internal_error` (tombstone clear transaction failed — atomic: nothing
 cleared, no audit row, no provision; retryable).
 
+### 7.14 `PUT /api/tesla/vehicles/{vehicleId}/plate` (owner license-plate entry — MYR-286)
+
+Owner-authenticated "what plate is on this car?" — the **only** way
+`Vehicle.licensePlate` is ever populated, and therefore the write half of the
+read surfaces in §7.0 and §7.1.
+
+**Why this endpoint has to exist.** The plate is **not a Tesla value**. The
+Fleet API exposes no license plate on any endpoint, in any telemetry field, or
+in any proto — there is nothing to sync, backfill, or decode. The column can be
+populated only by the owner typing it, and no Next.js/Prisma surface writes it
+either, so the Go server owns the write.
+
+**Enablement.** The route is ALWAYS mounted. No tesla-http-proxy, no Tesla
+token, and no Tesla call is involved at any point — this is purely a local
+owner-scoped DB write.
+
+**Request.**
+
+```
+PUT /api/tesla/vehicles/{vehicleId}/plate
+Authorization: Bearer <app session JWT>        # owner identity = JWT sub
+Content-Type: application/json
+
+{ "plate": "abc 1234" }
+```
+
+`{vehicleId}` is the Prisma cuid (the same key as §7.12 — NOT a VIN, and NOT the
+Tesla vehicle id used by §7.13; the local `Vehicle` row exists by definition
+here).
+
+| Field | Type | Classification | Notes |
+|-------|------|----------------|-------|
+| `plate` | `string` | **P1** | The plate as the owner typed it. Normalized server-side before validation and storage (see below). An **empty string CLEARS** the stored plate. An omitted key is treated as the empty string. |
+
+**Behavior / sequence:**
+
+1. Validate the bearer → `userId`. Missing/invalid → `401 auth_failed`. Missing
+   `{vehicleId}` → `400 invalid_request`. Non-`PUT` method → `405 invalid_request`.
+2. **Normalize, then validate — in that order, and the order is the contract.**
+   Normalization is `trim` (leading/trailing whitespace) then `uppercase`, and
+   nothing else: interior spacing is preserved verbatim, because `ABC 1234` and
+   `ABC1234` are different plates in some jurisdictions and collapsing them
+   would silently rewrite the owner's answer. Validation then runs on the
+   **normalized** value: at most **10 characters**, drawn only from
+   `^[A-Z0-9 -]*$`. So `"  abc 1234  "` is ACCEPTED (it normalizes to
+   `"ABC 1234"`), where validating the raw input would have rejected it for
+   lowercase and counted its surrounding spaces against the cap. A violation →
+   `400 invalid_request`, and nothing is written.
+3. Resolve `vehicleId` → owner via `VehicleRepo.GetByID`. Unknown vehicle →
+   `404 not_found` (indistinguishable from ownership-filtered — never leaks
+   existence). A real ownership mismatch → `403 vehicle_not_owned`. **Identical
+   semantics to §7.12.** No write runs on either.
+4. Write the normalized plate. The `UPDATE` is itself scoped
+   `WHERE "id" = … AND "userId" = <caller>`, so ownership is enforced twice and
+   the write is fail-closed regardless of step 3. A zero-row result (the car was
+   deleted in the gap) is reported as `404 not_found`, never a false `200`.
+5. Respond `200` with the **normalized stored value**.
+
+**Empty string clears.** `{"plate": ""}` — or any whitespace-only submission —
+writes the empty string, which is the "no plate set" value on both the column
+(`TEXT NOT NULL DEFAULT ''`) and the wire. A clear is an ordinary write, not a
+separate `DELETE` verb and not a validation failure.
+
+**Idempotent (§4.5).** PUTting the same plate twice yields the same `200` and
+the same stored value. PUTting a value that only differs by case or surrounding
+whitespace is also idempotent, because both normalize to the same stored string.
+
+**No migration.** The `Vehicle.licensePlate` column already exists
+(`TEXT NOT NULL DEFAULT ''`). This endpoint adds a **narrow Go-side UPDATE
+carve-out** on the Prisma-owned `Vehicle` table — the third such carve-out after
+the MYR-257 provision and the MYR-258 teardown — documented in
+[`data-lifecycle.md`](data-lifecycle.md) §1.4. CG-DL-9 constrains Go *migration*
+SQL and does not apply: this ships no migration, and an application-runtime
+Prisma UPDATE is the sanctioned class (same as `store.OwnerProvisioner`).
+
+**No WebSocket push.** A plate edit fires **no** `vehicle_update` frame, and a
+`vehicle_update` NEVER carries `licensePlate`. A client that needs the new value
+immediately either adopts this response optimistically or re-reads §7.0 / §7.1.
+
+**Response `200`** (`application/json`):
+
+```json
+{
+  "vehicleId": "clxyz1234567890abcdef",
+  "licensePlate": "ABC 1234"
+}
+```
+
+| Field | Type | Classification | Notes |
+|-------|------|----------------|-------|
+| `vehicleId` | `string` (cuid) | P0 | Echo of the path parameter. |
+| `licensePlate` | `string` | **P1** | The **normalized** value now stored. Empty string when the plate was cleared. Echoed so a client can adopt it without a re-read — there is no WS delta for this field. |
+
+**Errors:**
+
+| HTTP | `error.code` | When |
+|------|--------------|------|
+| 400 | `invalid_request` | Missing `{vehicleId}`, malformed JSON body, or a plate that violates the charset or the 10-character cap **after** normalization. The rejected value is P1 and is NEVER echoed in the message — the envelope describes the rule only. |
+| 401 | `auth_failed` | Missing/malformed/invalid bearer. |
+| 403 | `vehicle_not_owned` | Caller does not own the vehicle (matches §7.12). |
+| 404 | `not_found` | Unknown vehicle, or ownership-filtered — intentionally indistinguishable (matches §7.12). Also returned when the row disappears between the ownership check and the write. |
+| 405 | `invalid_request` | Non-`PUT` method. |
+| 500 | `internal_error` | Store-layer failure. Atomic: nothing written; retryable. |
+
+**Observability.** The P1 plate value is NEVER logged. The success line carries
+the P0 `vehicle_id` / `user_id` plus a `cleared` boolean — enough to debug
+without putting an identifying value in the log stream (§9, CG-DC-2).
+
+---
+
 ---
 
 ## 8. Resource schemas
@@ -2113,6 +2231,7 @@ Same as [`websocket-protocol.md`](websocket-protocol.md) §10 divergence managem
 ## 11. Change log
 
 | Date | Change | Author |
+| 2026-07-27 | **Owner-entered `licensePlate` — new §7.14 write endpoint + both-role read exposure ([MYR-286](https://linear.app/myrobotaxi/issue/MYR-286)).** `VehicleState` and `VehicleSummary` gain one OPTIONAL P1 string (contracts v0.15.0, `myrobotaxi/contracts#22`) so a rider can identify the correct car at pickup. **Not a Tesla value:** the Fleet API exposes no plate on any endpoint, telemetry field, or proto, so the column is populated ONLY by the owner via the new **§7.14 `PUT /api/tesla/vehicles/{vehicleId}/plate`** (body `{"plate":"…"}`). That endpoint **normalizes then validates, in that order** — trim + uppercase, then ≤ 10 chars and `^[A-Z0-9 -]*$` against the NORMALIZED value, so `"  abc 1234  "` is accepted as `"ABC 1234"` while a charset/length violation is `400 invalid_request` with the P1 value never echoed. An **empty string CLEARS** the plate (an ordinary write of `''`, not a separate verb). Ownership semantics are identical to §7.12: unknown vehicle `404 not_found` (indistinguishable from ownership-filtered), real mismatch `403 vehicle_not_owned`, and the `UPDATE` re-scopes `WHERE "userId" = <caller>` so a zero-row write returns 404 rather than a false 200. **RBAC — deliberately BOTH ROLES** (§5.2.0 / §5.2.1): unlike the sibling `vin`, which [MYR-279](https://linear.app/myrobotaxi/issue/MYR-279) gated to owners, the plate is in the owner AND viewer allow-lists, because a plate only a rider cannot see is useless for its one purpose. This REPLACES the pre-existing forward-looking owner-only mask rule that was written before the field was on the wire; the viewer VehicleState list is now owner-minus-`vin` and nothing else. **Empty-value convention:** the read paths emit `licensePlate` exactly like the sibling `color` — a plain non-`omitempty` string, so the key is ALWAYS present and "no plate set" is an EMPTY STRING; an ABSENT key means a pre-MYR-286 server. Neither means "we could not read the plate" — consumers keep the `VIN ····xxxx` fallback for both and never render an empty plate. **No migration** — the column already exists (`TEXT NOT NULL DEFAULT ''`); the write is a narrow Go-side UPDATE carve-out on the Prisma-owned `Vehicle` table, the third after MYR-257 provision / MYR-258 teardown, recorded in `data-lifecycle.md` §1.4 (CG-DL-9 governs migration SQL, not application-runtime UPDATEs). **No WebSocket delta in v1** — a `vehicle_update` never carries the field and an edit fires no push, so it lands on the next §7.0 / §7.1 read. §7.14 added; §7.0 + §7.1 field tables, examples and RBAC lines updated; §5.2.0 / §5.2.1 / §5.3 mask matrices corrected; `schemas/vehicle-state.schema.json` (before `lastUpdated`) + `schemas/vehicle-summary.schema.json` (appended), the OpenAPI `VehicleSummary` component + snapshot `x-role-masks`, `data-classification.md` §1.3 wire-exposure row, and the `snapshot`/`vehicles_list*` fixtures all updated. Implementation: `internal/telemetry/{vehicle_plate_handler,license_plate,vehicle_snapshot_types,vehicles_list_handler}.go`, `internal/store/{vehicle_plate,queries,types,vehicle_repo_scan,vehicle_repo_list}.go`, `internal/mask/tables.go`, `cmd/telemetry-server/wiring_vehicle_plate.go`. | go-engineer |
 | 2026-07-27 | **`/snapshot` `seatCoolerLeft`/`seatCoolerRight` are now contracted as the ventilated-seat CAPABILITY signal ([MYR-299](https://linear.app/myrobotaxi/issue/MYR-299)).** **No response-shape change** — both fields have been persisted and returned here since [MYR-273](https://linear.app/myrobotaxi/issue/MYR-273) (migration 0010). What is new is the documented inference consumers may draw from them: a car without ventilated seats never emits Tesla protos 237/238, so **presence** (`!= null`, **including `0`**) means "this car has cooled seats" and absence means it does not. That makes the existing absent-vs-null discipline load-bearing rather than cosmetic: a persisted `0` MUST serialize as the JSON number `0` (never omitted, never `null`) or a vented car with both seats off reads as heat-only, and a never-read value MUST serialize as an explicit `null` (never a fabricated `0`) or every car advertises cooled seats it may not have. Both directions are now pinned by handler tests. Companion server change: the two fields gain `ResendIntervalSeconds: 120` in `DefaultFieldConfig` so presence is continuously re-asserted (Tesla emits them on change only) — **applies to a car only on a fleet-config re-push**. See `vehicle-state-schema.md` §1.1. | go-engineer |
 | 2026-07-27 | **`/snapshot` now returns `seatVentEnabled` + `mediaPlaybackStatus` ([MYR-298](https://linear.app/myrobotaxi/issue/MYR-298)).** Both are contracted `vehicle_update` fields (MYR-252) that were neither persisted nor emitted on the DB-backed `/snapshot`, so a client that missed the live WS frame could never learn them — a backgrounded phone, a sleeping car, or any socket drop lost the value permanently (NFR-3.5). Migration **0014** adds two nullable columns to the Go-owned `go_vehicle_control_state` side table — `seat_vent_enabled BOOLEAN`, `media_playback_status TEXT` — fed by the SAME live persist path as the MYR-269/273/274 siblings (`mapTelemetryToControlState` → `VehicleUpdate.ControlState` → writer flush → per-field `COALESCE` upsert) and read through the same `VehicleRepo.GetByID` LEFT JOIN. **No new wire fields and no schema shape change** — both names already exist in `vehicle-state.schema.json` and in `internal/mask/tables.go` `vehicleStateOwnerFields` (since MYR-252), so this is purely a delivery-channel addition: WS-live-only → also snapshot-backed. **Absent-vs-null:** the owner projection ALWAYS carries both keys; a never-read value is an explicit `null` (honest-unknown), never an omitted key and never a fabricated `false`/`"Stopped"` — identical to the MYR-274 siblings. A streamed `mediaPlaybackStatus` of `"Unknown"`/empty persists NULL and never overwrites a known status (same discipline as `"Unknown"` `hvacAutoMode`/`hvacPower`). **Deliberately NOT on the MYR-260 `/vehicle_data` backfill path** — Tesla's cached `vehicle_data` climate subset carries neither value, so there is nothing to backfill from, and their absence there keeps them clear of the backfill-overwrites-fresher-stream bug tracked in [MYR-300](https://linear.app/myrobotaxi/issue/MYR-300). §5.2.1 mask row and §7.1 delivery note updated; `data-classification.md` §1.13 gains both columns (P0). This completes the [MYR-253](https://linear.app/myrobotaxi/issue/MYR-253) hydration — 20 of 21 cabin read-backs are now snapshot-backed; only `hvacPower` stays WS-live-only (its derived `isClimateOn` is persisted). | go-engineer |
 | 2026-07-26 | **`GET /api/vehicles` rows now carry `hasActiveRide` ([MYR-233](https://linear.app/myrobotaxi/issue/MYR-233)).** The catalog gains one OPTIONAL P0 boolean (contracts v0.14.0, `myrobotaxi/contracts#21`) answering "is this car serving a ride right now?" so a rider can render a Busy state and route new INSTANT requests to the scheduling flow instead of hitting a `409 ride_active` on accept. **Derivation mirrors the accept guard exactly:** `true` iff a `go_ride_requests` row exists for the vehicle with `scheduled_for IS NULL AND status IN ('accepted','arrived','enroute')` — character-for-character the predicate of the per-vehicle partial unique index `uq_go_ride_requests_active_instant_vehicle` (migration 0013, [MYR-266](https://linear.app/myrobotaxi/issue/MYR-266)). That reuse is the point: flag true ⇒ an accept would raise `23505` on that index; an accept conflicts ⇒ flag true. The index also bounds the match at one row per vehicle. Scheduled rides are EXEMPT and `requested` does NOT count (many riders may hold pending requests against one idle car; terminal states free it). **No migration and no new column** — the flag is derived read-time as a correlated `EXISTS` folded into the existing lean list query (`internal/store/queries.go` `queryVehiclesByUserList`), so the catalog still costs ONE statement (no N+1) and Postgres answers each probe from the partial index. §7.0 field table + example, §5.2.0 mask matrix (in BOTH role allow-lists — operational state, not owner-curated data), `schemas/vehicle-summary.schema.json`, the OpenAPI `VehicleSummary` component, and both `fixtures/rest/vehicles_list*.json` updated. **v1 caveat:** REST-read-time only — no WebSocket push of this flag to non-party viewers, so a Busy badge refreshes on the next list fetch. **Absence semantics:** this server always emits `true`/`false`; a missing key means a pre-MYR-233 server and MUST be read as "availability unknown → treat as available", never as Busy. No data-classification change (P0 derived state, same tier as the sibling `status`; no persisted column added). Implementation: `internal/store/{queries,vehicle_repo_list}.go`, `internal/mask/tables.go`, `internal/telemetry/vehicles_list_handler.go`, `cmd/telemetry-server/adapters.go`. | go-engineer |

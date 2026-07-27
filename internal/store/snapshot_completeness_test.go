@@ -274,6 +274,17 @@ func runSteadyStateField(t *testing.T, p schemaProperty, row fixtureRow) {
 
 	switch row.Category {
 	case "identity":
+		// Most identity columns arrive with the catalog seed. A few have no
+		// telemetry-writer path at all and are populated only by an owner-facing
+		// endpoint (licensePlate — MYR-286 — is written solely by PUT
+		// /api/tesla/vehicles/{vehicleId}/plate, because Tesla exposes no plate
+		// anywhere). For those the fixture declares a `seed` synthetic that
+		// stands in for the endpoint, so the read-back is still asserted.
+		if row.Synthetic != nil && row.Synthetic.Kind == "seed" {
+			if err := seedColumn(ctx, row.Synthetic.Field, row.Synthetic.Value); err != nil {
+				t.Fatalf("seed identity column %q: %v", row.Synthetic.Field, err)
+			}
+		}
 		v, err := repo.GetByVIN(ctx, completenessVIN)
 		if err != nil {
 			t.Fatalf("GetByVIN: %v", err)
@@ -698,6 +709,14 @@ func assertIdentityField(t *testing.T, name string, v store.Vehicle) {
 		}
 	case "color":
 		if v.Color == "" {
+			t.Errorf("identity field %q is empty after seed", name)
+		}
+	case "licensePlate":
+		// MYR-286. Empty in production means "the owner has not entered one",
+		// which is a legitimate steady state — but here the fixture's seed
+		// synthetic has just written a value, so an empty read-back means the
+		// column dropped out of the SELECT projection or the scan.
+		if v.LicensePlate == "" {
 			t.Errorf("identity field %q is empty after seed", name)
 		}
 	default:

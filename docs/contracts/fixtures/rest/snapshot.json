@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "description": "Full VehicleState snapshot from GET /api/vehicles/{vehicleId}/snapshot. Cold-load response used on initial page render and on every reconnect (NFR-3.11). Contains enough data to render the full UI without per-field loading spinners (NFR-3.5). As of MYR-24 (2026-04-23) the seven former spec-only catalog fields are populated from DB columns; as of MYR-41 (2026-04-25) chargeState and timeToFull are persisted to the Prisma Vehicle table (Vehicle.chargeState String? + Vehicle.timeToFull Float?) closing DV-03 and DV-04. Both columns remain nullable in steady state — a vehicle that has never charged surfaces null on snapshot.",
+    "description": "Full VehicleState snapshot from GET /api/vehicles/{vehicleId}/snapshot. Cold-load response used on initial page render and on every reconnect (NFR-3.11). Contains enough data to render the full UI without per-field loading spinners (NFR-3.5). As of MYR-24 (2026-04-23) the seven former spec-only catalog fields are populated from DB columns; as of MYR-41 (2026-04-25) chargeState and timeToFull are persisted to the Prisma Vehicle table (Vehicle.chargeState String? + Vehicle.timeToFull Float?) closing DV-03 and DV-04. Both columns remain nullable in steady state — a vehicle that has never charged surfaces null on snapshot. MYR-286 (2026-07-27) adds the owner-entered `licensePlate`: it is NOT from Tesla (the Fleet API exposes no plate) and is written only by PUT /api/tesla/vehicles/{vehicleId}/plate, already normalized on write. It is emitted like its sibling `color` — always keyed, with an EMPTY STRING (not a missing key) when the owner has not entered one. Visible to BOTH roles, unlike the owner-only full `vin`.",
     "anchoredFRs": ["FR-1.1", "FR-1.2", "FR-2.1", "NFR-3.5", "NFR-3.11"],
     "scenario": "happy-path"
   },
@@ -34,5 +34,6 @@
   "etaMinutes": null,
   "tripDistanceRemaining": null,
   "navRouteCoordinates": null,
+  "licensePlate": "ABC 1234",
   "lastUpdated": "2026-04-13T17:45:00Z"
 }

@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "description": "Happy-path response for GET /api/vehicles — the SDK's vehicle-enumeration entry point (rest-api.md §7.0). Owner-tier projection: every VehicleSummary field is present. The list is deliberately a thin catalog — no GPS, no nav, no climate (those live in /snapshot). v1 returns owned vehicles only; viewer-merged enumeration is PLANNED. MYR-233 adds the optional P0 `hasActiveRide` flag: Stumpy is parked at a pickup with an open INSTANT ride (accepted/arrived/enroute) so it renders Busy; Lightning is free. The flag is derived read-time from the `uq_go_ride_requests_active_instant_vehicle` index predicate — scheduled rides and `requested` never set it.",
+    "description": "Happy-path response for GET /api/vehicles — the SDK's vehicle-enumeration entry point (rest-api.md §7.0). Owner-tier projection: every VehicleSummary field is present. The list is deliberately a thin catalog — no GPS, no nav, no climate (those live in /snapshot). v1 returns owned vehicles only; viewer-merged enumeration is PLANNED. MYR-233 adds the optional P0 `hasActiveRide` flag: Stumpy is parked at a pickup with an open INSTANT ride (accepted/arrived/enroute) so it renders Busy; Lightning is free. The flag is derived read-time from the `uq_go_ride_requests_active_instant_vehicle` index predicate — scheduled rides and `requested` never set it. MYR-286 adds the P1 owner-entered `licensePlate`, shown here in BOTH of its states: Stumpy has one, Lightning's owner has not entered one and carries an EMPTY STRING rather than a missing key (the same always-emitted convention as `color`). Consumers keep the `VIN ····xxxx` fallback for the empty case and must never render an empty plate.",
     "anchoredFRs": ["FR-4.x", "FR-5.4", "NFR-3.21"],
     "scenario": "happy-path",
     "addedBy": "MYR-91"
@@ -18,7 +18,8 @@
       "estimatedRange": 245,
       "lastUpdated": "2026-05-10T17:45:00Z",
       "role": "owner",
-      "hasActiveRide": true
+      "hasActiveRide": true,
+      "licensePlate": "ABC 1234"
     },
     {
       "vehicleId": "clmno5678901234ghijkl",
@@ -32,7 +33,8 @@
       "estimatedRange": 132,
       "lastUpdated": "2026-05-10T17:42:13Z",
       "role": "owner",
-      "hasActiveRide": false
+      "hasActiveRide": false,
+      "licensePlate": ""
     }
   ]
 }
