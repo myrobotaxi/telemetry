@@ -39,6 +39,16 @@ type VehicleSummary struct {
 	ChargeLevel    int
 	EstimatedRange int
 	LastUpdated    time.Time
+
+	// HasActiveRide is DERIVED, not a column: it is the correlated
+	// EXISTS in `vehicleListHasActiveRideExpr` (MYR-233), true iff the
+	// vehicle currently holds an open INSTANT ride request
+	// (`scheduled_for IS NULL AND status IN
+	// ('accepted','enroute','arrived')`) — exactly the predicate of the
+	// `uq_go_ride_requests_active_instant_vehicle` partial unique index
+	// (migration 0013, MYR-266) that the accept guard races on.
+	// Scheduled rides and `requested` never set it.
+	HasActiveRide bool
 }
 
 // ListSummariesByUser returns the catalog rows for every vehicle owned
@@ -133,6 +143,7 @@ func scanVehicleSummaryRow(row rowScanner) (VehicleSummary, error) {
 		&v.ChargeLevel,
 		&v.EstimatedRange,
 		&v.LastUpdated,
+		&v.HasActiveRide,
 	); err != nil {
 		return VehicleSummary{}, fmt.Errorf("scan vehicle summary: %w", err)
 	}
