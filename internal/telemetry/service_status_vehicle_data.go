@@ -15,6 +15,12 @@ import (
 // connectivity state is anything other than "online" (asleep / offline). A
 // plain online, not-in-service car is streaming, so this returns false and no
 // /vehicle_data call fires — the live stream already carries honest values.
+//
+// This is Tesla's LAGGING view: a car that is actively streaming to us can
+// still read `asleep`/`offline` here for minutes. That is why it is not the
+// only guard — refreshFromVehicleData additionally applies the MYR-300
+// per-VIN stream-recency gate, using what we have actually received rather
+// than what Tesla claims.
 func notStreaming(state *FleetVehicleState) bool {
 	return state.InService || !strings.EqualFold(state.State, "online")
 }
@@ -29,6 +35,18 @@ func notStreaming(state *FleetVehicleState) bool {
 // non-fatal skip that leaves the last-known state — iOS then renders an honest
 // "unavailable" rather than a perpetual spinner. The error string is safe to
 // log (redacted VIN + status; the P1 payload body is never surfaced).
+//
+// MYR-300 stream-recency gate. Tesla's connectivity flag lags reality, so this
+// backfill also fires for cars that ARE streaming — and Tesla's /vehicle_data
+// can answer from a stale cache. Because the synthetic frame carries
+// CreatedAt = now, a non-nil stale value wins the COALESCE control-state
+// upsert and durably overwrites fresher streamed state (the client-verified
+// symptom: car screen "Cooling Down 69", app "Climate off"). So when a live
+// streamed frame has arrived for this VIN inside the freshness window, every
+// stream-sourceable field is dropped from the frame before publish — the
+// stream is authoritative and current for all of them. REST-only fields
+// (`trim`) still flow, and a genuinely non-streaming car (asleep, offline, in
+// service) is unaffected: it has no fresh stamp, so the full backfill applies.
 func (m *ServiceStatusMonitor) refreshFromVehicleData(ctx context.Context, vin, token string) {
 	data, err := m.reader.GetVehicleData(ctx, token, vin)
 	if err != nil {
@@ -38,6 +56,14 @@ func (m *ServiceStatusMonitor) refreshFromVehicleData(ctx context.Context, vin, 
 	}
 
 	fields := vehicleDataToFields(data)
+	if m.streamFresh(vin) {
+		dropped := dropStreamSourcedFields(fields)
+		m.logger.Info("service-status: vehicle_data backfill gated by fresh stream (MYR-300)",
+			slog.String("vin", redactVIN(vin)),
+			slog.Int("dropped_fields", dropped),
+			slog.Int("kept_fields", len(fields)),
+			slog.Duration("freshness_window", m.freshness))
+	}
 	if len(fields) == 0 {
 		return
 	}
@@ -49,6 +75,9 @@ func (m *ServiceStatusMonitor) refreshFromVehicleData(ctx context.Context, vin, 
 		VIN:       vin,
 		CreatedAt: m.now(), // becomes the wire `lastUpdated` → the app's "last synced"
 		Fields:    fields,
+		// Marks the frame as REST-sourced so the freshness gate above never
+		// counts our own output as evidence the car is streaming (MYR-300).
+		Source: events.SourceRESTBackfill,
 	}
 	if err := m.bus.Publish(ctx, events.NewEvent(evt)); err != nil {
 		m.logger.Warn("service-status: vehicle_data broadcast publish failed (non-fatal)",

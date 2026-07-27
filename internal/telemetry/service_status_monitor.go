@@ -72,17 +72,19 @@ type VehicleStatusUpdater interface {
 // in_service — the reconcile never flaps it out while a signal holds. Reads
 // are debounced per-VIN and every failure mode is non-fatal.
 type ServiceStatusMonitor struct {
-	bus      events.Bus
-	reader   FleetVehicleReader
-	tokens   teslaTokenResolver
-	owners   VehicleOwnerLookup
-	updater  VehicleStatusUpdater
-	cooldown time.Duration
-	logger   *slog.Logger
+	bus       events.Bus
+	reader    FleetVehicleReader
+	tokens    teslaTokenResolver
+	owners    VehicleOwnerLookup
+	updater   VehicleStatusUpdater
+	cooldown  time.Duration
+	freshness time.Duration // MYR-300 stream-authoritative window
+	logger    *slog.Logger
 
 	now         func() time.Time // injectable clock (debounce tests)
 	lastRead    sync.Map         // VIN string → time.Time
 	serviceMode sync.Map         // VIN string → bool (last-seen ServiceMode from the stream)
+	lastStream  sync.Map         // VIN string → time.Time (last LIVE streamed frame, MYR-300)
 	subs        []events.Subscription
 }
 
@@ -125,14 +127,15 @@ func NewServiceStatusMonitor(
 		logger = slog.New(slog.NewTextHandler(discardWriter{}, nil))
 	}
 	m := &ServiceStatusMonitor{
-		bus:      bus,
-		reader:   reader,
-		tokens:   tokens,
-		owners:   owners,
-		updater:  updater,
-		cooldown: defaultServiceReadCooldown,
-		logger:   logger,
-		now:      time.Now,
+		bus:       bus,
+		reader:    reader,
+		tokens:    tokens,
+		owners:    owners,
+		updater:   updater,
+		cooldown:  defaultServiceReadCooldown,
+		freshness: defaultStreamFreshness,
+		logger:    logger,
+		now:       time.Now,
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -160,6 +163,7 @@ func (m *ServiceStatusMonitor) Start() error {
 
 	m.logger.Info("service-status monitor started",
 		slog.Duration("read_cooldown", m.cooldown),
+		slog.Duration("stream_freshness", m.freshness),
 	)
 	return nil
 }
@@ -217,6 +221,13 @@ func (m *ServiceStatusMonitor) makeTelemetryHandler() events.Handler {
 // service-mode flag cannot leak across a reconnect (mirrors the broadcaster's
 // per-VIN cache-wipe on disconnect).
 func (m *ServiceStatusMonitor) handleConnectivity(ctx context.Context, evt events.ConnectivityEvent) {
+	if evt.Status == events.StatusDisconnected {
+		// MYR-300: the stream is definitively gone, so drop the freshness
+		// stamp BEFORE resolving — otherwise the gate below would suppress
+		// the very backfill this disconnect exists to trigger for the ~2
+		// minutes it takes the window to lapse on its own.
+		m.lastStream.Delete(evt.VIN)
+	}
 	m.resolveViaRead(ctx, evt.VIN, evt.Status.String())
 	if evt.Status == events.StatusDisconnected {
 		m.serviceMode.Delete(evt.VIN)
@@ -230,6 +241,11 @@ func (m *ServiceStatusMonitor) handleConnectivity(ctx context.Context, evt event
 // connectivity edge or a completed drive. Resend frames (unchanged value) are
 // no-ops — only true value transitions act, so there is no Fleet API spam.
 func (m *ServiceStatusMonitor) handleTelemetry(ctx context.Context, evt events.VehicleTelemetryEvent) {
+	// MYR-300: every LIVE frame — whatever fields it carries — is evidence
+	// the car is streaming right now, which makes the stream authoritative
+	// over Tesla's cached REST snapshot for the next freshness window.
+	m.noteStreamFrame(evt)
+
 	tv, ok := evt.Fields[serviceModeFieldKey]
 	if !ok || tv.BoolVal == nil {
 		return
@@ -276,6 +292,9 @@ func (m *ServiceStatusMonitor) resolveViaRead(ctx context.Context, vin, edge str
 	// once from a single REST vehicle_data read. This shares the connectivity-
 	// edge debounce already stamped by allow() above, so at most one
 	// /vehicle_data call fires per VIN per cooldown; streaming cars are skipped.
+	// MYR-300: because Tesla's connectivity flag lags, notStreaming() alone is
+	// not enough — refreshFromVehicleData applies a second, per-VIN
+	// stream-recency gate based on frames we have actually received.
 	if notStreaming(state) {
 		m.refreshFromVehicleData(ctx, vin, token)
 	}

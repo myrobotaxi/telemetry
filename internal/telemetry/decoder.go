@@ -160,6 +160,9 @@ func (d *Decoder) DecodePayload(payload *tpb.Payload) (events.VehicleTelemetryEv
 		}
 	}
 
+	// Source is left at its zero value, events.SourceStream — this is the live
+	// mTLS stream, and that provenance is what makes the frame count toward
+	// the MYR-300 stream-freshness gate in ServiceStatusMonitor.
 	evt := events.VehicleTelemetryEvent{
 		VIN:       payload.GetVin(),
 		CreatedAt: createdAt,
