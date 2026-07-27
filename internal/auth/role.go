@@ -20,9 +20,10 @@ const (
 
 	// RoleViewer identifies a user who has been invited to view a
 	// vehicle they do not own. Viewers receive the full real-time stream
-	// minus the fields enumerated as owner-only in rest-api.md §5.2
-	// (currently just licensePlate, which is forward-looking and not
-	// yet on the wire).
+	// minus the fields enumerated as owner-only in rest-api.md §5.2:
+	// the full `vin` on the snapshot (MYR-279) and the owner-curated
+	// `name` on the vehicles list. `licensePlate` is deliberately NOT
+	// owner-only (MYR-286) — riders need it to identify the car.
 	RoleViewer Role = "viewer"
 )
 

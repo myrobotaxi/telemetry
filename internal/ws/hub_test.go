@@ -992,11 +992,16 @@ func TestHub_Handshake_ResolveRoleError_FailsClosed(t *testing.T) {
 	}
 }
 
-// TestHub_BroadcastMasked_ViewerStripsLicensePlate verifies the
-// per-role projection contract from websocket-protocol.md §4.6: a
-// viewer-role client receives a vehicle_update with the licensePlate
-// field stripped (rest-api.md §5.2.1 viewer mask).
-func TestHub_BroadcastMasked_ViewerStripsLicensePlate(t *testing.T) {
+// TestHub_BroadcastMasked_ViewerStripsVIN verifies the per-role
+// projection contract from websocket-protocol.md §4.6: a viewer-role
+// client receives a vehicle_update with the full `vin` stripped
+// (rest-api.md §5.2.1 viewer mask, MYR-279).
+//
+// This case used `licensePlate` until MYR-286 moved that field into BOTH
+// role allow-lists (a rider must be able to read the plate of the car
+// pulling up). `vin` is now the canonical owner-only VehicleState field,
+// so it is what this test projects.
+func TestHub_BroadcastMasked_ViewerStripsVIN(t *testing.T) {
 	hub := newTestHub(t)
 	t.Cleanup(hub.Stop)
 
@@ -1020,9 +1025,9 @@ func TestHub_BroadcastMasked_ViewerStripsLicensePlate(t *testing.T) {
 		mask.ResourceVehicleState,
 		time.Now().UTC().Format(time.RFC3339),
 		map[string]any{
-			"speed":        65,
-			"chargeLevel":  82,
-			"licensePlate": "ABC-123",
+			"speed":       65,
+			"chargeLevel": 82,
+			"vin":         "7SAYGDET7TA613795",
 		},
 	)
 
@@ -1034,8 +1039,8 @@ func TestHub_BroadcastMasked_ViewerStripsLicensePlate(t *testing.T) {
 	if err := json.Unmarshal(got.Payload, &pl); err != nil {
 		t.Fatalf("unmarshal payload: %v", err)
 	}
-	if _, present := pl.Fields["licensePlate"]; present {
-		t.Errorf("viewer received licensePlate; mask did not strip it: %v", pl.Fields)
+	if _, present := pl.Fields["vin"]; present {
+		t.Errorf("viewer received the full vin; mask did not strip it: %v", pl.Fields)
 	}
 	if pl.Fields["speed"] != float64(65) {
 		t.Errorf("speed missing or wrong: %v", pl.Fields["speed"])
