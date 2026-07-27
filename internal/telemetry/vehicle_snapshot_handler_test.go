@@ -390,3 +390,105 @@ func TestVehicleSnapshotHandler_SeatVentMediaOnWire(t *testing.T) {
 		}
 	})
 }
+
+// TestVehicleSnapshotHandler_SeatCoolerPresenceOnWire is the MYR-299 handler-level
+// proof that the seat-cooler CAPABILITY signal survives the wire.
+//
+// The client derives "this car has ventilated seats" from the PRESENCE of
+// seatCoolerLeft/seatCoolerRight, not from their value: a car without cooled
+// seats never emits protos 237/238, while a car with them emits values that
+// include 0 (present-but-off). That inference only holds if the owner projection
+// distinguishes the two cases faithfully:
+//
+//   - a persisted 0 MUST arrive as the JSON number 0 — not omitted, not null, or
+//     a vented car with both seats off reads as "no cooled seats" and the owner is
+//     locked out of Cool (the client-reported defect);
+//   - a never-read value MUST arrive as an explicit null — never a fabricated 0,
+//     or every car in the fleet would advertise cooled seats it may not have.
+func TestVehicleSnapshotHandler_SeatCoolerPresenceOnWire(t *testing.T) {
+	const userID = "user-1"
+
+	decodeBody := func(t *testing.T, row VehicleSnapshotRow) map[string]any {
+		t.Helper()
+		h := NewVehicleSnapshotHandler(
+			&stubTokenValidator{userID: userID},
+			&stubVehicleSnapshotReader{row: row},
+			discardLogger(),
+			WithSnapshotRoleResolver(&stubRoleResolver{role: "owner"}),
+		)
+		mux := http.NewServeMux()
+		mux.Handle("GET /api/vehicles/{vehicleId}/snapshot", h)
+
+		req := httptest.NewRequestWithContext(
+			context.Background(),
+			http.MethodGet,
+			"/api/vehicles/"+fixtureSnapshotRowID+"/snapshot",
+			nil,
+		)
+		req.Header.Set("Authorization", "Bearer t")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status: got %d, want 200. Body: %s", rec.Code, rec.Body.String())
+		}
+		var body map[string]any
+		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return body
+	}
+
+	t.Run("present-but-off reaches the wire as 0, not null", func(t *testing.T) {
+		row := fixtureSnapshotRow(userID)
+		row.SeatCoolerLeft = intPtr(0)
+		row.SeatCoolerRight = intPtr(0)
+
+		body := decodeBody(t, row)
+		for _, key := range []string{"seatCoolerLeft", "seatCoolerRight"} {
+			got, ok := body[key]
+			if !ok {
+				t.Errorf("%s: key missing; a vented car with the seat off would read as "+
+					"having no cooled seats", key)
+				continue
+			}
+			if got != 0.0 {
+				t.Errorf("%s: got %v, want 0 (present-but-off is the capability signal)", key, got)
+			}
+		}
+	})
+
+	t.Run("non-zero levels reach the wire unchanged", func(t *testing.T) {
+		row := fixtureSnapshotRow(userID)
+		row.SeatCoolerLeft = intPtr(3)
+		row.SeatCoolerRight = intPtr(1)
+
+		body := decodeBody(t, row)
+		if got := body["seatCoolerLeft"]; got != 3.0 {
+			t.Errorf("seatCoolerLeft: got %v, want 3", got)
+		}
+		if got := body["seatCoolerRight"]; got != 1.0 {
+			t.Errorf("seatCoolerRight: got %v, want 1", got)
+		}
+	})
+
+	t.Run("never-seen values are explicit null, never a fabricated 0", func(t *testing.T) {
+		// fixtureSnapshotRow leaves both nil — the heat-only car, or one that has
+		// simply never streamed. Absence here is what lets the client withhold the
+		// Cool affordance honestly.
+		body := decodeBody(t, fixtureSnapshotRow(userID))
+
+		for _, key := range []string{"seatCoolerLeft", "seatCoolerRight"} {
+			got, ok := body[key]
+			if !ok {
+				t.Errorf("%s: key missing from owner projection; siblings keep the key "+
+					"with a null value", key)
+				continue
+			}
+			if got != nil {
+				t.Errorf("%s: got %v, want explicit null — a fabricated 0 would advertise "+
+					"cooled seats the car may not have", key, got)
+			}
+		}
+	})
+}

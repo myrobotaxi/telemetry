@@ -614,3 +614,58 @@ func TestMapTelemetryToControlState_MYR300GatedBackfillPreservesStreamedClimate(
 		t.Error("un-gated backfill should overwrite to false — the defect this gate prevents")
 	}
 }
+
+// TestMapTelemetryToControlState_SeatCoolerPresence is the MYR-299 derivation
+// guard. The client infers the ventilated-seat CAPABILITY from the presence of
+// seatCoolerLeft/seatCoolerRight, so the persist path must preserve
+// present-but-off (0) as a real observation and never confuse it with absence:
+//
+//   - 0 → a non-nil *int(0). A frame carrying only zeroed coolers must still
+//     produce a ControlStateUpdate (HasAny true) so the row is written and the
+//     capability becomes durable; if it mapped to nil the write would be skipped
+//     and a vented car with both seats off would stay invisible.
+//   - absent → nil, so a heat-only car never gains a fabricated 0.
+func TestMapTelemetryToControlState_SeatCoolerPresence(t *testing.T) {
+	t.Run("zero cooler levels are a real observation, not an absence", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldSeatCoolerLeft):  {IntVal: int64Ptr(0)},
+			string(telemetry.FieldSeatCoolerRight): {IntVal: int64Ptr(0)},
+		})
+		if got == nil {
+			t.Fatal("a zeroed-cooler frame mapped to nil — the side-table write would be " +
+				"skipped and the ventilated-seat capability would never persist")
+		}
+		eqIntPtr(t, "SeatCoolerLeft", intPtr(0), got.SeatCoolerLeft)
+		eqIntPtr(t, "SeatCoolerRight", intPtr(0), got.SeatCoolerRight)
+		if !got.HasAny() {
+			t.Error("HasAny() = false for a zeroed-cooler frame, want true")
+		}
+	})
+
+	t.Run("one cooler present, the other absent", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldSeatCoolerLeft): {IntVal: int64Ptr(0)},
+		})
+		if got == nil {
+			t.Fatal("mapped to nil, want a ControlStateUpdate")
+		}
+		eqIntPtr(t, "SeatCoolerLeft", intPtr(0), got.SeatCoolerLeft)
+		if got.SeatCoolerRight != nil {
+			t.Errorf("SeatCoolerRight = %v, want nil (absent stays absent)", *got.SeatCoolerRight)
+		}
+	})
+
+	t.Run("a heat-only frame leaves both coolers nil", func(t *testing.T) {
+		got := mapTelemetryToControlState(map[string]events.TelemetryValue{
+			string(telemetry.FieldSeatHeaterLeft):  {IntVal: int64Ptr(0)},
+			string(telemetry.FieldSeatHeaterRight): {IntVal: int64Ptr(0)},
+		})
+		if got == nil {
+			t.Fatal("mapped to nil, want a ControlStateUpdate")
+		}
+		if got.SeatCoolerLeft != nil || got.SeatCoolerRight != nil {
+			t.Errorf("coolers = %v/%v, want nil/nil — a car that never emits protos 237/238 "+
+				"must not gain a fabricated level", got.SeatCoolerLeft, got.SeatCoolerRight)
+		}
+	})
+}

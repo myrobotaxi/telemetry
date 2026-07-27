@@ -747,3 +747,154 @@ func TestControlState_SeatVentMediaPerFieldLastWriterWins(t *testing.T) {
 	wantBoolPtr(t, "SeatVentEnabled (overwritten false)", bp(false), v.SeatVentEnabled)
 	wantStrPtr(t, "MediaPlaybackStatus (still preserved)", sp("Paused"), v.MediaPlaybackStatus)
 }
+
+// TestControlState_SeatCoolerPresenceSurvivesSocketGap is the MYR-299 round-trip:
+// the ventilated-seat CAPABILITY the owner app gates the seat Heat/Cool toggle on
+// is the PRESENCE of seat_cooler_left/right, so the persist → /snapshot path must
+// carry present-but-off (0) through the socket gap without collapsing it into
+// "never read".
+//
+// The columns themselves are not new (MYR-273, migration 0010) — what MYR-299
+// relies on is that a stored 0 reads back as a non-nil *int(0) and a never-stored
+// value reads back as nil. Those two must never be conflated: the first says
+// "this car has cooled seats, both currently off" and the second says "this car
+// has no cooled seats". The MYR-299 fleet-config resend is what keeps the first
+// case populated for a vented car that has not touched its coolers.
+func TestControlState_SeatCoolerPresenceSurvivesSocketGap(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping store integration test")
+	}
+	ensureControlMigration(t)
+
+	tests := []struct {
+		name      string
+		vehID     string
+		vin       string
+		persist   *store.ControlStateUpdate // nil = persist nothing (heat-only / never-streamed car)
+		wantLeft  *int
+		wantRight *int
+	}{
+		{
+			name:      "vented car, both seats off (present-but-off)",
+			vehID:     "veh_ctl_cool_off",
+			vin:       "5YJ3E1EA1NF00CL01",
+			persist:   &store.ControlStateUpdate{SeatCoolerLeft: ip(0), SeatCoolerRight: ip(0)},
+			wantLeft:  ip(0),
+			wantRight: ip(0),
+		},
+		{
+			name:      "vented car, actively cooling",
+			vehID:     "veh_ctl_cool_on",
+			vin:       "5YJ3E1EA1NF00CL02",
+			persist:   &store.ControlStateUpdate{SeatCoolerLeft: ip(3), SeatCoolerRight: ip(1)},
+			wantLeft:  ip(3),
+			wantRight: ip(1),
+		},
+		{
+			name:      "only the driver cooler ever seen",
+			vehID:     "veh_ctl_cool_half",
+			vin:       "5YJ3E1EA1NF00CL03",
+			persist:   &store.ControlStateUpdate{SeatCoolerLeft: ip(0)},
+			wantLeft:  ip(0),
+			wantRight: nil,
+		},
+		{
+			name:      "heat-only car never emits 237/238",
+			vehID:     "veh_ctl_cool_none",
+			vin:       "5YJ3E1EA1NF00CL04",
+			persist:   &store.ControlStateUpdate{SeatHeaterLeft: ip(2), SeatHeaterRight: ip(0)},
+			wantLeft:  nil,
+			wantRight: nil,
+		},
+		{
+			name:      "never read at all",
+			vehID:     "veh_ctl_cool_nil",
+			vin:       "5YJ3E1EA1NF00CL05",
+			persist:   nil,
+			wantLeft:  nil,
+			wantRight: nil,
+		},
+	}
+
+	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+	ctx := context.Background()
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cleanTables(t, testPool)
+			cleanControlState(t)
+			seedVehicle(t, testPool, tt.vehID, tt.vin)
+
+			if tt.persist != nil {
+				if err := repo.UpsertControlState(ctx, tt.vehID, *tt.persist); err != nil {
+					t.Fatalf("UpsertControlState: %v", err)
+				}
+			}
+
+			// The socket gap: no writer, no live stream — just a later snapshot read.
+			v, err := repo.GetByID(ctx, tt.vehID)
+			if err != nil {
+				t.Fatalf("GetByID: %v", err)
+			}
+			wantIntPtr(t, "SeatCoolerLeft", tt.wantLeft, v.SeatCoolerLeft)
+			wantIntPtr(t, "SeatCoolerRight", tt.wantRight, v.SeatCoolerRight)
+		})
+	}
+}
+
+// TestControlState_SeatCoolerZeroOverwritesAndSurvivesUnrelatedFrames proves the
+// COALESCE upsert treats a seat-cooler 0 as an observation, not an absence: it
+// overwrites a prior non-zero level, and a later unrelated frame does not clear
+// it. Both matter for MYR-299 — the capability must stay durable once learned,
+// and turning the coolers off must not erase the fact that the car has them.
+func TestControlState_SeatCoolerZeroOverwritesAndSurvivesUnrelatedFrames(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping store integration test")
+	}
+	ensureControlMigration(t)
+	cleanTables(t, testPool)
+	cleanControlState(t)
+
+	const (
+		vehID = "veh_ctl_cool_lww_1"
+		vin   = "5YJ3E1EA1NF00CL06"
+	)
+	seedVehicle(t, testPool, vehID, vin)
+	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+	ctx := context.Background()
+
+	// Frame 1: the owner is cooling both seats.
+	if err := repo.UpsertControlState(ctx, vehID, store.ControlStateUpdate{
+		SeatCoolerLeft: ip(2), SeatCoolerRight: ip(3),
+	}); err != nil {
+		t.Fatalf("upsert 1: %v", err)
+	}
+
+	// Frame 2: both coolers go to 0 — a real observation that MUST overwrite.
+	if err := repo.UpsertControlState(ctx, vehID, store.ControlStateUpdate{
+		SeatCoolerLeft: ip(0), SeatCoolerRight: ip(0),
+	}); err != nil {
+		t.Fatalf("upsert 2: %v", err)
+	}
+	v, err := repo.GetByID(ctx, vehID)
+	if err != nil {
+		t.Fatalf("GetByID after frame 2: %v", err)
+	}
+	wantIntPtr(t, "SeatCoolerLeft (overwritten to 0)", ip(0), v.SeatCoolerLeft)
+	wantIntPtr(t, "SeatCoolerRight (overwritten to 0)", ip(0), v.SeatCoolerRight)
+
+	// Frame 3: an unrelated cabin frame — the zeros must survive, or the car
+	// would silently lose its ventilated-seat capability between frames.
+	if err := repo.UpsertControlState(ctx, vehID, store.ControlStateUpdate{
+		FanSpeed: ip(3),
+	}); err != nil {
+		t.Fatalf("upsert 3: %v", err)
+	}
+	v, err = repo.GetByID(ctx, vehID)
+	if err != nil {
+		t.Fatalf("GetByID after frame 3: %v", err)
+	}
+	wantIntPtr(t, "FanSpeed", ip(3), v.FanSpeed)
+	wantIntPtr(t, "SeatCoolerLeft (preserved 0)", ip(0), v.SeatCoolerLeft)
+	wantIntPtr(t, "SeatCoolerRight (preserved 0)", ip(0), v.SeatCoolerRight)
+}
