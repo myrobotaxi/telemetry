@@ -117,6 +117,20 @@ func TestContract_GETVehicles(t *testing.T) {
 					t.Errorf("role = %q, want %q", got, "owner")
 				}
 
+				// MYR-233: `hasActiveRide` is OPTIONAL in the schema
+				// (absence = a server that predates the field), but
+				// THIS server always emits it. The seeded vehicle has
+				// no ride rows, so it must be present AND false —
+				// asserting presence catches an `omitempty` or a
+				// §5.2.0 mask allow-list regression that would make a
+				// free car read as "availability unknown".
+				busy, ok := row["hasActiveRide"]
+				if !ok {
+					t.Errorf("missing `hasActiveRide` in items[0]; row keys: %v", keysOf(row))
+				} else if busy != false {
+					t.Errorf("hasActiveRide = %v, want false (vehicle has no rides)", busy)
+				}
+
 				// Cross-check against the canonical schema so any
 				// future field rename / type change surfaces here.
 				validateAgainstSchema(t, "docs/contracts/schemas/vehicle-summary.schema.json", marshalRow(t, row))
