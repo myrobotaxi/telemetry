@@ -159,8 +159,8 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		// change as climate runs (MYR-276: client saw it lag ~a minute at 60s —
 		// interior temp moves visibly while cooling/heating). OutsideTemp stays
 		// low-frequency (ambient changes slowly).
-		FleetFieldInsideTemp:           {IntervalSeconds: 10, ResendIntervalSeconds: intPtr(120)},
-		FleetFieldOutsideTemp:          {IntervalSeconds: 60, ResendIntervalSeconds: intPtr(120)},
+		FleetFieldInsideTemp:  {IntervalSeconds: 10, ResendIntervalSeconds: intPtr(120)},
+		FleetFieldOutsideTemp: {IntervalSeconds: 60, ResendIntervalSeconds: intPtr(120)},
 		// MYR-300: HvacPower MUST carry a resend. Tesla emits it on change
 		// only, so a server that reconnects while the car is already cooling
 		// never re-learns that climate is on — `isClimateOn` then reads Off
@@ -186,9 +186,22 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		FleetFieldSeatHeaterRearLeft:   {IntervalSeconds: 30},
 		FleetFieldSeatHeaterRearCenter: {IntervalSeconds: 30},
 		FleetFieldSeatHeaterRearRight:  {IntervalSeconds: 30},
-		FleetFieldSeatCoolerLeft:       {IntervalSeconds: 30},
-		FleetFieldSeatCoolerRight:      {IntervalSeconds: 30},
-		FleetFieldSeatVentEnabled:      {IntervalSeconds: 30, ResendIntervalSeconds: intPtr(120)},
+		// MYR-299: the seat-cooler fields MUST carry a resend, because their
+		// PRESENCE is the ventilated-seat capability signal the client gates
+		// the Heat/Cool toggle on. A car without cooled seats never emits
+		// protos 237/238 at all; a car with them emits a value including 0
+		// (present-but-off). Tesla emits them on change only, so without a
+		// resend a vented car that has not touched its seat coolers since the
+		// last (re)connect looks identical to a car that has none — and the
+		// owner is locked out of Cool. The 120s resend matches the sibling
+		// comfort fields and re-asserts presence continuously, which is what
+		// makes ABSENCE meaningful. NOTE: a config change only reaches a car
+		// on a re-push (POST /api/fleet-config/{vin}, `ops fleet-config push`,
+		// or the next owner link) — there is no config version/hash that
+		// re-pushes itself.
+		FleetFieldSeatCoolerLeft:  {IntervalSeconds: 30, ResendIntervalSeconds: intPtr(120)},
+		FleetFieldSeatCoolerRight: {IntervalSeconds: 30, ResendIntervalSeconds: intPtr(120)},
+		FleetFieldSeatVentEnabled: {IntervalSeconds: 30, ResendIntervalSeconds: intPtr(120)},
 
 		// Vehicle state — low frequency
 		//

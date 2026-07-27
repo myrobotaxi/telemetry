@@ -555,6 +555,59 @@ func TestDefaultFieldConfig_MileageCountersResend(t *testing.T) {
 	}
 }
 
+// TestDefaultFieldConfig_SeatCoolerPresenceResend is the MYR-299 guard: the two
+// seat-cooler fields MUST carry a resend, because their PRESENCE is the
+// ventilated-seat capability signal the owner app gates the seat Heat/Cool
+// toggle on.
+//
+// A car without cooled seats never emits protos 237/238 at all; a car with them
+// emits a value including 0 (present-but-off). Tesla emits both on change only,
+// so WITHOUT a resend a vented car that has not touched its seat coolers since
+// the last (re)connect is indistinguishable from a car that has none — and the
+// owner is locked out of Cool, which is exactly the client-reported defect. The
+// resend re-asserts presence continuously, which is what makes ABSENCE mean
+// "this car has no cooled seats".
+//
+// The 120s value is pinned to the sibling cabin-comfort fields (and to the
+// MYR-300 defaultStreamFreshness window sized against them), so this test
+// asserts the whole comfort family together — drifting one apart from the rest
+// is the regression worth catching.
+func TestDefaultFieldConfig_SeatCoolerPresenceResend(t *testing.T) {
+	t.Parallel()
+
+	fields := DefaultFieldConfig()
+
+	// The capability pair first, then the siblings whose cadence it must match.
+	for _, name := range []string{
+		FleetFieldSeatCoolerLeft,
+		FleetFieldSeatCoolerRight,
+		FleetFieldSeatVentEnabled,
+		FleetFieldHvacAutoMode,
+		FleetFieldHvacACEnabled,
+		FleetFieldHvacPower,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			fc, ok := fields[name]
+			if !ok {
+				t.Fatalf("field %q not found in default config", name)
+			}
+			if fc.ResendIntervalSeconds == nil {
+				t.Fatalf("field %q must set ResendIntervalSeconds — Tesla emits it on "+
+					"change only, so without a resend the server can never re-learn it "+
+					"after a reconnect (MYR-299/MYR-300)", name)
+			}
+			if *fc.ResendIntervalSeconds != 120 {
+				t.Errorf("resend_interval_seconds = %d, want 120 (cabin-comfort family cadence)",
+					*fc.ResendIntervalSeconds)
+			}
+			if fc.IntervalSeconds <= 0 {
+				t.Errorf("interval_seconds = %d, want positive", fc.IntervalSeconds)
+			}
+		})
+	}
+}
+
 // TestDefaultFieldConfig_CoversAllTrackedFields ensures every field in
 // fieldMap has a corresponding entry in DefaultFieldConfig. This prevents
 // the bug where a field is decoded but never requested from the vehicle.
