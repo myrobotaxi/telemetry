@@ -49,16 +49,16 @@ const (
 	// ONLY from REST vehicle_data.vehicle_config.trim_badging by the MYR-260
 	// /vehicle_data backfill, routed through the same control-state persist path
 	// as the streamed fields, and surfaced on the REST /snapshot as `trim`.
-	FieldTrim FieldName = "trim"
-	FieldLocked               FieldName = "locked"
-	FieldSentryMode           FieldName = "sentryMode"
-	FieldOriginLocation       FieldName = "originLocation"
-	FieldDestLocation         FieldName = "destinationLocation"
-	FieldMilesToArrival       FieldName = "milesToArrival"
-	FieldMinutesToArrival     FieldName = "minutesToArrival"
-	FieldLatAccel             FieldName = "lateralAcceleration"
-	FieldLongAccel            FieldName = "longitudinalAcceleration"
-	FieldMilesSinceReset      FieldName = "milesSinceReset"
+	FieldTrim             FieldName = "trim"
+	FieldLocked           FieldName = "locked"
+	FieldSentryMode       FieldName = "sentryMode"
+	FieldOriginLocation   FieldName = "originLocation"
+	FieldDestLocation     FieldName = "destinationLocation"
+	FieldMilesToArrival   FieldName = "milesToArrival"
+	FieldMinutesToArrival FieldName = "minutesToArrival"
+	FieldLatAccel         FieldName = "lateralAcceleration"
+	FieldLongAccel        FieldName = "longitudinalAcceleration"
+	FieldMilesSinceReset  FieldName = "milesSinceReset"
 	// MYR-252 Group B cabin-control read-back internal names. These equal
 	// the wire field names in vehicle-state.schema.json so mapFieldsForClient
 	// passes them through unchanged — except doorState, which is bit-decoded
@@ -75,6 +75,40 @@ const (
 	FieldDoorState            FieldName = "doorState"
 	FieldMediaPlaybackStatus  FieldName = "mediaPlaybackStatus"
 	FieldMediaVolume          FieldName = "mediaVolume"
+	// MYR-303 media now-playing internal names. Each EQUALS its wire field name
+	// in vehicle-state.schema.json, so internal/ws passes them through unchanged
+	// and no internalToClientField entry is needed — the same convention the
+	// MYR-252 media siblings above use. Two names are deliberately NOT the proto
+	// name, and the contraction happens HERE (in fieldMap below) rather than in
+	// the WS translate table, exactly as MediaAudioVolume (244) became
+	// `mediaVolume`:
+	//   - MediaAudioVolumeMax (252)     → mediaVolumeMax
+	//   - MediaNowPlayingDuration (245) → mediaNowPlayingDurationMs
+	//   - MediaNowPlayingElapsed (246)  → mediaNowPlayingElapsedMs
+	// The `Ms` suffix is load-bearing: the contract fixes the unit at
+	// milliseconds, and the bare proto names state no unit.
+	FieldMediaTitle          FieldName = "mediaNowPlayingTitle"
+	FieldMediaArtist         FieldName = "mediaNowPlayingArtist"
+	FieldMediaAlbum          FieldName = "mediaNowPlayingAlbum"
+	FieldMediaStation        FieldName = "mediaNowPlayingStation"
+	FieldMediaPlaybackSource FieldName = "mediaPlaybackSource"
+	FieldMediaDurationMs     FieldName = "mediaNowPlayingDurationMs"
+	FieldMediaElapsedMs      FieldName = "mediaNowPlayingElapsedMs"
+	FieldMediaVolumeMax      FieldName = "mediaVolumeMax"
+	// FieldSeatCoolingCapable (MYR-308) is an INTERNAL-only field name with NO
+	// Tesla proto and NO fieldMap entry, exactly like FieldTrim above. Tesla does
+	// not stream a ventilated-seat capability bit; it is sourced ONLY from REST
+	// vehicle_data.vehicle_config.has_seat_cooling by the MYR-260 backfill,
+	// routed through the same control-state persist path as the streamed fields,
+	// and surfaced on the REST /snapshot as `seatCoolingCapable`.
+	//
+	// Keeping it OUT of fieldMap is what carries it past the MYR-300
+	// stream-recency gate: streamSourcedFields (service_status_stream_freshness.go)
+	// is built from fieldMap, and dropStreamSourcedFields only deletes fields in
+	// that set. A REST-only field is therefore never dropped, so a busily-
+	// streaming car can still acquire the capability — and an in-service car,
+	// which is the whole point of MYR-308, has no fresh stream stamp at all.
+	FieldSeatCoolingCapable FieldName = "seatCoolingCapable"
 	// FieldServiceMode is Tesla proto 159 (ServiceMode, bool). MYR-259: an
 	// INTERNAL-only signal — decoded and fed into status derivation
 	// (in_service) by internal/ws, but never emitted as its own wire field
@@ -150,6 +184,27 @@ var fieldMap = map[tpb.Field]FieldName{
 	tpb.Field_DoorState:                    FieldDoorState,
 	tpb.Field_MediaPlaybackStatus:          FieldMediaPlaybackStatus,
 	tpb.Field_MediaAudioVolume:             FieldMediaVolume,
+	// MYR-303 media now-playing. Proto numbers verified against the vendored
+	// vehicle_data.proto: 248/247/249/250 (title/artist/album/station), 243
+	// (playback source), 245/246 (duration/elapsed, milliseconds), 252 (volume
+	// ceiling). See the FieldMedia* block above for the two name contractions.
+	tpb.Field_MediaNowPlayingTitle:    FieldMediaTitle,
+	tpb.Field_MediaNowPlayingArtist:   FieldMediaArtist,
+	tpb.Field_MediaNowPlayingAlbum:    FieldMediaAlbum,
+	tpb.Field_MediaNowPlayingStation:  FieldMediaStation,
+	tpb.Field_MediaPlaybackSource:     FieldMediaPlaybackSource,
+	tpb.Field_MediaNowPlayingDuration: FieldMediaDurationMs,
+	tpb.Field_MediaNowPlayingElapsed:  FieldMediaElapsedMs,
+	tpb.Field_MediaAudioVolumeMax:     FieldMediaVolumeMax,
+	// Field_MediaAudioVolumeIncrement (251) is intentionally NOT mapped — the
+	// contract has no wire field for the volume STEP, only the current level
+	// (mediaVolume) and the ceiling (mediaVolumeMax). Adding it here would leak
+	// an uncontracted field to WS clients via the event bus.
+	//
+	// FieldSeatCoolingCapable (MYR-308) is likewise absent BY DESIGN: it has no
+	// proto at all and is REST-only, which is what keeps it out of
+	// streamSourcedFields and therefore past the MYR-300 gate. See fields.go's
+	// FieldSeatCoolingCapable comment.
 	// MYR-259: ServiceMode (proto 159, bool). Decoded so the broadcaster can
 	// derive status=in_service; the raw signal is stripped before it reaches
 	// the wire (internal/ws/nav_broadcast.go), so no uncontracted field leaks.

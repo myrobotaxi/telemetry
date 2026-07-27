@@ -97,6 +97,39 @@ const (
 	FleetFieldMediaVolume         = "MediaAudioVolume"
 )
 
+// --- Media now-playing (MYR-303) ---
+//
+// The now-playing block: what is playing (title/artist/album), where it is
+// playing from (station = the channel WITHIN a source; playback source = the
+// app/input doing the playing), how long it is (duration/elapsed), and the
+// per-vehicle volume ceiling. Proto numbers verified against the vendored
+// internal/telemetry/proto/tesla/vehicle_data.proto:
+//
+//	MediaPlaybackSource     = 243
+//	MediaNowPlayingDuration = 245
+//	MediaNowPlayingElapsed  = 246
+//	MediaNowPlayingArtist   = 247
+//	MediaNowPlayingTitle    = 248
+//	MediaNowPlayingAlbum    = 249
+//	MediaNowPlayingStation  = 250
+//	MediaAudioVolumeMax     = 252
+//
+// Note the two name contractions applied at the fieldMap boundary (fields.go),
+// NOT in the WS translate table: MediaAudioVolumeMax → wire `mediaVolumeMax`,
+// exactly as MYR-252 contracted MediaAudioVolume (244) → `mediaVolume`; and
+// MediaNowPlayingDuration/Elapsed pick up an explicit `Ms` suffix on the wire
+// because the contract fixes the unit at milliseconds.
+const (
+	FleetFieldMediaPlaybackSource = "MediaPlaybackSource"
+	FleetFieldMediaTitle          = "MediaNowPlayingTitle"
+	FleetFieldMediaArtist         = "MediaNowPlayingArtist"
+	FleetFieldMediaAlbum          = "MediaNowPlayingAlbum"
+	FleetFieldMediaStation        = "MediaNowPlayingStation"
+	FleetFieldMediaDuration       = "MediaNowPlayingDuration"
+	FleetFieldMediaElapsed        = "MediaNowPlayingElapsed"
+	FleetFieldMediaVolumeMax      = "MediaAudioVolumeMax"
+)
+
 // --- Safety / ADAS ---
 
 const (
@@ -237,6 +270,42 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		// the next play/pause/volume change).
 		FleetFieldMediaPlaybackStatus: {IntervalSeconds: 10},
 		FleetFieldMediaVolume:         {IntervalSeconds: 10},
+
+		// Media now-playing (MYR-303). Same 10s interval as the two MYR-252
+		// media siblings above — Tesla emits the Media group on change, and a
+		// track change is exactly the kind of event the owner expects to see
+		// reflected promptly.
+		//
+		// Unlike those two siblings these DO carry a ResendIntervalSeconds, per
+		// the MYR-300 lesson: Tesla emits on change ONLY, so a server that
+		// (re)connects mid-track never re-learns the now-playing block and the
+		// panel reads empty while the car's own screen shows the track. That is
+		// the same "server that misses the initial emission" failure MYR-300 hit
+		// with HvacPower and MYR-299 hit with the seat coolers. The MYR-252
+		// siblings' "a stale media state self-corrects on the next play/pause"
+		// reasoning does NOT carry over: a paused car mid-album can sit
+		// unchanged for hours, and the volume CEILING (mediaVolumeMax) is
+		// near-constant per vehicle, so without a resend it may literally never
+		// be emitted again after the first connect — leaving every volume
+		// percentage the client renders scaled against a guessed 11.
+		//
+		// 120s matches the sibling comfort/seat-cooler resends and is the window
+		// defaultStreamFreshness (service_status_stream_freshness.go) is sized
+		// against, so these fields keep the MYR-300 backfill gate coherent.
+		//
+		// NOTE: a config change only reaches a car on a re-push (POST
+		// /api/fleet-config/{vin}, `ops fleet-config push`, or the next owner
+		// link) — there is no config version/hash that re-pushes itself. The
+		// eight fields below are NEW subscriptions, so every already-linked VIN
+		// needs that re-push before it will emit them at all.
+		FleetFieldMediaPlaybackSource: {IntervalSeconds: 10, ResendIntervalSeconds: intPtr(120)},
+		FleetFieldMediaTitle:          {IntervalSeconds: 10, ResendIntervalSeconds: intPtr(120)},
+		FleetFieldMediaArtist:         {IntervalSeconds: 10, ResendIntervalSeconds: intPtr(120)},
+		FleetFieldMediaAlbum:          {IntervalSeconds: 10, ResendIntervalSeconds: intPtr(120)},
+		FleetFieldMediaStation:        {IntervalSeconds: 10, ResendIntervalSeconds: intPtr(120)},
+		FleetFieldMediaDuration:       {IntervalSeconds: 10, ResendIntervalSeconds: intPtr(120)},
+		FleetFieldMediaElapsed:        {IntervalSeconds: 10, ResendIntervalSeconds: intPtr(120)},
+		FleetFieldMediaVolumeMax:      {IntervalSeconds: 10, ResendIntervalSeconds: intPtr(120)},
 
 		// Safety / ADAS.
 		//

@@ -34,6 +34,15 @@ var internalToClientField = map[string]string{
 	// mediaPlaybackStatus, mediaVolume. The doorState internal field is NOT
 	// passed through — it is bit-decoded into frunkOpen/trunkOpen by
 	// splitDoorStateField (door_fields.go).
+	//
+	// MYR-303 media now-playing fields also pass through unchanged:
+	// mediaNowPlayingTitle, mediaNowPlayingArtist, mediaNowPlayingAlbum,
+	// mediaNowPlayingStation, mediaPlaybackSource, mediaNowPlayingDurationMs,
+	// mediaNowPlayingElapsedMs, mediaVolumeMax. Their proto→wire renames
+	// (MediaAudioVolumeMax → mediaVolumeMax, and the `Ms` suffix on
+	// duration/elapsed) are applied in telemetry.fieldMap, NOT here — the same
+	// place MediaAudioVolume → mediaVolume is applied, so this table stays a
+	// legacy-frontend-alias table rather than a second naming authority.
 }
 
 // integerFields are client field names that the frontend Vehicle model types
@@ -59,6 +68,16 @@ var integerFields = map[string]struct{}{
 	"seatHeaterRearRight":  {},
 	"seatCoolerLeft":       {},
 	"seatCoolerRight":      {},
+	// MYR-303: the two millisecond counters are typed `integer` in
+	// vehicle-state.schema.json, so a firmware that sends them as a double is
+	// rounded here to match the contract.
+	"mediaNowPlayingDurationMs": {},
+	"mediaNowPlayingElapsedMs":  {},
+	// mediaVolumeMax (MYR-303) is intentionally ABSENT, exactly like its
+	// sibling mediaVolume: the contract types the volume CEILING as `number`,
+	// not `integer`, precisely so it stays consistent with the level it bounds.
+	// Rounding it here would make `mediaVolume / mediaVolumeMax` disagree with
+	// the car on any firmware that reports a fractional ceiling.
 }
 
 // isNavField reports whether the given internal field name belongs to the
