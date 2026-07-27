@@ -347,7 +347,7 @@
       "synthetic": { "kind": "vehicleUpdate", "field": "SeatVentEnabled", "value": true },
       "nullableInSteadyState": false,
       "linearIssue": "MYR-253",
-      "comment": "MYR-252 Group B cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253."
+      "comment": "MYR-252 Group B cabin-control read-back — DB /snapshot persistence tracked in MYR-253. MYR-298 now persists this to the Go-owned go_vehicle_control_state SIDE table (migration 0014, seat_vent_enabled BOOLEAN; not the Prisma Vehicle table) on the live persist path — NOT the /vehicle_data backfill, which does not carry it — and returns it on /snapshot via VehicleRepo.GetByID's LEFT JOIN; a real false overwrites, null when never read. This MYR-48 completeness harness exercises the Vehicle-table writer pipeline via GetByVIN (no side-table join), so this row stays expected_failure here — the side-table round-trip is covered by internal/store/vehicle_control_state_test.go."
     },
     "chargePortDoorOpen": {
       "category": "expected_failure",
@@ -379,7 +379,7 @@
       "synthetic": { "kind": "vehicleUpdate", "field": "MediaPlaybackStatus", "value": "Playing" },
       "nullableInSteadyState": false,
       "linearIssue": "MYR-253",
-      "comment": "MYR-252 Group B cabin-control read-back — WS-live only; DB /snapshot persistence tracked in MYR-253 (may stay WS-live-only — ephemeral)."
+      "comment": "MYR-252 Group B cabin-control read-back — DB /snapshot persistence tracked in MYR-253. MYR-298 now persists this to the Go-owned go_vehicle_control_state SIDE table (migration 0014, media_playback_status TEXT; not the Prisma Vehicle table) on the live persist path — NOT the /vehicle_data backfill, which does not carry it — and returns it on /snapshot via VehicleRepo.GetByID's LEFT JOIN; a streamed \"Unknown\"/empty persists NULL (honest-unknown), so the stored value is only ever Stopped/Playing/Paused. This MYR-48 completeness harness exercises the Vehicle-table writer pipeline via GetByVIN (no side-table join), so this row stays expected_failure here — the side-table round-trip is covered by internal/store/vehicle_control_state_test.go."
     },
     "mediaVolume": {
       "category": "expected_failure",

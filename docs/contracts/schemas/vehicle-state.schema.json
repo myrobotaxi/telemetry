@@ -387,7 +387,7 @@
     },
     "seatVentEnabled": {
       "type": ["boolean", "null"],
-      "description": "Whether seat ventilation is enabled. Sourced from Tesla proto field 254 (SeatVentEnabled, boolean). Added by MYR-252 (Group B). Live WS vehicle_update field.",
+      "description": "Whether seat ventilation is enabled. Sourced from Tesla proto field 254 (SeatVentEnabled, boolean). Added by MYR-252 (Group B). Live WS vehicle_update field. **MYR-298 (NFR-3.5 hydration):** now persisted server-side to the Go-owned `go_vehicle_control_state` side table (migration 0014, `seat_vent_enabled BOOLEAN`; no Prisma FK per CG-DL-9) on the live stream path and returned on the DB-backed REST `/snapshot` (LEFT-joined by `VehicleRepo.GetByID`), so a client that missed the live frame can still learn it. A real `false` is an observation and overwrites; null when never read. NOT written by the MYR-260 `/vehicle_data` backfill — Tesla's cached vehicle_data subset does not carry it.",
       "x-classification": "P0",
       "x-tesla-proto-field": 254
     },
@@ -412,7 +412,7 @@
     "mediaPlaybackStatus": {
       "type": ["string", "null"],
       "enum": ["Unknown", "Stopped", "Playing", "Paused", null],
-      "description": "Media playback status. Sourced from Tesla proto field 242 (MediaPlaybackStatus, MediaStatus enum). Added by MYR-252 (Group B). Live WS vehicle_update field.",
+      "description": "Media playback status. Sourced from Tesla proto field 242 (MediaPlaybackStatus, MediaStatus enum). Added by MYR-252 (Group B). Live WS vehicle_update field. **MYR-298 (NFR-3.5 hydration):** now persisted server-side to the Go-owned `go_vehicle_control_state` side table (migration 0014, `media_playback_status TEXT` holding the enum's string form; no Prisma FK per CG-DL-9) on the live stream path and returned on the DB-backed REST `/snapshot` (LEFT-joined by `VehicleRepo.GetByID`), so a client that missed the live frame can still learn it. Honest-unknown is preserved: a streamed \"Unknown\"/empty is OMITTED (persists NULL, never overwrites a known status), mirroring how an \"Unknown\" hvacAutoMode is omitted — so the persisted value is only ever Stopped/Playing/Paused, and null when never read. NOT written by the MYR-260 `/vehicle_data` backfill — Tesla's cached vehicle_data subset does not carry it.",
       "x-classification": "P0",
       "x-tesla-proto-field": 242
     },
