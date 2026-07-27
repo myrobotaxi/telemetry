@@ -1150,6 +1150,23 @@ components:
           enum: [owner, viewer]
           example: owner
           x-classification: P0
+        hasActiveRide:
+          type: boolean
+          description: |
+            True when the vehicle currently has an OPEN INSTANT ride
+            request — status `accepted`, `arrived`, or `enroute` with
+            `scheduledFor` unset. Exactly the predicate of the
+            per-vehicle partial unique index
+            `uq_go_ride_requests_active_instant_vehicle` (MYR-266), so
+            the flag can never disagree with the accept guard.
+            Scheduled rides are EXEMPT; `requested` does NOT count
+            (several riders may hold pending requests against one idle
+            car). OPTIONAL: this server always emits it, but absence
+            means "server predates the field / availability unknown →
+            treat as available", NEVER "busy". Derived REST-read-time
+            only — v1 does not push it over WebSocket (MYR-233).
+          example: false
+          x-classification: P0
 
     VehiclesListResponse:
       type: object
