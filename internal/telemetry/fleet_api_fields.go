@@ -161,7 +161,16 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		// low-frequency (ambient changes slowly).
 		FleetFieldInsideTemp:           {IntervalSeconds: 10, ResendIntervalSeconds: intPtr(120)},
 		FleetFieldOutsideTemp:          {IntervalSeconds: 60, ResendIntervalSeconds: intPtr(120)},
-		FleetFieldHvacPower:            {IntervalSeconds: 10},
+		// MYR-300: HvacPower MUST carry a resend. Tesla emits it on change
+		// only, so a server that reconnects while the car is already cooling
+		// never re-learns that climate is on — `isClimateOn` then reads Off
+		// durably while the car's own screen says "Cooling Down". The 120s
+		// resend matches the sibling comfort fields above and is what the
+		// MYR-300 backfill freshness window (defaultStreamFreshness) is sized
+		// against. NOTE: a config change only reaches a car on a re-push
+		// (POST /api/fleet-config/{vin}, `ops fleet-config push`, or the next
+		// owner link) — there is no config version/hash that re-pushes itself.
+		FleetFieldHvacPower:            {IntervalSeconds: 10, ResendIntervalSeconds: intPtr(120)},
 		FleetFieldHvacFanSpeed:         {IntervalSeconds: 30},
 		FleetFieldDriverTempSetting:    {IntervalSeconds: 30},
 		FleetFieldPassengerTempSetting: {IntervalSeconds: 30},
