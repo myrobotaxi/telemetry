@@ -15,14 +15,19 @@ import (
 var masksByResource = map[ResourceType]map[auth.Role]ResourceMask{
 	// rest-api.md §5.2.1 — Vehicle snapshot. Owners see every field
 	// in docs/contracts/schemas/vehicle-state.schema.json (the v1
-	// VehicleState shape). Viewers see the same set EXCEPT
-	// licensePlate. NOTE: licensePlate is a Prisma-owned column per
-	// data-classification.md §1.3 and is NOT currently a member of
-	// vehicle-state.schema.json — the rule below is forward-looking
-	// (codifies the behavior the first time licensePlate is surfaced
-	// over the SDK). Including licensePlate in the owner allow-list
-	// today is harmless: input payloads that lack the field simply do
-	// not produce a key in the projected output.
+	// VehicleState shape). Viewers see the same set EXCEPT the full
+	// `vin`, which MYR-279 gated to the owner role.
+	//
+	// MYR-286: `licensePlate` is in BOTH role allow-lists. That is a
+	// DELIBERATE PRODUCT DECISION, not an oversight, and it reverses
+	// the forward-looking owner-only placeholder this table carried
+	// before the field was ever on the wire: the entire purpose of the
+	// owner-entered plate is that a RIDER can identify the correct car
+	// at pickup, which fails if only the owner can see it. Contrast
+	// `vin` (MYR-279), which stays owner-only — a VIN identifies the
+	// physical car and links to its location history, while a plate is
+	// the label the rider is standing on the curb reading. Both are
+	// P1; the asymmetry is about who needs the value, not about tier.
 	ResourceVehicleState: {
 		auth.RoleOwner:  setFromFields(vehicleStateOwnerFields),
 		auth.RoleViewer: setFromFields(vehicleStateViewerFields),
@@ -30,7 +35,10 @@ var masksByResource = map[ResourceType]map[auth.Role]ResourceMask{
 
 	// rest-api.md §5.2.0 — Vehicles list (vehicle summary). Owners see
 	// every field; viewers see every field EXCEPT `name` (P1,
-	// owner-curated nickname). Per §7.0, v1 only reaches the owner
+	// owner-curated nickname). `licensePlate` (MYR-286) is in BOTH
+	// lists for the same deliberate reason as the snapshot resource
+	// above — a rider identifies the car at pickup from the catalog
+	// row. Per §7.0, v1 only reaches the owner
 	// branch (viewer-merged enumeration depends on the Go server
 	// reading the Prisma-owned Invite table — PLANNED), but the viewer
 	// mask is wired now so the data-side is ready when the invite-read
@@ -84,8 +92,8 @@ var masksByResource = map[ResourceType]map[auth.Role]ResourceMask{
 
 // vehicleStateOwnerFields is the v1 owner allow-list for the vehicle
 // snapshot. Sourced from docs/contracts/schemas/vehicle-state.schema.json
-// "properties" plus the Prisma-owned licensePlate column (forward-
-// looking, see rest-api.md §5.2.1).
+// "properties" (which since MYR-286 includes the Prisma-owned
+// licensePlate column). See rest-api.md §5.2.1.
 var vehicleStateOwnerFields = []string{
 	// Identity (DB-sourced, not telemetry).
 	"vehicleId",
@@ -101,6 +109,11 @@ var vehicleStateOwnerFields = []string{
 	// MYR-279 vehicle-detail read-backs (P0, non-identifying, side-table sourced).
 	"softwareVersion",
 	"trim",
+	// licensePlate (MYR-286) — owner-entered, P1, and in the VIEWER
+	// allow-list too (vehicleStateViewerFields removes only `vin`).
+	// Deliberate product decision: the plate exists so a rider can
+	// identify the car at pickup. Do NOT "fix" this to owner-only by
+	// analogy with `vin` above — see the ResourceVehicleState comment.
 	"licensePlate",
 	// Charge atomic group.
 	"chargeLevel",
@@ -188,14 +201,18 @@ var vehicleStateOwnerFields = []string{
 	"lastUpdated",
 }
 
-// vehicleStateViewerFields is owner minus licensePlate AND minus the full vin
-// (MYR-279). The full VIN is owner-only (party-scoped) — a viewer with shared
+// vehicleStateViewerFields is owner minus the full vin (MYR-279) — and
+// NOTHING else. The full VIN is owner-only (party-scoped): a viewer with shared
 // access sees model/year/color/softwareVersion/trim but NOT the full VIN, which
 // links to the physical car / its location history (data-classification.md
 // §1.3, §2.1). softwareVersion and trim stay visible to viewers (P0,
-// non-identifying, same tier as model). Built by exclusion to avoid drift.
-var vehicleStateViewerFields = removeField(
-	removeField(vehicleStateOwnerFields, "licensePlate"), "vin")
+// non-identifying, same tier as model).
+//
+// MYR-286 REMOVED the previous `licensePlate` exclusion. The plate is now a
+// both-roles field by deliberate product decision (a rider must be able to read
+// the plate of the car pulling up); `vin` is the one field that stays
+// owner-only. Built by exclusion to avoid drift.
+var vehicleStateViewerFields = removeField(vehicleStateOwnerFields, "vin")
 
 // vehicleSummaryOwnerFields is the v1 owner allow-list for the
 // vehicles-list catalog response (rest-api.md §5.2.0 / §7.0). Thin
@@ -220,6 +237,13 @@ var vehicleSummaryOwnerFields = []string{
 	// scheduling flow, so it is NOT owner-private: the viewer list
 	// below inherits it (owner minus `name`).
 	"hasActiveRide",
+	// MYR-286 — owner-entered license plate (P1). Like `hasActiveRide`
+	// and unlike `name`, it is NOT owner-private: the viewer list below
+	// inherits it (owner minus `name`) because a rider identifies the
+	// car at pickup from this catalog row. Deliberate product decision;
+	// contrast the full `vin`, which the catalog never carries at all
+	// (`vinLast4` only) and which the snapshot gates to owners.
+	"licensePlate",
 }
 
 // vehicleSummaryViewerFields is owner minus `name` per rest-api.md
@@ -326,7 +350,7 @@ func setFromFields(fields []string) ResourceMask {
 
 // removeField returns a copy of fields with all occurrences of name
 // removed. Used to derive viewer allow-lists from owner allow-lists by
-// exclusion (e.g., owner minus licensePlate). The loop never breaks on
+// exclusion (e.g., owner minus `vin`). The loop never breaks on
 // match — every input element that equals name is filtered out.
 func removeField(fields []string, name string) []string {
 	out := make([]string, 0, len(fields))

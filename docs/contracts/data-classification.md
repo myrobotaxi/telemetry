@@ -76,7 +76,7 @@ Every column in every persisted table is listed below. The **Tier** column is th
 | `model` | `String` | P0 | No | Yes | Vehicle model (e.g., "Model 3") |
 | `year` | `Int` | P0 | No | Yes | Model year |
 | `color` | `String` | P0 | No | Yes | Vehicle color |
-| `licensePlate` | `String` | P1 | No | No | Can be used to look up registered owner — PII |
+| `licensePlate` | `String` | P1 | No | **No — redact in logs; role-masked on the wire (BOTH roles)** | Externally correlatable to a person via DMV / third-party registry lookups, so it is identifying data — hence P1 rather than the P0 of its neighbours `model`/`color`. **Never log the value** (§2.2); log the P0 `vehicle_id` / `user_id` instead. **Wire exposure (MYR-286):** as of MYR-286 the plate IS on the wire — on the REST `/snapshot` (`vehicle-state.schema.json`) and on the `GET /api/vehicles` catalog row (`vehicle-summary.schema.json`) — and is in **BOTH** role allow-lists, owner AND viewer. That is a deliberate product decision, not an oversight: the entire purpose of the plate is that a rider can identify the correct car at pickup, which fails if only the owner can see it. Contrast the sibling `vin` above, which MYR-279 gated to the owner mask. Party-scope still binds: never emit it outside the vehicle's party (owner + invited viewers/riders of that vehicle), and it is NEVER on the WebSocket `vehicle_update` broadcast. **Write path (MYR-286):** not from Tesla and not from Prisma — the Fleet API exposes no plate anywhere, so the ONLY writer is the owner's `PUT /api/tesla/vehicles/{vehicleId}/plate` (`rest-api.md` §7.14) through the `data-lifecycle.md` §1.4 carve-out. Server-normalized on write (trim, uppercase, ≤ 10 chars, `^[A-Z0-9 -]*$`); empty string means "no plate set". See `internal/mask/tables.go` `vehicleStateOwnerFields` / `vehicleSummaryOwnerFields`. |
 | `chargeLevel` | `Int` | P0 | No | Yes | Battery percentage — not identifying |
 | `chargeState` | `String` (enum) | P0 | No | Yes | Charge state enum (`Disconnected`, `Charging`, `Complete`, …) — not identifying. Sourced from Tesla proto field **179** (`DetailedChargeState`) as of [MYR-42](https://linear.app/myrobotaxi/issue/MYR-42) (2026-04-23); MYR-40 initially sourced from proto 2 but empirical capture showed Tesla firmware ≥ 2024.44.25 does not emit proto 2, so the switch to proto 179 was non-behavioral (same 7 enum strings). Added by MYR-11 (v1 charge atomic group); source proto corrected by MYR-42. |
 | `estimatedRange` | `Int` | P0 | No | Yes | Range in miles — not identifying |
@@ -365,7 +365,7 @@ P1 values MUST NOT appear in:
 | OAuth tokens (`access_token`, `refresh_token`, `id_token`) | Omit entirely. Never log even partial token strings. |
 | Email addresses (`User.email`, `Invite.email`) | Omit entirely. Use the associated user ID or invite ID instead. |
 | Location names/addresses (`locationName`, `locationAddress`, `startLocation`, `startAddress`, `endLocation`, `endAddress`, `destinationName`, `destinationAddress`) | Omit entirely. Log the associated drive ID or vehicle ID instead. |
-| License plate (`licensePlate`) | Omit entirely. |
+| License plate (`licensePlate`) | Omit entirely — from log lines, error envelopes, and metric labels alike. Log the P0 `vehicle_id` / `user_id` instead, plus a shape marker (e.g. `cleared=true`) if the set-vs-clear distinction is needed. This binds the MYR-286 write path in particular: the §7.14 `PUT .../plate` handler must not echo a rejected plate back in its `400 invalid_request` message (the envelope describes the RULE only) and must not log the accepted value on success. |
 | User identity (`User.name`, `User.image`) | Omit entirely. Use user ID instead. |
 
 ### 2.3 P2 (Access-logged) — P1 rules plus audit trail
@@ -411,7 +411,7 @@ These P1 columns are sensitive and must never appear in logs, but are NOT encryp
 | `User` | `name` | Prisma-owned; disk encryption sufficient for display names |
 | `User` | `email` | Prisma-owned; disk encryption sufficient; not queried by telemetry server |
 | `User` | `image` | URL to avatar; disk encryption sufficient |
-| `Vehicle` | `licensePlate` | Prisma-owned; disk encryption sufficient; not queried by telemetry server |
+| `Vehicle` | `licensePlate` | Disk encryption sufficient. **Updated by MYR-286:** the telemetry server now both reads this column (on `/snapshot` + the vehicles list) and writes it (the §1.4 owner carve-out backing `PUT .../plate`), so the old "not queried by telemetry server" rationale no longer holds. App-level encryption is still not warranted: the value is short, owner-supplied, and read on every catalog row — encrypting it would force a decrypt per row on the hot list path for a value the owner is deliberately publishing to their own riders. Log redaction (§2.2) plus party-scoped masking is the control. |
 | `Vehicle` | `locationName` | Derived from GPS (already encrypted); reverse-geocoded label |
 | `Vehicle` | `locationAddress` | Derived from GPS (already encrypted); reverse-geocoded address |
 | `Vehicle` | `destinationName` | User-entered or Tesla-provided name; not coordinate data |

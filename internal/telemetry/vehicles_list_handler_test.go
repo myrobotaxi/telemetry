@@ -443,3 +443,73 @@ func TestLastFourOfVIN(t *testing.T) {
 		}
 	}
 }
+
+// TestVehiclesListHandler_LicensePlateOnWire pins the MYR-286 read path on the
+// catalog: the plate rides along on each row, and it follows the SAME
+// empty-value convention as its sibling identity field `color` — the key is
+// ALWAYS present (no omitempty) and "no plate set" is an empty string, not a
+// missing key. A client distinguishes "server predates MYR-286" (key absent)
+// from "owner has not entered one" (key present, empty) on exactly that basis,
+// so the always-emitted property is load-bearing.
+func TestVehiclesListHandler_LicensePlateOnWire(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+
+	rows := []VehicleCatalogRow{
+		{
+			ID: "clplate123456789abcdef", VIN: "5YJ3E1EA1PF000001", Name: "Plated",
+			Model: "Model 3", Year: 2024, Color: "Red", LicensePlate: "ABC 1234",
+			Status: "parked", ChargeLevel: 60, EstimatedRange: 180, LastUpdated: now,
+		},
+		{
+			ID: "clnoplate5678901234abc", VIN: "5YJ3E1EA1PF000002", Name: "Unplated",
+			Model: "Model Y", Year: 2023, Color: "White", LicensePlate: "",
+			Status: "parked", ChargeLevel: 90, EstimatedRange: 300, LastUpdated: now,
+		},
+	}
+
+	h := NewVehiclesListHandler(
+		&stubTokenValidator{userID: "user-1"},
+		&stubVehicleLister{rows: rows},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/vehicles", nil)
+	req.Header.Set("Authorization", "Bearer valid")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. Body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Raw maps so a MISSING key is distinguishable from a present "".
+	var resp struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v. Body: %s", err, rec.Body.String())
+	}
+	if len(resp.Items) != 2 {
+		t.Fatalf("want 2 items, got %d. Body: %s", len(resp.Items), rec.Body.String())
+	}
+
+	for i, want := range []string{"ABC 1234", ""} {
+		raw, ok := resp.Items[i]["licensePlate"]
+		if !ok {
+			t.Fatalf("items[%d] missing `licensePlate` (must be always-emitted, like `color`); keys: %v",
+				i, keysOfRow(resp.Items[i]))
+		}
+		got, isString := raw.(string)
+		if !isString {
+			t.Fatalf("items[%d].licensePlate = %v (%T), want a JSON string", i, raw, raw)
+		}
+		if got != want {
+			t.Errorf("items[%d].licensePlate = %q, want %q", i, got, want)
+		}
+	}
+
+	// Convention check: `color` is the sibling this field mirrors. If `color`
+	// ever switches to omitempty, this test should be revisited in lockstep.
+	if _, ok := resp.Items[1]["color"]; !ok {
+		t.Error("sibling `color` is missing; the empty-value convention this field mirrors has changed")
+	}
+}

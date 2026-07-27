@@ -71,7 +71,7 @@ func waitForEmitter(t *testing.T, f *fakeAuditEmitter, want int) {
 
 // TestHub_BroadcastMasked_EmitsAudit_OnViewerStrip exercises the WS
 // audit-emit gate end-to-end through BroadcastMasked. A viewer-role
-// client subscribes to a vehicle whose mask strips licensePlate. The
+// client subscribes to a vehicle whose mask strips the full vin. The
 // hub uses a per-vehicle frame counter starting at 1 and incrementing
 // per BroadcastMasked call; the test loops until ShouldAuditWS samples
 // in (1% rate, modulus 100), then asserts an audit row landed with the
@@ -112,12 +112,13 @@ func TestHub_BroadcastMasked_EmitsAudit_OnViewerStrip(t *testing.T) {
 		t.Fatal("no ShouldAuditWS hit found in 5000 frames; sampler is broken")
 	}
 
-	// Drive BroadcastMasked exactly firstHit times with a payload
-	// that the viewer mask strips at least one field from
-	// (licensePlate is owner-only).
+	// Drive BroadcastMasked exactly firstHit times with a payload that the
+	// viewer mask strips at least one field from. `vin` is the owner-only
+	// VehicleState field (MYR-279); `licensePlate` served this role until
+	// MYR-286 put it in BOTH allow-lists.
 	payload := map[string]any{
-		"speed":        65,
-		"licensePlate": "ABC-123",
+		"speed": 65,
+		"vin":   "7SAYGDET7TA613795",
 	}
 	for i := uint64(0); i < firstHit; i++ {
 		hub.BroadcastMasked(
@@ -262,15 +263,17 @@ func TestHub_BroadcastMasked_AuditEmitFailure_DoesNotDropFrame(t *testing.T) {
 
 	waitForClients(t, hub, 1)
 
-	// One broadcast that strips licensePlate; even if audit fails,
-	// the viewer must receive the projected frame.
+	// One broadcast that strips the owner-only `vin` (MYR-279); even if
+	// audit fails, the viewer must receive the projected frame. The field
+	// must be one the viewer mask actually strips or the audit path is
+	// never entered and the test passes vacuously.
 	hub.BroadcastMasked(
 		"v-1",
 		mask.ResourceVehicleState,
 		time.Now().UTC().Format(time.RFC3339),
 		map[string]any{
-			"speed":        65,
-			"licensePlate": "ABC-123",
+			"speed": 65,
+			"vin":   "7SAYGDET7TA613795",
 		},
 	)
 

@@ -135,4 +135,24 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 			}
 		})
 	}
+
+	// MYR-286 PUT route: the owner license-plate write (§7.14). Same rule —
+	// an unauthenticated PUT must fail the bearer gate (401), never 404.
+	putRoutes := []struct {
+		name string
+		path string
+	}{
+		{"vehicle license plate (MYR-286)", "/api/tesla/vehicles/clxyz1234567890abcdef/plate"},
+	}
+	for _, rt := range putRoutes {
+		t.Run(rt.name, func(t *testing.T) {
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodPut, rt.path, nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code == http.StatusNotFound {
+				t.Fatalf("route %q returned 404 — handler not mounted. Body: %s", rt.path, rec.Body.String())
+			}
+		})
+	}
 }

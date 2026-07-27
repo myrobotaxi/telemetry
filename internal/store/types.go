@@ -30,6 +30,12 @@ type Vehicle struct {
 	Model                string
 	Year                 int
 	Color                string
+	// LicensePlate is the owner-entered plate (MYR-286). Prisma-owned
+	// column, NOT NULL DEFAULT '' — empty string means "no plate set",
+	// never "unknown". Server-normalized on write (see
+	// VehicleRepo.UpdateLicensePlate), so reads are already uppercase,
+	// trimmed, and within the ≤10-char A-Z/0-9/space/hyphen charset.
+	LicensePlate         string
 	Status               VehicleStatus
 	ChargeLevel          int
 	EstimatedRange       int

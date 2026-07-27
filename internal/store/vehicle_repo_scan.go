@@ -59,7 +59,7 @@ func (r *VehicleRepo) scanVehicleRowExtra(row rowScanner, extra ...any) (Vehicle
 	)
 	dests := append(make([]any, 0, 40+len(extra)),
 		&v.ID, &v.UserID, &v.VIN, &v.Name,
-		&v.Model, &v.Year, &v.Color, &status,
+		&v.Model, &v.Year, &v.Color, &v.LicensePlate, &status,
 		&v.ChargeLevel, &v.EstimatedRange, &v.ChargeState, &v.TimeToFull,
 		&v.Speed, &v.GearPosition,
 		&v.Heading, &latPT, &lngPT,

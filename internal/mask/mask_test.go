@@ -43,22 +43,25 @@ func TestApply_FullAllowList(t *testing.T) {
 	}
 }
 
-func TestApply_PartialMask_StripsLicensePlate(t *testing.T) {
-	// Viewer projection of a vehicle_state payload that happens to
-	// carry a licensePlate (forward-looking). The viewer allow-list
-	// excludes licensePlate; verify it is stripped and reported in
-	// fieldsMasked.
+func TestApply_PartialMask_StripsVIN(t *testing.T) {
+	// Viewer projection of a vehicle_state payload carrying the full vin.
+	// The viewer allow-list excludes `vin` (MYR-279); verify it is stripped
+	// and reported in fieldsMasked.
+	//
+	// This case used `licensePlate` until MYR-286 moved that field into BOTH
+	// role allow-lists, leaving `vin` as the only owner-only VehicleState
+	// field and therefore the canonical partial-mask fixture.
 	mask := For(ResourceVehicleState, auth.RoleViewer)
 	input := map[string]any{
-		"speed":        65,
-		"chargeLevel":  82,
-		"licensePlate": "ABC-123",
+		"speed":       65,
+		"chargeLevel": 82,
+		"vin":         "7SAYGDET7TA613795",
 	}
 
 	out, masked := Apply(input, mask)
 
-	if _, present := out["licensePlate"]; present {
-		t.Error("viewer projection still contains licensePlate")
+	if _, present := out["vin"]; present {
+		t.Error("viewer projection still contains the full vin")
 	}
 	if out["speed"] != 65 {
 		t.Errorf("speed lost: got %v", out["speed"])
@@ -66,8 +69,8 @@ func TestApply_PartialMask_StripsLicensePlate(t *testing.T) {
 	if out["chargeLevel"] != 82 {
 		t.Errorf("chargeLevel lost: got %v", out["chargeLevel"])
 	}
-	if !reflect.DeepEqual(masked, []string{"licensePlate"}) {
-		t.Errorf("fieldsMasked = %v, want [licensePlate]", masked)
+	if !reflect.DeepEqual(masked, []string{"vin"}) {
+		t.Errorf("fieldsMasked = %v, want [vin]", masked)
 	}
 }
 
@@ -77,8 +80,8 @@ func TestApply_AbsentNotNulled_OnJSONSerialization(t *testing.T) {
 	// the projected map and inspecting raw JSON for the key name.
 	mask := For(ResourceVehicleState, auth.RoleViewer)
 	input := map[string]any{
-		"speed":        65,
-		"licensePlate": "ABC-123",
+		"speed": 65,
+		"vin":   "7SAYGDET7TA613795",
 	}
 
 	out, _ := Apply(input, mask)
@@ -90,8 +93,8 @@ func TestApply_AbsentNotNulled_OnJSONSerialization(t *testing.T) {
 	if got := string(encoded); !contains(got, "speed") {
 		t.Errorf("expected JSON to contain speed: %s", got)
 	}
-	if got := string(encoded); contains(got, "licensePlate") {
-		t.Errorf("JSON must NOT contain licensePlate (absent, not nulled): %s", got)
+	if got := string(encoded); contains(got, "vin") {
+		t.Errorf("JSON must NOT contain vin (absent, not nulled): %s", got)
 	}
 	if got := string(encoded); contains(got, "null") {
 		t.Errorf("JSON must NOT contain null for stripped key: %s", got)
@@ -101,9 +104,9 @@ func TestApply_AbsentNotNulled_OnJSONSerialization(t *testing.T) {
 func TestApply_Idempotent(t *testing.T) {
 	mask := For(ResourceVehicleState, auth.RoleViewer)
 	input := map[string]any{
-		"speed":        65,
-		"chargeLevel":  82,
-		"licensePlate": "ABC-123",
+		"speed":       65,
+		"chargeLevel": 82,
+		"vin":         "7SAYGDET7TA613795",
 	}
 
 	first, _ := Apply(input, mask)
@@ -120,12 +123,12 @@ func TestApply_Idempotent(t *testing.T) {
 func TestApply_DoesNotMutateInput(t *testing.T) {
 	mask := For(ResourceVehicleState, auth.RoleViewer)
 	input := map[string]any{
-		"speed":        65,
-		"licensePlate": "ABC-123",
+		"speed": 65,
+		"vin":   "7SAYGDET7TA613795",
 	}
 	before := map[string]any{
-		"speed":        65,
-		"licensePlate": "ABC-123",
+		"speed": 65,
+		"vin":   "7SAYGDET7TA613795",
 	}
 	_, _ = Apply(input, mask)
 	if !reflect.DeepEqual(input, before) {
@@ -175,21 +178,48 @@ func TestFor_FailClosed(t *testing.T) {
 	}
 }
 
-func TestFor_VehicleState_OwnerHasLicensePlate(t *testing.T) {
-	owner := For(ResourceVehicleState, auth.RoleOwner)
-	if _, ok := owner.Allowed["licensePlate"]; !ok {
-		t.Error("owner mask must contain licensePlate (forward-looking)")
+// TestFor_VehicleState_BothRolesHaveLicensePlate pins the MYR-286 product
+// decision: the owner-entered plate is visible to the OWNER **and** the
+// VIEWER/rider. The plate exists so a rider can identify the correct car at
+// pickup, which fails if only the owner can see it — so a change that moves
+// this field back to owner-only must break a test, not ship quietly.
+//
+// Contrast TestFor_VehicleState_MYR279 below: `vin` stays owner-only.
+func TestFor_VehicleState_BothRolesHaveLicensePlate(t *testing.T) {
+	for _, role := range []auth.Role{auth.RoleOwner, auth.RoleViewer} {
+		m := For(ResourceVehicleState, role)
+		if _, ok := m.Allowed["licensePlate"]; !ok {
+			t.Errorf("%s mask must contain licensePlate (MYR-286: deliberately both roles)", role)
+		}
 	}
+}
+
+// TestFor_VehicleSummary_BothRolesHaveLicensePlate is the vehicles-list half of
+// the same MYR-286 decision — the viewer list is owner-minus-`name`, so the
+// plate must survive into it.
+func TestFor_VehicleSummary_BothRolesHaveLicensePlate(t *testing.T) {
+	for _, role := range []auth.Role{auth.RoleOwner, auth.RoleViewer} {
+		m := For(ResourceVehicleSummary, role)
+		if _, ok := m.Allowed["licensePlate"]; !ok {
+			t.Errorf("%s summary mask must contain licensePlate (MYR-286)", role)
+		}
+	}
+	// The viewer list still strips the owner-curated nickname — proving the
+	// plate's presence is a deliberate carve-out, not a broken viewer mask.
+	if _, ok := For(ResourceVehicleSummary, auth.RoleViewer).Allowed["name"]; ok {
+		t.Error("viewer summary mask must NOT contain name")
+	}
+}
+
+func TestFor_VehicleState_OwnerHasSpeed(t *testing.T) {
+	owner := For(ResourceVehicleState, auth.RoleOwner)
 	if _, ok := owner.Allowed["speed"]; !ok {
 		t.Error("owner mask missing speed")
 	}
 }
 
-func TestFor_VehicleState_ViewerLacksLicensePlate(t *testing.T) {
+func TestFor_VehicleState_ViewerRetainsSharedFields(t *testing.T) {
 	viewer := For(ResourceVehicleState, auth.RoleViewer)
-	if _, ok := viewer.Allowed["licensePlate"]; ok {
-		t.Error("viewer mask must NOT contain licensePlate")
-	}
 	if _, ok := viewer.Allowed["speed"]; !ok {
 		t.Error("viewer mask missing speed")
 	}

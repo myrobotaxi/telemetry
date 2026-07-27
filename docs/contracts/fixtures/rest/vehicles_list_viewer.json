@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "description": "Forward-looking viewer-tier response for GET /api/vehicles. The viewer projection per rest-api.md §5.2.0 strips the P1 `name` field (owner-curated nickname stays owner-only); every other VehicleSummary field remains visible so the viewer can identify the vehicle in their list. This fixture is documented now to lock the wire shape; v1 SERVER behavior returns an empty list to viewer-tier callers because viewer-merged enumeration requires the Go server to read the Prisma-owned Invite table (PLANNED follow-up). Once that lands, this fixture is the canonical viewer response. The MYR-233 `hasActiveRide` flag is in BOTH role allow-lists — it is derived operational state (P0, same tier as `status`), not owner-curated data.",
+    "description": "Forward-looking viewer-tier response for GET /api/vehicles. The viewer projection per rest-api.md §5.2.0 strips the P1 `name` field (owner-curated nickname stays owner-only); every other VehicleSummary field remains visible so the viewer can identify the vehicle in their list. This fixture is documented now to lock the wire shape; v1 SERVER behavior returns an empty list to viewer-tier callers because viewer-merged enumeration requires the Go server to read the Prisma-owned Invite table (PLANNED follow-up). Once that lands, this fixture is the canonical viewer response. The MYR-233 `hasActiveRide` flag is in BOTH role allow-lists — it is derived operational state (P0, same tier as `status`), not owner-curated data. The MYR-286 `licensePlate` is in BOTH allow-lists too — a deliberate product decision, because the entire purpose of the plate is that a rider can identify the correct car at pickup. Contrast the full `vin`, which the catalog never carries at all (`vinLast4` only) and which the /snapshot gates to owners.",
     "anchoredFRs": ["FR-5.4"],
     "scenario": "transitional",
     "addedBy": "MYR-91"
@@ -17,7 +17,8 @@
       "estimatedRange": 245,
       "lastUpdated": "2026-05-10T17:45:00Z",
       "role": "viewer",
-      "hasActiveRide": false
+      "hasActiveRide": false,
+      "licensePlate": "ABC 1234"
     }
   ]
 }

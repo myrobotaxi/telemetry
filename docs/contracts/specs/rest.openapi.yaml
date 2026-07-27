@@ -145,8 +145,10 @@ paths:
         Latency target: p95 < 500 ms end-to-end per requirements.md §3.1.
 
         RBAC: owners see all fields in vehicle-state.schema.json; viewers
-        see all fields EXCEPT licensePlate (forward-looking mask -- see
-        rest-api.md §5.2.1). The limited_viewer extension slot (FR-5.5)
+        see all fields EXCEPT the full `vin`, which is owner-only per
+        MYR-279 (see rest-api.md §5.2.1). `licensePlate` is deliberately
+        visible to BOTH roles (MYR-286) -- a rider identifies the car at
+        pickup from it. The limited_viewer extension slot (FR-5.5)
         is NOT implemented in v1 but is documented as the extension seam.
       x-anchored-requirements:
         - NFR-3.5
@@ -198,6 +200,7 @@ paths:
                     etaMinutes: null
                     tripDistanceRemaining: null
                     navRouteCoordinates: null
+                    licensePlate: ABC 1234
                     lastUpdated: '2026-04-13T18:22:01Z'
         '401':
           $ref: '#/components/responses/Unauthorized'
@@ -212,12 +215,11 @@ paths:
       x-role-masks:
         owner: ['*']
         viewer:
-          description: All VehicleState fields except licensePlate (forward-looking) and the full vin, which is owner-only (party-scoped) per MYR-279. softwareVersion and trim stay visible to viewers (P0, non-identifying).
+          description: All VehicleState fields except the full vin, which is owner-only (party-scoped) per MYR-279. softwareVersion and trim stay visible to viewers (P0, non-identifying), and so does licensePlate -- MYR-286 put it in BOTH role masks by deliberate product decision, because the plate exists so a rider can identify the correct car at pickup.
           excludes:
-            - licensePlate
             - vin
         limited_viewer:
-          description: FR-5.5 extension seam -- NOT implemented in v1. Documented for future readiness.
+          description: FR-5.5 extension seam -- NOT implemented in v1. Documented for future readiness. It still excludes licensePlate even though the full `viewer` role now receives it (MYR-286) -- an invited viewer waiting at a pickup needs the plate, whereas the limited_viewer seam is the deliberately-degraded tier that also loses precise GPS and the whole navigation group.
           excludes:
             - licensePlate
             - navRouteCoordinates
@@ -1167,6 +1169,29 @@ components:
             only — v1 does not push it over WebSocket (MYR-233).
           example: false
           x-classification: P0
+        licensePlate:
+          type: string
+          maxLength: 10
+          pattern: '^[A-Z0-9 -]*$'
+          description: |
+            Owner-entered license plate, same value and semantics as
+            VehicleState.licensePlate. NOT sourced from Tesla (the Fleet
+            API exposes no plate anywhere) — it exists only because the
+            owner typed it via `PUT /api/tesla/vehicles/{vehicleId}/plate`
+            (MYR-286). The server normalizes on write (trim, uppercase,
+            ≤10 chars, charset `A-Z 0-9`, space, hyphen), so rows always
+            carry an already-normalized value and consumers MUST NOT
+            re-normalize before display. OPTIONAL and tolerant: ABSENT
+            and EMPTY STRING both mean "no plate set" — keep the
+            `VIN ····xxxx` fallback (from the sibling `vinLast4`) for
+            both, and never render an empty plate. Visible to BOTH roles
+            by deliberate product decision, unlike VehicleState.vin:
+            a rider identifies the car at pickup from this row. P1
+            (externally correlatable to a person via registry lookup) —
+            redact in logs, never emit outside the vehicle's party. No
+            WebSocket delta in v1; it refreshes on the next list fetch.
+          example: ABC 1234
+          x-classification: P1
 
     VehiclesListResponse:
       type: object

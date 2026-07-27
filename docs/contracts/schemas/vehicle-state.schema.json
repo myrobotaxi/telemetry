@@ -423,6 +423,14 @@
       "minimum": 0,
       "x-tesla-proto-field": 244
     },
+    "licensePlate": {
+      "type": "string",
+      "description": "Owner-entered license plate for this vehicle. NOT sourced from Tesla — the Fleet API exposes no plate on any endpoint, telemetry field, or proto, so this value exists only because the vehicle's owner typed it: it is set and cleared via `PUT /api/tesla/vehicles/{vehicleId}/plate` (MYR-286) and persisted server-side. The server NORMALIZES on write — uppercased, leading/trailing whitespace trimmed, at most 10 characters, and restricted to the charset A-Z, 0-9, space, and hyphen; submitting an empty string to that PUT CLEARS the stored plate. Reads therefore only ever return an already-normalized value, so consumers MUST NOT re-normalize or re-validate before display. OPTIONAL and deliberately tolerant: ABSENT and EMPTY STRING both mean 'no plate set' (an absent field additionally means the server may predate MYR-286) — neither ever means 'this car has a plate we could not read'. Consumers MUST keep their existing `VIN ····xxxx` fallback label for both cases and MUST NEVER render an empty plate (no blank chip, no stray separator, no 'Plate: ' with nothing after it). Visibility is deliberately BOTH ROLES: owner AND viewer/rider receive this field, unlike the sibling `vin`, which MYR-279 gated to the owner role mask. That asymmetry is an intentional product decision, not an oversight — the entire purpose of the plate is that a rider can identify the correct car at pickup, which fails if only the owner can see it. Classified P1 rather than P0 (unlike `model`/`color`) precisely because of that reach: a plate is externally correlatable to a person via DMV and third-party registry lookups, so it is identifying data — redact it in logs and never emit it outside the vehicle's party (owner plus invited viewers/riders of that vehicle). Delivery: v1 carries NO live WebSocket delta for this field — a vehicle_update frame NEVER contains licensePlate, and a plate edit fires no push. It changes only through the PUT above and reaches clients on the next read: this REST /snapshot and the GET /api/vehicles list row (vehicle-summary.schema.json). A client that needs the new value immediately after an edit re-reads (or optimistically applies its own PUT response) rather than waiting for a stream update.",
+      "x-classification": "P1",
+      "maxLength": 10,
+      "pattern": "^[A-Z0-9 -]*$",
+      "examples": ["ABC 1234"]
+    },
     "lastUpdated": {
       "type": "string",
       "format": "date-time",

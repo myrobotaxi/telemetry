@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/myrobotaxi/telemetry/internal/auth"
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
 	"github.com/myrobotaxi/telemetry/pkg/sdk"
 )
@@ -489,6 +490,103 @@ func TestVehicleSnapshotHandler_SeatCoolerPresenceOnWire(t *testing.T) {
 				t.Errorf("%s: got %v, want explicit null — a fabricated 0 would advertise "+
 					"cooled seats the car may not have", key, got)
 			}
+		}
+	})
+}
+
+// TestVehicleSnapshotHandler_LicensePlateOnWire pins the MYR-286 read path on
+// /snapshot for BOTH roles.
+//
+// Two things are load-bearing here:
+//
+//   - Empty-value convention: the plate mirrors its sibling identity field
+//     `color` exactly — a plain string with NO omitempty, so the key is ALWAYS
+//     present and "no plate set" is an empty string rather than a missing key.
+//     Clients read an ABSENT key as "server predates MYR-286" and a present-but-
+//     empty one as "owner has not entered a plate"; collapsing the two would
+//     erase that distinction.
+//   - Visibility: the VIEWER receives it too. That is the deliberate product
+//     decision behind the field (a rider must be able to identify the car
+//     pulling up), and it is the one place it differs from the owner-only `vin`
+//     the same projection strips.
+func TestVehicleSnapshotHandler_LicensePlateOnWire(t *testing.T) {
+	const userID = "user-1"
+
+	decodeBody := func(t *testing.T, row VehicleSnapshotRow, role auth.Role) map[string]any {
+		t.Helper()
+		h := NewVehicleSnapshotHandler(
+			&stubTokenValidator{userID: userID},
+			&stubVehicleSnapshotReader{row: row},
+			discardLogger(),
+			WithSnapshotRoleResolver(&stubRoleResolver{role: role}),
+		)
+		mux := http.NewServeMux()
+		mux.Handle("GET /api/vehicles/{vehicleId}/snapshot", h)
+
+		req := httptest.NewRequestWithContext(
+			context.Background(),
+			http.MethodGet,
+			"/api/vehicles/"+fixtureSnapshotRowID+"/snapshot",
+			nil,
+		)
+		req.Header.Set("Authorization", "Bearer t")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status: got %d, want 200. Body: %s", rec.Code, rec.Body.String())
+		}
+		var body map[string]any
+		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return body
+	}
+
+	for _, role := range []auth.Role{auth.RoleOwner, auth.RoleViewer} {
+		t.Run(string(role)+" sees a set plate", func(t *testing.T) {
+			row := fixtureSnapshotRow(userID)
+			row.LicensePlate = "ABC 1234"
+
+			body := decodeBody(t, row, role)
+			got, ok := body["licensePlate"]
+			if !ok {
+				t.Fatalf("licensePlate missing from the %s projection", role)
+			}
+			if got != "ABC 1234" {
+				t.Errorf("licensePlate = %v, want %q", got, "ABC 1234")
+			}
+		})
+
+		t.Run(string(role)+" gets an empty string when unset, not a missing key", func(t *testing.T) {
+			// fixtureSnapshotRow leaves LicensePlate at its zero value — the
+			// car whose owner never entered a plate.
+			body := decodeBody(t, fixtureSnapshotRow(userID), role)
+
+			got, ok := body["licensePlate"]
+			if !ok {
+				t.Fatalf("licensePlate key missing; it must be always-emitted like its sibling `color`")
+			}
+			if got != "" {
+				t.Errorf("licensePlate = %v, want the empty string", got)
+			}
+			// Same shape as the sibling it mirrors.
+			if _, ok := body["color"]; !ok {
+				t.Error("sibling `color` is missing; the convention this field mirrors has changed")
+			}
+		})
+	}
+
+	t.Run("viewer keeps the plate but still loses the owner-only vin", func(t *testing.T) {
+		row := fixtureSnapshotRow(userID)
+		row.LicensePlate = "ABC 1234"
+
+		body := decodeBody(t, row, auth.RoleViewer)
+		if _, ok := body["licensePlate"]; !ok {
+			t.Error("viewer must receive licensePlate (MYR-286: deliberately both roles)")
+		}
+		if _, ok := body["vin"]; ok {
+			t.Error("viewer must NOT receive the full vin (MYR-279: owner-only)")
 		}
 	})
 }

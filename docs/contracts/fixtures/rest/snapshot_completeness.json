@@ -35,6 +35,13 @@
       "nullableInSteadyState": false,
       "comment": "Exterior color (Prisma NOT NULL). Seeded via catalog. Test asserts Vehicle.Color != \"\"."
     },
+    "licensePlate": {
+      "category": "identity",
+      "atomicGroup": "",
+      "nullableInSteadyState": false,
+      "synthetic": { "kind": "seed", "field": "licensePlate", "value": "ABC 1234" },
+      "comment": "MYR-286: owner-entered plate on the Prisma Vehicle table (TEXT NOT NULL DEFAULT ''). Deliberately NOT a telemetry field — Tesla exposes no plate on any endpoint, proto, or stream, so no writer-pipeline path exists or should: the ONLY writer is the owner's PUT /api/tesla/vehicles/{vehicleId}/plate (rest-api.md §7.14). The seed synthetic stands in for that endpoint so the read-back through GetByVIN is still asserted. An EMPTY value in production means 'owner has not entered one', never a persistence gap, so this row must never become an expected_failure."
+    },
     "vin": {
       "category": "identity",
       "atomicGroup": "",

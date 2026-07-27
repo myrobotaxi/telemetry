@@ -38,6 +38,7 @@ Every field below corresponds to a column in the `Vehicle` table or a value deri
 | `model` | `string` | No | -- | P0 | -- | DB `Vehicle.model` |
 | `year` | `integer` | No | -- | P0 | -- | DB `Vehicle.year` |
 | `color` | `string` | No | -- | P0 | -- | DB `Vehicle.color` |
+| `licensePlate` | `string` | No | -- | **P1** | -- | DB `Vehicle.licensePlate` (`TEXT NOT NULL DEFAULT ''`). **Owner-entered, MYR-286** — NOT from Tesla (the Fleet API exposes no plate on any endpoint, field, or proto); written ONLY by `PUT /api/tesla/vehicles/{vehicleId}/plate` (rest-api.md §7.14) and normalized on write (trim, uppercase, ≤ 10 chars, `^[A-Z0-9 -]*$`). **Visible to BOTH roles** — deliberate product decision (a rider identifies the car at pickup), unlike the owner-only `vin` below. Never on the WS broadcast. Redact in logs (data-classification.md §1.3/§2.2). Optional (not in `required`); ABSENT and EMPTY STRING both mean "no plate set" — this server always emits the key with an empty string, matching the `color` convention. |
 | `vin` | `string` | No | -- | P0 | -- | DB `Vehicle.vin` (FULL 17-char). **Owner-`/snapshot` only (MYR-279)** — owner mask allow-list only; removed from the viewer allow-list and never on the WS broadcast; the vehicles-list surfaces `vinLast4`. Redacted to `***XXXX` in logs (data-classification.md §1.3/§2.1). Optional (not in `required`). |
 | `softwareVersion` | `string` or `null` | Yes | -- | P0 | -- | Installed Tesla firmware. Streamed proto `Version` OR REST `vehicle_data.vehicle_state.car_version` (MYR-260 backfill). MYR-279: persisted to `go_vehicle_control_state` (migration 0011), returned on `/snapshot`. Null when never read. |
 | `trim` | `string` or `null` | Yes | -- | P0 | -- | Trim badge (e.g. "Performance"). REST `vehicle_data.vehicle_config.trim_badging` ONLY (not streamed). MYR-279: persisted to `go_vehicle_control_state` (migration 0011), returned on `/snapshot`. Null when never read. |
@@ -286,6 +287,7 @@ Every field has exactly one authoritative source. This mapping is critical for u
 | Field | Source of Truth | Freshness Model |
 |-------|----------------|-----------------|
 | `vehicleId`, `name`, `model`, `year`, `color` | DB (Prisma-owned) | Static; changes only via user action in web app |
+| `licensePlate` | DB (Prisma-owned column, **Go-owned write path** — MYR-286) | Static; changes only via the owner's `PUT /api/tesla/vehicles/{vehicleId}/plate`. No Tesla source exists and v1 pushes no WS delta, so it refreshes on the next `/snapshot` or vehicles-list read. |
 | `latitude`, `longitude` | Tesla `Location` telemetry | Live stream; 2s interval with 10m delta filter |
 | `heading` | Tesla `GpsHeading` telemetry | Live stream; 5s interval |
 | `speed` | Tesla `VehicleSpeed` telemetry | Live stream; 2s interval |
