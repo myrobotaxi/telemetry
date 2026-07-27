@@ -55,6 +55,36 @@ type ControlStateUpdate struct {
 	SeatVentEnabled     *bool
 	MediaPlaybackStatus *string
 
+	// MYR-303 media NOW-PLAYING block. The five free-text fields diverge
+	// deliberately from MediaPlaybackStatus above on empty values: that field is
+	// an ENUM whose "Unknown" member means "we could not read this", so an
+	// empty/Unknown is dropped to nil. These are FREE TEXT, where an empty value
+	// means the car is telling us the track ENDED — a real observation that MUST
+	// overwrite a stale title, or the panel advertises a song that stopped
+	// playing an hour ago. So a present-but-empty string is kept (persisted as
+	// '' and therefore wins the COALESCE upsert); only an ABSENT field stays
+	// nil. Read back, '' is "nothing playing" and NULL is "never observed".
+	//
+	// The numerics follow the ordinary rule: a real observation including zero
+	// overwrites. MediaNowPlayingDurationMs may legitimately hold Tesla's
+	// 18000000 (5h) radio sentinel — stored as-is; rendering it as "no duration"
+	// is the client's job per vehicle-state.schema.json.
+	MediaNowPlayingTitle    *string
+	MediaNowPlayingArtist   *string
+	MediaNowPlayingAlbum    *string
+	MediaNowPlayingStation  *string
+	MediaPlaybackSource     *string
+	MediaNowPlayingDuration *int64
+	MediaNowPlayingElapsed  *int64
+	MediaVolumeMax          *float64
+
+	// MYR-308 ventilated-seat CAPABILITY — a spec fact, not a runtime state
+	// (contrast SeatVentEnabled above, which is the on/off of that equipment).
+	// REST-only: sourced from vehicle_config.has_seat_cooling by the MYR-260
+	// backfill, exactly like Trim. A real false is authoritative ("this car has
+	// no cooled seats") and overwrites.
+	SeatCoolingCapable *bool
+
 	// MYR-273 cabin-setting levels. Temp setpoints are Fahrenheit-rounded ints
 	// (converted Celsius→Fahrenheit at the telemetry boundary, like interiorTemp);
 	// fan speed and seat heater/cooler levels are small non-negative ints; media
@@ -91,7 +121,22 @@ func (c *ControlStateUpdate) HasAny() bool {
 		return false
 	}
 	return c.hasBoolControl() || c.hasLevelControl() || c.hasStringControl() ||
-		c.hasClimateMode() || c.hasSeatVentMedia()
+		c.hasClimateMode() || c.hasSeatVentMedia() || c.hasMediaNowPlaying() ||
+		c.SeatCoolingCapable != nil
+}
+
+// hasMediaNowPlaying reports whether any MYR-303 now-playing field is present.
+// A present-but-EMPTY text field counts: an empty title is the car saying the
+// track ended, which is a real observation worth an upsert.
+func (c *ControlStateUpdate) hasMediaNowPlaying() bool {
+	return c.MediaNowPlayingTitle != nil ||
+		c.MediaNowPlayingArtist != nil ||
+		c.MediaNowPlayingAlbum != nil ||
+		c.MediaNowPlayingStation != nil ||
+		c.MediaPlaybackSource != nil ||
+		c.MediaNowPlayingDuration != nil ||
+		c.MediaNowPlayingElapsed != nil ||
+		c.MediaVolumeMax != nil
 }
 
 // hasBoolControl reports whether any MYR-269 owner-control boolean is present.
@@ -163,6 +208,24 @@ func mergeControlState(dst, src *ControlStateUpdate) {
 	dst.HvacAcEnabled = mergePtr(dst.HvacAcEnabled, src.HvacAcEnabled)
 	dst.SeatVentEnabled = mergePtr(dst.SeatVentEnabled, src.SeatVentEnabled)
 	dst.MediaPlaybackStatus = mergePtr(dst.MediaPlaybackStatus, src.MediaPlaybackStatus)
+	mergeMediaNowPlaying(dst, src)
+	dst.SeatCoolingCapable = mergePtr(dst.SeatCoolingCapable, src.SeatCoolingCapable)
+}
+
+// mergeMediaNowPlaying folds the MYR-303 now-playing fields of src onto dst.
+// Split out of mergeControlState to keep that function under the funlen cap.
+// mergePtr keeps a non-nil src value even when it is an empty string, which is
+// what makes "the track ended" propagate through the writer's coalescing buffer
+// instead of being swallowed before it ever reaches the upsert.
+func mergeMediaNowPlaying(dst, src *ControlStateUpdate) {
+	dst.MediaNowPlayingTitle = mergePtr(dst.MediaNowPlayingTitle, src.MediaNowPlayingTitle)
+	dst.MediaNowPlayingArtist = mergePtr(dst.MediaNowPlayingArtist, src.MediaNowPlayingArtist)
+	dst.MediaNowPlayingAlbum = mergePtr(dst.MediaNowPlayingAlbum, src.MediaNowPlayingAlbum)
+	dst.MediaNowPlayingStation = mergePtr(dst.MediaNowPlayingStation, src.MediaNowPlayingStation)
+	dst.MediaPlaybackSource = mergePtr(dst.MediaPlaybackSource, src.MediaPlaybackSource)
+	dst.MediaNowPlayingDuration = mergePtr(dst.MediaNowPlayingDuration, src.MediaNowPlayingDuration)
+	dst.MediaNowPlayingElapsed = mergePtr(dst.MediaNowPlayingElapsed, src.MediaNowPlayingElapsed)
+	dst.MediaVolumeMax = mergePtr(dst.MediaVolumeMax, src.MediaVolumeMax)
 }
 
 // controlIntFields maps each cabin-setting telemetry field that persists as a
@@ -214,6 +277,8 @@ func mapTelemetryToControlState(fields map[string]events.TelemetryValue) *Contro
 	mapControlStrings(fields, c)
 	mapControlClimateMode(fields, c)
 	mapControlSeatVentMedia(fields, c)
+	mapControlMediaNowPlaying(fields, c)
+	mapControlCapability(fields, c)
 	if !c.HasAny() {
 		return nil
 	}
@@ -416,9 +481,13 @@ INSERT INTO go_vehicle_control_state
      seat_heater_rear_left, seat_heater_rear_center, seat_heater_rear_right,
      seat_cooler_left, seat_cooler_right, media_volume,
      software_version, trim, hvac_auto_mode, hvac_ac_enabled,
-     seat_vent_enabled, media_playback_status, updated_at)
+     seat_vent_enabled, media_playback_status,
+     media_now_playing_title, media_now_playing_artist, media_now_playing_album,
+     media_now_playing_station, media_playback_source,
+     media_now_playing_duration_ms, media_now_playing_elapsed_ms, media_volume_max,
+     seat_cooling_capable, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
-        $22, $23, NOW())
+        $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, NOW())
 ON CONFLICT (vehicle_id) DO UPDATE SET
     is_locked               = COALESCE(EXCLUDED.is_locked, go_vehicle_control_state.is_locked),
     frunk_open              = COALESCE(EXCLUDED.frunk_open, go_vehicle_control_state.frunk_open),
@@ -442,6 +511,15 @@ ON CONFLICT (vehicle_id) DO UPDATE SET
     hvac_ac_enabled         = COALESCE(EXCLUDED.hvac_ac_enabled, go_vehicle_control_state.hvac_ac_enabled),
     seat_vent_enabled       = COALESCE(EXCLUDED.seat_vent_enabled, go_vehicle_control_state.seat_vent_enabled),
     media_playback_status   = COALESCE(EXCLUDED.media_playback_status, go_vehicle_control_state.media_playback_status),
+    media_now_playing_title       = COALESCE(EXCLUDED.media_now_playing_title, go_vehicle_control_state.media_now_playing_title),
+    media_now_playing_artist      = COALESCE(EXCLUDED.media_now_playing_artist, go_vehicle_control_state.media_now_playing_artist),
+    media_now_playing_album       = COALESCE(EXCLUDED.media_now_playing_album, go_vehicle_control_state.media_now_playing_album),
+    media_now_playing_station     = COALESCE(EXCLUDED.media_now_playing_station, go_vehicle_control_state.media_now_playing_station),
+    media_playback_source         = COALESCE(EXCLUDED.media_playback_source, go_vehicle_control_state.media_playback_source),
+    media_now_playing_duration_ms = COALESCE(EXCLUDED.media_now_playing_duration_ms, go_vehicle_control_state.media_now_playing_duration_ms),
+    media_now_playing_elapsed_ms  = COALESCE(EXCLUDED.media_now_playing_elapsed_ms, go_vehicle_control_state.media_now_playing_elapsed_ms),
+    media_volume_max              = COALESCE(EXCLUDED.media_volume_max, go_vehicle_control_state.media_volume_max),
+    seat_cooling_capable          = COALESCE(EXCLUDED.seat_cooling_capable, go_vehicle_control_state.seat_cooling_capable),
     updated_at              = NOW()`
 
 // UpsertControlState persists the present owner-control fields for the vehicle
@@ -479,6 +557,19 @@ func (r *VehicleRepo) UpsertControlState(ctx context.Context, vehicleID string, 
 		update.HvacAcEnabled,
 		update.SeatVentEnabled,
 		update.MediaPlaybackStatus,
+		// MYR-303: a non-nil EMPTY string binds as '' (not NULL), so it wins the
+		// COALESCE above and clears a stale track — the deliberate divergence
+		// from media_playback_status two lines up. See the ControlStateUpdate
+		// field comments.
+		update.MediaNowPlayingTitle,
+		update.MediaNowPlayingArtist,
+		update.MediaNowPlayingAlbum,
+		update.MediaNowPlayingStation,
+		update.MediaPlaybackSource,
+		update.MediaNowPlayingDuration,
+		update.MediaNowPlayingElapsed,
+		update.MediaVolumeMax,
+		update.SeatCoolingCapable,
 	)
 	r.metrics.ObserveQueryDuration("vehicle.upsert_control_state", time.Since(start).Seconds())
 	if err != nil {

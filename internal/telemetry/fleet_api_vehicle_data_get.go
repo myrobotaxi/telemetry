@@ -46,11 +46,24 @@ type VehicleDataVehicleState struct {
 }
 
 // VehicleDataVehicleConfig is the vehicle_config sub-object subset: the trim
-// badge. MYR-279: trim is NOT a streamed telemetry field, so this REST read is
-// the ONLY source of the trim value (e.g. "Performance", "Long Range"). Absent
-// field decodes to nil and is skipped by the mapper.
+// badge and the ventilated-seat capability. Neither is a streamed telemetry
+// field, so this REST read is their ONLY source. Absent fields decode to nil and
+// are skipped by the mapper.
+//
+// MYR-279: trim is the badge string (e.g. "Performance", "Long Range").
+//
+// MYR-308: HasSeatCooling is whether the car is EQUIPPED WITH ventilated (cooled)
+// front seats — a SPEC fact, not a runtime state. Contrast the streamed
+// SeatVentEnabled (proto 254), which is the on/off of that equipment: a car can
+// be has_seat_cooling=true with seatVentEnabled=false. Verified live against the
+// client's vehicle, which returns true. A nil here means Tesla omitted the key
+// (older firmware, or a partial payload) and MUST NOT be read as "no seat
+// cooling" — the mapper skips it so the column stays NULL and clients keep the
+// pre-MYR-308 telemetry-presence heuristic. Only an explicit false is the
+// authoritative no.
 type VehicleDataVehicleConfig struct {
-	TrimBadging *string `json:"trim_badging"`
+	TrimBadging    *string `json:"trim_badging"`
+	HasSeatCooling *bool   `json:"has_seat_cooling"`
 }
 
 // VehicleDataClimateState is the climate_state sub-object subset: whether the

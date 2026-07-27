@@ -14,13 +14,13 @@ import (
 // into this interface and converts `store.Vehicle` → VehicleSnapshotRow
 // at the boundary so the handler stays decoupled from `internal/store`.
 type VehicleSnapshotRow struct {
-	ID                   string
-	UserID               string
-	VIN                  string
-	Name                 string
-	Model                string
-	Year                 int
-	Color                string
+	ID     string
+	UserID string
+	VIN    string
+	Name   string
+	Model  string
+	Year   int
+	Color  string
 	// LicensePlate is the owner-entered plate (MYR-286), an IDENTITY-row
 	// field read straight off the Prisma "Vehicle" column like Color/Name —
 	// not telemetry, never streamed. Empty string == not set.
@@ -88,6 +88,22 @@ type VehicleSnapshotRow struct {
 	// same GetByID LEFT JOIN. Nullable — nil means never read.
 	SeatVentEnabled     *bool
 	MediaPlaybackStatus *string
+
+	// MYR-303 media now-playing block, same side table, same LEFT JOIN. Nullable
+	// — nil means NEVER OBSERVED. For the five text fields that is distinct from
+	// a non-nil EMPTY string, which means "observed, and nothing is playing".
+	MediaNowPlayingTitle    *string
+	MediaNowPlayingArtist   *string
+	MediaNowPlayingAlbum    *string
+	MediaNowPlayingStation  *string
+	MediaPlaybackSource     *string
+	MediaNowPlayingDuration *int64
+	MediaNowPlayingElapsed  *int64
+	MediaVolumeMax          *float64
+
+	// MYR-308 ventilated-seat capability, same side table, same LEFT JOIN.
+	// Nullable — nil means never read, NOT "no seat cooling".
+	SeatCoolingCapable *bool
 }
 
 // VehicleSnapshotReader returns the snapshot row for a Prisma cuid.
@@ -110,11 +126,11 @@ type VehicleSnapshotReader interface {
 // for permitted nullable fields (the schema marks these explicitly
 // nullable).
 type vehicleSnapshotResponse struct {
-	VehicleID            string          `json:"vehicleId"`
-	Name                 string          `json:"name"`
-	Model                string          `json:"model"`
-	Year                 int             `json:"year"`
-	Color                string          `json:"color"`
+	VehicleID string `json:"vehicleId"`
+	Name      string `json:"name"`
+	Model     string `json:"model"`
+	Year      int    `json:"year"`
+	Color     string `json:"color"`
 	// LicensePlate (MYR-286): the owner-entered plate. Emitted with the SAME
 	// convention as its sibling identity-row field `color` above — a plain
 	// string with NO omitempty, so the key is ALWAYS present and "not set" is
@@ -206,6 +222,34 @@ type vehicleSnapshotResponse struct {
 	// tables.go, since MYR-252).
 	SeatVentEnabled     *bool   `json:"seatVentEnabled"`
 	MediaPlaybackStatus *string `json:"mediaPlaybackStatus"`
+
+	// MYR-303: the media NOW-PLAYING block, persisted (go_vehicle_control_state)
+	// and returned on the DB-backed /snapshot so a car that is asleep, offline or
+	// in service still surfaces the last-known track instead of an empty panel.
+	// Wire names match the live WS vehicle_update fields (they pass through
+	// internal/ws unchanged) so the client's Vehicle model reconciles REST and WS.
+	//
+	// Nullable, and the null carries a SPECIFIC meaning for the five text
+	// fields: null == never observed, whereas an empty string == observed and
+	// nothing is playing. Clients must not collapse the two — the first is
+	// "we don't know", the second is "we know, and it's nothing".
+	MediaNowPlayingTitle    *string  `json:"mediaNowPlayingTitle"`
+	MediaNowPlayingArtist   *string  `json:"mediaNowPlayingArtist"`
+	MediaNowPlayingAlbum    *string  `json:"mediaNowPlayingAlbum"`
+	MediaNowPlayingStation  *string  `json:"mediaNowPlayingStation"`
+	MediaPlaybackSource     *string  `json:"mediaPlaybackSource"`
+	MediaNowPlayingDuration *int64   `json:"mediaNowPlayingDurationMs"`
+	MediaNowPlayingElapsed  *int64   `json:"mediaNowPlayingElapsedMs"`
+	MediaVolumeMax          *float64 `json:"mediaVolumeMax"`
+
+	// MYR-308: the ventilated-seat CAPABILITY (a spec fact from REST
+	// vehicle_config, not a runtime state — contrast seatVentEnabled above).
+	// SNAPSHOT-ONLY by construction: Tesla does not stream it, so it never
+	// appears on a WS vehicle_update frame. Nullable: null == the server has
+	// never completed a vehicle-config read for this car, which clients MUST
+	// treat as "unknown, fall back to the seatCooler*-presence heuristic" and
+	// NOT as "no seat cooling". An explicit false is the authoritative no.
+	SeatCoolingCapable *bool `json:"seatCoolingCapable"`
 }
 
 // toMaskMap returns the response as a wire-name-keyed map suitable for
@@ -292,6 +336,30 @@ func addSnapshotControlFields(m map[string]any, r vehicleSnapshotResponse) {
 	// fabricated value.
 	m["seatVentEnabled"] = derefOrNil(r.SeatVentEnabled)
 	m["mediaPlaybackStatus"] = derefOrNil(r.MediaPlaybackStatus)
+	addSnapshotMediaFields(m, r)
+}
+
+// addSnapshotMediaFields adds the MYR-303 media now-playing block and the
+// MYR-308 ventilated-seat capability to the mask map, keyed by their wire names.
+// Split from addSnapshotControlFields to keep both under the funlen cap.
+//
+// Absent-vs-null matches the siblings exactly: the key is ALWAYS written, so the
+// wire always carries it and a never-observed field is an explicit JSON null
+// rather than an omitted key or a fabricated value. For the five text fields the
+// null is load-bearing and must NOT be collapsed with the empty string that
+// derefOrNil passes through for an observed-but-cleared track: null == never
+// observed, "" == nothing playing.
+func addSnapshotMediaFields(m map[string]any, r vehicleSnapshotResponse) {
+	m["mediaNowPlayingTitle"] = derefOrNil(r.MediaNowPlayingTitle)
+	m["mediaNowPlayingArtist"] = derefOrNil(r.MediaNowPlayingArtist)
+	m["mediaNowPlayingAlbum"] = derefOrNil(r.MediaNowPlayingAlbum)
+	m["mediaNowPlayingStation"] = derefOrNil(r.MediaNowPlayingStation)
+	m["mediaPlaybackSource"] = derefOrNil(r.MediaPlaybackSource)
+	m["mediaNowPlayingDurationMs"] = derefOrNil(r.MediaNowPlayingDuration)
+	m["mediaNowPlayingElapsedMs"] = derefOrNil(r.MediaNowPlayingElapsed)
+	m["mediaVolumeMax"] = derefOrNil(r.MediaVolumeMax)
+	// MYR-308 — REST-sourced, snapshot-only (never on a WS vehicle_update).
+	m["seatCoolingCapable"] = derefOrNil(r.SeatCoolingCapable)
 }
 
 // buildSnapshotResponse maps the store-layer row into the wire shape.
@@ -353,5 +421,15 @@ func buildSnapshotResponse(row VehicleSnapshotRow) vehicleSnapshotResponse {
 		HvacAcEnabled:        row.HvacAcEnabled,
 		SeatVentEnabled:      row.SeatVentEnabled,
 		MediaPlaybackStatus:  row.MediaPlaybackStatus,
+
+		MediaNowPlayingTitle:    row.MediaNowPlayingTitle,
+		MediaNowPlayingArtist:   row.MediaNowPlayingArtist,
+		MediaNowPlayingAlbum:    row.MediaNowPlayingAlbum,
+		MediaNowPlayingStation:  row.MediaNowPlayingStation,
+		MediaPlaybackSource:     row.MediaPlaybackSource,
+		MediaNowPlayingDuration: row.MediaNowPlayingDuration,
+		MediaNowPlayingElapsed:  row.MediaNowPlayingElapsed,
+		MediaVolumeMax:          row.MediaVolumeMax,
+		SeatCoolingCapable:      row.SeatCoolingCapable,
 	}
 }

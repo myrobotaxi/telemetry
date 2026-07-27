@@ -32,13 +32,16 @@ WHERE "vin" = $1`
 
 // queryVehicleByID is the snapshot (GET /snapshot) read path. It LEFT JOINs the
 // Go-owned go_vehicle_control_state side table (MYR-269, MYR-273, MYR-279,
-// MYR-274, MYR-298) so the response carries the durable owner-control read-backs for a
+// MYR-274, MYR-298, MYR-303, MYR-308) so the response carries the durable
+// owner-control read-backs for a
 // non-streaming car: the five MYR-269 booleans (lock, trunk/frunk, climate,
 // charge-port), the eleven MYR-273 cabin-setting levels (driver/passenger temp
 // setpoints, fan speed, seat heater/cooler levels, media volume), the two MYR-279
 // vehicle-detail strings (software version, trim), and the two MYR-274 climate-mode
-// read-backs (hvac auto mode, A/C enabled), and the two MYR-298 read-backs (seat
-// ventilation, media playback status). The control columns are appended AFTER the
+// read-backs (hvac auto mode, A/C enabled), the two MYR-298 read-backs (seat
+// ventilation, media playback status), the eight MYR-303 media now-playing
+// columns, and the MYR-308 ventilated-seat capability bit. The control columns
+// are appended AFTER the
 // *Enc columns so scanVehicleRowExtra reads them as trailing `extra` destinations.
 // Joining a Go-owned table into a Prisma-owned read is a runtime SELECT, not a
 // migration FK, so CG-DL-9 does not apply. The base columns stay unqualified
@@ -52,7 +55,11 @@ const queryVehicleByID = `SELECT ` + vehicleSelectColumns + `,
 	gcs.seat_cooler_left, gcs.seat_cooler_right, gcs.media_volume,
 	gcs.software_version, gcs.trim,
 	gcs.hvac_auto_mode, gcs.hvac_ac_enabled,
-	gcs.seat_vent_enabled, gcs.media_playback_status
+	gcs.seat_vent_enabled, gcs.media_playback_status,
+	gcs.media_now_playing_title, gcs.media_now_playing_artist, gcs.media_now_playing_album,
+	gcs.media_now_playing_station, gcs.media_playback_source,
+	gcs.media_now_playing_duration_ms, gcs.media_now_playing_elapsed_ms, gcs.media_volume_max,
+	gcs.seat_cooling_capable
 FROM "Vehicle"
 LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"
 WHERE "Vehicle"."id" = $1`

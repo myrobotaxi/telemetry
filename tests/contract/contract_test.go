@@ -268,6 +268,16 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		-- MYR-298 seat-vent + media-playback read-backs (migration 0014)
 		"seat_vent_enabled"       BOOLEAN,
 		"media_playback_status"   TEXT,
+		-- MYR-303 media now-playing + MYR-308 capability (migration 0015)
+		"media_now_playing_title"       TEXT,
+		"media_now_playing_artist"      TEXT,
+		"media_now_playing_album"       TEXT,
+		"media_now_playing_station"     TEXT,
+		"media_playback_source"         TEXT,
+		"media_now_playing_duration_ms" BIGINT,
+		"media_now_playing_elapsed_ms"  BIGINT,
+		"media_volume_max"              DOUBLE PRECISION,
+		"seat_cooling_capable"          BOOLEAN,
 		"updated_at"       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);
 

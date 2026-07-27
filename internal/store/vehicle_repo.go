@@ -152,61 +152,26 @@ func (r *VehicleRepo) GetByID(ctx context.Context, id string) (Vehicle, error) {
 }
 
 // scanVehicleByID runs the snapshot read (queryVehicleByID, which LEFT JOINs the
-// go_vehicle_control_state side table) and scans the base vehicle row plus the
-// owner-control columns: the five MYR-269 booleans and the eleven MYR-273
-// cabin-setting levels. A NULL control column (no side-table row, or a field
+// go_vehicle_control_state side table) and scans the base vehicle row plus every
+// owner-control column. A NULL control column (no side-table row, or a field
 // never observed) scans into a nil pointer, which the snapshot surfaces as an
 // absent/unknown control — never a fabricated value.
+//
+// The destinations and their Vehicle assignments live on controlStateScan
+// (vehicle_control_scan.go), whose dests() order MUST track queryVehicleByID.
+// MYR-303/308 moved them there: at 31 columns the inline form was three lines
+// per column and had outgrown the funlen cap.
 func (r *VehicleRepo) scanVehicleByID(ctx context.Context, id string) (Vehicle, error) {
 	row := r.pool.QueryRow(ctx, queryVehicleByID, id)
-	var isLocked, frunkOpen, trunkOpen, isClimateOn, chargePortOpen *bool
-	var driverTemp, passengerTemp, fanSpeed *int
-	var seatHeaterLeft, seatHeaterRight *int
-	var seatHeaterRearLeft, seatHeaterRearCenter, seatHeaterRearRight *int
-	var seatCoolerLeft, seatCoolerRight *int
-	var mediaVolume *float64
-	var softwareVersion, trim *string
-	var hvacAutoMode *string
-	var hvacAcEnabled *bool
-	var seatVentEnabled *bool
-	var mediaPlaybackStatus *string
-	v, err := r.scanVehicleRowExtra(row,
-		&isLocked, &frunkOpen, &trunkOpen, &isClimateOn, &chargePortOpen,
-		&driverTemp, &passengerTemp, &fanSpeed,
-		&seatHeaterLeft, &seatHeaterRight,
-		&seatHeaterRearLeft, &seatHeaterRearCenter, &seatHeaterRearRight,
-		&seatCoolerLeft, &seatCoolerRight, &mediaVolume,
-		&softwareVersion, &trim,
-		&hvacAutoMode, &hvacAcEnabled,
-		&seatVentEnabled, &mediaPlaybackStatus)
+	var cs controlStateScan
+	v, err := r.scanVehicleRowExtra(row, cs.dests()...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Vehicle{}, ErrVehicleNotFound
 	}
 	if err != nil {
 		return Vehicle{}, fmt.Errorf("scan vehicle: %w", err)
 	}
-	v.IsLocked = isLocked
-	v.FrunkOpen = frunkOpen
-	v.TrunkOpen = trunkOpen
-	v.IsClimateOn = isClimateOn
-	v.ChargePortOpen = chargePortOpen
-	v.DriverTempSetting = driverTemp
-	v.PassengerTempSetting = passengerTemp
-	v.FanSpeed = fanSpeed
-	v.SeatHeaterLeft = seatHeaterLeft
-	v.SeatHeaterRight = seatHeaterRight
-	v.SeatHeaterRearLeft = seatHeaterRearLeft
-	v.SeatHeaterRearCenter = seatHeaterRearCenter
-	v.SeatHeaterRearRight = seatHeaterRearRight
-	v.SeatCoolerLeft = seatCoolerLeft
-	v.SeatCoolerRight = seatCoolerRight
-	v.MediaVolume = mediaVolume
-	v.SoftwareVersion = softwareVersion
-	v.Trim = trim
-	v.HvacAutoMode = hvacAutoMode
-	v.HvacAcEnabled = hvacAcEnabled
-	v.SeatVentEnabled = seatVentEnabled
-	v.MediaPlaybackStatus = mediaPlaybackStatus
+	cs.applyTo(&v)
 	return v, nil
 }
 

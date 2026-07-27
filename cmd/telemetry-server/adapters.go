@@ -276,6 +276,17 @@ func (a *vehicleSnapshotAdapter) GetByID(ctx context.Context, vehicleID string) 
 		HvacAcEnabled:        v.HvacAcEnabled,
 		SeatVentEnabled:      v.SeatVentEnabled,
 		MediaPlaybackStatus:  v.MediaPlaybackStatus,
+
+		// MYR-303 media now-playing + MYR-308 seat-cooling capability.
+		MediaNowPlayingTitle:    v.MediaNowPlayingTitle,
+		MediaNowPlayingArtist:   v.MediaNowPlayingArtist,
+		MediaNowPlayingAlbum:    v.MediaNowPlayingAlbum,
+		MediaNowPlayingStation:  v.MediaNowPlayingStation,
+		MediaPlaybackSource:     v.MediaPlaybackSource,
+		MediaNowPlayingDuration: v.MediaNowPlayingDuration,
+		MediaNowPlayingElapsed:  v.MediaNowPlayingElapsed,
+		MediaVolumeMax:          v.MediaVolumeMax,
+		SeatCoolingCapable:      v.SeatCoolingCapable,
 	}, nil
 }
 
@@ -487,7 +498,6 @@ func proxyHTTPClient(proxyURL string, logger *slog.Logger) *http.Client {
 	}
 }
 
-
 // openDriveListerAdapter adapts store.DriveRepo to the
 // drives.OpenDriveLister interface used by Detector.Start for orphan
 // reconciliation (MYR-146). The drives package defines its own
@@ -529,7 +539,7 @@ func (a *openDriveListerAdapter) ListOpen(ctx context.Context) ([]drives.OpenDri
 // We pass zero values for all numeric fields because the row never
 // accumulated post-restart telemetry (the in-memory state was lost on
 // redeploy). The endTime column is what unblocks the existing
-// "endTime IS NULL OR endTime = ''" ListOpen predicate; the zero
+// "endTime IS NULL OR endTime = ”" ListOpen predicate; the zero
 // stats are the honest representation of "we don't know what
 // happened between start and now".
 func (a *openDriveListerAdapter) MarkOrphanEnded(ctx context.Context, driveID string) error {

@@ -162,6 +162,48 @@ var vehicleStateOwnerFields = []string{
 	"trunkOpen",
 	"mediaPlaybackStatus",
 	"mediaVolume",
+	// MYR-303 media NOW-PLAYING block.
+	//
+	// The five free-text fields (title/artist/album/station/playbackSource) are
+	// P1, not P0 like the rest of this cabin block — they are free-text USER
+	// CONTENT, and an accumulated stream of them reveals listening habits
+	// (taste, and by inference language, mood, politics, religion).
+	//
+	// They are nonetheless in BOTH role allow-lists, and that is the whole
+	// point of the feature rather than an oversight: a RIDER sitting in the car
+	// can hear what is playing, so showing it to them reveals nothing they do
+	// not already know, and a now-playing panel that goes blank for the
+	// passenger is the feature failing. Same reasoning as `licensePlate`
+	// (MYR-286) — the asymmetry that matters is who NEEDS the value, not the
+	// tier. Contrast `vin`, which stays the one owner-only snapshot field.
+	//
+	// What P1 DOES buy here is handled outside this table: never log the values
+	// (presence/length only — see data-classification.md §1.13), never emit
+	// them outside the vehicle's party, never aggregate or retain them as a
+	// listening history.
+	//
+	// NOTE for the FR-5.5 `limited_viewer` seam (rest-api.md §5.2.1): these five
+	// MUST be EXCLUDED from that tier when it is implemented, alongside precise
+	// GPS and the navigation group. limited_viewer is the deliberately-degraded
+	// tier for someone who is NOT in the car — the "they can already hear it"
+	// justification above evaporates, and free-text listening data is exactly
+	// what that tier exists to withhold. The three numerics below are P0 and may
+	// stay. v1 has no limited_viewer role, so there is nothing to encode here
+	// yet; this comment is the standing instruction for whoever adds it.
+	"mediaNowPlayingTitle",
+	"mediaNowPlayingArtist",
+	"mediaNowPlayingAlbum",
+	"mediaNowPlayingStation",
+	"mediaPlaybackSource",
+	// P0 numerics — a bare track length, playback offset, or volume ceiling
+	// identifies nothing on its own (same tier as the sibling mediaVolume).
+	"mediaNowPlayingDurationMs",
+	"mediaNowPlayingElapsedMs",
+	"mediaVolumeMax",
+	// MYR-308 — ventilated-seat capability. P0 both roles: an equipment/trim
+	// fact about the car, the same tier as `trim`/`model`/`year` and reasoned
+	// about the same way. Snapshot-only (Tesla does not stream it).
+	"seatCoolingCapable",
 	// Odometer / FSD.
 	"odometerMiles",
 	"fsdMilesSinceReset",
