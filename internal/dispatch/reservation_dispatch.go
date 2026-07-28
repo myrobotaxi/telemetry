@@ -43,8 +43,10 @@ func (s *ReservationSweeper) sweepOnce(ctx context.Context) sweepResult {
 	}
 
 	res := sweepResult{due: len(dueList)}
-	for _, r := range dueList {
-		s.handleDue(ctx, r, now, &res)
+	// Indexed rather than ranged by value: DueReservation is wide enough that
+	// gocritic flags the per-iteration copy.
+	for i := range dueList {
+		s.handleDue(ctx, &dueList[i], now, &res)
 	}
 	if res.due > 0 {
 		s.logger.Info("reservation sweep",
@@ -72,7 +74,7 @@ func (s *ReservationSweeper) sweepOnce(ctx context.Context) sweepResult {
 //
 // The nav push runs on the dispatcher's bounded worker pool, so a slow or
 // asleep car never delays the rest of the sweep.
-func (s *ReservationSweeper) handleDue(ctx context.Context, r DueReservation, now time.Time, res *sweepResult) {
+func (s *ReservationSweeper) handleDue(ctx context.Context, r *DueReservation, now time.Time, res *sweepResult) {
 	busy, err := s.store.VehicleHasActiveInstantRide(ctx, r.VehicleID)
 	if err != nil {
 		// Unknown busy state: do NOT claim. We cannot tell whether pushing
@@ -131,7 +133,7 @@ func (s *ReservationSweeper) handleDue(ctx context.Context, r DueReservation, no
 // window. The deadline is anchored on scheduledFor (not on first observation),
 // so it is a property of the reservation itself: a restart mid-hold resumes
 // the same deadline rather than resetting it.
-func (s *ReservationSweeper) holdExpired(r DueReservation, now time.Time) bool {
+func (s *ReservationSweeper) holdExpired(r *DueReservation, now time.Time) bool {
 	return now.After(r.ScheduledFor.Add(s.cfg.BusyHold))
 }
 
@@ -145,7 +147,7 @@ func (s *ReservationSweeper) holdExpired(r DueReservation, now time.Time) bool {
 // re-evaluating the row every 30s forever. No `ride.due` is published — the
 // reservation never actually dispatched, and the seam's future consumer is a
 // "your car is on the way" notification that would be false here.
-func (s *ReservationSweeper) expireBusy(ctx context.Context, r DueReservation, res *sweepResult) {
+func (s *ReservationSweeper) expireBusy(ctx context.Context, r *DueReservation, res *sweepResult) {
 	claimed, err := s.dispatcher.store.ClaimDispatch(ctx, r.RideRequestID)
 	if err != nil {
 		s.logger.Error("reservation sweep: claim for expiry failed",
@@ -176,7 +178,7 @@ func (s *ReservationSweeper) expireBusy(ctx context.Context, r DueReservation, r
 // won. Fire-and-forget and drop-safe: a nil bus or a publish failure is logged
 // and the dispatch proceeds regardless — the nav push is the contract, the
 // event is only a notification hook.
-func (s *ReservationSweeper) publishDue(ctx context.Context, r DueReservation, now time.Time) {
+func (s *ReservationSweeper) publishDue(ctx context.Context, r *DueReservation, now time.Time) {
 	if s.bus == nil {
 		return
 	}

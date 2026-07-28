@@ -82,7 +82,10 @@ func (a *reservationStoreAdapter) ListDueReservations(ctx context.Context, now t
 		return nil, err
 	}
 	out := make([]dispatch.DueReservation, 0, len(recs))
-	for _, rec := range recs {
+	// Indexed rather than ranged by value: RideRequestRecord is wide enough
+	// that gocritic flags the per-iteration copy.
+	for i := range recs {
+		rec := &recs[i]
 		if rec.ScheduledFor == nil {
 			// Unreachable: the due query requires scheduled_for IS NOT NULL.
 			// Skipped rather than dereferenced so a future query change can
