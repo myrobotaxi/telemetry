@@ -103,8 +103,11 @@ func TestMigration0015_UpAddsMediaColumns(t *testing.T) {
 // away and every earlier issue's columns survive, so a rollback of MYR-303/308
 // cannot take MYR-269/273/274/279/298 state with it.
 //
-// Runs migrate down one step then back up, leaving the database at head for
-// whatever runs next.
+// Migrates down TO VERSION 14 and back up, leaving the database at head for
+// whatever runs next. Version-targeted rather than Steps(-1) on purpose: a
+// relative step silently rolls back whatever the newest migration happens to
+// be, so the next issue that adds one would turn this into a test of ITS
+// down-migration (MYR-179 hit exactly that when 0016 landed).
 func TestMigration0015_DownDropsMediaColumns(t *testing.T) {
 	if !dockerAvailable {
 		t.Skip("docker unavailable; skipping migration integration test")
@@ -114,8 +117,8 @@ func TestMigration0015_DownDropsMediaColumns(t *testing.T) {
 	m := newTestMigrator(t)
 	defer func() { _, _ = m.Close() }()
 
-	if err := m.Steps(-1); err != nil {
-		t.Fatalf("migrate down 1: %v", err)
+	if err := m.Migrate(14); err != nil {
+		t.Fatalf("migrate down to 14: %v", err)
 	}
 	// Restore the schema no matter how the assertions below go, so whatever
 	// runs next still sees a head database.

@@ -104,8 +104,16 @@ func setupNavDispatcher(
 		logger.Info("nav-dispatch startup reconciliation resolved interrupted dispatches", slog.String("leg", "dropoff"), slog.Int("count", n))
 	}
 
+	// Reservation-time dispatch (MYR-179): a SCHEDULED ride's accept does NOT
+	// push nav (see dispatch.Dispatcher.process); this sweeper fires its
+	// pickup at `scheduledFor` instead, claiming the SAME leg-1 latch. Started
+	// AFTER the reconciliation above so orphaned claims from the previous
+	// process are resolved before new ones are made.
+	startReservationSweeper(ctx, cfg, bus, d, rideRepo, logger)
+
 	logger.Info("nav-dispatch subscriber enabled",
 		slog.Bool("dispatch_enabled", cfg.DispatchEnabled()),
+		slog.Bool("reservation_dispatch_enabled", cfg.ReservationDispatchEnabled()),
 		slog.Bool("signing_transport", transport.Enabled()),
 		slog.Int("retry_max", dispatchRetryMax),
 	)
