@@ -8,10 +8,16 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/store"
 )
 
-// Reservation-dispatch read paths (MYR-179). These pin the two predicates the
-// scheduled-dispatch sweeper trusts: "which reservations are due" and "is this
-// car busy". A drift in either is a dispatch-correctness bug — a reservation
-// dialed early/late, or nav re-pointed at a car mid-ride.
+// Reservation-dispatch store paths (MYR-179). These pin the predicates the
+// scheduled-dispatch sweeper trusts: "which reservations are actionable now",
+// "is this car busy", and the guarded reservation claim. A drift in any of them
+// is a dispatch-correctness bug — a reservation dialed early/late, nav
+// re-pointed at a car mid-ride, or a cancelled ride dialed anyway.
+
+// testExpiryWindow mirrors the sweeper's production lateness ceiling. The due
+// query takes `expiredBefore` (= now - ceiling) rather than the duration, so
+// one clock governs selection and the Go-side deadline alike.
+const testExpiryWindow = 30 * time.Minute
 
 // reservationSeed describes one row the due-selection matrix needs.
 type reservationSeed struct {
@@ -129,7 +135,7 @@ func TestListDueReservations_Selection(t *testing.T) {
 			repo, _ := setupRideRequestRepo(t)
 			id := seedReservation(t, repo, "0000000000000001", tt.seed)
 
-			due, err := repo.ListDueReservations(context.Background(), sweepAt, 100)
+			due, err := repo.ListDueReservations(context.Background(), sweepAt, sweepAt.Add(-testExpiryWindow), 100)
 			if err != nil {
 				t.Fatalf("ListDueReservations: %v", err)
 			}
@@ -162,7 +168,7 @@ func TestListDueReservations_OrdersOldestFirstAndDecrypts(t *testing.T) {
 		store.RideRequestStatusAccepted, timePtr(sweepAt.Add(-90 * time.Minute)), false,
 	})
 
-	due, err := repo.ListDueReservations(context.Background(), sweepAt, 100)
+	due, err := repo.ListDueReservations(context.Background(), sweepAt, sweepAt.Add(-testExpiryWindow), 100)
 	if err != nil {
 		t.Fatalf("ListDueReservations: %v", err)
 	}
@@ -179,8 +185,8 @@ func TestListDueReservations_OrdersOldestFirstAndDecrypts(t *testing.T) {
 		t.Errorf("pickup = (%v, %v), want the decrypted (%v, %v)",
 			due[0].Pickup.Latitude, due[0].Pickup.Longitude, want.Latitude, want.Longitude)
 	}
-	if due[0].ScheduledFor == nil {
-		t.Error("ScheduledFor nil on a due reservation, want the reservation instant")
+	if due[0].ScheduledFor.IsZero() {
+		t.Error("ScheduledFor zero on a due reservation, want the reservation instant")
 	}
 }
 
@@ -196,7 +202,7 @@ func TestListDueReservations_RespectsLimit(t *testing.T) {
 		})
 	}
 
-	due, err := repo.ListDueReservations(context.Background(), sweepAt, 2)
+	due, err := repo.ListDueReservations(context.Background(), sweepAt, sweepAt.Add(-testExpiryWindow), 2)
 	if err != nil {
 		t.Fatalf("ListDueReservations: %v", err)
 	}
