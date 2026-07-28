@@ -215,7 +215,7 @@ paths:
       x-role-masks:
         owner: ['*']
         viewer:
-          description: All VehicleState fields except the full vin, which is owner-only (party-scoped) per MYR-279. softwareVersion and trim stay visible to viewers (P0, non-identifying), and so does licensePlate -- MYR-286 put it in BOTH role masks by deliberate product decision, because the plate exists so a rider can identify the correct car at pickup.
+          description: All VehicleState fields except the full vin, which is owner-only (party-scoped) per MYR-279. softwareVersion and trim stay visible to viewers (P0, non-identifying), as do their MYR-320 siblings trimLabel and fsdVersion (same tier, same treatment -- the viewer list is derived as owner-minus-vin, so they are inherited rather than separately granted), and so does licensePlate -- MYR-286 put it in BOTH role masks by deliberate product decision, because the plate exists so a rider can identify the correct car at pickup.
           excludes:
             - vin
         limited_viewer:
