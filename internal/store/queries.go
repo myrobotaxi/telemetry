@@ -108,9 +108,28 @@ const vehicleListHasActiveRideExpr = `EXISTS (
 		SELECT 1
 		FROM go_ride_requests r
 		WHERE r.vehicle_id = "Vehicle"."id"
-		  AND r.scheduled_for IS NULL
-		  AND r.status IN ('accepted', 'enroute', 'arrived')
+		  AND ` + activeInstantRidePredicate + `
 	) AS "hasActiveRide"`
+
+// activeInstantRidePredicate is the single definition of "this car is BUSY
+// right now" — character-for-character the predicate of the partial unique
+// index `uq_go_ride_requests_active_instant_vehicle` (migration 0013,
+// MYR-266), written against an aliased `r` so every consumer shares it:
+//
+//   - vehicleListHasActiveRideExpr — the `hasActiveRide` catalog flag (MYR-233).
+//   - queryRideRequestVehicleBusy — the reservation sweeper's vehicle-busy
+//     hold (MYR-179): a reservation coming due must not dial nav at a car that
+//     is mid-ride, so it holds and retries instead of claiming.
+//
+// Extracted (MYR-179) precisely so a THIRD reader cannot drift from the index
+// it mirrors. Excluded, mirroring the index: SCHEDULED rides (a reservation
+// never makes the car busy — which is also why one reservation coming due
+// cannot block another for the same car; that is a v1 boundary, see
+// rest-api.md §7.8), `requested` (many riders may hold pending requests
+// against one idle car), and the terminal states. A new committed lifecycle
+// state must be added HERE and to 0013's index in the same PR.
+const activeInstantRidePredicate = `r.scheduled_for IS NULL
+		  AND r.status IN ('accepted', 'enroute', 'arrived')`
 
 // queryVehiclesByUserList is the lean read path for the catalog list
 // endpoint. Companion to queryVehiclesByUser (wide read, kept for
@@ -219,7 +238,7 @@ WHERE "id" = $1`
 // global (one instance, all VINs) and keys in-memory state by VIN. A
 // two-step (open drives → per-row VIN lookup) would round-trip per
 // vehicle for no benefit. The set is bounded by the live-fleet size,
-// and `endTime IS NULL OR endTime = ''` is by definition rare in steady
+// and `endTime IS NULL OR endTime = ”` is by definition rare in steady
 // state.
 //
 // Predicate covers both representations because the cleanup-binary

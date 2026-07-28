@@ -949,8 +949,8 @@ func TestNewEvent_UniqueIDs(t *testing.T) {
 func TestNewEvent_AllPayloadTypes(t *testing.T) {
 	// Verify NewEvent correctly derives the topic for every domain event type.
 	tests := []struct {
-		name     string
-		payload  EventPayload
+		name      string
+		payload   EventPayload
 		wantTopic Topic
 	}{
 		{

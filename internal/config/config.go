@@ -24,6 +24,9 @@ type Config struct {
 	mapboxToken     string
 	teslaPublicKey  string
 	dispatchEnabled bool
+	// reservationDispatchEnabled is the MYR-179 scheduled-dispatch sweeper
+	// kill-switch, independent of dispatchEnabled.
+	reservationDispatchEnabled bool
 }
 
 // MonitoringConfig holds observability probe settings.
@@ -246,6 +249,16 @@ func (c *Config) TeslaPublicKey() string { return c.teslaPublicKey }
 // the vehicle. Defaults to true; set DISPATCH_ENABLED=false to disable
 // without a deploy.
 func (c *Config) DispatchEnabled() bool { return c.dispatchEnabled }
+
+// ReservationDispatchEnabled is the MYR-179 scheduled-dispatch kill-switch.
+// When false the reservation sweeper does not run at all: a scheduled ride's
+// pickup nav is never fired at its `scheduledFor` instant, and due
+// reservations stay accepted / latch-unclaimed / outcome-absent (so enabling
+// it later picks them up rather than having burned them). Deliberately
+// separate from DispatchEnabled so scheduled dispatch can be stopped without
+// affecting instant rides. Defaults to true; set
+// RESERVATION_DISPATCH_ENABLED=false to disable without a deploy.
+func (c *Config) ReservationDispatchEnabled() bool { return c.reservationDispatchEnabled }
 
 // Load reads configuration from the JSON file at configPath, overlays
 // environment variable overrides, applies defaults for missing optional

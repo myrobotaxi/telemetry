@@ -71,6 +71,22 @@ const (
 	// start: only the winning arrived→enroute write publishes it.
 	TopicRideStarted Topic = "ride.started"
 
+	// TopicRideDue is the reservation-due seam (MYR-179): published once when
+	// a SCHEDULED ride reaches its `scheduledFor` instant and the reservation
+	// sweeper wins the leg-1 dispatch claim — i.e. exactly when the pickup nav
+	// push is about to fire for that reservation. The payload is RideDueEvent.
+	// Internal-only — never broadcast to WS clients (the client-visible signal
+	// is the same `dispatchStatus` annotation an instant ride gets).
+	//
+	// NO subscriber exists yet; the bus tolerates zero subscribers and the
+	// publish is fire-and-forget + drop-safe (a publish failure NEVER affects
+	// the dispatch). It exists so the planned rider push-notification
+	// ("your car is on the way") has a seam to hang off without re-opening the
+	// dispatch path. Exactly-once per due ride by construction: only the
+	// sweeper that WON the `dispatched_at` claim publishes, and that latch
+	// admits one winner for the ride's whole lifetime.
+	TopicRideDue Topic = "ride.due"
+
 	// TopicVehicleDeleted is published when a Vehicle row is deleted from
 	// the Prisma-owned "Vehicle" table (sourced from a Postgres
 	// LISTEN/NOTIFY channel; see internal/store/notify_listener.go). The

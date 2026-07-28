@@ -115,3 +115,31 @@ type RideStartedEvent struct {
 
 // EventTopic returns TopicRideStarted.
 func (RideStartedEvent) EventTopic() Topic { return TopicRideStarted }
+
+// RideDueEvent is the reservation-due seam (MYR-179): published once when a
+// SCHEDULED ride reaches its ScheduledFor instant and the reservation sweeper
+// wins the leg-1 dispatch claim — the moment the pickup nav push fires for
+// that reservation. Deliberately SUMMARY-ONLY (ids + the two instants): unlike
+// RideAcceptedEvent it carries no places and no passenger contact, because its
+// intended consumer is a rider push notification, not a Tesla command — a
+// future consumer that needs the pickup refetches the ride.
+//
+// No subscriber exists yet; the publish is fire-and-forget and drop-safe.
+// Internal-only — never broadcast to WS clients.
+type RideDueEvent struct {
+	BasePayload
+	RideRequestID string
+	VehicleID     string
+	RiderID       string
+	OwnerID       string
+	// ScheduledFor is the reservation instant that came due.
+	ScheduledFor time.Time
+	// DueAt is the sweeper-clock instant the reservation was actually picked
+	// up. It is >= ScheduledFor by up to one sweep interval (plus any
+	// vehicle-busy hold), so a consumer can tell a punctual dispatch from a
+	// held-then-released one without re-reading the row.
+	DueAt time.Time
+}
+
+// EventTopic returns TopicRideDue.
+func (RideDueEvent) EventTopic() Topic { return TopicRideDue }
