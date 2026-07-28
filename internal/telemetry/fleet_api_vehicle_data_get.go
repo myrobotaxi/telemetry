@@ -46,11 +46,28 @@ type VehicleDataVehicleState struct {
 }
 
 // VehicleDataVehicleConfig is the vehicle_config sub-object subset: the trim
-// badge and the ventilated-seat capability. Neither is a streamed telemetry
-// field, so this REST read is their ONLY source. Absent fields decode to nil and
-// are skipped by the mapper.
+// badge, the human-readable trim label, the exterior colour and the
+// ventilated-seat capability. None is a streamed telemetry field, so this REST
+// read is their ONLY source. Absent fields decode to nil and are skipped by the
+// mapper.
 //
 // MYR-279: trim is the badge string (e.g. "Performance", "Long Range").
+//
+// MYR-320: PerformancePackage is the HUMAN-READABLE trim/performance
+// designation (live-verified: "Performance" on the client's own car). It is the
+// display-safe sibling of TrimBadging, which carries the RAW BADGE CODE (e.g.
+// "p74d") and is explicitly NOT display-safe. Both are kept — neither replaces
+// the other — and only the label reaches a consumer as `trimLabel`.
+//
+// MYR-320: ExteriorColor is Tesla's own colour name (live-verified:
+// "Quicksilver"). Unlike every other field on this struct it does NOT travel as
+// a telemetry field: the wire already exposes `color`, emitted straight from the
+// Prisma-owned "Vehicle".color column, which nothing has ever populated. So the
+// decode feeds a narrow application-runtime UPDATE of that column
+// (store.VehicleRepo.UpdateVehicleColor, data-lifecycle.md §1.4) and the value
+// then flows to both the snapshot and the vehicles-list with ZERO contract
+// change. An EMPTY string is never written: it would blank a colour a human
+// (or an earlier read) already got right.
 //
 // MYR-308: HasSeatCooling is whether the car is EQUIPPED WITH ventilated (cooled)
 // front seats — a SPEC fact, not a runtime state. Contrast the streamed
@@ -62,8 +79,10 @@ type VehicleDataVehicleState struct {
 // pre-MYR-308 telemetry-presence heuristic. Only an explicit false is the
 // authoritative no.
 type VehicleDataVehicleConfig struct {
-	TrimBadging    *string `json:"trim_badging"`
-	HasSeatCooling *bool   `json:"has_seat_cooling"`
+	TrimBadging        *string `json:"trim_badging"`
+	PerformancePackage *string `json:"performance_package"`
+	ExteriorColor      *string `json:"exterior_color"`
+	HasSeatCooling     *bool   `json:"has_seat_cooling"`
 }
 
 // VehicleDataClimateState is the climate_state sub-object subset: whether the
