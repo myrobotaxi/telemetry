@@ -118,9 +118,9 @@ type activeDrive struct {
 	lastOdometer        float64 // most recent odometer reading (miles)
 	odometerBaselineSet bool    // true once startOdometer holds a real observed value
 	lastLocation        events.Location
-	lastTimestamp       time.Time
-	lastSOC             float64 // most recent SOC for EndChargeLevel
-	lastEnergy          float64 // most recent energyRemaining for EnergyDelta
+	lastTimestamp  time.Time
+	lastSOC        float64 // most recent SOC for EndChargeLevel
+	lastEnergy     float64 // most recent energyRemaining for EnergyDelta
 
 	// startedWall and lastMovementAt are wall-clock (Detector.now)
 	// timestamps backing the watchdog's stall and duration-cap end

@@ -288,3 +288,4 @@ func CountPlaintextRemaining(ctx context.Context, p pool) (map[string]int, error
 	}
 	return out, nil
 }
+

@@ -240,14 +240,14 @@ func FuzzDecryptString(f *testing.F) {
 	}
 
 	// Seed corpus: documented error paths + a valid ciphertext.
-	f.Add("")                                                  // empty sentinel
-	f.Add("!!!not-base64!!!")                                  // base64 decode failure
-	f.Add(base64.StdEncoding.EncodeToString([]byte{0x00}))     // too short, version 0x00
-	f.Add(base64.StdEncoding.EncodeToString(make([]byte, 28))) // one short of MinCiphertextLen
-	f.Add(base64.StdEncoding.EncodeToString(make([]byte, 29))) // exactly min, version 0x00 = invalid
+	f.Add("")                                                    // empty sentinel
+	f.Add("!!!not-base64!!!")                                    // base64 decode failure
+	f.Add(base64.StdEncoding.EncodeToString([]byte{0x00}))       // too short, version 0x00
+	f.Add(base64.StdEncoding.EncodeToString(make([]byte, 28)))   // one short of MinCiphertextLen
+	f.Add(base64.StdEncoding.EncodeToString(make([]byte, 29)))   // exactly min, version 0x00 = invalid
 	tooLong := make([]byte, 29)
 	tooLong[0] = 0xFF
-	f.Add(base64.StdEncoding.EncodeToString(tooLong)) // unknown version
+	f.Add(base64.StdEncoding.EncodeToString(tooLong))            // unknown version
 	if ct, err := enc.EncryptString("seed"); err == nil {
 		f.Add(ct)
 	}

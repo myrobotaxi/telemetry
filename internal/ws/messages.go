@@ -120,10 +120,10 @@ type connectivityPayload struct {
 // (omitempty) for an on-demand ("Now") request. Full record (pickup/dropoff
 // places, passenger) is fetched via GET /api/ride-requests/{id}.
 type rideRequestCreatedPayload struct {
-	RideRequestID string `json:"rideRequestId"`
-	VehicleID     string `json:"vehicleId"`
-	RiderID       string `json:"riderId"`
-	Status        string `json:"status"`
+	RideRequestID string  `json:"rideRequestId"`
+	VehicleID     string  `json:"vehicleId"`
+	RiderID       string  `json:"riderId"`
+	Status        string  `json:"status"`
 	// RequesterName is the requester's resolved display name (MYR-229),
 	// omitted when the rider has no identity row. P1 PII — never logged.
 	RequesterName *string `json:"requesterName,omitempty"`
@@ -175,3 +175,4 @@ type pingPayload struct {
 type pongPayload struct {
 	Nonce string `json:"nonce,omitempty"`
 }
+

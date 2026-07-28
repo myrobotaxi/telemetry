@@ -597,10 +597,10 @@ func TestDecoder_DecodePayload_ChargeAtomicGroup4Field(t *testing.T) {
 	dec := NewDecoder()
 
 	payload := makePayload([]*tpb.Datum{
-		makeDatum(tpb.Field_Soc, stringVal("68.2")),            // chargeLevel
-		makeDatum(tpb.Field_EstBatteryRange, stringVal("172")), // estimatedRange
-		makeDatum(tpb.Field_DetailedChargeState, detailedChargeStateVal(tpb.DetailedChargeStateValue_DetailedChargeStateCharging)), // chargeState (MYR-42: sources from proto 179)
-		makeDatum(tpb.Field_TimeToFullCharge, &tpb.Value{Value: &tpb.Value_DoubleValue{DoubleValue: 1.0667}}),                      // timeToFull
+		makeDatum(tpb.Field_Soc, stringVal("68.2")),                                                                                  // chargeLevel
+		makeDatum(tpb.Field_EstBatteryRange, stringVal("172")),                                                                       // estimatedRange
+		makeDatum(tpb.Field_DetailedChargeState, detailedChargeStateVal(tpb.DetailedChargeStateValue_DetailedChargeStateCharging)),   // chargeState (MYR-42: sources from proto 179)
+		makeDatum(tpb.Field_TimeToFullCharge, &tpb.Value{Value: &tpb.Value_DoubleValue{DoubleValue: 1.0667}}),                        // timeToFull
 	})
 
 	evt, fieldErrs, err := dec.DecodePayload(payload)

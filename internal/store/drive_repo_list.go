@@ -36,7 +36,7 @@ import (
 // values (reverse-geocoded place names + street addresses) and stay
 // well within the lean-projection budget. Empty strings are
 // represented as `""` (the Prisma columns are `TEXT NOT NULL DEFAULT
-// ”`) and are surfaced unchanged to the wire layer; the handler
+// ''`) and are surfaced unchanged to the wire layer; the handler
 // decides how to expose them (e.g., empty string vs. omitted JSON key).
 //
 // MYR-152: FsdMiles + FsdPercentage are included so the list can show

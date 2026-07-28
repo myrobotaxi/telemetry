@@ -35,7 +35,7 @@ func (b *fakeBus) Subscribe(_ events.Topic, _ events.Handler) (events.Subscripti
 	return events.Subscription{}, nil
 }
 func (b *fakeBus) Unsubscribe(_ events.Subscription) error { return nil }
-func (b *fakeBus) Close(_ context.Context) error           { return nil }
+func (b *fakeBus) Close(_ context.Context) error          { return nil }
 
 func newTestListener(bus events.Bus) *NotifyListener {
 	return NewNotifyListener(NotifyListenerConfig{}, bus, slog.New(slog.NewTextHandler(discardWriter{}, nil)))

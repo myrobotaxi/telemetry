@@ -4,24 +4,24 @@ import "math"
 
 // RoutePosition holds the computed position along a route after an advance.
 type RoutePosition struct {
-	Lat            float64
-	Lng            float64
-	Heading        float64 // degrees, 0=north
-	DistanceRemain float64 // miles remaining to destination
-	Finished       bool    // true when route is complete
+	Lat              float64
+	Lng              float64
+	Heading          float64 // degrees, 0=north
+	DistanceRemain   float64 // miles remaining to destination
+	Finished         bool    // true when route is complete
 }
 
 // RouteFollower tracks progress along a sequence of [lng, lat] waypoints.
 // On each call to Advance it moves forward by the distance implied by
 // the given speed and time interval, interpolating between waypoints.
 type RouteFollower struct {
-	coords        [][2]float64 // [lng, lat]
-	segIdx        int          // index of current segment start
-	segFraction   float64      // fraction [0,1) along current segment
-	totalMiles    float64      // total route distance
-	traveledMiles float64      // distance traveled so far
-	segLengths    []float64    // precomputed segment lengths in miles
-	finished      bool
+	coords         [][2]float64 // [lng, lat]
+	segIdx         int          // index of current segment start
+	segFraction    float64      // fraction [0,1) along current segment
+	totalMiles     float64      // total route distance
+	traveledMiles  float64      // distance traveled so far
+	segLengths     []float64    // precomputed segment lengths in miles
+	finished       bool
 }
 
 // NewRouteFollower creates a follower from a RouteFile. It precomputes

@@ -185,3 +185,4 @@ func derefFloatOrZero(p *float64) float64 {
 	}
 	return *p
 }
+

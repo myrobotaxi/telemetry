@@ -126,8 +126,8 @@ func TestDecryptGCM_ShortInput(t *testing.T) {
 		nil,
 		{},
 		{0x00},
-		bytes.Repeat([]byte{0xAB}, nonceLen), // nonce only
-		bytes.Repeat([]byte{0xAB}, nonceLen+gcmTagLen-1), // 1 byte short of min
+		bytes.Repeat([]byte{0xAB}, nonceLen),               // nonce only
+		bytes.Repeat([]byte{0xAB}, nonceLen+gcmTagLen-1),   // 1 byte short of min
 	}
 	for i, blob := range tests {
 		if _, err := decryptGCM(key, blob); !errors.Is(err, ErrCiphertextTooShort) {

@@ -35,10 +35,10 @@ var fieldConverters = map[tpb.Field]func(*tpb.Value) (events.TelemetryValue, err
 	tpb.Field_ChargePortDoorOpen: convertBool,
 	// MYR-259: ServiceMode (proto 159) is a boolean; some firmware sends it
 	// as the string "true"/"false", both of which convertBool handles.
-	tpb.Field_ServiceMode:       convertBool,
-	tpb.Field_DefrostMode:       convertDefrostMode,
-	tpb.Field_ClimateKeeperMode: convertClimateKeeperMode,
-	tpb.Field_HvacPower:         convertHvacPower,
+	tpb.Field_ServiceMode: convertBool,
+	tpb.Field_DefrostMode:        convertDefrostMode,
+	tpb.Field_ClimateKeeperMode:  convertClimateKeeperMode,
+	tpb.Field_HvacPower:          convertHvacPower,
 	// MYR-252 Group B enum + Doors decode.
 	tpb.Field_HvacAutoMode:        convertHvacAutoMode,
 	tpb.Field_MediaPlaybackStatus: convertMediaStatus,

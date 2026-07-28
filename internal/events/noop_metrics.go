@@ -6,8 +6,8 @@ type NoopBusMetrics struct{}
 
 var _ BusMetrics = NoopBusMetrics{}
 
-func (NoopBusMetrics) IncPublished(Topic)                    {}
-func (NoopBusMetrics) IncDelivered(Topic)                    {}
-func (NoopBusMetrics) IncDropped(Topic)                      {}
-func (NoopBusMetrics) ObservePublishDuration(Topic, float64) {}
-func (NoopBusMetrics) SetSubscriberCount(Topic, int)         {}
+func (NoopBusMetrics) IncPublished(Topic)                        {}
+func (NoopBusMetrics) IncDelivered(Topic)                        {}
+func (NoopBusMetrics) IncDropped(Topic)                          {}
+func (NoopBusMetrics) ObservePublishDuration(Topic, float64)     {}
+func (NoopBusMetrics) SetSubscriberCount(Topic, int)             {}

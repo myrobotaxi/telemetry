@@ -47,23 +47,23 @@ type NoopReceiverMetrics struct{}
 
 var _ ReceiverMetrics = NoopReceiverMetrics{}
 
-func (NoopReceiverMetrics) IncMessagesReceived(string)         {}
-func (NoopReceiverMetrics) IncDecodeErrors(string)             {}
-func (NoopReceiverMetrics) IncRateLimited(string)              {}
-func (NoopReceiverMetrics) SetConnectedVehicles(int)           {}
-func (NoopReceiverMetrics) ObserveMessageLatency(float64)      {}
+func (NoopReceiverMetrics) IncMessagesReceived(string)      {}
+func (NoopReceiverMetrics) IncDecodeErrors(string)          {}
+func (NoopReceiverMetrics) IncRateLimited(string)           {}
+func (NoopReceiverMetrics) SetConnectedVehicles(int)        {}
+func (NoopReceiverMetrics) ObserveMessageLatency(float64)   {}
 func (NoopReceiverMetrics) IncFieldDecodeError(string, string) {}
-func (NoopReceiverMetrics) IncRejectedVINNotAuthorized()       {}
+func (NoopReceiverMetrics) IncRejectedVINNotAuthorized() {}
 
 // PrometheusReceiverMetrics implements ReceiverMetrics using Prometheus.
 type PrometheusReceiverMetrics struct {
-	messagesReceived             *prometheus.CounterVec
-	decodeErrors                 *prometheus.CounterVec
-	rateLimited                  *prometheus.CounterVec
-	fieldDecodeErrors            *prometheus.CounterVec
+	messagesReceived  *prometheus.CounterVec
+	decodeErrors      *prometheus.CounterVec
+	rateLimited       *prometheus.CounterVec
+	fieldDecodeErrors          *prometheus.CounterVec
 	inboundRejectedNotAuthorized *prometheus.CounterVec
-	connectedVehicles            prometheus.Gauge
-	messageLatency               prometheus.Histogram
+	connectedVehicles prometheus.Gauge
+	messageLatency    prometheus.Histogram
 }
 
 var _ ReceiverMetrics = (*PrometheusReceiverMetrics)(nil)

@@ -324,8 +324,8 @@ func TestRideRequestRepo_UpdateStatus(t *testing.T) {
 		wantCompleted bool
 	}{
 		{
-			name:         "accepted stamps accepted_at only",
-			transitions:  []store.RideRequestStatus{store.RideRequestStatusAccepted},
+			name:        "accepted stamps accepted_at only",
+			transitions: []store.RideRequestStatus{store.RideRequestStatusAccepted},
 			wantAccepted: true,
 		},
 		{
