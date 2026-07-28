@@ -115,38 +115,45 @@ func (d *Dispatcher) runLeg(ctx context.Context, leg dispatchLeg) {
 		)
 		return
 	}
-	d.runClaimedLeg(ctx, leg)
+	_ = d.runClaimedLeg(ctx, leg)
 }
 
 // runClaimedLeg is the post-claim half of the pipeline: (kill-switch | resolve
-// → command) → record. The caller MUST already hold the leg's claim.
+// → command) → record. The caller MUST already hold the leg's claim. It
+// returns the RESOLVED outcome (the same value it just recorded).
 //
 // Split out from runLeg by MYR-179 so the reservation sweeper can interpose
-// between the claim and the push — it must evaluate the vehicle-busy hold
-// BEFORE claiming, and publish the `ride.due` seam immediately AFTER winning
-// the claim — while still running the identical resolve/retry/record
-// machinery. The sweeper reuses this rather than forking it, so a change to
-// the retry policy or the outcome contract lands on both paths at once.
-func (d *Dispatcher) runClaimedLeg(ctx context.Context, leg dispatchLeg) {
+// between the claim and the push — it must evaluate expiry and the
+// vehicle-busy hold BEFORE claiming — while still running the identical
+// resolve/retry/record machinery. The sweeper reuses this rather than forking
+// it, so a change to the retry policy or the outcome contract lands on both
+// paths at once.
+//
+// The returned outcome exists for the sweeper's `ride.due` seam: that event
+// means "your car is on the way", so it may only fire once the push actually
+// resolved `sent`. The instant path ignores the return value — its outcome is
+// already persisted and has no downstream seam.
+func (d *Dispatcher) runClaimedLeg(ctx context.Context, leg dispatchLeg) Outcome {
 	if !d.cfg.Enabled {
 		d.record(ctx, leg, "", OutcomeSkipped, nil, "")
-		return
+		return OutcomeSkipped
 	}
 
 	vin, code := d.resolveVIN(ctx, leg.vehicleID)
 	if code != nil {
 		d.record(ctx, leg, "", OutcomeFailed, code, "")
-		return
+		return OutcomeFailed
 	}
 
 	token, code := d.resolveToken(ctx, leg.ownerID)
 	if code != nil {
 		d.record(ctx, leg, vin, OutcomeFailed, code, "")
-		return
+		return OutcomeFailed
 	}
 
 	outcome, ecode, detail := d.executeWithRetry(ctx, vin, token, leg.coord)
 	d.record(ctx, leg, vin, outcome, ecode, detail)
+	return outcome
 }
 
 // record persists the outcome and emits the single per-attempt audit line.

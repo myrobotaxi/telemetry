@@ -7,33 +7,64 @@ import (
 	"testing"
 	"time"
 
+	"github.com/myrobotaxi/telemetry/internal/commands"
 	"github.com/myrobotaxi/telemetry/internal/events"
 )
 
 // --- fakes -----------------------------------------------------------------
 
-// latchStore models the DATABASE latch rather than a per-call script:
-// ClaimDispatch is atomic and the FIRST caller for a ride id wins, forever.
-// That is the property scheduled dispatch inherits from MYR-176, so the fake
-// has to reproduce it faithfully or the concurrency tests prove nothing. One
-// instance is shared by every sweeper in a test, exactly as one database is
-// shared by every server process in production.
+// latchStore models the DATABASE, not a per-call script. ClaimDispatch and
+// ClaimReservationDispatch are atomic and the FIRST caller for a ride id wins,
+// forever; the reservation claim additionally refuses a ride that has left
+// `accepted`, exactly as its SQL `status = 'accepted'` conjunct does. Those are
+// the properties scheduled dispatch inherits, so the fake has to reproduce them
+// faithfully or the concurrency tests prove nothing. One instance is shared by
+// every sweeper in a test, exactly as one database is shared by every server
+// process in production.
 type latchStore struct {
-	mu       sync.Mutex
-	claimed  map[string]bool
-	claims   int // total claim ATTEMPTS
-	won      int // attempts that won
-	recorded []recordCall
-	claimErr error
+	mu        sync.Mutex
+	claimed   map[string]bool
+	moved     map[string]bool // ride no longer `accepted` (cancelled / picked-up)
+	claims    int             // total claim ATTEMPTS
+	won       int             // attempts that won
+	recorded  []recordCall
+	claimErr  error
+	callOrder []string // interleaving of busy/claim/record, for ordering proofs
+
+	// beforeClaim runs immediately before a reservation claim decides, with no
+	// lock held. It models a concurrent lifecycle write landing in the
+	// select→claim window.
+	beforeClaim func(rideID string)
 }
 
 func newLatchStore() *latchStore {
-	return &latchStore{claimed: make(map[string]bool)}
+	return &latchStore{claimed: make(map[string]bool), moved: make(map[string]bool)}
 }
 
 func (s *latchStore) ClaimDispatch(_ context.Context, rideID string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.claimLocked(rideID)
+}
+
+// ClaimReservationDispatch is the sweeper's claim: same latch, plus the
+// status re-check.
+func (s *latchStore) ClaimReservationDispatch(_ context.Context, rideID string) (bool, error) {
+	if s.beforeClaim != nil {
+		s.beforeClaim(rideID)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.callOrder = append(s.callOrder, "claim:"+rideID)
+	if s.moved[rideID] {
+		// The guarded UPDATE matches no row: the ride is no longer accepted.
+		s.claims++
+		return false, nil
+	}
+	return s.claimLocked(rideID)
+}
+
+func (s *latchStore) claimLocked(rideID string) (bool, error) {
 	s.claims++
 	if s.claimErr != nil {
 		return false, s.claimErr
@@ -46,7 +77,15 @@ func (s *latchStore) ClaimDispatch(_ context.Context, rideID string) (bool, erro
 	return true, nil
 }
 
-func (s *latchStore) RecordDispatchOutcome(_ context.Context, _ string, status Outcome, errCode *string) error {
+// moveOn takes a ride out of `accepted` (a rider cancel, or an owner marking
+// picked-up) so any later claim for it must lose.
+func (s *latchStore) moveOn(rideID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.moved[rideID] = true
+}
+
+func (s *latchStore) RecordDispatchOutcome(_ context.Context, rideID string, status Outcome, errCode *string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rc := recordCall{status: status}
@@ -54,6 +93,7 @@ func (s *latchStore) RecordDispatchOutcome(_ context.Context, _ string, status O
 		rc.code = *errCode
 	}
 	s.recorded = append(s.recorded, rc)
+	s.callOrder = append(s.callOrder, "record:"+rideID)
 	return nil
 }
 
@@ -69,24 +109,42 @@ func (s *latchStore) snapshot() (claims, won int, recorded []recordCall) {
 	return s.claims, s.won, append([]recordCall(nil), s.recorded...)
 }
 
-// fakeReservationStore serves a fixed due list and a per-vehicle busy answer.
-type fakeReservationStore struct {
-	mu        sync.Mutex
-	due       []DueReservation
-	busy      map[string]bool
-	listErr   error
-	busyErr   error
-	listCnt   int
-	busyCnt   int
-	lastNow   time.Time
-	lastLimit int
+func (s *latchStore) order() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.callOrder...)
 }
 
-func (f *fakeReservationStore) ListDueReservations(_ context.Context, now time.Time, limit int) ([]DueReservation, error) {
+// fakeReservationStore serves a fixed due list and a per-vehicle busy answer.
+// The claim delegates to the shared latch so a test's sweepers all contend on
+// one "database".
+type fakeReservationStore struct {
+	mu                sync.Mutex
+	latch             *latchStore
+	due               []DueReservation
+	busy              map[string]bool
+	listErr           error
+	busyErr           error
+	listCnt           int
+	busyCnt           int
+	lastNow           time.Time
+	lastExpiredBefore time.Time
+	lastLimit         int
+
+	// beforeBusy runs at the start of every busy check, with no lock held.
+	beforeBusy func(vehicleID string)
+}
+
+func (f *fakeReservationStore) ListDueReservations(
+	_ context.Context,
+	now, expiredBefore time.Time,
+	limit int,
+) ([]DueReservation, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.listCnt++
 	f.lastNow = now
+	f.lastExpiredBefore = expiredBefore
 	f.lastLimit = limit
 	if f.listErr != nil {
 		return nil, f.listErr
@@ -95,13 +153,67 @@ func (f *fakeReservationStore) ListDueReservations(_ context.Context, now time.T
 }
 
 func (f *fakeReservationStore) VehicleHasActiveInstantRide(_ context.Context, vehicleID string) (bool, error) {
+	if f.beforeBusy != nil {
+		f.beforeBusy(vehicleID)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.busyCnt++
+	if f.latch != nil {
+		f.latch.mu.Lock()
+		f.latch.callOrder = append(f.latch.callOrder, "busy:"+vehicleID)
+		f.latch.mu.Unlock()
+	}
 	if f.busyErr != nil {
 		return false, f.busyErr
 	}
 	return f.busy[vehicleID], nil
+}
+
+func (f *fakeReservationStore) ClaimReservationDispatch(ctx context.Context, rideID string) (bool, error) {
+	return f.latch.ClaimReservationDispatch(ctx, rideID)
+}
+
+func (f *fakeReservationStore) setBusy(vehicleID string, busy bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.busy[vehicleID] = busy
+}
+
+// syncExecutor is a race-safe fakeExecutor. The sweeper now runs its
+// reservations on real concurrent workers, so the recorder has to be safe under
+// -race; it can also BLOCK a chosen vehicle's push, which is how the
+// pool-isolation test saturates the sweeper.
+type syncExecutor struct {
+	mu    sync.Mutex
+	reqs  []commands.Request
+	err   error
+	block chan struct{} // non-nil: every call waits on it before returning
+}
+
+func (e *syncExecutor) Execute(ctx context.Context, req commands.Request) (commands.Result, error) {
+	e.mu.Lock()
+	e.reqs = append(e.reqs, req)
+	block, err := e.block, e.err
+	e.mu.Unlock()
+
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return commands.Result{}, ctx.Err()
+		}
+	}
+	if err != nil {
+		return commands.Result{}, err
+	}
+	return commands.Result{Command: req.Command, Applied: true}, nil
+}
+
+func (e *syncExecutor) calls() []commands.Request {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]commands.Request(nil), e.reqs...)
 }
 
 // fakeBus records published events. Subscribe/Unsubscribe/Close are unused by
@@ -145,6 +257,8 @@ func (b *fakeBus) dueEvents() []events.RideDueEvent {
 var (
 	testScheduledFor = time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	testSweepNow     = testScheduledFor.Add(10 * time.Second)
+	// testMaxLateness mirrors the production ceiling the harness configures.
+	testMaxLateness = 30 * time.Minute
 )
 
 func testReservation() DueReservation {
@@ -160,16 +274,19 @@ func testReservation() DueReservation {
 
 // newSweeperHarness builds a sweeper over a real Dispatcher (so the reused
 // runClaimedLeg machinery is genuinely exercised) with a controllable clock.
+// It wires the reservation store's claim onto the shared latch, mirroring
+// production where both go to the same row.
 func newSweeperHarness(
 	t *testing.T,
 	latch *latchStore,
-	resStore ReservationStore,
+	resStore *fakeReservationStore,
 	bus events.Bus,
 	now func() time.Time,
 	dispatchEnabled bool,
-) (*ReservationSweeper, *fakeExecutor) {
+) (*ReservationSweeper, *syncExecutor) {
 	t.Helper()
-	exec := &fakeExecutor{}
+	resStore.latch = latch
+	exec := &syncExecutor{}
 	d := New(
 		&fakeVehicleResolver{vin: "5YJ3E1EA7KF000001"},
 		&fakeTokenSource{token: "tok"},
@@ -181,7 +298,7 @@ func newSweeperHarness(
 	s := NewReservationSweeper(d, resStore, bus, ReservationConfig{
 		Enabled:      true,
 		Interval:     time.Millisecond,
-		BusyHold:     30 * time.Minute,
+		MaxLateness:  testMaxLateness,
 		SweepTimeout: 5 * time.Second,
 	}, nil).withClock(now)
 	return s, exec
@@ -225,7 +342,9 @@ func TestProcess_ScheduledAcceptDefersDispatch(t *testing.T) {
 
 // TestProcess_InstantAcceptStillDispatches is the regression guard: the accept
 // deferral must be scoped to reservations only. An instant ride keeps
-// dispatching synchronously on accept exactly as it did before MYR-179.
+// dispatching synchronously on accept exactly as it did before MYR-179 — and
+// through the UNGUARDED ClaimDispatch, so its behaviour is byte-identical to
+// MYR-176.
 func TestProcess_InstantAcceptStillDispatches(t *testing.T) {
 	latch := newLatchStore()
 	exec := &fakeExecutor{}
@@ -257,7 +376,7 @@ func TestProcess_InstantAcceptStillDispatches(t *testing.T) {
 // --- sweeper: the happy path ----------------------------------------------
 
 // TestSweep_DispatchesDueReservation walks the whole reservation path: due row
-// → busy check → claim → ride.due → the same nav push an instant accept makes.
+// → busy check → claim → the same nav push an instant accept makes → ride.due.
 func TestSweep_DispatchesDueReservation(t *testing.T) {
 	latch := newLatchStore()
 	resStore := &fakeReservationStore{due: []DueReservation{testReservation()}, busy: map[string]bool{}}
@@ -265,7 +384,6 @@ func TestSweep_DispatchesDueReservation(t *testing.T) {
 	s, exec := newSweeperHarness(t, latch, resStore, bus, func() time.Time { return testSweepNow }, true)
 
 	res := s.sweepOnce(context.Background())
-	s.dispatcher.Wait()
 
 	if res.due != 1 || res.dispatched != 1 || res.held != 0 || res.expired != 0 {
 		t.Errorf("sweep = %+v, want one due reservation dispatched", res)
@@ -277,11 +395,12 @@ func TestSweep_DispatchesDueReservation(t *testing.T) {
 	if len(recorded) != 1 || recorded[0].status != OutcomeSent {
 		t.Errorf("recorded = %v, want one sent outcome", recorded)
 	}
-	if len(exec.calls) != 1 {
-		t.Fatalf("Tesla calls = %d, want 1", len(exec.calls))
+	calls := exec.calls()
+	if len(calls) != 1 {
+		t.Fatalf("Tesla calls = %d, want 1", len(calls))
 	}
 	// The pushed destination must be the reservation's PICKUP.
-	if got := exec.calls[0].Params["value"]; got != "37.7955,-122.3937" {
+	if got := calls[0].Params["value"]; got != "37.7955,-122.3937" {
 		t.Errorf("pushed destination = %v, want the reservation pickup", got)
 	}
 
@@ -307,13 +426,12 @@ func TestSweep_SecondSweepDoesNotRedispatch(t *testing.T) {
 
 	s.sweepOnce(context.Background())
 	second := s.sweepOnce(context.Background())
-	s.dispatcher.Wait()
 
 	if second.dispatched != 0 || second.lost != 1 {
 		t.Errorf("second sweep = %+v, want the claim lost and nothing dispatched", second)
 	}
-	if len(exec.calls) != 1 {
-		t.Errorf("Tesla calls = %d, want 1 across both sweeps", len(exec.calls))
+	if got := len(exec.calls()); got != 1 {
+		t.Errorf("Tesla calls = %d, want 1 across both sweeps", got)
 	}
 	if got := len(bus.dueEvents()); got != 1 {
 		t.Errorf("ride.due events = %d, want exactly 1 per due ride", got)
@@ -331,7 +449,7 @@ func TestSweep_ConcurrentSweepersDispatchExactlyOnce(t *testing.T) {
 
 	const sweepers = 2
 	svs := make([]*ReservationSweeper, sweepers)
-	execs := make([]*fakeExecutor, sweepers)
+	execs := make([]*syncExecutor, sweepers)
 	for i := range svs {
 		resStore := &fakeReservationStore{due: []DueReservation{testReservation()}, busy: map[string]bool{}}
 		svs[i], execs[i] = newSweeperHarness(t, latch, resStore, bus, now, true)
@@ -349,9 +467,6 @@ func TestSweep_ConcurrentSweepersDispatchExactlyOnce(t *testing.T) {
 	}
 	close(start)
 	wg.Wait()
-	for _, s := range svs {
-		s.dispatcher.Wait()
-	}
 
 	claims, won, recorded := latch.snapshot()
 	if claims != sweepers {
@@ -366,7 +481,7 @@ func TestSweep_ConcurrentSweepersDispatchExactlyOnce(t *testing.T) {
 
 	total := 0
 	for _, e := range execs {
-		total += len(e.calls)
+		total += len(e.calls())
 	}
 	if total != 1 {
 		t.Errorf("Tesla calls across sweepers = %d, want exactly 1", total)
@@ -380,16 +495,30 @@ func TestSweep_ConcurrentSweepersDispatchExactlyOnce(t *testing.T) {
 
 // TestSweep_BusyVehicleHoldsThenFailsPastWindow is the busy-hold policy end to
 // end on one reservation: while the car is mid-ride the reservation is held
-// untouched and retried; once it has waited past the hold window it is claimed
-// and failed HONESTLY, with no nav push and no ride.due (the car never came).
+// untouched and retried; once it has waited past the lateness ceiling it is
+// claimed and failed HONESTLY, with no nav push and no ride.due (the car never
+// came).
 func TestSweep_BusyVehicleHoldsThenFailsPastWindow(t *testing.T) {
 	r := testReservation()
 	latch := newLatchStore()
 	resStore := &fakeReservationStore{due: []DueReservation{r}, busy: map[string]bool{r.VehicleID: true}}
 	bus := &fakeBus{}
 
-	clock := testSweepNow
-	s, exec := newSweeperHarness(t, latch, resStore, bus, func() time.Time { return clock }, true)
+	var (
+		clockMu sync.Mutex
+		clock   = testSweepNow
+	)
+	readClock := func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return clock
+	}
+	setClock := func(v time.Time) {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		clock = v
+	}
+	s, exec := newSweeperHarness(t, latch, resStore, bus, readClock, true)
 
 	// Inside the window: hold, and leave the row completely untouched so the
 	// next tick can still dispatch it if the car frees up.
@@ -398,7 +527,7 @@ func TestSweep_BusyVehicleHoldsThenFailsPastWindow(t *testing.T) {
 		if res.held != 1 || res.dispatched != 0 || res.expired != 0 {
 			t.Fatalf("sweep %d = %+v, want held", i, res)
 		}
-		clock = clock.Add(5 * time.Minute)
+		setClock(readClock().Add(5 * time.Minute))
 	}
 	claims, _, recorded := latch.snapshot()
 	if claims != 0 {
@@ -408,10 +537,9 @@ func TestSweep_BusyVehicleHoldsThenFailsPastWindow(t *testing.T) {
 		t.Errorf("recorded during hold = %v, want none", recorded)
 	}
 
-	// Past scheduledFor + 30m with the car still busy: stop waiting.
-	clock = r.ScheduledFor.Add(30*time.Minute + time.Second)
+	// Past scheduledFor + the ceiling with the car still busy: stop waiting.
+	setClock(r.ScheduledFor.Add(testMaxLateness + time.Second))
 	res := s.sweepOnce(context.Background())
-	s.dispatcher.Wait()
 
 	if res.expired != 1 || res.dispatched != 0 {
 		t.Errorf("expiry sweep = %+v, want one expired reservation", res)
@@ -423,11 +551,11 @@ func TestSweep_BusyVehicleHoldsThenFailsPastWindow(t *testing.T) {
 	if len(recorded) != 1 {
 		t.Fatalf("recorded = %v, want exactly one outcome", recorded)
 	}
-	if recorded[0].status != OutcomeFailed || recorded[0].code != codeReservationExpiredVehicleBusy {
-		t.Errorf("recorded = %+v, want failed/%s", recorded[0], codeReservationExpiredVehicleBusy)
+	if recorded[0].status != OutcomeFailed || recorded[0].code != codeReservationExpired {
+		t.Errorf("recorded = %+v, want failed/%s", recorded[0], codeReservationExpired)
 	}
-	if len(exec.calls) != 0 {
-		t.Errorf("Tesla calls = %d, want 0 (an expired reservation is never pushed)", len(exec.calls))
+	if got := len(exec.calls()); got != 0 {
+		t.Errorf("Tesla calls = %d, want 0 (an expired reservation is never pushed)", got)
 	}
 	if got := len(bus.dueEvents()); got != 0 {
 		t.Errorf("ride.due events = %d, want 0 (the reservation never dispatched)", got)
@@ -442,26 +570,32 @@ func TestSweep_BusyVehicleFreesUpBeforeWindowExpires(t *testing.T) {
 	latch := newLatchStore()
 	resStore := &fakeReservationStore{due: []DueReservation{r}, busy: map[string]bool{r.VehicleID: true}}
 	bus := &fakeBus{}
-	clock := testSweepNow
-	s, exec := newSweeperHarness(t, latch, resStore, bus, func() time.Time { return clock }, true)
+	var (
+		clockMu sync.Mutex
+		clock   = testSweepNow
+	)
+	s, exec := newSweeperHarness(t, latch, resStore, bus, func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return clock
+	}, true)
 
 	if res := s.sweepOnce(context.Background()); res.held != 1 {
 		t.Fatalf("first sweep = %+v, want held", res)
 	}
 
-	resStore.mu.Lock()
-	resStore.busy[r.VehicleID] = false
-	resStore.mu.Unlock()
+	resStore.setBusy(r.VehicleID, false)
+	clockMu.Lock()
 	clock = clock.Add(time.Minute)
+	clockMu.Unlock()
 
 	res := s.sweepOnce(context.Background())
-	s.dispatcher.Wait()
 
 	if res.dispatched != 1 {
 		t.Errorf("second sweep = %+v, want the reservation dispatched", res)
 	}
-	if len(exec.calls) != 1 {
-		t.Errorf("Tesla calls = %d, want 1", len(exec.calls))
+	if got := len(exec.calls()); got != 1 {
+		t.Errorf("Tesla calls = %d, want 1", got)
 	}
 	if got := len(bus.dueEvents()); got != 1 {
 		t.Errorf("ride.due events = %d, want 1", got)
@@ -481,7 +615,6 @@ func TestSweep_BusyCheckErrorDoesNotClaim(t *testing.T) {
 	s, exec := newSweeperHarness(t, latch, resStore, &fakeBus{}, func() time.Time { return testSweepNow }, true)
 
 	res := s.sweepOnce(context.Background())
-	s.dispatcher.Wait()
 
 	if res.held != 1 || res.dispatched != 0 {
 		t.Errorf("sweep = %+v, want held on an unknown busy state", res)
@@ -490,8 +623,8 @@ func TestSweep_BusyCheckErrorDoesNotClaim(t *testing.T) {
 	if claims != 0 || len(recorded) != 0 {
 		t.Errorf("claims = %d, recorded = %v, want the row untouched", claims, recorded)
 	}
-	if len(exec.calls) != 0 {
-		t.Errorf("Tesla calls = %d, want 0", len(exec.calls))
+	if got := len(exec.calls()); got != 0 {
+		t.Errorf("Tesla calls = %d, want 0", got)
 	}
 }
 
@@ -523,10 +656,9 @@ func TestSweep_PublishFailureDoesNotBlockDispatch(t *testing.T) {
 	s, exec := newSweeperHarness(t, latch, resStore, bus, func() time.Time { return testSweepNow }, true)
 
 	s.sweepOnce(context.Background())
-	s.dispatcher.Wait()
 
-	if len(exec.calls) != 1 {
-		t.Errorf("Tesla calls = %d, want 1 despite the publish failure", len(exec.calls))
+	if got := len(exec.calls()); got != 1 {
+		t.Errorf("Tesla calls = %d, want 1 despite the publish failure", got)
 	}
 	if _, _, recorded := latch.snapshot(); len(recorded) != 1 || recorded[0].status != OutcomeSent {
 		t.Errorf("recorded = %v, want one sent outcome", recorded)
@@ -540,31 +672,9 @@ func TestSweep_NilBusIsSafe(t *testing.T) {
 	s, exec := newSweeperHarness(t, latch, resStore, nil, func() time.Time { return testSweepNow }, true)
 
 	s.sweepOnce(context.Background())
-	s.dispatcher.Wait()
 
-	if len(exec.calls) != 1 {
-		t.Errorf("Tesla calls = %d, want 1", len(exec.calls))
-	}
-}
-
-// TestSweep_DispatchKillSwitchRecordsSkipped proves DISPATCH_ENABLED=false
-// applies to reservations too — because the sweeper reuses runClaimedLeg, a
-// due reservation resolves `skipped` with no Tesla call, exactly like an
-// instant accept.
-func TestSweep_DispatchKillSwitchRecordsSkipped(t *testing.T) {
-	latch := newLatchStore()
-	resStore := &fakeReservationStore{due: []DueReservation{testReservation()}, busy: map[string]bool{}}
-	s, exec := newSweeperHarness(t, latch, resStore, &fakeBus{}, func() time.Time { return testSweepNow }, false)
-
-	s.sweepOnce(context.Background())
-	s.dispatcher.Wait()
-
-	_, _, recorded := latch.snapshot()
-	if len(recorded) != 1 || recorded[0].status != OutcomeSkipped {
-		t.Errorf("recorded = %v, want one skipped outcome", recorded)
-	}
-	if len(exec.calls) != 0 {
-		t.Errorf("Tesla calls = %d, want 0 under the kill-switch", len(exec.calls))
+	if got := len(exec.calls()); got != 1 {
+		t.Errorf("Tesla calls = %d, want 1", got)
 	}
 }
 
@@ -574,7 +684,7 @@ func TestSweep_DispatchKillSwitchRecordsSkipped(t *testing.T) {
 // having burned them.
 func TestReservationSweeper_KillSwitchStopsTheLoop(t *testing.T) {
 	latch := newLatchStore()
-	resStore := &fakeReservationStore{due: []DueReservation{testReservation()}, busy: map[string]bool{}}
+	resStore := &fakeReservationStore{latch: latch, due: []DueReservation{testReservation()}, busy: map[string]bool{}}
 	d := New(&fakeVehicleResolver{vin: "5YJ"}, &fakeTokenSource{token: "t"}, &fakeExecutor{}, latch, Config{Enabled: true}, nil)
 	s := NewReservationSweeper(d, resStore, &fakeBus{}, ReservationConfig{
 		Enabled:  false,
@@ -633,7 +743,6 @@ func TestReservationSweeper_RunSweepsOnTick(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not exit on context cancellation")
 	}
-	s.dispatcher.Wait()
 
 	// Even across many ticks the latch admits one winner.
 	if _, won, recorded := latch.snapshot(); won != 1 || len(recorded) != 1 {
@@ -641,24 +750,34 @@ func TestReservationSweeper_RunSweepsOnTick(t *testing.T) {
 	}
 }
 
-// TestReservationConfig_Defaults pins the documented defaults, including the
-// 30s cadence and the 30-minute busy-hold window the contract promises.
+// TestReservationConfig_Defaults pins the documented defaults: the 30s cadence,
+// the 30-minute lateness ceiling, and the two batch/isolation knobs the review
+// round introduced (a modest per-sweep window and the sweeper's OWN small
+// worker budget).
 func TestReservationConfig_Defaults(t *testing.T) {
 	got := ReservationConfig{Enabled: true}.withDefaults()
 	if got.Interval != 30*time.Second {
 		t.Errorf("Interval = %v, want 30s", got.Interval)
 	}
-	if got.BusyHold != 30*time.Minute {
-		t.Errorf("BusyHold = %v, want 30m", got.BusyHold)
+	if got.MaxLateness != 30*time.Minute {
+		t.Errorf("MaxLateness = %v, want 30m", got.MaxLateness)
 	}
-	if got.SweepTimeout <= 0 || got.MaxPerSweep <= 0 {
-		t.Errorf("SweepTimeout = %v, MaxPerSweep = %d, want positive defaults", got.SweepTimeout, got.MaxPerSweep)
+	if got.SweepTimeout <= 0 {
+		t.Errorf("SweepTimeout = %v, want a positive default", got.SweepTimeout)
+	}
+	if got.MaxPerSweep != 25 {
+		t.Errorf("MaxPerSweep = %d, want 25 (claims are just-in-time; an unreached "+
+			"candidate reappears next tick)", got.MaxPerSweep)
+	}
+	if got.MaxConcurrent != 2 {
+		t.Errorf("MaxConcurrent = %d, want 2 (the sweeper's own budget, not the "+
+			"dispatcher's instant pool)", got.MaxConcurrent)
 	}
 }
 
-// TestSweep_PassesSweeperClockToTheStore proves ONE clock governs both the due
-// selection and the busy-hold deadline — the reason the query takes `now`
-// instead of using the database's NOW().
+// TestSweep_PassesSweeperClockToTheStore proves ONE clock governs the due
+// selection, the anti-starvation expiry window, and the Go-side deadline — the
+// reason the query takes `now` and `expiredBefore` instead of using NOW().
 func TestSweep_PassesSweeperClockToTheStore(t *testing.T) {
 	latch := newLatchStore()
 	resStore := &fakeReservationStore{busy: map[string]bool{}}
@@ -670,6 +789,9 @@ func TestSweep_PassesSweeperClockToTheStore(t *testing.T) {
 	defer resStore.mu.Unlock()
 	if !resStore.lastNow.Equal(testSweepNow) {
 		t.Errorf("due query now = %v, want the sweeper clock %v", resStore.lastNow, testSweepNow)
+	}
+	if want := testSweepNow.Add(-testMaxLateness); !resStore.lastExpiredBefore.Equal(want) {
+		t.Errorf("due query expiredBefore = %v, want now - MaxLateness %v", resStore.lastExpiredBefore, want)
 	}
 	if resStore.lastLimit <= 0 {
 		t.Errorf("due query limit = %d, want the configured cap", resStore.lastLimit)

@@ -33,7 +33,8 @@ func applyDispatchEnvOverrides(fc *fileConfig) error {
 	// reservation machinery can be stopped without touching instant rides.
 	// False stops the sweeper entirely: due reservations stay accepted,
 	// latch-unclaimed and outcome-absent, so turning it back on picks up the
-	// ones still inside their busy-hold window instead of having burned them.
+	// ones still inside their lateness window and honestly failing the rest,
+	// instead of having burned them.
 	reservation, err := parseBoolEnv("RESERVATION_DISPATCH_ENABLED", true)
 	if err != nil {
 		return err

@@ -15,7 +15,7 @@ import (
 // a SCHEDULED ride's pickup nav at its `scheduledFor` instant — the accept
 // having deliberately deferred it. Lives at cmd/ (not inside
 // internal/dispatch) for the same dependency-rule reason as the dispatcher:
-// the sweeper depends only on a small consumer-site read interface, adapted
+// the sweeper depends only on a small consumer-site store interface, adapted
 // here onto the ride-request repo.
 
 const (
@@ -24,20 +24,29 @@ const (
 	// at most one interval. 30s is well inside the tolerance of a booking made
 	// hours or days ahead while costing one indexed query per tick.
 	reservationSweepInterval = 30 * time.Second
-	// reservationBusyHold is how long past `scheduledFor` a due reservation
-	// keeps waiting for a vehicle that is mid-ride before it is failed
-	// honestly. See dispatch.ReservationConfig.BusyHold.
-	reservationBusyHold = 30 * time.Minute
-	// reservationSweepTimeout bounds one sweep pass (list + per-row busy check
-	// and claim) so a database stall cannot wedge the ticker. The nav pushes
-	// it starts are NOT bounded by it — they run on the dispatcher's own
-	// OverallTimeout, off the sweep goroutine.
+	// reservationMaxLateness is the lateness ceiling: how far past
+	// `scheduledFor` a due reservation may still be dispatched before it is
+	// failed honestly instead. See dispatch.ReservationConfig.MaxLateness.
+	reservationMaxLateness = 30 * time.Minute
+	// reservationSweepTimeout bounds the due-list QUERY so a database stall
+	// cannot wedge the ticker. The per-reservation work it starts is NOT
+	// bounded by it — each worker runs under the dispatcher's own
+	// OverallTimeout, exactly like an instant dispatch.
 	reservationSweepTimeout = 30 * time.Second
+	// reservationMaxPerSweep caps one pass. Modest because claims are
+	// just-in-time: an unreached candidate is re-selected on the next tick
+	// rather than skipped, so a small window costs latency, never dispatches.
+	reservationMaxPerSweep = 25
+	// reservationMaxConcurrent is the sweeper's OWN worker budget, separate
+	// from the dispatcher's instant-dispatch pool so a backlog of
+	// asleep-vehicle reservation pushes can never delay an instant accept's
+	// pickup push.
+	reservationMaxConcurrent = 2
 )
 
 // startReservationSweeper builds the sweeper over the already-constructed
-// dispatcher (whose leg-1 claim/record seams and nav-push machinery it reuses)
-// and runs it in its own goroutine until ctx cancels.
+// dispatcher (whose leg-1 record seam and nav-push machinery it reuses) and
+// runs it in its own goroutine until ctx cancels.
 //
 // It is started AFTER the leg-1 startup reconciliation in setupNavDispatcher:
 // the reconciler must be allowed to resolve dispatches orphaned by the
@@ -57,10 +66,12 @@ func startReservationSweeper(
 		&reservationStoreAdapter{repo: rideRepo},
 		bus,
 		dispatch.ReservationConfig{
-			Enabled:      cfg.ReservationDispatchEnabled(),
-			Interval:     reservationSweepInterval,
-			BusyHold:     reservationBusyHold,
-			SweepTimeout: reservationSweepTimeout,
+			Enabled:       cfg.ReservationDispatchEnabled(),
+			Interval:      reservationSweepInterval,
+			MaxLateness:   reservationMaxLateness,
+			SweepTimeout:  reservationSweepTimeout,
+			MaxPerSweep:   reservationMaxPerSweep,
+			MaxConcurrent: reservationMaxConcurrent,
 		},
 		logger.With(slog.String("component", "reservation-sweeper")),
 	)
@@ -68,7 +79,7 @@ func startReservationSweeper(
 }
 
 // reservationStoreAdapter adapts the ride-request repo to
-// dispatch.ReservationStore. It also performs the record → DueReservation
+// dispatch.ReservationStore. It also performs the row → DueReservation
 // projection, which is where the P1 pickup coordinates cross into the
 // dispatch package (already decrypted by the repo's scan, exactly as the
 // accept path's RideAcceptedEvent carries them).
@@ -76,23 +87,20 @@ type reservationStoreAdapter struct {
 	repo *store.RideRequestRepo
 }
 
-func (a *reservationStoreAdapter) ListDueReservations(ctx context.Context, now time.Time, limit int) ([]dispatch.DueReservation, error) {
-	recs, err := a.repo.ListDueReservations(ctx, now, limit)
+func (a *reservationStoreAdapter) ListDueReservations(
+	ctx context.Context,
+	now, expiredBefore time.Time,
+	limit int,
+) ([]dispatch.DueReservation, error) {
+	recs, err := a.repo.ListDueReservations(ctx, now, expiredBefore, limit)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]dispatch.DueReservation, 0, len(recs))
-	// Indexed rather than ranged by value: RideRequestRecord is wide enough
-	// that gocritic flags the per-iteration copy.
+	// Indexed rather than ranged by value: DueReservation is wide enough that
+	// gocritic flags the per-iteration copy.
 	for i := range recs {
 		rec := &recs[i]
-		if rec.ScheduledFor == nil {
-			// Unreachable: the due query requires scheduled_for IS NOT NULL.
-			// Skipped rather than dereferenced so a future query change can
-			// never turn a projection bug into a nil-pointer panic in the
-			// dispatch loop.
-			continue
-		}
 		pickup := events.RidePlace{
 			Latitude:  rec.Pickup.Latitude,
 			Longitude: rec.Pickup.Longitude,
@@ -110,7 +118,7 @@ func (a *reservationStoreAdapter) ListDueReservations(ctx context.Context, now t
 			RiderID:       rec.RiderID,
 			OwnerID:       rec.OwnerID,
 			Pickup:        pickup,
-			ScheduledFor:  *rec.ScheduledFor,
+			ScheduledFor:  rec.ScheduledFor,
 		})
 	}
 	return out, nil
@@ -118,4 +126,8 @@ func (a *reservationStoreAdapter) ListDueReservations(ctx context.Context, now t
 
 func (a *reservationStoreAdapter) VehicleHasActiveInstantRide(ctx context.Context, vehicleID string) (bool, error) {
 	return a.repo.VehicleHasActiveInstantRide(ctx, vehicleID)
+}
+
+func (a *reservationStoreAdapter) ClaimReservationDispatch(ctx context.Context, rideID string) (bool, error) {
+	return a.repo.ClaimReservationDispatch(ctx, rideID)
 }
