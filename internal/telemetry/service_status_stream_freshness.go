@@ -68,20 +68,36 @@ func (m *ServiceStatusMonitor) noteStreamFrame(evt events.VehicleTelemetryEvent)
 	m.lastStream.Store(evt.VIN, m.now())
 }
 
+// LastStreamAt reports when the most recent LIVE streamed frame arrived for
+// this VIN, and whether that frame is still inside the stream-authoritative
+// freshness window. A VIN we have never heard from returns the zero time and
+// false.
+//
+// Exported for the MYR-315 owner-triggered refresh endpoint (rest-api.md
+// §7.15), which short-circuits to `{"status":"fresh"}` — no Tesla call at all —
+// when the stream already holds current truth, and echoes the returned instant
+// as the response's `lastUpdated`. Reusing the monitor's per-VIN state rather
+// than keeping a second copy is what keeps the endpoint's notion of "fresh"
+// identical to the MYR-300 backfill gate's.
+func (m *ServiceStatusMonitor) LastStreamAt(vin string) (time.Time, bool) {
+	v, ok := m.lastStream.Load(vin)
+	if !ok {
+		return time.Time{}, false
+	}
+	last, ok := v.(time.Time)
+	if !ok {
+		return time.Time{}, false
+	}
+	return last, m.now().Sub(last) < m.freshness
+}
+
 // streamFresh reports whether a live streamed frame has arrived for this VIN
 // within the freshness window. The boundary is EXCLUSIVE of the window edge:
 // an age of exactly defaultStreamFreshness counts as stale, so a car whose
 // resend cadence has lapsed is backfilled rather than left unrefreshed.
 func (m *ServiceStatusMonitor) streamFresh(vin string) bool {
-	v, ok := m.lastStream.Load(vin)
-	if !ok {
-		return false
-	}
-	last, ok := v.(time.Time)
-	if !ok {
-		return false
-	}
-	return m.now().Sub(last) < m.freshness
+	_, fresh := m.LastStreamAt(vin)
+	return fresh
 }
 
 // dropStreamSourcedFields removes every stream-sourceable field from a REST

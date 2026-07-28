@@ -2,6 +2,8 @@ package telemetry
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 
@@ -48,11 +50,59 @@ func notStreaming(state *FleetVehicleState) bool {
 // (`trim`) still flow, and a genuinely non-streaming car (asleep, offline, in
 // service) is unaffected: it has no fresh stamp, so the full backfill applies.
 func (m *ServiceStatusMonitor) refreshFromVehicleData(ctx context.Context, vin, token string) {
-	data, err := m.reader.GetVehicleData(ctx, token, vin)
-	if err != nil {
+	err := m.RefreshFromVehicleData(ctx, vin, token)
+	switch {
+	case err == nil:
+		return
+	case errors.Is(err, ErrVehicleDataPublish):
+		// A bus failure is ours, not the car's, and is rare enough to be worth
+		// operator attention.
+		m.logger.Warn("service-status: vehicle_data broadcast publish failed (non-fatal)",
+			slog.String("vin", redactVIN(vin)), slog.String("error", err.Error()))
+	default:
+		// A failed read is the ordinary outcome for a sleeping car (Tesla answers
+		// 408), so it stays at Debug — promoting it would spam the logs for every
+		// parked car in the fleet.
 		m.logger.Debug("service-status: vehicle_data backfill skipped (non-fatal, no wake)",
 			slog.String("vin", redactVIN(vin)), slog.String("error", err.Error()))
-		return
+	}
+}
+
+// ErrVehicleDataRead / ErrVehicleDataPublish classify a RefreshFromVehicleData
+// failure without exposing the underlying Fleet API error type. The read
+// sentinel covers "the car did not answer" (408 asleep, offline, decode
+// failure); the publish sentinel covers "we could not fan the frame out".
+// Callers use errors.Is — the event-path backfill to pick a log level, and the
+// MYR-315 refresh handler to decide whether a 502 or a 500 is honest.
+var (
+	ErrVehicleDataRead    = errors.New("vehicle_data read failed")
+	ErrVehicleDataPublish = errors.New("vehicle_data broadcast publish failed")
+)
+
+// RefreshFromVehicleData is the error-returning core of the vehicle_data
+// backfill: ONE Fleet API read, mapped through vehicleDataToFields, gated by
+// the MYR-300 stream-recency rule, and republished as a synthetic
+// REST-backfill VehicleTelemetryEvent.
+//
+// Exported so the MYR-315 owner-triggered refresh endpoint publishes through
+// the IDENTICAL MYR-260 mapping the connectivity-edge backfill uses — same
+// field names, same broadcast, same control-state persist — rather than
+// growing a parallel read path that would drift. The refresh endpoint reaches
+// this only after establishing the stream is stale, so the MYR-300 gate is a
+// no-op for it by construction and the full field set flows.
+//
+// Because the read includes vehicle_config, an owner-triggered refresh also
+// re-acquires the REST-only spec facts `trim` (MYR-279) and
+// `seatCoolingCapable` (MYR-308) for free.
+//
+// It NEVER force-wakes — waking is the caller's decision (the event path
+// deliberately does not; the refresh endpoint does, under the bounded
+// commands.Executor budget). Returned errors wrap the sentinels above and are
+// safe to log (redacted VIN + status; the P1 payload body is never surfaced).
+func (m *ServiceStatusMonitor) RefreshFromVehicleData(ctx context.Context, vin, token string) error {
+	data, err := m.reader.GetVehicleData(ctx, token, vin)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrVehicleDataRead, err)
 	}
 
 	fields := vehicleDataToFields(data)
@@ -65,10 +115,10 @@ func (m *ServiceStatusMonitor) refreshFromVehicleData(ctx context.Context, vin, 
 			slog.Duration("freshness_window", m.freshness))
 	}
 	if len(fields) == 0 {
-		return
+		return nil
 	}
 	if m.bus == nil {
-		return // direct-handler unit tests construct the monitor without a bus
+		return nil // direct-handler unit tests construct the monitor without a bus
 	}
 
 	evt := events.VehicleTelemetryEvent{
@@ -80,12 +130,11 @@ func (m *ServiceStatusMonitor) refreshFromVehicleData(ctx context.Context, vin, 
 		Source: events.SourceRESTBackfill,
 	}
 	if err := m.bus.Publish(ctx, events.NewEvent(evt)); err != nil {
-		m.logger.Warn("service-status: vehicle_data broadcast publish failed (non-fatal)",
-			slog.String("vin", redactVIN(vin)), slog.String("error", err.Error()))
-		return
+		return fmt.Errorf("%w: %w", ErrVehicleDataPublish, err)
 	}
 	m.logger.Info("service-status: populated owner controls from REST vehicle_data",
 		slog.String("vin", redactVIN(vin)), slog.Int("fields", len(fields)))
+	return nil
 }
 
 // vehicleDataToFields maps the decoded REST vehicle_data subset onto internal
