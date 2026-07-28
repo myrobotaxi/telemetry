@@ -134,6 +134,16 @@ type Vehicle struct {
 	// value.
 	ServiceETC           *time.Time
 	ServiceExpectedEndAt *time.Time
+
+	// MYR-320 vehicle-detail read-backs, same side table, populated only by
+	// GetByID. TrimLabel is the DISPLAY-SAFE trim label
+	// (vehicle_config.performance_package) and stands ALONGSIDE Trim above,
+	// which keeps the raw badge code; FSDVersion is the FSD software
+	// designation from the newest release-notes title and is a different value
+	// from SoftwareVersion above, which is the firmware build. nil means never
+	// read — for FSDVersion emphatically NOT "this car has no FSD".
+	TrimLabel  *string
+	FSDVersion *string
 }
 
 // VehicleUpdate holds the subset of vehicle fields that can change from

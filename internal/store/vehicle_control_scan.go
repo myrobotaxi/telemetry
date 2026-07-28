@@ -74,6 +74,15 @@ type controlStateScan struct {
 	// service_data body for a visit with no appointment record.
 	serviceETC           *time.Time
 	serviceExpectedEndAt *time.Time
+
+	// MYR-320 vehicle-detail strings. trimLabel is the DISPLAY-SAFE label
+	// (vehicle_config.performance_package), a separate value from the raw badge
+	// code in `trim` above; fsdVersion is the FSD software designation from the
+	// newest release-notes title, a separate value from the firmware build in
+	// `softwareVersion` above. nil means never read — for fsdVersion that is
+	// emphatically NOT "this car has no FSD".
+	trimLabel  *string
+	fsdVersion *string
 }
 
 // dests returns the scan destinations in queryVehicleByID's column order, for
@@ -93,6 +102,7 @@ func (c *controlStateScan) dests() []any {
 		&c.mediaDuration, &c.mediaElapsed, &c.mediaVolMax,
 		&c.seatCoolingCapable,
 		&c.serviceETC, &c.serviceExpectedEndAt,
+		&c.trimLabel, &c.fsdVersion,
 	}
 }
 
@@ -134,4 +144,6 @@ func (c *controlStateScan) applyTo(v *Vehicle) {
 	v.SeatCoolingCapable = c.seatCoolingCapable
 	v.ServiceETC = c.serviceETC
 	v.ServiceExpectedEndAt = c.serviceExpectedEndAt
+	v.TrimLabel = c.trimLabel
+	v.FSDVersion = c.fsdVersion
 }

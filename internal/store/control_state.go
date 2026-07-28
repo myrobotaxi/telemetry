@@ -110,6 +110,24 @@ type ControlStateUpdate struct {
 	// stream it).
 	SoftwareVersion *string
 	Trim            *string
+
+	// MYR-320 vehicle-DETAIL read-backs, the same side table and the same
+	// snapshot LEFT JOIN as the MYR-279 pair above.
+	//
+	// TrimLabel is the DISPLAY-SAFE label from
+	// vehicle_config.performance_package ("Performance"); it sits ALONGSIDE
+	// Trim, which stays the raw badge code ("p74d"). Neither replaces the other
+	// and only TrimLabel is ever rendered.
+	//
+	// FSDVersion is the FSD software designation from the newest release-notes
+	// TITLE ("FSD (Supervised) v14.3.5") — a different endpoint and a different
+	// value from SoftwareVersion, which is the installed firmware build.
+	//
+	// Both follow the MYR-279 empty-string-drop rule rather than the MYR-303
+	// media rule: these are facts about the car that only get better-known, so
+	// an empty read is "we learned nothing", never "the value went away".
+	TrimLabel  *string
+	FSDVersion *string
 }
 
 // HasAny reports whether at least one control field is present. The writer
@@ -164,10 +182,12 @@ func (c *ControlStateUpdate) hasLevelControl() bool {
 		c.MediaVolume != nil
 }
 
-// hasStringControl reports whether any MYR-279 vehicle-detail string (software
-// version, trim) is present.
+// hasStringControl reports whether any vehicle-detail string is present — the
+// MYR-279 pair (software version, trim) plus the MYR-320 pair (trim label, FSD
+// version).
 func (c *ControlStateUpdate) hasStringControl() bool {
-	return c.SoftwareVersion != nil || c.Trim != nil
+	return c.SoftwareVersion != nil || c.Trim != nil ||
+		c.TrimLabel != nil || c.FSDVersion != nil
 }
 
 // hasClimateMode reports whether any MYR-274 climate-mode read-back (hvac auto
@@ -204,6 +224,8 @@ func mergeControlState(dst, src *ControlStateUpdate) {
 	dst.MediaVolume = mergePtr(dst.MediaVolume, src.MediaVolume)
 	dst.SoftwareVersion = mergePtr(dst.SoftwareVersion, src.SoftwareVersion)
 	dst.Trim = mergePtr(dst.Trim, src.Trim)
+	dst.TrimLabel = mergePtr(dst.TrimLabel, src.TrimLabel)
+	dst.FSDVersion = mergePtr(dst.FSDVersion, src.FSDVersion)
 	dst.HvacAutoMode = mergePtr(dst.HvacAutoMode, src.HvacAutoMode)
 	dst.HvacAcEnabled = mergePtr(dst.HvacAcEnabled, src.HvacAcEnabled)
 	dst.SeatVentEnabled = mergePtr(dst.SeatVentEnabled, src.SeatVentEnabled)
@@ -377,20 +399,38 @@ func mapControlLevels(fields map[string]events.TelemetryValue, c *ControlStateUp
 	}
 }
 
-// mapControlStrings derives the MYR-279 vehicle-detail read-backs (software
-// version, trim) onto c. Both are plain strings: software version from the
-// Version telemetry field (streamed OR the /vehicle_data car_version), trim from
-// the /vehicle_data-only trim field. Empty strings are ignored so a blank frame
-// never overwrites a known value with "".
+// mapControlStrings derives the vehicle-detail read-backs onto c: the MYR-279
+// pair (software version, trim) and the MYR-320 pair (trim label, FSD version).
+// All four are plain strings — software version from the Version telemetry field
+// (streamed OR the /vehicle_data car_version), trim and trim label from
+// /vehicle_data's vehicle_config, FSD version from the release-notes title —
+// and all four share one rule, so they are table-driven rather than repeated.
+//
+// Empty strings are IGNORED so a blank frame never overwrites a known value with
+// "". That is the deliberate divergence from the MYR-303 media text fields,
+// where an empty value is a real observation ("the track ended") that must
+// overwrite: these four are facts about the car that only ever become
+// better-known, so an empty read means "we learned nothing", never "the value
+// went away".
 func mapControlStrings(fields map[string]events.TelemetryValue, c *ControlStateUpdate) {
-	if v, ok := fields[string(telemetry.FieldVersion)]; ok && !v.Invalid && v.StringVal != nil && *v.StringVal != "" {
+	for field, target := range controlStringFields {
+		v, ok := fields[string(field)]
+		if !ok || v.Invalid || v.StringVal == nil || *v.StringVal == "" {
+			continue
+		}
 		s := *v.StringVal
-		c.SoftwareVersion = &s
+		*target(c) = &s
 	}
-	if v, ok := fields[string(telemetry.FieldTrim)]; ok && !v.Invalid && v.StringVal != nil && *v.StringVal != "" {
-		s := *v.StringVal
-		c.Trim = &s
-	}
+}
+
+// controlStringFields maps each vehicle-detail telemetry field name onto the
+// ControlStateUpdate pointer it fills. Table-driven so a fifth detail string
+// costs one line here instead of a fourth copy of the same guard.
+var controlStringFields = map[telemetry.FieldName]func(*ControlStateUpdate) **string{
+	telemetry.FieldVersion:    func(c *ControlStateUpdate) **string { return &c.SoftwareVersion },
+	telemetry.FieldTrim:       func(c *ControlStateUpdate) **string { return &c.Trim },
+	telemetry.FieldTrimLabel:  func(c *ControlStateUpdate) **string { return &c.TrimLabel },
+	telemetry.FieldFSDVersion: func(c *ControlStateUpdate) **string { return &c.FSDVersion },
 }
 
 // controlIntFromValue extracts a nullable int level from a TelemetryValue. The
@@ -485,9 +525,9 @@ INSERT INTO go_vehicle_control_state
      media_now_playing_title, media_now_playing_artist, media_now_playing_album,
      media_now_playing_station, media_playback_source,
      media_now_playing_duration_ms, media_now_playing_elapsed_ms, media_volume_max,
-     seat_cooling_capable, updated_at)
+     seat_cooling_capable, trim_label, fsd_version, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
-        $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, NOW())
+        $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, NOW())
 ON CONFLICT (vehicle_id) DO UPDATE SET
     is_locked               = COALESCE(EXCLUDED.is_locked, go_vehicle_control_state.is_locked),
     frunk_open              = COALESCE(EXCLUDED.frunk_open, go_vehicle_control_state.frunk_open),
@@ -520,6 +560,8 @@ ON CONFLICT (vehicle_id) DO UPDATE SET
     media_now_playing_elapsed_ms  = COALESCE(EXCLUDED.media_now_playing_elapsed_ms, go_vehicle_control_state.media_now_playing_elapsed_ms),
     media_volume_max              = COALESCE(EXCLUDED.media_volume_max, go_vehicle_control_state.media_volume_max),
     seat_cooling_capable          = COALESCE(EXCLUDED.seat_cooling_capable, go_vehicle_control_state.seat_cooling_capable),
+    trim_label                    = COALESCE(EXCLUDED.trim_label, go_vehicle_control_state.trim_label),
+    fsd_version                   = COALESCE(EXCLUDED.fsd_version, go_vehicle_control_state.fsd_version),
     updated_at              = NOW()`
 
 // UpsertControlState persists the present owner-control fields for the vehicle
@@ -570,6 +612,11 @@ func (r *VehicleRepo) UpsertControlState(ctx context.Context, vehicleID string, 
 		update.MediaNowPlayingElapsed,
 		update.MediaVolumeMax,
 		update.SeatCoolingCapable,
+		// MYR-320: empty strings never reach here — mapControlStrings drops
+		// them — so a NULL bind always means "this frame said nothing" and the
+		// COALESCE correctly keeps the stored value.
+		update.TrimLabel,
+		update.FSDVersion,
 	)
 	r.metrics.ObserveQueryDuration("vehicle.upsert_control_state", time.Since(start).Seconds())
 	if err != nil {
