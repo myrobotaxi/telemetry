@@ -128,6 +128,24 @@ func (a *vinResolverAdapter) GetByVIN(ctx context.Context, vin string) (string, 
 	return id, nil
 }
 
+// vehicleIDAdapter adapts store.VINCache to the telemetry.VehicleIDLookup
+// interface (MYR-316). The service-status monitor works in VINs — that is what
+// the telemetry stream and the Fleet API speak — but the service-window columns
+// live on a side table keyed by the Prisma vehicle id, so one translation is
+// unavoidable. Reuses the same cache as vinResolverAdapter, so it costs no
+// extra DB round trip per edge.
+type vehicleIDAdapter struct {
+	cache *store.VINCache
+}
+
+func (a *vehicleIDAdapter) GetVehicleID(ctx context.Context, vin string) (string, error) {
+	id, err := a.cache.ResolveID(ctx, vin)
+	if err != nil {
+		return "", fmt.Errorf("resolve VIN: %w", err)
+	}
+	return id, nil
+}
+
 // vehicleOwnerAdapter adapts store.VINCache to the
 // telemetry.VehicleOwnerLookup interface (returns owning user ID). Shares
 // the same cache instance as vinResolverAdapter, so a single DB lookup per
@@ -193,6 +211,10 @@ func (a *vehicleListerAdapter) ListByUser(ctx context.Context, userID string) ([
 			EstimatedRange: v.EstimatedRange,
 			LastUpdated:    v.LastUpdated,
 			HasActiveRide:  v.HasActiveRide,
+			// MYR-316: raw sources; the handler resolves the precedence and
+			// the in-service gate.
+			ServiceETC:           v.ServiceETC,
+			ServiceExpectedEndAt: v.ServiceExpectedEndAt,
 		})
 	}
 	return out, nil
@@ -287,6 +309,8 @@ func (a *vehicleSnapshotAdapter) GetByID(ctx context.Context, vehicleID string) 
 		MediaNowPlayingElapsed:  v.MediaNowPlayingElapsed,
 		MediaVolumeMax:          v.MediaVolumeMax,
 		SeatCoolingCapable:      v.SeatCoolingCapable,
+		ServiceETC:              v.ServiceETC,
+		ServiceExpectedEndAt:    v.ServiceExpectedEndAt,
 	}, nil
 }
 

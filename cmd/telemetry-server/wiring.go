@@ -196,7 +196,11 @@ type httpRouteDeps struct {
 	auditMetrics   mask.AuditMetrics
 	debugGate      debugFieldsGate
 	originPatterns []string
-	logger         *slog.Logger
+	// serviceStatus is the running in-service monitor. It also owns the
+	// per-VIN stream-recency state (MYR-300) and the vehicle_data backfill
+	// mapping (MYR-260) that the MYR-315 refresh endpoint reuses.
+	serviceStatus *telemetry.ServiceStatusMonitor
+	logger        *slog.Logger
 }
 
 // setupHTTPHandlers wires every HTTP handler the server exposes:
@@ -303,6 +307,10 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 	setupVehicleReaddEndpoint(deps)
 
 	setupVehiclePlateEndpoint(deps)
+
+	setupVehicleRefreshEndpoint(deps)
+
+	setupVehicleServiceWindowEndpoint(deps)
 
 	setupVehicleCommandEndpoint(deps, snapshotAdapter)
 

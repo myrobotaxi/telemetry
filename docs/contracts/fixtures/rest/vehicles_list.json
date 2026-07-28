@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "description": "Happy-path response for GET /api/vehicles — the SDK's vehicle-enumeration entry point (rest-api.md §7.0). Owner-tier projection: every VehicleSummary field is present. The list is deliberately a thin catalog — no GPS, no nav, no climate (those live in /snapshot). v1 returns owned vehicles only; viewer-merged enumeration is PLANNED. MYR-233 adds the optional P0 `hasActiveRide` flag: Stumpy is parked at a pickup with an open INSTANT ride (accepted/arrived/enroute) so it renders Busy; Lightning is free. The flag is derived read-time from the `uq_go_ride_requests_active_instant_vehicle` index predicate — scheduled rides and `requested` never set it. MYR-286 adds the P1 owner-entered `licensePlate`, shown here in BOTH of its states: Stumpy has one, Lightning's owner has not entered one and carries an EMPTY STRING rather than a missing key (the same always-emitted convention as `color`). Consumers keep the `VIN ····xxxx` fallback for the empty case and must never render an empty plate.",
+    "description": "Happy-path response for GET /api/vehicles — the SDK's vehicle-enumeration entry point (rest-api.md §7.0). Owner-tier projection: every VehicleSummary field is present. The list is deliberately a thin catalog — no GPS, no nav, no climate (those live in /snapshot). v1 returns owned vehicles only; viewer-merged enumeration is PLANNED. MYR-233 adds the optional P0 `hasActiveRide` flag: Stumpy is parked at a pickup with an open INSTANT ride (accepted/arrived/enroute) so it renders Busy; Lightning is free. The flag is derived read-time from the `uq_go_ride_requests_active_instant_vehicle` index predicate — scheduled rides and `requested` never set it. MYR-286 adds the P1 owner-entered `licensePlate`, shown here in BOTH of its states: Stumpy has one, Lightning's owner has not entered one and carries an EMPTY STRING rather than a missing key (the same always-emitted convention as `color`). Consumers keep the `VIN ····xxxx` fallback for the empty case and must never render an empty plate. MYR-316 adds the P0 nullable `serviceEstimatedEndAt` — the resolved end of the car's current service visit, COALESCE(Tesla `service_data.service_etc`, owner-entered expected-back), emitted ONLY while `status` is `in_service`. Neither row here is in service (`parked` / `charging`), so both carry the honest `null`; a null means NO scheduling bound at all, never 'unknown, block the picker'.",
     "anchoredFRs": ["FR-4.x", "FR-5.4", "NFR-3.21"],
     "scenario": "happy-path",
     "addedBy": "MYR-91"
@@ -19,7 +19,8 @@
       "lastUpdated": "2026-05-10T17:45:00Z",
       "role": "owner",
       "hasActiveRide": true,
-      "licensePlate": "ABC 1234"
+      "licensePlate": "ABC 1234",
+      "serviceEstimatedEndAt": null
     },
     {
       "vehicleId": "clmno5678901234ghijkl",
@@ -34,7 +35,8 @@
       "lastUpdated": "2026-05-10T17:42:13Z",
       "role": "owner",
       "hasActiveRide": false,
-      "licensePlate": ""
+      "licensePlate": "",
+      "serviceEstimatedEndAt": null
     }
   ]
 }

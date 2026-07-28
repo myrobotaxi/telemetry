@@ -204,6 +204,11 @@ var vehicleStateOwnerFields = []string{
 	// fact about the car, the same tier as `trim`/`model`/`year` and reasoned
 	// about the same way. Snapshot-only (Tesla does not stream it).
 	"seatCoolingCapable",
+	// MYR-316 — service window. P0 both roles: operational timing about the
+	// car, the same tier as the sibling `status` it qualifies, and a rider
+	// needs it for exactly the same reason the owner does (it floors the
+	// scheduling picker). Snapshot-only; server-computed, never client-set.
+	"serviceEstimatedEndAt",
 	// Odometer / FSD.
 	"odometerMiles",
 	"fsdMilesSinceReset",
@@ -286,6 +291,11 @@ var vehicleSummaryOwnerFields = []string{
 	// contrast the full `vin`, which the catalog never carries at all
 	// (`vinLast4` only) and which the snapshot gates to owners.
 	"licensePlate",
+	// MYR-316 — service window. P0, and NOT owner-private for the same reason
+	// as `hasActiveRide`: the rider scheduling flow floors its picker at this
+	// instant, so a viewer who cannot see it cannot schedule correctly. The
+	// viewer list below inherits it (owner minus `name`).
+	"serviceEstimatedEndAt",
 }
 
 // vehicleSummaryViewerFields is owner minus `name` per rest-api.md

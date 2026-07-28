@@ -183,13 +183,29 @@ const vehicleStatusOffline = "offline"
 // the reservation instant belongs to the scheduled-dispatch machinery
 // (MYR-179), which must re-check the vehicle THEN; accepting a reservation is
 // not dispatching it.
+// MYR-316 amends the exemption WITHOUT weakening it. A scheduled accept is
+// still exempt from the availability gate, but it is now additionally bound by
+// the vehicle's service window: a reservation for a time BEFORE the car is
+// expected back is refused with 400 invalid_request. That is the fact MYR-313's
+// reasoning assumed and did not have — "a reservation days out says nothing
+// about the car's status today" is true, but nothing made the reservation be
+// days out. Consequently a scheduled accept now DOES read the vehicle (MYR-313
+// short-circuited before the read), and the read FAILS OPEN for scheduled rides
+// so a lookup failure cannot resurrect the MYR-313 defect.
 func (h *RideRequestHandler) rejectIfVehicleUnavailable(ctx context.Context, w http.ResponseWriter, rec RideRequestData) bool {
-	if rec.ScheduledFor != nil {
-		return false
-	}
-
 	row, err := h.vehicles.GetByID(ctx, rec.VehicleID)
 	if err != nil {
+		if rec.ScheduledFor != nil {
+			// Fail OPEN: the MYR-316 bound is advisory, and refusing a
+			// reservation because we could not read the car is exactly the
+			// stranding MYR-313 exists to prevent.
+			h.logger.Warn("ride-request accept: vehicle lookup failed; scheduled accept proceeds unbounded",
+				slog.String("ride_request_id", rec.ID),
+				slog.String("vehicle_id", rec.VehicleID),
+				slog.String("error", err.Error()),
+			)
+			return false
+		}
 		h.logger.Error("ride-request accept: vehicle status lookup failed",
 			slog.String("ride_request_id", rec.ID),
 			slog.String("vehicle_id", rec.VehicleID),
@@ -198,6 +214,18 @@ func (h *RideRequestHandler) rejectIfVehicleUnavailable(ctx context.Context, w h
 		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
 		return true
 	}
+
+	// MYR-316 service-window bound. Applies to SCHEDULED accepts only (the
+	// helper no-ops on a nil scheduledFor).
+	if h.rejectIfBeforeServiceWindow(w, rec.ScheduledFor, row) {
+		return true
+	}
+
+	// MYR-313: the availability gate below is INSTANT-only.
+	if rec.ScheduledFor != nil {
+		return false
+	}
+
 	switch row.Status {
 	case serviceStatusInService:
 		h.writeError(w, http.StatusConflict, wserrors.ErrCodeVehicleUnavailable, "Vehicle is in service and can't be dispatched")

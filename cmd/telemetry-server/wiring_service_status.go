@@ -40,6 +40,16 @@ func setupServiceStatusMonitor(
 		&vehicleOwnerAdapter{cache: vinCache},
 		&vehicleStatusUpdaterAdapter{repo: vehicleRepo},
 		log,
+		// MYR-316: on the same connectivity-edge path (and sharing its per-VIN
+		// debounce), read Tesla's service_data for an in-service car and clear
+		// both service-window columns when the car leaves service. The reader
+		// is the SAME direct-Fleet-API client as the in_service read — an
+		// unsigned authenticated read, never the signing proxy.
+		telemetry.WithServiceWindow(
+			reader,
+			vehicleRepo,
+			&vehicleIDAdapter{cache: vinCache},
+		),
 	)
 	if err := monitor.Start(); err != nil {
 		return nil, err

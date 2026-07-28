@@ -124,6 +124,16 @@ type Vehicle struct {
 	// means never read — NOT "no seat cooling"; an explicit false is the
 	// authoritative no.
 	SeatCoolingCapable *bool
+
+	// MYR-316 service window: the two independent sources behind the single
+	// wire field serviceEstimatedEndAt, same side table. ServiceETC is Tesla's
+	// own estimate and takes precedence; ServiceExpectedEndAt is the
+	// owner-entered fallback. Emission is COALESCE(ServiceETC,
+	// ServiceExpectedEndAt) and ONLY while Status is in_service — the read
+	// layer applies both rules, so these two are raw storage, not the wire
+	// value.
+	ServiceETC           *time.Time
+	ServiceExpectedEndAt *time.Time
 }
 
 // VehicleUpdate holds the subset of vehicle fields that can change from

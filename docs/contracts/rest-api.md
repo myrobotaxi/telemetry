@@ -76,6 +76,8 @@ Every FR/NFR listed here is anchored in at least one section of this doc. The ta
    12. `DELETE /api/tesla/vehicles/{vehicleId}` (owner car offboarding — MYR-258)
    13. `POST /api/tesla/vehicles/{teslaVehicleId}/re-add` (owner deliberate re-add — MYR-262)
    14. `PUT /api/tesla/vehicles/{vehicleId}/plate` (owner license-plate entry — MYR-286)
+   15. `POST /api/tesla/vehicles/{vehicleId}/refresh` (owner on-demand state refresh — MYR-315)
+   16. `PUT /api/tesla/vehicles/{vehicleId}/service-window` (owner expected-back entry — MYR-316)
 8. Resource schemas
 9. Observability
 10. Code <-> spec divergences
@@ -271,7 +273,7 @@ Per-site audit (REST surface in `internal/telemetry/`, WS surface in `internal/w
 | [`handler.go`](../../internal/ws/handler.go) — auth timeout | WS frame | `ErrCodeAuthTimeout` | Client did not send `auth` within `AuthTimeout` |
 | [`handler.go`](../../internal/ws/handler.go) — `GetUserVehicles` failure | WS frame | `ErrCodeAuthFailed` | DB failure when loading vehicle ownership |
 | [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — missing/invalid Authorization | 401 | `ErrCodeAuthFailed` | Header omitted or `ValidateToken` fails |
-| [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — malformed/unknown-field body, bad place, out-of-range coord, bad `scheduledFor`, bad `limit`/`cursor` | 400 | `ErrCodeInvalidRequest` | Create body / list query failed validation (`additionalProperties:false`) |
+| [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — malformed/unknown-field body, bad place, out-of-range coord, bad `scheduledFor`, `scheduledFor` earlier than the vehicle's `serviceEstimatedEndAt`, bad `limit`/`cursor` | 400 | `ErrCodeInvalidRequest` | Create body / list query failed validation (`additionalProperties:false`); the last case is the MYR-316 service-window bound — deliberately the SAME code, no new one (null estimate ⇒ no bound; equal allowed; instant rides unaffected, §7.8) |
 | [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — vehicle not found on create | 404 | `ErrCodeNotFound` | `GetByID` returns `sdk.ErrNotFound` |
 | [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — vehicle access denied on create | 403 | `ErrCodeVehicleNotOwned` | Caller's `userID` ≠ vehicle's owner (v1 owner-only access; §7.8) |
 | [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — second open instant ride on create (pre-check) | 409 | `ErrCodeRideActive` | Rider already holds an OPEN instant ride; body carries `activeRideRequest` (MYR-230, §7.8) |
@@ -280,11 +282,14 @@ Per-site audit (REST surface in `internal/telemetry/`, WS surface in `internal/w
 | [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — owner attempts cancel (rider-only) | 403 | `ErrCodePermissionDenied` | A party, but wrong role for the action |
 | [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — illegal lifecycle transition | 409 | `ErrCodeConflict` | Cancel from a non-`{requested,accepted}` state (§7.8) |
 | [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — store failure | 500 | `ErrCodeInternalError` | DB error on create / status update / list |
+| [`ride_request_owner_handler.go`](../../internal/telemetry/ride_request_owner_handler.go) — scheduled accept whose `scheduledFor` precedes the vehicle's `serviceEstimatedEndAt` | 400 | `ErrCodeInvalidRequest` | MYR-316 service-window bound on accept, same code as the create-side check (§7.8). The vehicle read this needs **fails open** for scheduled rides — unreadable ⇒ unbounded, never refused — so it cannot reintroduce the MYR-313 stranding defect |
 | [`ride_request_owner_handler.go`](../../internal/telemetry/ride_request_owner_handler.go) — rider attempts accept/decline (owner-only) | 403 | `ErrCodePermissionDenied` | A party, but wrong role for the decision |
 | [`ride_request_owner_handler.go`](../../internal/telemetry/ride_request_owner_handler.go) — accept/decline from a non-`requested` state | 409 | `ErrCodeConflict` | Illegal lifecycle transition (§7.8 matrix) |
 | [`ride_request_owner_handler.go`](../../internal/telemetry/ride_request_owner_handler.go) — accept for an in-service / offline vehicle | 409 | `ErrCodeVehicleUnavailable` | Target vehicle's persisted status is `in_service`/`offline` and cannot fulfill the ride (MYR-277, §7.8) |
 | [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — accept for a vehicle already on another active ride (unique-index race backstop) | 409 | `ErrCodeVehicleUnavailable` | Guarded `requested`→`accepted` write rejected by `uq_go_ride_requests_active_instant_vehicle` (23505); the car is already committed to an `accepted`/`arrived`/`enroute` ride (MYR-266, §7.8) |
 | [`ride_request_owner_handler.go`](../../internal/telemetry/ride_request_owner_handler.go) — incoming feed store failure | 500 | `ErrCodeInternalError` | DB error on the owner list |
+| [`vehicle_service_window_handler.go`](../../internal/telemetry/vehicle_service_window_handler.go) — missing `{vehicleId}`, malformed JSON body, unparseable or non-future `expectedEndAt` | 400 | `ErrCodeInvalidRequest` | §7.16 owner write. A malformed timestamp reports `expectedEndAt must be an RFC 3339 date-time`; a past/now value reports `expectedEndAt must be in the future`. Clearing is NOT an error — absent key, explicit `null`, empty/whitespace string and an empty body all clear |
+| [`vehicle_service_window_handler.go`](../../internal/telemetry/vehicle_service_window_handler.go) — non-`PUT` method | 405 | `ErrCodeInvalidRequest` | §7.16, same shape as §7.14 |
 
 Sites NOT in this audit (intentional carve-outs):
 
@@ -435,15 +440,15 @@ The mask is applied at the **handler layer**: the store returns plaintext, fully
 
 | Role | Visible fields | Notes |
 |------|----------------|-------|
-| `owner` | All `VehicleSummary` fields: `vehicleId`, `name`, `model`, `year`, `color`, `vinLast4`, `status`, `chargeLevel`, `estimatedRange`, `lastUpdated`, `role`, `hasActiveRide`, `licensePlate` | Full catalog visibility. `role` is always `owner` for the row's caller-vehicle relationship. `hasActiveRide` ([MYR-233](https://linear.app/myrobotaxi/issue/MYR-233)) is P0 derived operational state — same tier as `status` — and is in BOTH role allow-lists: a rider needs it to render Busy and route to the scheduling flow. `licensePlate` ([MYR-286](https://linear.app/myrobotaxi/issue/MYR-286)) is P1 but likewise in BOTH allow-lists — see the viewer row. |
-| `viewer` | All `VehicleSummary` fields EXCEPT `name` | The user-assigned nickname (P1, owner-curated) is owner-only. Viewers still see model/year/color so they can identify the vehicle in their list, but the nickname stays with the owner. `licensePlate` ([MYR-286](https://linear.app/myrobotaxi/issue/MYR-286)) is deliberately NOT owner-only despite also being P1: the entire purpose of the plate is that a rider can identify the correct car at pickup, which fails if only the owner can see it. That is a product decision, not an oversight — do not "fix" it by analogy with `name`. The catalog never carries the full `vin` for either role (`vinLast4` only). Forward-looking — see the §7.0 implementation note about the v1 viewer pathway being PLANNED. |
+| `owner` | All `VehicleSummary` fields: `vehicleId`, `name`, `model`, `year`, `color`, `vinLast4`, `status`, `chargeLevel`, `estimatedRange`, `lastUpdated`, `role`, `hasActiveRide`, `licensePlate`, `serviceEstimatedEndAt` | Full catalog visibility. `role` is always `owner` for the row's caller-vehicle relationship. `hasActiveRide` ([MYR-233](https://linear.app/myrobotaxi/issue/MYR-233)) is P0 derived operational state — same tier as `status` — and is in BOTH role allow-lists: a rider needs it to render Busy and route to the scheduling flow. `licensePlate` ([MYR-286](https://linear.app/myrobotaxi/issue/MYR-286)) is P1 but likewise in BOTH allow-lists — see the viewer row. `serviceEstimatedEndAt` ([MYR-316](https://linear.app/myrobotaxi/issue/MYR-316)) is P0 operational timing — again the same tier as `status` — and is in BOTH allow-lists for the same reason `hasActiveRide` is: it is what floors the rider's scheduling picker, so a rider who cannot see it cannot book correctly. Added to `vehicleSummaryOwnerFields` in `internal/mask/tables.go`; the viewer list derives from it by `removeField`, so it lands in both by construction. |
+| `viewer` | All `VehicleSummary` fields EXCEPT `name` | The user-assigned nickname (P1, owner-curated) is owner-only. Viewers still see model/year/color so they can identify the vehicle in their list, but the nickname stays with the owner. `licensePlate` ([MYR-286](https://linear.app/myrobotaxi/issue/MYR-286)) is deliberately NOT owner-only despite also being P1: the entire purpose of the plate is that a rider can identify the correct car at pickup, which fails if only the owner can see it. That is a product decision, not an oversight — do not "fix" it by analogy with `name`. `serviceEstimatedEndAt` ([MYR-316](https://linear.app/myrobotaxi/issue/MYR-316)) is likewise NOT owner-only, and needs no separate rule: `name` is the sole subtraction, so every field added to the owner list arrives here automatically (`removeField` derivation in `internal/mask/tables.go`). That is the intended outcome, not an accident of the derivation — the window floors the rider's picker. The catalog never carries the full `vin` for either role (`vinLast4` only). Forward-looking — see the §7.0 implementation note about the v1 viewer pathway being PLANNED. |
 
 #### 5.2.1 Vehicle snapshot (`GET /api/vehicles/{vehicleId}/snapshot`)
 
 | Role | Visible fields | Notes |
 |------|----------------|-------|
-| `owner` | All fields in [`schemas/vehicle-state.schema.json`](schemas/vehicle-state.schema.json) | Including GPS, nav, charge, gear -- the full v1 `VehicleState` shape. Includes the MYR-252 cabin-control read-back fields (`locked`, `hvacPower`, `isClimateOn`, `fanSpeed`, `driverTempSetting`, `passengerTempSetting`, `hvacAutoMode`, `hvacAcEnabled`, `seatHeaterLeft`/`Right`, `seatHeaterRearLeft`/`Center`/`Right`, `seatCoolerLeft`/`Right`, `seatVentEnabled`, `chargePortDoorOpen`, `frunkOpen`, `trunkOpen`, `mediaPlaybackStatus`, `mediaVolume`) — all P0, all in `internal/mask/tables.go` `vehicleStateOwnerFields`. **Delivery caveat (updated by [MYR-298](https://linear.app/myrobotaxi/issue/MYR-298)):** **20 of the 21** cabin read-backs are now persisted (Go-owned `go_vehicle_control_state` side table, LEFT-joined into `VehicleRepo.GetByID`) and **returned on this DB-backed `/snapshot`** for non-streaming cars (NFR-3.5) — the five owner controls `locked`, `frunkOpen`, `trunkOpen`, `isClimateOn`, `chargePortDoorOpen` ([MYR-269](https://linear.app/myrobotaxi/issue/MYR-269)), the eleven cabin-setting levels ([MYR-273](https://linear.app/myrobotaxi/issue/MYR-273)), the two climate-mode read-backs ([MYR-274](https://linear.app/myrobotaxi/issue/MYR-274)), and `seatVentEnabled` + `mediaPlaybackStatus` ([MYR-298](https://linear.app/myrobotaxi/issue/MYR-298)). Only `hvacPower` stays WS-live-only — its server-derived `isClimateOn` boolean IS persisted, so nothing owner-facing is lost. Every persisted read-back is nullable and surfaces as an explicit `null` when never read (honest-unknown, never a fabricated value). This closes the [MYR-253](https://linear.app/myrobotaxi/issue/MYR-253) hydration. **Extended by [MYR-303](https://linear.app/myrobotaxi/issue/MYR-303) + [MYR-308](https://linear.app/myrobotaxi/issue/MYR-308):** the owner projection additionally carries the media now-playing block (`mediaNowPlayingTitle`, `mediaNowPlayingArtist`, `mediaNowPlayingAlbum`, `mediaNowPlayingStation`, `mediaPlaybackSource`, `mediaNowPlayingDurationMs`, `mediaNowPlayingElapsedMs`, `mediaVolumeMax`) and `seatCoolingCapable` — all nine persisted to the same side table (migration 0015) and returned here. The five free-text fields are **P1**, not P0 like the rest of the cabin block: they are user content whose accumulation reveals listening habits, so they are redacted in logs (`data-classification.md` §1.13). `seatCoolingCapable` is REST-sourced (`vehicle_config.has_seat_cooling`) and **snapshot-only** — Tesla does not stream it, so it never appears on a `vehicle_update` frame. A `/snapshot` omitting optional fields is contract-valid (§7.1). |
-| `viewer` | All fields EXCEPT the full `vin` | **Updated by [MYR-286](https://linear.app/myrobotaxi/issue/MYR-286).** The viewer allow-list is now owner-minus-`vin` and nothing else. The full 17-char `vin` stays owner-only per [MYR-279](https://linear.app/myrobotaxi/issue/MYR-279) — it identifies the physical car and links to its location history ([`data-classification.md`](data-classification.md) §1.3, §2.1) — while `licensePlate`, which this row previously excluded as a *forward-looking* rule written before the field was on the wire, is now **deliberately visible to viewers**: the plate exists so a rider can identify the correct car at pickup, which fails if only the owner can see it. Both fields are P1; the asymmetry is about **who needs the value**, not about tier. Viewers retain full GPS, nav, and charge visibility because the whole point of sharing is to watch the vehicle in real time (FR-5.1, FR-5.4). The MYR-252 cabin-control fields are in the viewer allow-list too; the same WS-live-only caveat applies. **MYR-303/308:** the media now-playing block and `seatCoolingCapable` are in the viewer allow-list as well. For the five **P1** free-text media fields that is a deliberate product decision, not an oversight — a rider sitting in the car can already hear what is playing, so a now-playing panel that blanks for the passenger is the feature failing. Same reasoning as `licensePlate`; `vin` remains the only owner-only field. |
+| `owner` | All fields in [`schemas/vehicle-state.schema.json`](schemas/vehicle-state.schema.json) | Including GPS, nav, charge, gear -- the full v1 `VehicleState` shape. Includes the MYR-252 cabin-control read-back fields (`locked`, `hvacPower`, `isClimateOn`, `fanSpeed`, `driverTempSetting`, `passengerTempSetting`, `hvacAutoMode`, `hvacAcEnabled`, `seatHeaterLeft`/`Right`, `seatHeaterRearLeft`/`Center`/`Right`, `seatCoolerLeft`/`Right`, `seatVentEnabled`, `chargePortDoorOpen`, `frunkOpen`, `trunkOpen`, `mediaPlaybackStatus`, `mediaVolume`) — all P0, all in `internal/mask/tables.go` `vehicleStateOwnerFields`. **Delivery caveat (updated by [MYR-298](https://linear.app/myrobotaxi/issue/MYR-298)):** **20 of the 21** cabin read-backs are now persisted (Go-owned `go_vehicle_control_state` side table, LEFT-joined into `VehicleRepo.GetByID`) and **returned on this DB-backed `/snapshot`** for non-streaming cars (NFR-3.5) — the five owner controls `locked`, `frunkOpen`, `trunkOpen`, `isClimateOn`, `chargePortDoorOpen` ([MYR-269](https://linear.app/myrobotaxi/issue/MYR-269)), the eleven cabin-setting levels ([MYR-273](https://linear.app/myrobotaxi/issue/MYR-273)), the two climate-mode read-backs ([MYR-274](https://linear.app/myrobotaxi/issue/MYR-274)), and `seatVentEnabled` + `mediaPlaybackStatus` ([MYR-298](https://linear.app/myrobotaxi/issue/MYR-298)). Only `hvacPower` stays WS-live-only — its server-derived `isClimateOn` boolean IS persisted, so nothing owner-facing is lost. Every persisted read-back is nullable and surfaces as an explicit `null` when never read (honest-unknown, never a fabricated value). This closes the [MYR-253](https://linear.app/myrobotaxi/issue/MYR-253) hydration. **Extended by [MYR-303](https://linear.app/myrobotaxi/issue/MYR-303) + [MYR-308](https://linear.app/myrobotaxi/issue/MYR-308):** the owner projection additionally carries the media now-playing block (`mediaNowPlayingTitle`, `mediaNowPlayingArtist`, `mediaNowPlayingAlbum`, `mediaNowPlayingStation`, `mediaPlaybackSource`, `mediaNowPlayingDurationMs`, `mediaNowPlayingElapsedMs`, `mediaVolumeMax`) and `seatCoolingCapable` — all nine persisted to the same side table (migration 0015) and returned here. The five free-text fields are **P1**, not P0 like the rest of the cabin block: they are user content whose accumulation reveals listening habits, so they are redacted in logs (`data-classification.md` §1.13). `seatCoolingCapable` is REST-sourced (`vehicle_config.has_seat_cooling`) and **snapshot-only** — Tesla does not stream it, so it never appears on a `vehicle_update` frame. A `/snapshot` omitting optional fields is contract-valid (§7.1). **Extended by [MYR-316](https://linear.app/myrobotaxi/issue/MYR-316):** the owner projection also carries `serviceEstimatedEndAt` — added to `vehicleStateOwnerFields` in `internal/mask/tables.go`, P0 like the sibling `status` it is gated on. It is neither streamed nor a cabin read-back: it is `COALESCE(service_etc, service_expected_end_at)` over two migration-**0017** columns on the same side table (Tesla's estimate outranking the owner's §7.16 entry), emitted only while the vehicle is `in_service` and `null` otherwise. |
+| `viewer` | All fields EXCEPT the full `vin` | **Updated by [MYR-286](https://linear.app/myrobotaxi/issue/MYR-286).** The viewer allow-list is now owner-minus-`vin` and nothing else. The full 17-char `vin` stays owner-only per [MYR-279](https://linear.app/myrobotaxi/issue/MYR-279) — it identifies the physical car and links to its location history ([`data-classification.md`](data-classification.md) §1.3, §2.1) — while `licensePlate`, which this row previously excluded as a *forward-looking* rule written before the field was on the wire, is now **deliberately visible to viewers**: the plate exists so a rider can identify the correct car at pickup, which fails if only the owner can see it. Both fields are P1; the asymmetry is about **who needs the value**, not about tier. Viewers retain full GPS, nav, and charge visibility because the whole point of sharing is to watch the vehicle in real time (FR-5.1, FR-5.4). The MYR-252 cabin-control fields are in the viewer allow-list too; the same WS-live-only caveat applies. **MYR-303/308:** the media now-playing block and `seatCoolingCapable` are in the viewer allow-list as well. For the five **P1** free-text media fields that is a deliberate product decision, not an oversight — a rider sitting in the car can already hear what is playing, so a now-playing panel that blanks for the passenger is the feature failing. Same reasoning as `licensePlate`; `vin` remains the only owner-only field. **MYR-316:** `serviceEstimatedEndAt` is in the viewer allow-list too — automatically, since this row is owner-minus-`vin` and the viewer table is derived by `removeField` — and deliberately so: the field is what floors the rider's scheduling picker, so withholding it would break the exact consumer it was added for. |
 | `limited_viewer` (FR-5.5 future slot) | All fields EXCEPT `licensePlate`, `vin`, `navRouteCoordinates`, `destinationName`, `destinationAddress`, `destinationLatitude`, `destinationLongitude`, `originLatitude`, `originLongitude`; `latitude`/`longitude` reduced to a coarse-grained hash (city-block resolution) | Documented here as the extension seam for FR-5.5. NOT implemented in v1. It still excludes `licensePlate` even though the full `viewer` role now receives it (MYR-286): an invited viewer waiting at a pickup needs the plate, whereas `limited_viewer` is the deliberately-degraded tier that also loses precise GPS and the whole navigation group. **MYR-303 adds five more exclusions to this seam:** `mediaNowPlayingTitle`, `mediaNowPlayingArtist`, `mediaNowPlayingAlbum`, `mediaNowPlayingStation` and `mediaPlaybackSource` MUST be excluded from `limited_viewer` when it is implemented. The full `viewer` role receives them because a rider is IN the car and can already hear the audio; `limited_viewer` is the deliberately-degraded tier for someone who is NOT, so that justification evaporates and free-text listening data is exactly what this tier exists to withhold — the same logic that strips precise GPS and the navigation group. The three P0 media numerics (`mediaNowPlayingDurationMs`, `mediaNowPlayingElapsedMs`, `mediaVolumeMax`) and the P0 `seatCoolingCapable` may stay. The mask is a static per-role projection; adding the `limited_viewer` row is a one-file handler-layer change in `internal/mask/`. |
 
 #### 5.2.2 Drive list (`GET /api/vehicles/{vehicleId}/drives`)
@@ -556,6 +561,8 @@ No contract changes are required for the new role's wire shape (the REST respons
 | `POST` | `/api/ride-requests/{id}/accept` | Owner accepts a `requested` ride (emits the MYR-176 dispatch seam) | Bearer (owner) | FR-9.3 |
 | `POST` | `/api/ride-requests/{id}/decline` | Owner declines a `requested` ride | Bearer (owner) | FR-9.3 |
 | `POST` | `/api/vehicles/{vehicleId}/command/{name}` | Send a Tesla vehicle command (P11 actuation + P10 dispatch) | Bearer + owner of vehicleId | FR-11.x, NFR-3.21 |
+| `POST` | `/api/tesla/vehicles/{vehicleId}/refresh` | On-demand state refresh: wake if needed, one `vehicle_data` read (§7.15) | Bearer + owner of vehicleId | FR-1.1, FR-2.1, NFR-3.21 |
+| `PUT` | `/api/tesla/vehicles/{vehicleId}/service-window` | Owner's "expected back" fallback for `serviceEstimatedEndAt` — the value Tesla's own estimate outranks (§7.16) | Bearer + owner of vehicleId | FR-9.3, NFR-3.21 |
 | `POST` | `/api/auth/apple` | Native Sign in with Apple → ES256 access + refresh pair | None (pre-auth; per-IP rate-limited) | FR-6.1, MYR-193 |
 | `POST` | `/api/auth/refresh` | Single-use refresh-token rotation | Refresh token in body (pre-auth; per-IP rate-limited) | FR-6.2, MYR-193 |
 | `POST` | `/api/auth/revoke` | Revoke a refresh-token family (sign-out) | Refresh token in body (pre-auth; per-IP rate-limited) | MYR-193 |
@@ -609,7 +616,8 @@ No request body, no query parameters in v1. Pagination (`cursor`, `limit`) is re
       "lastUpdated": "2026-05-10T17:45:00Z",
       "role": "owner",
       "hasActiveRide": false,
-      "licensePlate": "ABC 1234"
+      "licensePlate": "ABC 1234",
+      "serviceEstimatedEndAt": null
     }
   ]
 }
@@ -632,6 +640,7 @@ No request body, no query parameters in v1. Pagination (`cursor`, `limit`) is re
 | `role` | `string` (enum) | P0 | `owner` or `viewer`. The caller's relationship to the vehicle. See RBAC below. |
 | `hasActiveRide` | `boolean` | P0 | **OPTIONAL** ([MYR-233](https://linear.app/myrobotaxi/issue/MYR-233)). `true` iff the vehicle currently has an OPEN INSTANT ride request. **Derivation:** a `go_ride_requests` row with `scheduled_for IS NULL AND status IN ('accepted','arrived','enroute')` — character-for-character the predicate of the per-vehicle partial unique index `uq_go_ride_requests_active_instant_vehicle` (migration 0013, [MYR-266](https://linear.app/myrobotaxi/issue/MYR-266)), so the flag and the accept guard can never disagree (flag true ⇒ an accept would 409; an accept 409s ⇒ flag true). The index also bounds the match at one row per vehicle. Scheduled rides are EXEMPT (a reservation never makes the car busy) and `requested` does NOT count (many riders may hold pending requests against one idle car). Computed in the list query as a correlated `EXISTS` — one statement for the whole catalog, no N+1. **v1 no-WS-push caveat:** derivation is REST-read-time only; §8 pushes no `hasActiveRide` frame to non-party viewers, so a rider's Busy badge refreshes on the next list fetch, not live. **Absence semantics:** this server version always emits the field (`true`/`false`); a missing key means the server predates MYR-233 — consumers MUST read that as "availability unknown → treat as available" and MUST NEVER render Busy from absence. |
 | `licensePlate` | `string` | **P1** | **OPTIONAL** ([MYR-286](https://linear.app/myrobotaxi/issue/MYR-286)). The owner-entered license plate, same value and semantics as `VehicleState.licensePlate` (§7.1). Read off the Prisma-owned `Vehicle.licensePlate` column as an identity-row field alongside `name`/`color` — **not telemetry** and **not from Tesla** (the Fleet API exposes no plate anywhere); it exists only because the owner typed it via §7.14. Already normalized on write (trim, uppercase, ≤ 10 chars, charset `[A-Z0-9 -]`) — consumers MUST NOT re-normalize before display. **Empty-value convention:** this server ALWAYS emits the key and uses an **empty string** for "no plate set", matching the sibling `color` exactly; an ABSENT key means a pre-MYR-286 server. Neither ever means "we could not read the plate" — keep the `VIN ····xxxx` fallback (built from `vinLast4`) for both, and never render an empty plate in a catalog row. **RBAC:** in BOTH role allow-lists (§5.2.0) despite being P1 — the plate exists so a rider can identify the correct car at pickup. **v1 no-WS-push caveat:** no WebSocket delta; the plate refreshes on the next list fetch. |
+| `serviceEstimatedEndAt` | `string` (RFC 3339, UTC) or `null` | P0 | **OPTIONAL** ([MYR-316](https://linear.app/myrobotaxi/issue/MYR-316), contracts v0.17.0). When this vehicle's current service visit is estimated to END — the same value and the same semantics as `VehicleState.serviceEstimatedEndAt` (§7.1), resolved by one shared helper so the catalog row and the snapshot can never disagree. **Resolution:** `COALESCE(service_etc, service_expected_end_at)` over two nullable columns on the Go-owned `go_vehicle_control_state` side table (migration **0017**), where `service_etc` is Tesla's own estimate (Fleet API `GET /api/1/vehicles/{vin}/service_data`) and `service_expected_end_at` is what the owner typed via §7.16 — Tesla wins, the owner is the fallback. **Emitted only while `status` is `in_service`;** every other status is `null`, and the monitor additionally CLEARS both columns when it observes the car leaving service, so the gate is belt-and-braces and a stale window can never outlive the visit. **`null` is the common case, not a failure:** Tesla returns an all-null `service_data` body for a visit with no appointment record, so a car can be legitimately in service with no estimate at all. **Consumer rule:** floor the scheduling picker here; when the value is `null` or the key is ABSENT there is **NO BOUND** and scheduling stays fully open — never block a booking on missing data. **RBAC:** BOTH roles (§5.2.0) — a rider needs the window for the same reason the owner does, because it floors the picker. **v1 no-WS-push caveat:** not streamed; a `vehicle_update` NEVER carries it, so it refreshes on the next list fetch. |
 
 ##### Excluded from the list response
 
@@ -699,6 +708,16 @@ When a single user can plausibly own > 100 vehicles (fleet operators?), this end
 >
 > **`null` does NOT mean "no seat cooling".** It means the server predates MYR-308 or has never completed a vehicle-config read for this car; clients MUST fall back to the existing telemetry-presence heuristic (treat the car as capable if `seatCoolerLeft`/`seatCoolerRight` have ever been non-null) rather than hiding the control. An explicit `false` is AUTHORITATIVE and outranks that heuristic: clients MUST NOT offer seat-cooling controls at all — no greyed-out row, no disabled slider implying the hardware exists. P0 both roles (an equipment fact, tiered like `trim`). See `data-classification.md` §1.13.
 
+> **MYR-316 — `serviceEstimatedEndAt`, the service window (REST-derived, snapshot + list only).** The snapshot returns `serviceEstimatedEndAt` (`string` RFC 3339 or `null`): when the car's CURRENT service visit is estimated to end. It answers the one question an "In Service" badge cannot — *when do I get my car back?* — and it is what floors the rider's scheduling picker, so it is P0 operational timing about the car, the same tier as the sibling `status`, and in BOTH role masks (a rider needs the floor for exactly the reason the owner does).
+>
+> **Two columns, one emitted value — and the two-column split is the design, not an accident.** Migration **0017** adds `service_etc` (Tesla's own estimate, read from the Fleet API `GET /api/1/vehicles/{vin}/service_data`) and `service_expected_end_at` (what the owner typed via the new §7.16) to the Go-owned `go_vehicle_control_state` side table, both nullable `TIMESTAMPTZ`. The wire value is `COALESCE(service_etc, service_expected_end_at)` — **Tesla wins, the owner is the fallback** — resolved by one shared helper (`internal/telemetry/service_window.go`) used by this endpoint, §7.0, and the §7.8 scheduler bound, so the three readers can never drift. Collapsing them into one column would have been cheaper and wrong: a Tesla estimate arriving late would ERASE what the owner typed, and a withdrawn Tesla estimate would fall back to `null` instead of back to the owner's answer. Both columns also sit OUTSIDE the shared COALESCE control-state upsert the rest of this table uses — that upsert cannot express a NULL write, and clearing is a first-class operation here — so they have dedicated writers in `internal/store/vehicle_service_window.go`.
+>
+> **Emitted ONLY while `status` is `in_service`; `null` otherwise.** The monitor additionally CLEARS both columns when it observes the car leaving service, so the in-service gate is belt-and-braces: a stale window can neither outlive the visit nor be resurrected by a status flip. Consumers therefore never age this field out themselves.
+>
+> **`null` is COMMON AND NORMAL.** Tesla returns an ALL-NULL `service_data` body for a visit with no appointment record, so a car can be genuinely in service with no estimate at all. `null` is not an error, not a fetch failure, and not a claim that the car is back — and it means **NO BOUND**: scheduling stays fully open, and neither the picker nor the server may block on missing data (§7.8). The read itself is non-fatal on error and leaves the last-known estimate in place.
+>
+> **Delivery: NOT STREAMED.** Tesla has no proto for a service ETC, so there is no `fieldMap` entry, **no fleet-config change**, and a `vehicle_update` frame NEVER carries `serviceEstimatedEndAt`. It is REST-derived and reaches clients on the next read of this endpoint or §7.0. The Tesla read piggybacks on the ServiceStatusMonitor's existing connectivity-edge path for an in-service car, sharing the SAME per-VIN 45 s read debounce as the `GET /api/1/vehicles/{vin}` edge read and the MYR-260 `/vehicle_data` backfill and reusing the token that read already resolved — one more read on a path that was already firing, not a new poller. See `vehicle-state-schema.md` §2.4 and `data-classification.md` §1.13.
+
 #### Purpose
 
 Returns the full current `VehicleState` for a single vehicle. This is the cold-load snapshot the SDK fetches on initial page render (target: < 500 ms end-to-end per the latency table in `requirements.md` §3.1) and on every reconnect per NFR-3.11 (see `websocket-protocol.md` §7.2 reconnect sequence). The snapshot is the DB source-of-truth (see [`data-lifecycle.md`](data-lifecycle.md) §1.2); the WebSocket is the real-time channel. An SDK built on this contract never shows a per-field loading spinner -- the snapshot response is always complete enough to render the full UI (NFR-3.5, NFR-3.6).
@@ -755,6 +774,7 @@ Example:
   "tripDistanceRemaining": null,
   "navRouteCoordinates": null,
   "licensePlate": "ABC 1234",
+  "serviceEstimatedEndAt": null,
   "lastUpdated": "2026-04-13T18:22:01Z"
 }
 ```
@@ -764,6 +784,7 @@ The seven former spec-only catalog fields (`model`, `year`, `color`, `fsdMilesSi
 | Field | Type | Classification | Notes |
 |-------|------|----------------|-------|
 | `licensePlate` | `string` | **P1** | **OPTIONAL** ([MYR-286](https://linear.app/myrobotaxi/issue/MYR-286), contracts v0.15.0). The owner-entered license plate, read off the Prisma-owned `Vehicle.licensePlate` column as an identity-row field alongside `name`/`color` — **not telemetry**. **Not sourced from Tesla:** the Fleet API exposes no plate on any endpoint, telemetry field, or proto, so the value exists only because the owner typed it via §7.14 `PUT /api/tesla/vehicles/{vehicleId}/plate`. **Already normalized** on write (trimmed, uppercased, ≤ 10 chars, charset `[A-Z0-9 -]`) — consumers MUST NOT re-normalize or re-validate before display. **Empty-value convention:** this server ALWAYS emits the key and uses an **empty string** for "no plate set", exactly matching its sibling `color` (a plain non-`omitempty` string). The wire contract additionally tolerates an ABSENT key, which means the server predates MYR-286; neither ever means "this car has a plate we could not read". Consumers keep their existing `VIN ····xxxx` fallback for both cases and MUST NEVER render an empty plate. **RBAC:** visible to BOTH roles (§5.2.1) — unlike the owner-only `vin`. **Delivery:** no WebSocket delta in v1 — a `vehicle_update` frame NEVER carries `licensePlate` and a plate edit fires no push, so the value reaches clients on the next read (this endpoint or §7.0). |
+| `serviceEstimatedEndAt` | `string` (RFC 3339, UTC) or `null` | P0 | **OPTIONAL** ([MYR-316](https://linear.app/myrobotaxi/issue/MYR-316), contracts v0.17.0). When the car's CURRENT service visit is estimated to end — the answer an "In Service" badge alone cannot give, and the FLOOR the rider's scheduling picker builds on. **Server-computed, never client-supplied on this shape.** Resolved as `COALESCE(service_etc, service_expected_end_at)` over two nullable `TIMESTAMPTZ` columns on the Go-owned `go_vehicle_control_state` side table (migration **0017**): Tesla's own estimate (`service_data.service_etc`, Fleet API `GET /api/1/vehicles/{vin}/service_data`) OUTRANKS the owner-entered "expected back" value written by §7.16, which is the fallback — kept as two columns precisely so a late Tesla estimate does not erase what the owner typed and a withdrawn one falls back rather than to `null`. **Gated on status:** emitted only while `status` is `in_service`; anything else is `null`, and the monitor physically clears both columns when the car leaves service, so the gate is belt-and-braces. **`null` is common and normal** — Tesla returns an all-null `service_data` body for a visit with no appointment record — and means **NO BOUND**, not "unknown, refuse to schedule" (§7.8). **RBAC:** BOTH roles (§5.2.1); P0 operational timing, the same tier as `status`, so it is log-safe. **Delivery:** NOT STREAMED — no proto, no `fieldMap` entry, no fleet-config change, and a `vehicle_update` NEVER carries it; it reaches clients on the next read (this endpoint or §7.0). |
 
 #### Response -- error
 
@@ -777,7 +798,7 @@ The seven former spec-only catalog fields (`model`, `year`, `color`, `fsdMilesSi
 
 #### RBAC
 
-See §5.2.1. Owners see the full `VehicleState`; viewers see everything except the full `vin` (MYR-279). `licensePlate` is visible to BOTH roles (MYR-286) — a rider identifies the car at pickup from it.
+See §5.2.1. Owners see the full `VehicleState`; viewers see everything except the full `vin` (MYR-279). `licensePlate` is visible to BOTH roles (MYR-286) — a rider identifies the car at pickup from it. `serviceEstimatedEndAt` is visible to BOTH roles too (MYR-316) — it floors the rider's scheduling picker, so a viewer who cannot see it cannot book against the car correctly.
 
 #### Implementation notes
 
@@ -1393,7 +1414,7 @@ Body is `RideRequestCreateRequest` (`vehicleId`, `pickup`, `dropoff` required; `
 
 > **One-time dedup at migration (deploy caveat).** The guard postdates the create endpoint, so databases that predate it can hold riders with several concurrently-open instant rides (stale pre-guard test debris). Migration 0004 is self-cleaning: **before** creating the index it transitions every OLDER open instant ride per rider to `cancelled`, keeping only the MOST RECENT one (`ORDER BY created_at DESC, id DESC` — the list endpoints' total order; keeping newest matches rider expectation). The dedup mirrors the store's `UpdateStatusFrom` timestamp discipline (entering `cancelled` stamps neither `acceptedAt` nor `completedAt`; `updatedAt` is touched). **No `ride_status_changed` WS frames fire for these rows** — migrations run with no event bus; clients refetch via REST (FR-9.1/FR-9.2 reconciliation) and observe the stale rides as `cancelled`.
 
-Errors: `400 invalid_request` (malformed/unknown-field body, bad place, bad `scheduledFor`), `401 auth_failed`, `403 vehicle_not_owned`, `404 not_found` (unknown vehicle), `409 ride_active` (rider already has an open instant ride), `500 internal_error`.
+Errors: `400 invalid_request` (malformed/unknown-field body, bad place, bad `scheduledFor`, or a `scheduledFor` EARLIER than the vehicle's `serviceEstimatedEndAt` — the MYR-316 service-window bound, see the accept section below), `401 auth_failed`, `403 vehicle_not_owned`, `404 not_found` (unknown vehicle), `409 ride_active` (rider already has an open instant ride), `500 internal_error`.
 
 ##### 409 `ride_active` body
 
@@ -1477,11 +1498,19 @@ Owner-only. Legal only from `requested` → `accepted`; any other current status
 
 **Scheduled accepts are EXEMPT (MYR-313).** When `scheduledFor` is set the gate does not run at all — the vehicle's status is not even read, so a status-lookup failure cannot strand a reservation either. "Can this car be dispatched right now?" is only the question an instant accept is asking; a reservation days out says nothing about the car's status today, and refusing it left owners unable to confirm reservations for a car that was in service that afternoon. This makes the gate consistent with the two guards it is the analogue of — the per-rider `ride_active` index and the per-vehicle one-active-ride index (`uq_go_ride_requests_active_instant_vehicle`), both partial on `scheduled_for IS NULL` — and with §4.1.1's statement that scheduled rides are exempt from both. **Availability at the reservation instant is still required**, but that is the scheduled-dispatch machinery's precondition (it must re-check the vehicle when the reservation comes due); accepting a reservation is not dispatching it.
 
+**Service-window bound on `scheduledFor` (MYR-316).** A **scheduled** accept is refused **`400 invalid_request`** — deliberately NOT a new error code and NOT a `409` — when the ride's `scheduledFor` is EARLIER than the target vehicle's current `serviceEstimatedEndAt`, with the message `scheduledFor must not be earlier than the vehicle's estimated service end (<RFC3339>)`. The same bound is enforced on **create** (`POST /api/ride-requests`), so a reservation cannot be booked past the guard and then confirmed through it, and the resolved value is computed by the same `internal/telemetry/service_window.go` helper that §7.0 / §7.1 emit from — one definition of the window, three readers, no drift. This is a **request-validity** failure, not a lifecycle or capability conflict: the rider asked for a time the car provably cannot serve, and the honest fix is to pick a later time, which is what a `400` tells a client to do. Three rules, all load-bearing:
+
+- **A null estimate means NO BOUND.** When `serviceEstimatedEndAt` is null — the vehicle is not `in_service`, or it is but Tesla returned the all-null `service_data` body a visit with no appointment record produces — scheduling stays **fully open**. Missing data never narrows what a rider may book; the server must no more block on absence than the picker must.
+- **EQUAL is ALLOWED.** The bound is strictly "earlier than", so a `scheduledFor` exactly at `serviceEstimatedEndAt` passes. A rider booking the car for the minute it is due back is asking a legitimate question, and an off-by-one that rejected it would be indistinguishable from a broken estimate.
+- **INSTANT rides are unaffected.** They carry no `scheduledFor` to compare, and they are already gated by MYR-277's in-service `409 vehicle_unavailable` — a car in the shop cannot be dispatched right now, which is the instant path's own question.
+
+**Consequence for MYR-313: a scheduled accept now DOES read the vehicle.** MYR-313 short-circuited the availability gate *before* the vehicle read; the bound needs the vehicle's current `serviceEstimatedEndAt`, so the read happens again. That read **FAILS OPEN for scheduled rides** — an unreadable vehicle leaves the reservation **unbounded** rather than refused — which is the exact inverse of the instant path's fail-closed `500`, and it is what guarantees the MYR-313 stranding defect cannot return: no lookup failure can cost an owner a confirmation. **MYR-313's exemption from the AVAILABILITY gate is unchanged**: an `in_service`/`offline` scheduled accept still succeeds, because "can this car be dispatched right now?" remains the wrong question for a reservation. The two guards ask different things — the availability gate asks about *now*, the service-window bound asks whether the requested *future* instant clears a known service end.
+
 **Dispatch seam (MYR-176):** a successful accept also publishes an internal `ride.accepted` event on the process event bus carrying the pickup/dropoff places and the booked-for passenger contact — the input the nav-dispatch pipeline subscribes to for the Tesla `navigation_request` share push. The event is internal-only: it never reaches the WS broadcast path, and no Tesla call happens **synchronously on this endpoint** — the push runs asynchronously off the bus.
 
 **Scheduled accepts DEFER the dispatch to `scheduledFor` (MYR-179).** The `ride.accepted` seam still fires for a reservation, but the nav-dispatch pipeline **does not push** when the ride carries `scheduledFor`: accepting a reservation is not dispatching it, and dialing a rider's pickup into the car hours or days early would strand the wrong destination in its navigation. The pickup push instead fires at the reservation instant, driven by the reservation sweeper (see "Reservation-time dispatch" below). Observable consequence on the wire: after a **scheduled** accept, `dispatchStatus` and `dispatchedAt` stay **absent** — the same pending shape an instant ride has between accept and push resolution — until `scheduledFor` arrives. **Instant accepts are unchanged** (push on accept). Nothing about the *lifecycle* changes: the ride is `accepted` either way, and `dispatchStatus` remains an orthogonal annotation.
 
-Errors: `401 auth_failed`, `403 permission_denied` (rider/non-owner party), `404 not_found` (unknown id / non-party), `409 conflict` (illegal lifecycle transition), `409 vehicle_unavailable` (INSTANT accepts only — target vehicle `in_service`/`offline`, MYR-277; scheduled accepts are exempt, MYR-313), `500 internal_error`.
+Errors: `400 invalid_request` (SCHEDULED accepts only — `scheduledFor` is earlier than the target vehicle's `serviceEstimatedEndAt`, the MYR-316 service-window bound; no bound applies when that value is null, and an equal instant is allowed), `401 auth_failed`, `403 permission_denied` (rider/non-owner party), `404 not_found` (unknown id / non-party), `409 conflict` (illegal lifecycle transition), `409 vehicle_unavailable` (INSTANT accepts only — target vehicle `in_service`/`offline`, MYR-277; scheduled accepts are exempt, MYR-313), `500 internal_error`.
 
 #### Dispatch outcome (MYR-176)
 
@@ -1575,6 +1604,7 @@ The owner-driven handshake makes the lifecycle a strict linear chain
 - **MYR-176** performs the leg-1 (pickup) nav push on accept but records it as an orthogonal `dispatchStatus`/`dispatchedAt` annotation (see "Dispatch outcome" above) — it does **not** advance the main lifecycle.
 - **MYR-179** changes only **when** that leg-1 push fires for a **scheduled** ride — at `scheduledFor` rather than at accept (see "Reservation-time dispatch" above). The matrix is untouched: a reservation still goes `requested → accepted` on accept and sits in `accepted` until the owner confirms pickup, exactly as before; only the orthogonal `dispatchStatus` annotation resolves later. A reservation failed by the lateness ceiling (`reservation_expired`) likewise stays `accepted` — the dispatch failed, the ride did not, and the owner/rider may still cancel or proceed manually.
 - **MYR-277** gates **accept only** on vehicle availability: `requested → accepted` is refused `409 vehicle_unavailable` when the target vehicle's persisted status is `in_service` or `offline`. This does **not** change the transition matrix (the transition stays legal for a dispatchable `parked`/`driving`/`charging` vehicle) — it is an orthogonal capability precondition on the accept endpoint, evaluated against the current persisted status and never applied to decline. **MYR-313** narrows it to **instant** rides: a `scheduledFor` ride skips the gate entirely (see §7.8), matching the per-rider and per-vehicle active-ride guards, which are both partial on `scheduled_for IS NULL`.
+- **MYR-316** adds a **service-window bound** on `scheduledFor`, on **create AND accept**, and it too leaves the matrix untouched: `requested → accepted` stays legal, and the refusal is a `400 invalid_request` (not a new code, not a `409`) because a reservation for a time the car provably cannot serve is a bad *request*, not an illegal transition or a capability conflict. Bound: `scheduledFor` earlier than the vehicle's resolved `serviceEstimatedEndAt` (§7.0/§7.1) is refused; **null estimate ⇒ no bound at all**, **equal is allowed** (strictly "earlier than"), and instant rides are unaffected (no `scheduledFor`, already gated by MYR-277). Note the interaction with the bullet above: the bound means a scheduled accept **does** read the vehicle again, but that read **fails open** — an unreadable vehicle leaves the reservation unbounded rather than refused — so MYR-313's stranding defect cannot return, and MYR-313's exemption from the *availability* gate is unchanged.
 - **MYR-270** replaces the retired MYR-265 auto-leg model with an **owner-driven handshake** over the three remaining transitions: `accepted → arrived` (owner **picked-up**), `arrived → enroute` (rider **start** — which fires the leg-2 dropoff nav push), and `enroute → completed` (owner **dropped-off**). Completion is now **owner-confirmed**: the MYR-265 drive-end auto-completion (`internal/ridecomplete`) and the rider `board` endpoint are removed, so a car parking no longer closes a ride and the rider can no longer advance the ride before the owner confirms pickup. Each transition is guarded + idempotent and emits the usual `ride_status_changed` summary. (The `enroute_at` column stamped on `arrived → enroute` remains as a lifecycle timestamp; it no longer feeds any drive-end correlation.)
 - Every transition that succeeds emits a `ride_status_changed` summary frame to the two parties.
 
@@ -2219,6 +2249,252 @@ without putting an identifying value in the log stream (§9, CG-DC-2).
 
 ---
 
+### 7.15 `POST /api/tesla/vehicles/{vehicleId}/refresh` (owner on-demand state refresh — MYR-315)
+
+Owner-authenticated "bring this car up to date now" — the pull half of an
+otherwise entirely push-based surface.
+
+**Why this endpoint has to exist.** Every other read surface is **passive**. The
+WebSocket carries only what the car volunteers, and a car that is asleep, in
+service, or merely quiet volunteers nothing — so §7.1 keeps returning the last
+frame it ever saw, however old. The §7.12/§7.13 backfills fire on *connectivity
+edges*, which a parked car does not produce. Without this endpoint a user
+staring at stale data has no action available to them at all.
+
+**Enablement.** The route is ALWAYS mounted. The `vehicle_data` read is an
+UNSIGNED authenticated read against the direct Fleet API, so it needs no
+tesla-http-proxy; only the *wake* uses the command transport (proxy-preferred,
+Fleet REST fallback). With no wake transport configured, an already-awake car
+still refreshes normally and a sleeping one resolves to `502 command_failed`.
+
+**Request.**
+
+```
+POST /api/tesla/vehicles/{vehicleId}/refresh
+Authorization: Bearer <app session JWT>        # owner identity = JWT sub
+```
+
+`{vehicleId}` is the Prisma cuid (the same key as §7.12 / §7.14 — NOT a VIN, and
+NOT the Tesla vehicle id used by §7.13). There is **no request body.**
+
+**Behavior / sequence:**
+
+1. Validate the bearer → `userId`. Missing/invalid → `401 auth_failed`. Missing
+   `{vehicleId}` → `400 invalid_request`. Non-`POST` method → `405 invalid_request`.
+2. Resolve `vehicleId` → owner. Unknown vehicle → `404 not_found`
+   (indistinguishable from ownership-filtered — never leaks existence). A real
+   ownership mismatch → `403 vehicle_not_owned`. **Identical semantics to §7.12
+   and §7.14.** Neither touches Tesla.
+3. **Freshness short-circuit.** If a LIVE streamed frame has arrived for this
+   VIN within the **120 s** stream-authoritative window (the same MYR-300 window
+   that gates the REST backfill), respond `200` with `status: "fresh"` and the
+   arrival time of that frame. **No Tesla call is made, and the cooldown in
+   step 4 is not consumed** — a car that is working perfectly must never be
+   rate-limited for it, and refreshing data that is already current would only
+   cost the user battery.
+4. **Cooldown.** Otherwise, a per-vehicle limiter permits one Tesla-hitting
+   refresh per **60 s**. Over the limit → `429 rate_limited` with `Retry-After: 60`.
+5. **Wake.** Probe Tesla's cheap vehicle object; if `state` is not `online`,
+   wake and retry under the **same bounded wake budget vehicle commands use**
+   (§7.9) — 3 attempts, 2 s backoff. Probe-first, so an *online but quiet* car
+   (the common case) costs one cheap read and **no wake at all**. Budget spent →
+   `503 vehicle_asleep`.
+6. **One read.** Exactly ONE `vehicle_data` read, republished through the same
+   MYR-260 backfill mapping the connectivity-edge path uses — so the values land
+   on the identical broadcast + persist route a streamed frame takes, and a
+   client with a live socket sees the resulting `vehicle_update` as usual.
+   Respond `200` with `status: "refreshed"`.
+
+**`seatCoolingCapable` comes along free.** The `vehicle_data` read includes the
+`vehicle_config` sub-object, so a refresh also re-acquires the REST-only spec
+facts `trim` (MYR-279) and `seatCoolingCapable` (MYR-308) — the two fields the
+stream can never source. An owner whose car has never produced a connectivity
+edge since MYR-308 shipped can therefore populate the capability bit by tapping
+refresh, with no drive and no reconnect required.
+
+**Cooldown is in-memory and per-process.** It resets on restart and is not
+shared across replicas, so the effective limit under N replicas is up to N
+refreshes per minute per vehicle. This is deliberate: the backstop that actually
+protects Tesla is the bounded wake budget and the single-read shape, and a
+durable counter would cost a DB round trip on every tap to enforce a limit whose
+only job is to damp a stuck finger. The limiter is consumed on the path that
+dials Tesla, **including** when that path then fails — a `503` does not refund
+the token, so a client retrying a sleeping car backs off rather than re-waking
+it every second.
+
+**Not idempotent in the §4.5 sense, but safe to repeat.** Two refreshes inside
+the cooldown do not produce two Tesla calls; two refreshes outside it produce
+two reads and two `lastUpdated` values, which is the point.
+
+**Response `200`** (`application/json`):
+
+```json
+{
+  "status": "refreshed",
+  "lastUpdated": "2026-07-28T12:00:00Z"
+}
+```
+
+| Field | Type | Classification | Notes |
+|-------|------|----------------|-------|
+| `status` | `string` enum | P0 | `"fresh"` — the live stream already held current truth and no Tesla call was made. `"refreshed"` — the car was woken if necessary and one `vehicle_data` read was published. |
+| `lastUpdated` | `string` (RFC 3339, UTC) | P0 | The instant the data now reflects: the arrival time of the last live frame when `fresh`, the completion time of the REST read when `refreshed`. Matches the `lastUpdated` semantics of §7.0 / §7.1. |
+
+**Errors:**
+
+| HTTP | `error.code` | When |
+|------|--------------|------|
+| 400 | `invalid_request` | Missing `{vehicleId}`. |
+| 401 | `auth_failed` | Missing/malformed/invalid bearer, or the owner has no usable Tesla token (account not linked, or expired beyond refresh — re-link required). |
+| 403 | `vehicle_not_owned` | Caller does not own the vehicle (matches §7.12 / §7.14). |
+| 404 | `not_found` | Unknown vehicle, or ownership-filtered — intentionally indistinguishable (matches §7.12 / §7.14). |
+| 405 | `invalid_request` | Non-`POST` method. |
+| 429 | `rate_limited` | This vehicle was refreshed within the last 60 s. Carries `Retry-After: 60`. Never returned for a `fresh` short-circuit. |
+| 502 | `command_failed` | The Fleet API read failed for a reason a wake cannot fix, the publish failed, or no wake transport is configured for a car that needs waking. Retryable. |
+| 503 | `vehicle_asleep` | The wake budget was exhausted, or the car dropped back to sleep between the wake probe and the read (Tesla `408`). Transient — the SDK backs off. |
+| 500 | `internal_error` | Store-layer failure during the ownership lookup. Nothing was read or written. |
+
+**Observability.** VINs are redacted to last-4 in every log line (§9, CG-DC-2).
+The `vehicle_data` payload is P1 and is NEVER logged, not even on a decode
+failure — only the redacted VIN and the HTTP status.
+
+---
+
+### 7.16 `PUT /api/tesla/vehicles/{vehicleId}/service-window` (owner expected-back entry — MYR-316)
+
+Owner-authenticated "when do you expect this car back?" — the **fallback** half of
+the `serviceEstimatedEndAt` read surface in §7.0 / §7.1, and the only value on
+that field a human ever types.
+
+**Why this endpoint has to exist.** Tesla's own estimate is the better answer and
+the server always prefers it — but Tesla very often has no answer at all. The
+Fleet API's `GET /api/1/vehicles/{vin}/service_data` returns a body whose fields
+are **all nullable**, and an **all-null body is the normal shape for a visit with
+no appointment record**: the car is genuinely in service and Tesla simply does
+not know when it will be done. Without this endpoint that case is permanently
+`null` — the owner is staring at an "In Service" badge that cannot say *when*,
+and the rider's scheduling picker has no floor to build on even though the owner
+was told "Thursday afternoon" at the counter. The owner is the only remaining
+source of that fact, so the Go server owns the write.
+
+**Enablement.** The route is ALWAYS mounted. No tesla-http-proxy, no Tesla token,
+and no Tesla call is involved at any point — this is purely a local owner-scoped
+DB write against the Go-owned `go_vehicle_control_state` side table.
+
+**Request.**
+
+```
+PUT /api/tesla/vehicles/{vehicleId}/service-window
+Authorization: Bearer <app session JWT>        # owner identity = JWT sub
+Content-Type: application/json
+
+{ "expectedEndAt": "2026-07-29T18:00:00Z" }
+```
+
+`{vehicleId}` is the Prisma cuid (the same key as §7.12 / §7.14 / §7.15 — NOT a
+VIN, and NOT the Tesla vehicle id used by §7.13).
+
+| Field | Type | Classification | Notes |
+|-------|------|----------------|-------|
+| `expectedEndAt` | `string` (RFC 3339) or `null` | P0 | When the owner expects the car back. MUST be in the FUTURE. **Four accepted spellings CLEAR the value** — see below. Written to `service_expected_end_at`; it is the FALLBACK, so Tesla's `service_etc` still outranks it on the next read. |
+
+**Behavior / sequence:**
+
+1. Validate the bearer → `userId`. Missing/invalid → `401 auth_failed`. Missing
+   `{vehicleId}` → `400 invalid_request`. Non-`PUT` method → `405 invalid_request`.
+2. Decode the body. **Clearing has four accepted spellings, all equivalent:** the
+   key ABSENT, an explicit `null`, an EMPTY or whitespace-only string, and an
+   EMPTY BODY. All four write SQL `NULL` to `service_expected_end_at`. There is
+   deliberately no separate `DELETE` verb: "I no longer know when it's coming
+   back" is an ordinary answer to the same question, and a client that renders a
+   cleared text field should not have to switch HTTP methods to submit it.
+3. Otherwise parse as RFC 3339. Unparseable → `400 invalid_request`, message
+   `expectedEndAt must be an RFC 3339 date-time`. **The value must be in the
+   FUTURE** — a past or present instant is `400 invalid_request` with
+   `expectedEndAt must be in the future`. A service window that has already
+   elapsed is not information, and accepting one would silently install a
+   scheduling floor (§7.8) that every future booking already clears.
+4. Resolve `vehicleId` → owner via `VehicleRepo.GetByID`. Unknown vehicle →
+   `404 not_found` (indistinguishable from ownership-filtered — never leaks
+   existence). A real ownership mismatch → `403 vehicle_not_owned`. **Identical
+   semantics to §7.12 and §7.14.** No write runs on either.
+5. Write `service_expected_end_at` through the dedicated writer in
+   [`internal/store/vehicle_service_window.go`](../../internal/store/vehicle_service_window.go)
+   — **not** the shared per-field COALESCE control-state upsert the rest of that
+   table uses, which cannot express a NULL write and so could never clear.
+   Store failure → `500 internal_error`; nothing written, retryable.
+6. Respond `200` with the value now stored in the owner column.
+
+**The ownership check is load-bearing here in a way it is not for §7.14.** The
+plate endpoint writes the Prisma-owned `Vehicle` table, whose `UPDATE` re-scopes
+`WHERE "userId" = <caller>` — a belt-and-braces second enforcement that makes a
+zero-row write fail closed even if the check above were wrong. The
+`go_vehicle_control_state` side table has **no `userId` column** (CG-DL-9: no
+Prisma FKs), so there is no owner-scoped SQL predicate to fall back on and step 4
+is the *only* thing standing between a caller and another user's car. Treat it
+as such: it is not a duplicate of the read-path filter.
+
+**Precedence — this endpoint writes the FALLBACK, Tesla wins.** The emitted
+`serviceEstimatedEndAt` is `COALESCE(service_etc, service_expected_end_at)`, so
+a `200` from this endpoint does **not** guarantee the value will appear on the
+next `/snapshot`: if Tesla's own `service_etc` is (or later becomes) non-null it
+takes precedence. That is why the response echoes the **owner column** rather
+than the resolved field — echoing the resolved value would make a client believe
+its write had been overruled when it has merely been outranked, and would leave
+it with no way to display the value the owner just typed. A client that needs the
+resolved window re-reads §7.0 / §7.1.
+
+**Auto-clear when the car leaves service.** The ServiceStatusMonitor physically
+clears BOTH columns when it observes the vehicle leaving `in_service`, so an
+owner's entry is scoped to the visit it was typed for and can never leak into the
+next one. Combined with the in-service emission gate (a non-`in_service` vehicle
+reads `null` regardless of column contents), a stale window is impossible in both
+directions. The consequence worth stating plainly: **an owner may need to re-enter
+the value for a subsequent visit** — that is intended, not a bug.
+
+**Idempotent (§4.5).** PUTting the same instant twice yields the same `200` and
+the same stored value; so does clearing twice.
+
+**No WebSocket push.** A service-window edit fires **no** `vehicle_update` frame,
+and a `vehicle_update` NEVER carries `serviceEstimatedEndAt` — Tesla has no proto
+for it, so there is nothing to stream and **no fleet-config change** was involved.
+A client that needs the new value immediately either adopts this response
+optimistically or re-reads §7.0 / §7.1.
+
+**Response `200`** (`application/json`):
+
+```json
+{
+  "vehicleId": "clxyz1234567890abcdef",
+  "expectedEndAt": "2026-07-29T18:00:00Z"
+}
+```
+
+| Field | Type | Classification | Notes |
+|-------|------|----------------|-------|
+| `vehicleId` | `string` (cuid) | P0 | Echo of the path parameter. |
+| `expectedEndAt` | `string` (RFC 3339, UTC) or `null` | P0 | The value now stored in the OWNER column `service_expected_end_at` — **not** the resolved `serviceEstimatedEndAt`. `null` after a clear. Tesla's `service_etc` may still outrank it on the next read; see "Precedence" above. |
+
+**Errors:**
+
+| HTTP | `error.code` | When |
+|------|--------------|------|
+| 400 | `invalid_request` | Missing `{vehicleId}`; malformed JSON body; `expectedEndAt` not parseable as RFC 3339 (`expectedEndAt must be an RFC 3339 date-time`); or `expectedEndAt` not in the future (`expectedEndAt must be in the future`). Clearing is never an error. |
+| 401 | `auth_failed` | Missing/malformed/invalid bearer. |
+| 403 | `vehicle_not_owned` | Caller does not own the vehicle (matches §7.12 / §7.14). |
+| 404 | `not_found` | Unknown vehicle, or ownership-filtered — intentionally indistinguishable (matches §7.12 / §7.14). |
+| 405 | `invalid_request` | Non-`PUT` method. |
+| 500 | `internal_error` | Store-layer failure. Atomic: nothing written; retryable. |
+
+**Observability.** The success line carries the P0 `vehicle_id` / `user_id` plus
+a `cleared` boolean, mirroring §7.14. The timestamp itself is P0 operational
+timing — the same tier as `Vehicle.status` — so it is log-safe and needs no
+redaction; VINs still redact to last-4 (§9, CG-DC-2). Handler:
+[`internal/telemetry/vehicle_service_window_handler.go`](../../internal/telemetry/vehicle_service_window_handler.go);
+wiring `cmd/telemetry-server/wiring_vehicle_service_window.go`.
+
+---
+
 ---
 
 ## 8. Resource schemas
@@ -2291,6 +2567,8 @@ Same as [`websocket-protocol.md`](websocket-protocol.md) §10 divergence managem
 ## 11. Change log
 
 | Date | Change | Author |
+| 2026-07-28 | **The service window — `serviceEstimatedEndAt` on `VehicleState` + `VehicleSummary`, a new §7.16 owner write, and a scheduler bound ([MYR-316](https://linear.app/myrobotaxi/issue/MYR-316)).** Contracts **v0.17.0**. One OPTIONAL nullable **P0** RFC 3339 field answering the question an "In Service" badge cannot — *when do I get my car back?* — and, more consequentially, FLOORING the rider's scheduling picker. **Two columns, deliberately, added by migration 0017** (`0017_vehicle_control_state_service_window.up.sql`) to the Go-owned `go_vehicle_control_state` side table: `service_etc TIMESTAMPTZ` (Tesla's own estimate, from the Fleet API `GET /api/1/vehicles/{vin}/service_data` → `service_data.service_etc`) and `service_expected_end_at TIMESTAMPTZ` (owner-entered). Both nullable, both P0 — operational timing about the car, the same tier as the sibling `Vehicle.status`, so log-safe and unencrypted. **The wire value is `COALESCE(service_etc, service_expected_end_at)` — Tesla wins, the owner is the fallback — and the two-column split IS the design:** one merged column would let a late Tesla estimate ERASE what the owner typed, and would make a WITHDRAWN Tesla estimate fall back to `null` instead of back to the owner's answer. Both columns sit deliberately OUTSIDE the shared per-field COALESCE control-state upsert every other column in that table uses — that upsert **cannot express a NULL write** and clearing is first-class here — so they have dedicated writers in `internal/store/vehicle_service_window.go`. **Emission is gated on `status = 'in_service'`; every other status is `null`** — and the ServiceStatusMonitor ALSO physically CLEARS both columns when it observes the car leaving service, so the gate is belt-and-braces: a stale window can neither outlive the visit nor be resurrected by a status flip, and consumers never age the field out themselves. One shared resolver (`internal/telemetry/service_window.go`) serves the snapshot, the list, and the scheduler bound, so three readers cannot drift. **`null` is COMMON AND NORMAL, not a failure:** every field of Tesla's `service_data` response is nullable and an ALL-NULL body is the ordinary shape for a visit with no appointment record — it is not an error, not a fetch failure, and not a claim that the car is back. **Tesla read piggybacks, it does not poll:** it fires on the ServiceStatusMonitor's existing connectivity-edge path for an `in_service` vehicle, sharing the SAME per-VIN read debounce (`defaultServiceReadCooldown`, 45s) as the existing `GET /api/1/vehicles/{vin}` edge read and the MYR-260 `/vehicle_data` backfill, and reusing the token that read already resolved; non-fatal on error, leaving the last-known estimate. **New §7.16 `PUT /api/tesla/vehicles/{vehicleId}/service-window`** (body `{"expectedEndAt":"<RFC3339>"}`), owner-only: **four accepted spellings CLEAR** — absent key, explicit `null`, empty/whitespace string, empty body — and the value MUST be in the FUTURE, else `400 invalid_request` `expectedEndAt must be in the future` (a malformed timestamp gives `expectedEndAt must be an RFC 3339 date-time`). Ownership semantics are byte-identical to §7.12/§7.14 (unknown → `404 not_found`, indistinguishable from ownership-filtered; mismatch → `403 vehicle_not_owned`), non-`PUT` → `405 invalid_request`, store failure → `500 internal_error`. **That ownership check is load-bearing in a way §7.14's is not:** the plate `UPDATE` re-scopes `WHERE "userId" = <caller>` as a second enforcement, but the side table has **no `userId` column** (CG-DL-9, no Prisma FKs), so there is no owner-scoped SQL predicate to fall back on. The `200` body `{"vehicleId":"…","expectedEndAt":"…" or null}` echoes the **OWNER column, not the resolved `serviceEstimatedEndAt`** — echoing the resolved value would tell a client its write was overruled when it was merely outranked by Tesla on the next read. **Scheduler bound (create AND accept):** `POST /api/ride-requests` and `POST /api/ride-requests/{id}/accept` refuse a `scheduledFor` EARLIER than the vehicle's current `serviceEstimatedEndAt` with **`400 invalid_request`** — **no new error code**, and not a `409`: a reservation for a time the car provably cannot serve is a bad *request*, not an illegal transition or a capability conflict — message `scheduledFor must not be earlier than the vehicle's estimated service end (<RFC3339>)`. **Three rules:** a **null estimate ⇒ NO BOUND** (scheduling stays fully open; neither consumers nor the server may ever block on missing data), **EQUAL is ALLOWED** (strictly "earlier than"), and **INSTANT rides are unaffected** (no `scheduledFor` to compare; already gated by MYR-277's in-service `409 vehicle_unavailable`). **MYR-313 interaction, stated explicitly:** a scheduled ACCEPT now **does** read the vehicle, where [MYR-313](https://linear.app/myrobotaxi/issue/MYR-313) short-circuited before the read — but that read **FAILS OPEN for scheduled rides** (an unreadable vehicle leaves the reservation UNBOUNDED rather than refused), the exact inverse of the instant path's fail-closed `500`, so the MYR-313 stranding defect cannot return; MYR-313's exemption from the AVAILABILITY gate is **unchanged** (in_service/offline scheduled accepts still succeed). **RBAC — BOTH roles**, on `vehicleStateOwnerFields` AND `vehicleSummaryOwnerFields` in `internal/mask/tables.go` (viewer inherits by the existing `removeField` derivation): a rider needs the window for the same reason the owner does — it floors the picker, so withholding it would break the one consumer it was built for. **Delivery: NOT STREAMED** — Tesla has no proto for a service ETC, so there is no `fieldMap` entry, **no fleet-config change**, and a `vehicle_update` frame NEVER carries `serviceEstimatedEndAt`; it is snapshot/list-only and lands on the next §7.0 / §7.1 read. §7.16 added; §7 index + §6 catalog rows added; §7.0 + §7.1 field tables, examples and RBAC lines, the §7.1 blockquote notes, §5.2.0 / §5.2.1 mask matrices, §7.8 create + accept error lines, the accept bound + MYR-313 paragraphs, the transition-matrix bullet, and the §4.1.1.b emission audit all updated; `schemas/vehicle-state.schema.json` (before `lastUpdated`) + `schemas/vehicle-summary.schema.json`, the OpenAPI `VehicleSummary` component, `data-classification.md` §1.13 (two columns + note), `vehicle-state-schema.md` §1.1/§2.4/§4, and the `snapshot`/`vehicles_list*`/`snapshot_completeness` fixtures updated. Implementation: `internal/telemetry/{service_window,vehicle_service_window_handler}.go`, `internal/store/vehicle_service_window.go`, `internal/store/migrations/0017_vehicle_control_state_service_window.{up,down}.sql`, `internal/mask/tables.go`, `cmd/telemetry-server/wiring_vehicle_service_window.go`. | go-engineer |
+| 2026-07-28 | **On-demand state refresh — new §7.15 owner endpoint ([MYR-315](https://linear.app/myrobotaxi/issue/MYR-315)).** New `POST /api/tesla/vehicles/{vehicleId}/refresh` (no body), the **pull half of an otherwise entirely push-based read surface**: the WebSocket carries only what the car volunteers, and an asleep / in-service / merely quiet car volunteers nothing, so §7.1 keeps returning the last frame it ever saw while the MYR-260 backfills — which fire on *connectivity edges* — never trigger for a car that simply sits parked. Without this endpoint a user looking at stale data has no action available at all. **Three-rung ladder, in order.** (1) **Freshness short-circuit:** a LIVE streamed frame inside the **120 s** MYR-300 stream-authoritative window answers `200 {"status":"fresh","lastUpdated":"<last frame>"}` with **zero Tesla calls and no cooldown consumed** — refreshing already-current data would only cost the owner battery, and a healthy car must never be rate-limited for being healthy. (2) **Cooldown:** otherwise one Tesla-hitting refresh per vehicle per **60 s**, else `429 rate_limited` + `Retry-After: 60`. (3) **Wake + ONE read:** wake under the **same bounded budget vehicle commands use** (§7.9 — 3 attempts, 2 s backoff) via the new `commands.Executor.EnsureAwake`, which shares `wakeStep` with `Execute`'s asleep branch so the two can never drift; **probe-first**, so an *online but quiet* car (the common case) costs one cheap `GET /api/1/vehicles/{vin}` and **no wake at all**; then exactly ONE `vehicle_data` read republished through the **existing MYR-260 mapping** so values land on the identical broadcast + persist path a streamed frame takes and live clients see an ordinary `vehicle_update`. Budget spent → `503 vehicle_asleep`; a car that slept between probe and read (Tesla `408`) reports the **same** `503` rather than a misleading `502`. **`seatCoolingCapable` and `trim` come along free** — the read includes `vehicle_config`, so an owner whose car has produced no connectivity edge since MYR-308 shipped can acquire the capability bit by tapping refresh, with no drive and no reconnect. **Ownership is byte-identical to §7.12/§7.14** (unknown → `404 not_found`, indistinguishable from ownership-filtered; real mismatch → `403 vehicle_not_owned`). **Cooldown is in-memory, per-process** — it resets on restart and is not shared across replicas (effective limit: N refreshes/min/vehicle under N replicas), a deliberate trade since the real backstop is the bounded wake budget plus the single-read shape; a failed refresh does **not** refund its token, so a client retrying a sleeping car backs off instead of re-waking it every second. **No new error code** (reuses `vehicle_asleep`, `rate_limited`, `invalid_request`), **no migration**, **no fleet-config change** (no new streamed fields), and **no schema change** — the endpoint returns a REST-only body, not a `VehicleState`. §7.15 added; §6 catalog + §7 index rows added. Implementation: `internal/commands/wake.go`, `internal/telemetry/{vehicle_refresh,vehicle_refresh_handler,service_status_stream_freshness,service_status_vehicle_data}.go`, `cmd/telemetry-server/wiring_vehicle_refresh.go`. | go-engineer |
 | 2026-07-27 | **Reservation-time dispatch — a scheduled ride's pickup nav now fires at `scheduledFor`, not at accept ([MYR-179](https://linear.app/myrobotaxi/issue/MYR-179)).** v1 changes only **WHEN** the existing leg-1 (pickup) push runs. **No new lifecycle status, no new wire field and no wire-shape change** — the MYR-176 latch columns (`dispatch_status`/`dispatched_at`/`dispatch_error`) are reused unchanged; the only schema work is **migration 0016**, a partial index (no columns, no constraints). **Accept half:** the nav-dispatch pipeline no longer pushes when the accepted ride carries `scheduledFor`; it returns without touching the latch, leaving the row latch-unclaimed and outcome-absent (deliberately NOT `skipped` — that is the kill-switch outcome and would both misreport the ride and latch it out of the sweep). Observable on the wire as `dispatchStatus`/`dispatchedAt` staying **absent** after a scheduled accept until the reservation instant. **Instant accepts are unchanged.** **Sweeper half:** a new `internal/dispatch` `ReservationSweeper` ticks every 30 s over `scheduled_for IS NOT NULL AND status = 'accepted' AND dispatched_at IS NULL AND scheduled_for <= now` (oldest first, `LIMIT 25`; the sweeper's own clock is passed into the query rather than using `NOW()` so ONE clock governs both due-selection and the lateness deadline), then hands each candidate to its OWN small worker pool (2), where the **same** `dispatched_at` latch is claimed and the **same** push pipeline runs via a `runLeg` → claim + `runClaimedLeg` split. The pass itself claims **nothing**: the latch is stamped JUST IN TIME, inside the worker after the busy re-check and immediately before the push, so claim → outcome is bounded by the per-dispatch `OverallTimeout` and stays under the startup reconciler's 5-minute floor — a deploy mid-pass hands unreached candidates back rather than burning them. The sweeper's pool is separate from the dispatcher's, so a reservation backlog can never delay an instant accept's push (**instant dispatch behaviour is unchanged under any reservation load**). Reuse is the design: **exactly-once across replicas** (the latch admits one winner, so every server may sweep with no coordination) and **crash safety** come for free — a crash between claim and outcome leaves the identical `dispatched_at` set / `dispatch_status` NULL orphan the **existing leg-1 startup reconciler** already resolves; its query filters on the latch columns only and has never mentioned `scheduled_for`, so scheduled rows were already in scope and **it required no widening** (now pinned by a store test). **Lateness ceiling (30 min)** — evaluated FIRST, before the vehicle is even consulted: a reservation still undispatched past `scheduledFor + 30 min` is **claimed and failed honestly** `failed` / new internal code **`reservation_expired`**, without a push, whatever the car is doing. That covers both causes (car busy the whole window, and dispatch itself unavailable after downtime or a kill-switch window) with one code, and stops a stale reservation from dialling a car hours late — the MYR-176 "an honest, alertable outcome beats a late nav push" stance applied to the sweeper. The deadline is anchored on `scheduledFor`, so a restart mid-hold resumes rather than resets it and downtime buys no fresh window. **Vehicle-busy hold** — the reservation-time availability re-check MYR-313 deferred here: inside the ceiling and immediately before claiming, the worker tests the per-vehicle busy predicate (`scheduled_for IS NULL AND status IN ('accepted','arrived','enroute')`, character-for-character `uq_go_ride_requests_active_instant_vehicle` and now SHARED in code with the `hasActiveRide` catalog flag so a third reader cannot drift). Busy → **hold** (no claim, no outcome, no push; retried next tick, so the ride dispatches the moment the car frees up); busy state unreadable → hold, never claim. Held rows are also filtered out of the selection window in SQL so they cannot head-of-line block younger dispatchable reservations out of the `LIMIT`, while past-ceiling rows are exempt from that filter and always surface for resolution. **Claim-time re-validation** — the reservation claim is its own guarded `UPDATE` re-checking `status = 'accepted' AND scheduled_for IS NOT NULL`, so a rider cancel or an owner picked-up landing between the sweep's SELECT and the claim LOSES: no push, no outcome, no event. The instant path's claim is deliberately left unguarded and byte-identical to MYR-176. **New internal `ride.due` seam** (`events.RideDueEvent`, ids + `scheduledFor` + `dueAt`): published once per due ride, and only when the push actually resolved **`sent`** — the topic means "your car is on the way", so kill-switched (`skipped`), token-failed, command-failed and expired reservations emit nothing (the latch admits one winner, so a false event could never be corrected). Internal-only (never broadcast, no REST surface), fire-and-forget and drop-safe, **no consumer yet** — a hook for the planned rider push notification. **New kill-switch `RESERVATION_DISPATCH_ENABLED`** (default true, `strconv.ParseBool` fail-fast like `DISPATCH_ENABLED`): false stops the sweeper entirely, leaving reservations unclaimed so re-enabling picks them up rather than having burned them; `DISPATCH_ENABLED=false` still records due reservations `skipped` exactly like instant accepts. **Indexing:** migration 0016 adds `idx_go_ride_requests_reservation_due`, a partial index over `scheduled_for` whose predicate is exactly the sweep query's three static conjuncts, so the every-30s pass on every replica stays an index probe as `go_ride_requests` accumulates terminal rows forever. **Accept-after-due:** `scheduledFor` is not floored to the future, so a reservation accepted after its instant dispatches on the next tick while inside the 30-minute ceiling and resolves `reservation_expired` beyond it — now documented. **v1 boundaries (both directions):** the busy predicate excludes scheduled rides (mirroring the index), so two reservations for one car at overlapping times both dispatch; and the model is one-directional — a car mid-RESERVATION is not busy to the instant path, so an instant accept can still re-point it. Both belong to booking-time conflict detection / an accept-side guard, not dispatch. §7.8 accept section, new "Reservation-time dispatch" subsection, `dispatch_error` code list, and transition-matrix note updated. Implementation: `internal/dispatch/{reservation_sweeper,reservation_dispatch,reservation_worker,dispatcher_leg}.go`, `internal/store/ride_request_reservation{,_queries}.go`, `internal/store/migrations/0016_ride_reservation_due_index.{up,down}.sql`, `internal/config/load_dispatch.go`, wired in `cmd/telemetry-server/reservation_wiring.go`. | go-engineer |
 | 2026-07-27 | **Scheduled accepts are EXEMPT from the `vehicle_unavailable` availability gate ([MYR-313](https://linear.app/myrobotaxi/issue/MYR-313)).** `POST /api/ride-requests/{id}/accept` no longer consults the target vehicle's current status when the ride carries `scheduledFor` — the gate short-circuits before the vehicle read, so a status-lookup failure cannot strand a reservation either. **Why:** the MYR-277 gate asks "can this car be dispatched RIGHT NOW?", which is the question an INSTANT accept is asking and the wrong one for a reservation. A client could not confirm a Saturday 5:30 PM request because the car was in service that afternoon (`409 vehicle_unavailable`, "Vehicle is in service and can't be dispatched"). This restores consistency with the two guards the gate is the analogue of — the per-rider `uq_go_ride_requests_active_instant_rider` and the per-vehicle `uq_go_ride_requests_active_instant_vehicle` (MYR-266), **both partial on `scheduled_for IS NULL`** — and with what §4.1.1 already stated ("scheduled rides are exempt from both"): the docs were already correct and the MYR-277 status half was the outlier. **Instant behaviour is unchanged** — `in_service`/`offline` still `409 vehicle_unavailable`, still fails closed on an unreadable status, still never gates decline. **No schema, wire, or migration change** (the exemption is a predicate on an existing field). **Reservation-time availability is still required** and remains the scheduled-dispatch machinery's precondition ([MYR-179](https://linear.app/myrobotaxi/issue/MYR-179)) — it must re-check the vehicle when the reservation comes due; accepting a reservation is not dispatching it. §7.8 accept section + error list, §4.1.1 `vehicle_unavailable` row and §4.1.1.b note, and the §7.8 transition-matrix note updated. Implementation: `internal/telemetry/ride_request_owner_handler.go` (`rejectIfVehicleUnavailable`). | go-engineer |
 | 2026-07-27 | **Owner-entered `licensePlate` — new §7.14 write endpoint + both-role read exposure ([MYR-286](https://linear.app/myrobotaxi/issue/MYR-286)).** `VehicleState` and `VehicleSummary` gain one OPTIONAL P1 string (contracts v0.15.0, `myrobotaxi/contracts#22`) so a rider can identify the correct car at pickup. **Not a Tesla value:** the Fleet API exposes no plate on any endpoint, telemetry field, or proto, so the column is populated ONLY by the owner via the new **§7.14 `PUT /api/tesla/vehicles/{vehicleId}/plate`** (body `{"plate":"…"}`). That endpoint **normalizes then validates, in that order** — trim + uppercase, then ≤ 10 chars and `^[A-Z0-9 -]*$` against the NORMALIZED value, so `"  abc 1234  "` is accepted as `"ABC 1234"` while a charset/length violation is `400 invalid_request` with the P1 value never echoed. An **empty string CLEARS** the plate (an ordinary write of `''`, not a separate verb). Ownership semantics are identical to §7.12: unknown vehicle `404 not_found` (indistinguishable from ownership-filtered), real mismatch `403 vehicle_not_owned`, and the `UPDATE` re-scopes `WHERE "userId" = <caller>` so a zero-row write returns 404 rather than a false 200. **RBAC — deliberately BOTH ROLES** (§5.2.0 / §5.2.1): unlike the sibling `vin`, which [MYR-279](https://linear.app/myrobotaxi/issue/MYR-279) gated to owners, the plate is in the owner AND viewer allow-lists, because a plate only a rider cannot see is useless for its one purpose. This REPLACES the pre-existing forward-looking owner-only mask rule that was written before the field was on the wire; the viewer VehicleState list is now owner-minus-`vin` and nothing else. **Empty-value convention:** the read paths emit `licensePlate` exactly like the sibling `color` — a plain non-`omitempty` string, so the key is ALWAYS present and "no plate set" is an EMPTY STRING; an ABSENT key means a pre-MYR-286 server. Neither means "we could not read the plate" — consumers keep the `VIN ····xxxx` fallback for both and never render an empty plate. **No migration** — the column already exists (`TEXT NOT NULL DEFAULT ''`); the write is a narrow Go-side UPDATE carve-out on the Prisma-owned `Vehicle` table, the third after MYR-257 provision / MYR-258 teardown, recorded in `data-lifecycle.md` §1.4 (CG-DL-9 governs migration SQL, not application-runtime UPDATEs). **No WebSocket delta in v1** — a `vehicle_update` never carries the field and an edit fires no push, so it lands on the next §7.0 / §7.1 read. §7.14 added; §7.0 + §7.1 field tables, examples and RBAC lines updated; §5.2.0 / §5.2.1 / §5.3 mask matrices corrected; `schemas/vehicle-state.schema.json` (before `lastUpdated`) + `schemas/vehicle-summary.schema.json` (appended), the OpenAPI `VehicleSummary` component + snapshot `x-role-masks`, `data-classification.md` §1.3 wire-exposure row, and the `snapshot`/`vehicles_list*` fixtures all updated. Implementation: `internal/telemetry/{vehicle_plate_handler,license_plate,vehicle_snapshot_types,vehicles_list_handler}.go`, `internal/store/{vehicle_plate,queries,types,vehicle_repo_scan,vehicle_repo_list}.go`, `internal/mask/tables.go`, `cmd/telemetry-server/wiring_vehicle_plate.go`. | go-engineer |

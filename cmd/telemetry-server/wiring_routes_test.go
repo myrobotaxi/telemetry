@@ -123,6 +123,7 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 		{"ride request decline (MYR-175)", "/api/ride-requests/crr0123456789abcdef0123456789abcd/decline"},
 		{"vehicle command (MYR-180)", "/api/vehicles/clxyz1234567890abcdef/command/door_lock"},
 		{"vehicle re-add (MYR-262)", "/api/tesla/vehicles/vid-12345/re-add"},
+		{"vehicle refresh (MYR-315, §7.15)", "/api/tesla/vehicles/clxyz1234567890abcdef/refresh"},
 	}
 	for _, rt := range postRoutes {
 		t.Run(rt.name, func(t *testing.T) {
@@ -143,6 +144,7 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 		path string
 	}{
 		{"vehicle license plate (MYR-286)", "/api/tesla/vehicles/clxyz1234567890abcdef/plate"},
+		{"vehicle service window (MYR-316, §7.16)", "/api/tesla/vehicles/clxyz1234567890abcdef/service-window"},
 	}
 	for _, rt := range putRoutes {
 		t.Run(rt.name, func(t *testing.T) {
