@@ -28,13 +28,13 @@ import (
 // `internal/telemetry/vehicles_list_handler.go` `vehicleSummary`. No
 // GPS, no nav, no climate — those belong in the wide detail read.
 type VehicleSummary struct {
-	ID             string
-	UserID         string
-	VIN            string
-	Name           string
-	Model          string
-	Year           int
-	Color          string
+	ID     string
+	UserID string
+	VIN    string
+	Name   string
+	Model  string
+	Year   int
+	Color  string
 	// LicensePlate is the owner-entered plate (MYR-286), read straight
 	// off the Prisma-owned column. Empty string == not set.
 	LicensePlate   string
@@ -52,6 +52,15 @@ type VehicleSummary struct {
 	// (migration 0013, MYR-266) that the accept guard races on.
 	// Scheduled rides and `requested` never set it.
 	HasActiveRide bool
+
+	// MYR-316 service window, LEFT JOINed from go_vehicle_control_state.
+	// ServiceETC (Tesla's own estimate) takes precedence over
+	// ServiceExpectedEndAt (owner-entered); the handler emits
+	// COALESCE(ServiceETC, ServiceExpectedEndAt) and ONLY while Status is
+	// in_service. Both nil for the overwhelming majority of rows — a car that
+	// has never been to service has no estimate to carry.
+	ServiceETC           *time.Time
+	ServiceExpectedEndAt *time.Time
 }
 
 // ListSummariesByUser returns the catalog rows for every vehicle owned
@@ -148,10 +157,11 @@ func scanVehicleSummaryRow(row rowScanner) (VehicleSummary, error) {
 		&v.EstimatedRange,
 		&v.LastUpdated,
 		&v.HasActiveRide,
+		&v.ServiceETC,
+		&v.ServiceExpectedEndAt,
 	); err != nil {
 		return VehicleSummary{}, fmt.Errorf("scan vehicle summary: %w", err)
 	}
 	v.Status = VehicleStatus(status)
 	return v, nil
 }
-

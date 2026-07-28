@@ -1,5 +1,7 @@
 package store
 
+import "time"
+
 // controlStateScan holds the nullable go_vehicle_control_state columns that the
 // GetByID snapshot read (queryVehicleByID, queries.go) LEFT JOINs onto the base
 // "Vehicle" row. Every field is a pointer: a NULL column — no side-table row at
@@ -63,6 +65,15 @@ type controlStateScan struct {
 	// MYR-308 ventilated-seat capability (REST-sourced spec fact). nil means
 	// never read, NOT "no seat cooling".
 	seatCoolingCapable *bool
+
+	// MYR-316 service window, the two independent sources behind the single
+	// wire field serviceEstimatedEndAt. serviceETC is Tesla's own estimate
+	// (service_data.service_etc) and WINS; serviceExpectedEndAt is the
+	// owner-entered fallback. nil means "no estimate from this source" — for
+	// serviceETC that is common and normal, because Tesla returns an all-null
+	// service_data body for a visit with no appointment record.
+	serviceETC           *time.Time
+	serviceExpectedEndAt *time.Time
 }
 
 // dests returns the scan destinations in queryVehicleByID's column order, for
@@ -81,6 +92,7 @@ func (c *controlStateScan) dests() []any {
 		&c.mediaStation, &c.mediaSource,
 		&c.mediaDuration, &c.mediaElapsed, &c.mediaVolMax,
 		&c.seatCoolingCapable,
+		&c.serviceETC, &c.serviceExpectedEndAt,
 	}
 }
 
@@ -120,4 +132,6 @@ func (c *controlStateScan) applyTo(v *Vehicle) {
 	v.MediaNowPlayingElapsed = c.mediaElapsed
 	v.MediaVolumeMax = c.mediaVolMax
 	v.SeatCoolingCapable = c.seatCoolingCapable
+	v.ServiceETC = c.serviceETC
+	v.ServiceExpectedEndAt = c.serviceExpectedEndAt
 }

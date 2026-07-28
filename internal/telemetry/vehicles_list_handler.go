@@ -21,12 +21,12 @@ import (
 // package is already imported by store-adjacent code through
 // `cmd/ops`).
 type VehicleCatalogRow struct {
-	ID             string
-	VIN            string
-	Name           string
-	Model          string
-	Year           int
-	Color          string
+	ID    string
+	VIN   string
+	Name  string
+	Model string
+	Year  int
+	Color string
 	// LicensePlate is the owner-entered plate (MYR-286), an identity-row
 	// field off the Prisma "Vehicle" column like Color/Name — not
 	// telemetry. Empty string == not set.
@@ -41,6 +41,14 @@ type VehicleCatalogRow struct {
 	// `scheduled_for IS NULL`) — the same predicate the per-vehicle
 	// accept guard races on.
 	HasActiveRide bool
+
+	// MYR-316 service window: the two RAW sources behind the single wire
+	// field serviceEstimatedEndAt, LEFT JOINed from the Go-owned control-state
+	// side table. ServiceETC (Tesla) takes precedence over
+	// ServiceExpectedEndAt (owner-entered); the wire value is resolved from
+	// these plus Status and is never emitted raw.
+	ServiceETC           *time.Time
+	ServiceExpectedEndAt *time.Time
 }
 
 // VehicleLister returns the catalog rows for vehicles owned by a
@@ -86,11 +94,11 @@ func NewVehiclesListHandler(
 // `VehicleSummary` in specs/rest.openapi.yaml. See also the mask
 // allow-list in `internal/mask/tables.go` (vehicleSummaryOwnerFields).
 type vehicleSummary struct {
-	VehicleID      string `json:"vehicleId"`
-	Name           string `json:"name"`
-	Model          string `json:"model"`
-	Year           int    `json:"year"`
-	Color          string `json:"color"`
+	VehicleID string `json:"vehicleId"`
+	Name      string `json:"name"`
+	Model     string `json:"model"`
+	Year      int    `json:"year"`
+	Color     string `json:"color"`
 	// LicensePlate (MYR-286) follows the SAME emission convention as its
 	// sibling identity field `color`: plain string, NO omitempty, so the
 	// key is ALWAYS present and "no plate set" is an empty string rather
@@ -108,6 +116,14 @@ type vehicleSummary struct {
 	// that predates MYR-233, never "vehicle is free". Consumers treat an
 	// absent value as "availability unknown → treat as available".
 	HasActiveRide bool `json:"hasActiveRide"`
+	// ServiceEstimatedEndAt is when this car's CURRENT SERVICE VISIT is
+	// expected to end (MYR-316, contracts v0.17.0) — the same value and the
+	// same semantics as VehicleState.serviceEstimatedEndAt. RFC 3339 UTC, or
+	// null. Server-computed: Tesla's `service_etc` wins, else the owner-entered
+	// §7.16 value, else null. Meaningful ONLY while `status` is `in_service`
+	// and null otherwise. ALWAYS emitted (as an explicit null when there is no
+	// estimate) so a consumer can tell "no estimate" from a pre-MYR-316 server.
+	ServiceEstimatedEndAt *string `json:"serviceEstimatedEndAt"`
 }
 
 // toMaskMap returns the row as a wire-name-keyed map suitable for
@@ -128,6 +144,9 @@ func (v vehicleSummary) toMaskMap() map[string]any {
 		"lastUpdated":    v.LastUpdated,
 		"role":           v.Role,
 		"hasActiveRide":  v.HasActiveRide,
+		// MYR-316 — already resolved (precedence + in-service gate) by
+		// buildResponse; this is the emitted value, not a raw column.
+		"serviceEstimatedEndAt": v.ServiceEstimatedEndAt,
 	}
 }
 
@@ -200,6 +219,9 @@ func (h *VehiclesListHandler) buildResponse(rows []VehicleCatalogRow, role auth.
 			LastUpdated:    v.LastUpdated.UTC().Format(time.RFC3339),
 			Role:           string(role),
 			HasActiveRide:  v.HasActiveRide,
+			// MYR-316: resolved here so the precedence and the in-service gate
+			// are applied exactly once per surface (service_window.go).
+			ServiceEstimatedEndAt: serviceEstimatedEndAtWire(v.Status, v.ServiceETC, v.ServiceExpectedEndAt),
 		}
 		// `fieldsMasked` is intentionally discarded in v1: §7.0 reads
 		// are not audited per `data-lifecycle.md` §4.2, and the v1

@@ -59,7 +59,8 @@ const queryVehicleByID = `SELECT ` + vehicleSelectColumns + `,
 	gcs.media_now_playing_title, gcs.media_now_playing_artist, gcs.media_now_playing_album,
 	gcs.media_now_playing_station, gcs.media_playback_source,
 	gcs.media_now_playing_duration_ms, gcs.media_now_playing_elapsed_ms, gcs.media_volume_max,
-	gcs.seat_cooling_capable
+	gcs.seat_cooling_capable,
+	gcs.service_etc, gcs.service_expected_end_at
 FROM "Vehicle"
 LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"
 WHERE "Vehicle"."id" = $1`
@@ -140,9 +141,24 @@ const activeInstantRidePredicate = `r.scheduled_for IS NULL
 // EXISTS rather than a follow-up per-vehicle query — one statement
 // serves the whole catalog, preserving the MYR-122 single-round-trip
 // property of this path.
+// MYR-316: the service-window pair is the FIRST side-table data this lean
+// query carries, so it also introduces the LEFT JOIN. That is a deliberate,
+// bounded departure from the MYR-122 rule of thumb ("no join on the list
+// path"), and it stays inside the rule that actually matters — the invariant
+// is "MUST NOT SELECT columns the response body doesn't emit", and both of
+// these ARE emitted, as VehicleSummary.serviceEstimatedEndAt.
+//
+// The cost is one probe of go_vehicle_control_state's vehicle_id PRIMARY KEY
+// per row — the same index the snapshot read already joins on — and two
+// fixed-width timestamps. It pulls no JSON blob, no encrypted shadow, and no
+// text column, which is what made the pre-MYR-122 wide read expensive. The
+// alternative, an N+1 per-vehicle lookup from the handler, would be strictly
+// worse on the very path MYR-122 exists to protect.
 const queryVehiclesByUserList = `SELECT ` + vehicleListSummaryColumns + `,
-	` + vehicleListHasActiveRideExpr + `
+	` + vehicleListHasActiveRideExpr + `,
+	gcs.service_etc, gcs.service_expected_end_at
 FROM "Vehicle"
+LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"
 WHERE "userId" = $1
 ORDER BY "name", "vin"`
 

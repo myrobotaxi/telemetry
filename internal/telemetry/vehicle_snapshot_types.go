@@ -104,6 +104,14 @@ type VehicleSnapshotRow struct {
 	// MYR-308 ventilated-seat capability, same side table, same LEFT JOIN.
 	// Nullable — nil means never read, NOT "no seat cooling".
 	SeatCoolingCapable *bool
+
+	// MYR-316 service window: the two RAW sources behind the single wire field
+	// serviceEstimatedEndAt, same side table, same LEFT JOIN. ServiceETC is
+	// Tesla's own estimate and takes precedence; ServiceExpectedEndAt is the
+	// owner-entered fallback. The wire value is resolved from these plus
+	// Status by resolveServiceEstimatedEndAt — never emitted raw.
+	ServiceETC           *time.Time
+	ServiceExpectedEndAt *time.Time
 }
 
 // VehicleSnapshotReader returns the snapshot row for a Prisma cuid.
@@ -250,6 +258,22 @@ type vehicleSnapshotResponse struct {
 	// treat as "unknown, fall back to the seatCooler*-presence heuristic" and
 	// NOT as "no seat cooling". An explicit false is the authoritative no.
 	SeatCoolingCapable *bool `json:"seatCoolingCapable"`
+
+	// ServiceEstimatedEndAt is when the car's CURRENT SERVICE VISIT is expected
+	// to end (MYR-316, contracts v0.17.0). RFC 3339 UTC, or null.
+	//
+	// SERVER-COMPUTED with a fixed precedence: Tesla's own `service_etc` from
+	// the Fleet API service_data endpoint, else the owner-entered value from
+	// §7.16, else null. Tesla returns an all-null service_data body for a visit
+	// with no appointment record, so a null here is COMMON AND NORMAL — not an
+	// error, not a fetch failure, and never a claim that the car is back.
+	//
+	// Meaningful ONLY while the sibling `status` is `in_service`, and null
+	// otherwise: consumers never have to age this value out themselves.
+	//
+	// SNAPSHOT-ONLY: REST-derived, never streamed — a WS vehicle_update frame
+	// NEVER carries it.
+	ServiceEstimatedEndAt *string `json:"serviceEstimatedEndAt"`
 }
 
 // toMaskMap returns the response as a wire-name-keyed map suitable for
@@ -360,6 +384,9 @@ func addSnapshotMediaFields(m map[string]any, r vehicleSnapshotResponse) {
 	m["mediaVolumeMax"] = derefOrNil(r.MediaVolumeMax)
 	// MYR-308 — REST-sourced, snapshot-only (never on a WS vehicle_update).
 	m["seatCoolingCapable"] = derefOrNil(r.SeatCoolingCapable)
+	// MYR-316 — already resolved (precedence + in-service gate) by
+	// buildSnapshotResponse; this is the emitted value, not a raw column.
+	m["serviceEstimatedEndAt"] = derefOrNil(r.ServiceEstimatedEndAt)
 }
 
 // buildSnapshotResponse maps the store-layer row into the wire shape.
@@ -431,5 +458,8 @@ func buildSnapshotResponse(row VehicleSnapshotRow) vehicleSnapshotResponse {
 		MediaNowPlayingElapsed:  row.MediaNowPlayingElapsed,
 		MediaVolumeMax:          row.MediaVolumeMax,
 		SeatCoolingCapable:      row.SeatCoolingCapable,
+		// MYR-316: resolved here, so the precedence and the in-service gate are
+		// applied exactly once per surface (service_window.go).
+		ServiceEstimatedEndAt: serviceEstimatedEndAtWire(row.Status, row.ServiceETC, row.ServiceExpectedEndAt),
 	}
 }
