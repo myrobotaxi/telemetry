@@ -278,6 +278,11 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"media_now_playing_elapsed_ms"  BIGINT,
 		"media_volume_max"              DOUBLE PRECISION,
 		"seat_cooling_capable"          BOOLEAN,
+		-- MYR-316 service window (migration 0017). The snapshot LEFT JOIN and
+		-- the catalog list query both select these, so the harness must carry
+		-- them or both endpoints 500 on a missing column.
+		"service_etc"             TIMESTAMPTZ,
+		"service_expected_end_at" TIMESTAMPTZ,
 		"updated_at"       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);
 
