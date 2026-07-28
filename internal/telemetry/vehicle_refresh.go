@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -127,9 +128,13 @@ func (r *VehicleRefresher) LastStreamAt(vin string) (time.Time, bool) {
 }
 
 // Refresh brings one vehicle up to date. See the type doc for the ordering
-// rationale. Errors are either a *commands.CommandError (already carrying the
-// REST status + typed code, e.g. 503 vehicle_asleep once the wake budget is
-// spent) or one of this package's sentinels, which the handler maps.
+// rationale.
+//
+// Errors are WRAPPED for context but never re-typed: the handler classifies
+// them with errors.As (*commands.CommandError, already carrying the REST status
+// and typed code — e.g. 503 vehicle_asleep once the wake budget is spent) and
+// errors.Is (the token and vehicle_data sentinels), both of which see straight
+// through the wrapping.
 func (r *VehicleRefresher) Refresh(ctx context.Context, userID, vin string) (RefreshResult, error) {
 	if at, fresh := r.streams.LastStreamAt(vin); fresh {
 		return RefreshResult{Status: RefreshStatusFresh, LastUpdated: at}, nil
@@ -140,15 +145,15 @@ func (r *VehicleRefresher) Refresh(ctx context.Context, userID, vin string) (Ref
 	// branches on those sentinels directly.
 	tok, err := r.tokens.Resolve(ctx, userID)
 	if err != nil {
-		return RefreshResult{}, err
+		return RefreshResult{}, fmt.Errorf("vehicle refresh: %w", err)
 	}
 
 	if err := r.waker.EnsureAwake(ctx, vin, tok.AccessToken, r.awakeProbe(tok.AccessToken, vin)); err != nil {
-		return RefreshResult{}, err
+		return RefreshResult{}, fmt.Errorf("vehicle refresh: wake %s: %w", redactVIN(vin), err)
 	}
 
 	if err := r.backfill.RefreshFromVehicleData(ctx, vin, tok.AccessToken); err != nil {
-		return RefreshResult{}, err
+		return RefreshResult{}, fmt.Errorf("vehicle refresh: %w", err)
 	}
 
 	r.logger.Info("vehicle refreshed on owner request",
@@ -164,7 +169,7 @@ func (r *VehicleRefresher) awakeProbe(token, vin string) commands.AwakeProbe {
 	return func(ctx context.Context) (bool, error) {
 		state, err := r.fleet.GetVehicle(ctx, token, vin)
 		if err != nil {
-			return false, err
+			return false, fmt.Errorf("wake probe: %w", err)
 		}
 		return strings.EqualFold(state.State, "online"), nil
 	}
