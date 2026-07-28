@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 // fileConfig mirrors the JSON structure for unmarshaling. All duration
@@ -37,6 +38,11 @@ type fileConfig struct {
 	// kill-switch (RESERVATION_DISPATCH_ENABLED), independent of
 	// dispatchEnabled. See load_dispatch.go.
 	reservationDispatchEnabled bool
+
+	// MYR-320 periodic in-service re-poll knobs (SERVICE_REPOLL_ENABLED /
+	// SERVICE_REPOLL_INTERVAL). See load_service_repoll.go.
+	serviceRepollEnabled  bool
+	serviceRepollInterval time.Duration
 
 	// Identity module secrets/identifiers (env, not JSON).
 	es256PrivateKeyPEM string
@@ -179,6 +185,10 @@ func applyEnvOverrides(fc *fileConfig) error {
 	applyProxyEnvOverrides(fc)
 
 	if err := applyDispatchEnvOverrides(fc); err != nil {
+		return err
+	}
+
+	if err := applyServiceRepollEnvOverrides(fc); err != nil {
 		return err
 	}
 
@@ -367,5 +377,7 @@ func buildConfig(fc *fileConfig) *Config {
 		teslaPublicKey:             fc.teslaPublicKey,
 		dispatchEnabled:            fc.dispatchEnabled,
 		reservationDispatchEnabled: fc.reservationDispatchEnabled,
+		serviceRepollEnabled:       fc.serviceRepollEnabled,
+		serviceRepollInterval:      fc.serviceRepollInterval,
 	}
 }
