@@ -310,6 +310,8 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 
 	setupVehicleRefreshEndpoint(deps)
 
+	setupVehicleServiceWindowEndpoint(deps)
+
 	setupVehicleCommandEndpoint(deps, snapshotAdapter)
 
 	setupDebugFieldsEndpoint(deps)

@@ -144,6 +144,7 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 		path string
 	}{
 		{"vehicle license plate (MYR-286)", "/api/tesla/vehicles/clxyz1234567890abcdef/plate"},
+		{"vehicle service window (MYR-316, §7.16)", "/api/tesla/vehicles/clxyz1234567890abcdef/service-window"},
 	}
 	for _, rt := range putRoutes {
 		t.Run(rt.name, func(t *testing.T) {
