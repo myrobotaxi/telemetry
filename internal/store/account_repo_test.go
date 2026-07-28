@@ -324,3 +324,4 @@ func TestNewAccountRepo_PanicsOnNilEncryptor(t *testing.T) {
 	}()
 	store.NewAccountRepo(nil, nil)
 }
+

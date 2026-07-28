@@ -28,13 +28,13 @@ import (
 // `internal/telemetry/vehicles_list_handler.go` `vehicleSummary`. No
 // GPS, no nav, no climate — those belong in the wide detail read.
 type VehicleSummary struct {
-	ID     string
-	UserID string
-	VIN    string
-	Name   string
-	Model  string
-	Year   int
-	Color  string
+	ID             string
+	UserID         string
+	VIN            string
+	Name           string
+	Model          string
+	Year           int
+	Color          string
 	// LicensePlate is the owner-entered plate (MYR-286), read straight
 	// off the Prisma-owned column. Empty string == not set.
 	LicensePlate   string
@@ -154,3 +154,4 @@ func scanVehicleSummaryRow(row rowScanner) (VehicleSummary, error) {
 	v.Status = VehicleStatus(status)
 	return v, nil
 }
+

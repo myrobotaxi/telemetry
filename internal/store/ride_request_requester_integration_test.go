@@ -56,9 +56,7 @@ func TestRideRequestRepo_RequesterName_AppleNativeRider(t *testing.T) {
 	}{
 		{
 			name: "apple binding name when no User row",
-			seed: func(id string) {
-				seedAppleIdentity(t, "sub-"+id, id, strPtr("Priya Patel"), strPtr("priya@icloud.com"))
-			},
+			seed: func(id string) { seedAppleIdentity(t, "sub-"+id, id, strPtr("Priya Patel"), strPtr("priya@icloud.com")) },
 			want: "Priya",
 		},
 		{

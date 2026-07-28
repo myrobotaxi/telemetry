@@ -128,38 +128,38 @@ func buildDebugURL(server, vin string) (string, error) {
 // contract at docs/contracts/vehicle-state-schema.md §1.1, so this command
 // doubles as a spot-check for the REST /snapshot wire shape.
 type vehicleSnapshot struct {
-	ID                   string          `json:"id"`
-	VIN                  string          `json:"vin"`
-	Name                 string          `json:"name"`
-	Model                string          `json:"model"`
-	Year                 int             `json:"year"`
-	Color                string          `json:"color"`
-	Status               string          `json:"status"`
-	ChargeLevel          int             `json:"chargeLevel"`
-	EstimatedRange       int             `json:"estimatedRange"`
-	ChargeState          *string         `json:"chargeState"`
-	TimeToFull           *float64        `json:"timeToFull"`
-	Speed                int             `json:"speed"`
-	GearPosition         *string         `json:"gearPosition,omitempty"`
-	Heading              int             `json:"heading"`
-	Latitude             float64         `json:"latitude"`
-	Longitude            float64         `json:"longitude"`
-	LocationName         string          `json:"locationName"`
-	LocationAddress      string          `json:"locationAddress"`
-	InteriorTemp         int             `json:"interiorTemp"`
-	ExteriorTemp         int             `json:"exteriorTemp"`
-	OdometerMiles        int             `json:"odometerMiles"`
-	FsdMilesSinceReset   float64         `json:"fsdMilesSinceReset"`
-	DestinationName      *string         `json:"destinationName,omitempty"`
-	DestinationAddress   *string         `json:"destinationAddress,omitempty"`
-	DestinationLatitude  *float64        `json:"destinationLatitude,omitempty"`
-	DestinationLongitude *float64        `json:"destinationLongitude,omitempty"`
-	OriginLatitude       *float64        `json:"originLatitude,omitempty"`
-	OriginLongitude      *float64        `json:"originLongitude,omitempty"`
-	EtaMinutes           *int            `json:"etaMinutes,omitempty"`
-	TripDistRemaining    *float64        `json:"tripDistanceRemaining,omitempty"`
+	ID                   string   `json:"id"`
+	VIN                  string   `json:"vin"`
+	Name                 string   `json:"name"`
+	Model                string   `json:"model"`
+	Year                 int      `json:"year"`
+	Color                string   `json:"color"`
+	Status               string   `json:"status"`
+	ChargeLevel          int      `json:"chargeLevel"`
+	EstimatedRange       int      `json:"estimatedRange"`
+	ChargeState          *string  `json:"chargeState"`
+	TimeToFull           *float64 `json:"timeToFull"`
+	Speed                int      `json:"speed"`
+	GearPosition         *string  `json:"gearPosition,omitempty"`
+	Heading              int      `json:"heading"`
+	Latitude             float64  `json:"latitude"`
+	Longitude            float64  `json:"longitude"`
+	LocationName         string   `json:"locationName"`
+	LocationAddress      string   `json:"locationAddress"`
+	InteriorTemp         int      `json:"interiorTemp"`
+	ExteriorTemp         int      `json:"exteriorTemp"`
+	OdometerMiles        int      `json:"odometerMiles"`
+	FsdMilesSinceReset   float64  `json:"fsdMilesSinceReset"`
+	DestinationName      *string  `json:"destinationName,omitempty"`
+	DestinationAddress   *string  `json:"destinationAddress,omitempty"`
+	DestinationLatitude  *float64 `json:"destinationLatitude,omitempty"`
+	DestinationLongitude *float64 `json:"destinationLongitude,omitempty"`
+	OriginLatitude       *float64 `json:"originLatitude,omitempty"`
+	OriginLongitude      *float64 `json:"originLongitude,omitempty"`
+	EtaMinutes           *int     `json:"etaMinutes,omitempty"`
+	TripDistRemaining    *float64 `json:"tripDistanceRemaining,omitempty"`
 	NavRouteCoordinates  json.RawMessage `json:"navRouteCoordinates,omitempty"`
-	LastUpdated          string          `json:"lastUpdated"`
+	LastUpdated          string   `json:"lastUpdated"`
 }
 
 func runFieldsSnapshot(ctx context.Context, args []string) error {

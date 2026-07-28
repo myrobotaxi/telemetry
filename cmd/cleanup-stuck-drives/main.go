@@ -110,10 +110,10 @@ func run() int {
 	deleted, runErr := cleanupOrphans(ctx, pool, minAge, dryRun)
 
 	report := struct {
-		MinAge  string `json:"minAge"`
-		DryRun  bool   `json:"dryRun"`
-		RowsHit int64  `json:"rowsHit"`
-		Error   string `json:"error,omitempty"`
+		MinAge     string `json:"minAge"`
+		DryRun     bool   `json:"dryRun"`
+		RowsHit    int64  `json:"rowsHit"`
+		Error      string `json:"error,omitempty"`
 	}{
 		MinAge:  minAge.String(),
 		DryRun:  dryRun,

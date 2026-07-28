@@ -21,10 +21,10 @@ type pendingPair struct {
 // encryption are set; the others are zero-value (lat/lng nil) so the
 // UPDATE COALESCE skips them.
 type pendingRow struct {
-	id     string
-	main   pendingPair
-	dest   pendingPair
-	origin pendingPair
+	id       string
+	main     pendingPair
+	dest     pendingPair
+	origin   pendingPair
 }
 
 // hasWork reports whether the row needs an UPDATE.
@@ -48,13 +48,13 @@ func (b *Backfiller) collectBatch(ctx context.Context, res *Result) ([]pendingRo
 	var firstErr error
 	for rows.Next() {
 		var (
-			id                         string
-			latPT, lngPT               *float64
-			latEnc, lngEnc             *string
-			destLatPT, destLngPT       *float64
-			destLatEnc, destLngEnc     *string
-			originLatPT, originLngPT   *float64
-			originLatEnc, originLngEnc *string
+			id                                 string
+			latPT, lngPT                       *float64
+			latEnc, lngEnc                     *string
+			destLatPT, destLngPT               *float64
+			destLatEnc, destLngEnc             *string
+			originLatPT, originLngPT           *float64
+			originLatEnc, originLngEnc         *string
 		)
 		if err := rows.Scan(&id,
 			&latPT, &lngPT, &latEnc, &lngEnc,
@@ -111,10 +111,10 @@ func (b *Backfiller) encryptRow(
 		return pendingPair{latEnc: &latCT, lngEnc: &lngCT}, nil
 	}
 	for _, p := range []struct {
-		latPT, lngPT   *float64
+		latPT, lngPT *float64
 		latEnc, lngEnc *string
-		dst            *pendingPair
-		label          string
+		dst   *pendingPair
+		label string
 	}{
 		{latPT, lngPT, latEnc, lngEnc, &row.main, "main"},
 		{destLatPT, destLngPT, destLatEnc, destLngEnc, &row.dest, "dest"},
