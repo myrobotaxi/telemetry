@@ -166,18 +166,11 @@ func (e *Executor) invoke(ctx context.Context, cmd Command, req Request, body []
 			return Result{Command: cmd.Name, Applied: true}, nil
 
 		case OutcomeAsleep:
-			if wakeAttempts >= e.cfg.WakeMaxAttempts {
-				return Result{}, withDetail(errVehicleAsleep(), res.Reason)
-			}
-			wakeAttempts++
-			if wErr := e.transport.Wake(ctx, req.VIN, req.AccessToken); wErr != nil {
-				e.logger.Warn("wake request failed; will retry command anyway",
-					slog.Int("attempt", wakeAttempts),
-					slog.String("command", cmd.Name),
-				)
-			}
-			if sErr := sleepCtx(ctx, e.cfg.WakeBackoff); sErr != nil {
-				return Result{}, errInternal("command canceled during wake backoff")
+			// Shared with EnsureAwake (wake.go) so the command path and the
+			// owner-triggered refresh path can never drift apart on budget,
+			// backoff, or the terminal vehicle_asleep error.
+			if cErr := e.wakeStep(ctx, req.VIN, req.AccessToken, cmd.Name, &wakeAttempts, res.Reason); cErr != nil {
+				return Result{}, cErr
 			}
 
 		case OutcomeCounterError:
