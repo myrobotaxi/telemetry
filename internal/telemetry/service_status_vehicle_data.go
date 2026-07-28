@@ -113,8 +113,12 @@ func (m *ServiceStatusMonitor) RefreshFromVehicleData(ctx context.Context, vin, 
 	// MYR-320: the exterior colour goes to its OWN column (Prisma
 	// "Vehicle".color), not into the telemetry frame — see syncVehicleColor.
 	// Runs before the empty-frame short-circuit below so a car whose
-	// vehicle_data carries nothing but a colour still gets it.
-	m.syncVehicleColor(ctx, vin, data.VehicleConfig)
+	// vehicle_data carries nothing but a colour still gets it. A nil payload is
+	// tolerated the same way vehicleDataToFields tolerates it: Tesla can answer
+	// 200 with an empty body, and that must be a no-op, not a crash.
+	if data != nil {
+		m.syncVehicleColor(ctx, vin, data.VehicleConfig)
+	}
 
 	// MYR-320: ONE additional non-waking GET on the same trigger, for the one
 	// value no vehicle_data field carries. Non-fatal: a failure or an empty list
