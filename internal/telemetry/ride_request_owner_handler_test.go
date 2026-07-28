@@ -267,19 +267,24 @@ func TestRideRequestHandler_Accept_ScheduledExemptFromAvailabilityGate(t *testin
 			if store.updatedState != rideStatusAccepted {
 				t.Errorf("scheduled accept: UpdateStatus arg got %q want %q", store.updatedState, rideStatusAccepted)
 			}
-			// The exemption short-circuits BEFORE the vehicle read — an exempt
-			// accept must not depend on the status lookup at all.
-			if reader.calls != 0 {
-				t.Errorf("scheduled accept must not read the vehicle status, got %d lookups", reader.calls)
+			// MYR-316 amended this: a scheduled accept now DOES read the
+			// vehicle, because the service-window bound needs it. What must
+			// still hold is that the read's ANSWER never blocks a scheduled
+			// accept on availability grounds — asserted by the wantAccepted
+			// rows above, where in_service and offline both still yield 200.
+			if reader.calls != 1 {
+				t.Errorf("scheduled accept reads the vehicle once for the MYR-316 bound, got %d lookups", reader.calls)
 			}
 		})
 	}
 }
 
 // TestRideRequestHandler_Accept_ScheduledSurvivesVehicleLookupFailure pairs with
-// the fail-closed instant behaviour: because a scheduled accept never asks the
-// question, a vehicle-status lookup that fails cannot strand a reservation
-// (MYR-313). The instant fail-closed 500 is asserted separately below.
+// the fail-closed instant behaviour: a vehicle lookup that fails cannot strand a
+// reservation (MYR-313). Since MYR-316 the scheduled path DOES perform the
+// lookup (for the service-window bound), so this now pins the FAIL-OPEN rule —
+// an unreadable vehicle leaves the reservation unbounded rather than refused.
+// The instant fail-closed 500 is asserted separately below.
 func TestRideRequestHandler_Accept_ScheduledSurvivesVehicleLookupFailure(t *testing.T) {
 	const owner = rideOtherUsr
 	scheduled := time.Date(2026, 8, 1, 17, 30, 0, 0, time.UTC)

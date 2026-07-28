@@ -15,10 +15,10 @@ import (
 
 // stubVINResolver is a test double that maps VINs to vehicle IDs.
 type stubVINResolver struct {
-	mu       sync.RWMutex
-	mapping  map[string]string
-	err      error
-	callLog  []string
+	mu      sync.RWMutex
+	mapping map[string]string
+	err     error
+	callLog []string
 }
 
 func newStubVINResolver(mapping map[string]string) *stubVINResolver {
@@ -1045,7 +1045,6 @@ func TestUnwrapValue(t *testing.T) {
 		})
 	}
 }
-
 
 func TestBroadcaster_HandleDriveUpdated(t *testing.T) {
 	bus := events.NewChannelBus(events.DefaultBusConfig(), events.NoopBusMetrics{}, slog.Default())

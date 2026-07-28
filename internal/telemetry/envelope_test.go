@@ -54,8 +54,8 @@ func TestUnwrapEnvelope_ErrorCases(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		input     []byte
+		name       string
+		input      []byte
 		wantSubstr string
 	}{
 		{name: "nil input", input: nil, wantSubstr: "unwrap envelope"},

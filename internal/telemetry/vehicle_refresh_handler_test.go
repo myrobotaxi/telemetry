@@ -282,8 +282,8 @@ func (alwaysAwakeTransport) Command(context.Context, commands.TransportRequest) 
 	return commands.TransportResult{}, nil
 }
 func (alwaysAwakeTransport) Wake(context.Context, string, string) error { return nil }
-func (alwaysAwakeTransport) Enabled() bool                             { return true }
-func (alwaysAwakeTransport) RESTEnabled() bool                         { return true }
+func (alwaysAwakeTransport) Enabled() bool                              { return true }
+func (alwaysAwakeTransport) RESTEnabled() bool                          { return true }
 
 // --- Auth / ownership matrix ---
 

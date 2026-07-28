@@ -99,6 +99,13 @@ func (h *RideRequestHandler) ServeCreate(w http.ResponseWriter, r *http.Request)
 	in.RiderID = userID
 	in.OwnerID = row.UserID
 
+	// MYR-316: a scheduled ride may not be booked for a time before the car is
+	// expected back from service. Instant rides are unaffected (already gated
+	// by MYR-277), and a vehicle with no estimate imposes no bound.
+	if h.rejectIfBeforeServiceWindow(w, in.ScheduledFor, row) {
+		return
+	}
+
 	// One active ride per rider (MYR-230): an INSTANT request is refused
 	// while the rider already has an open instant ride. The fast-path
 	// pre-check runs here; the partial unique index (migration 0004) is the

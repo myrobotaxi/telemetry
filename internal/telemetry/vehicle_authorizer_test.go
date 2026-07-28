@@ -44,7 +44,7 @@ func (b *stubBus) Subscribe(_ events.Topic, _ events.Handler) (events.Subscripti
 	return events.Subscription{}, nil
 }
 func (b *stubBus) Unsubscribe(_ events.Subscription) error { return nil }
-func (b *stubBus) Close(_ context.Context) error          { return nil }
+func (b *stubBus) Close(_ context.Context) error           { return nil }
 
 func newTestReceiver(t *testing.T, authorized map[string]bool) (*Receiver, *stubBus, *countingMetrics) {
 	t.Helper()

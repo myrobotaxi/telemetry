@@ -60,6 +60,7 @@ func formatRideTimePtr(t *time.Time) *string {
 // RideRequestCreateRequest schema constraints. Returns a human-readable
 // reason string the handler emits as 400 invalid_request; the reason never
 // contains P1 values (coordinates/labels/PII).
+//
 //nolint:gocritic // the (input, reason) pair reads clearly at the single call site; a named 400-reason string beats an error wrapper here
 func validateCreateBody(body rideRequestCreateBody) (RideRequestCreateInput, string) {
 	if body.VehicleID == "" {
@@ -110,6 +111,7 @@ func validateCreateBody(body rideRequestCreateBody) (RideRequestCreateInput, str
 // validateRidePlace enforces the RidePlace schema: lat/lng/label required,
 // lat in [-90,90], lng in [-180,180], label non-empty. The `field` prefix
 // names which place failed without echoing coordinate values.
+//
 //nolint:gocritic // the (place, reason) pair reads clearly at the two call sites
 func validateRidePlace(field string, p *ridePlaceWire) (RidePlaceData, string) {
 	if p == nil {

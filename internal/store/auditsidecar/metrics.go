@@ -22,9 +22,9 @@ type Metrics interface {
 // NoopMetrics is the zero-cost default for tests and local dev.
 type NoopMetrics struct{}
 
-func (NoopMetrics) IncWrite()             {}
-func (NoopMetrics) IncFailure(_ string)   {}
-func (NoopMetrics) SetQueueDepth(_ int)   {}
+func (NoopMetrics) IncWrite()           {}
+func (NoopMetrics) IncFailure(_ string) {}
+func (NoopMetrics) SetQueueDepth(_ int) {}
 
 // PrometheusMetrics implements Metrics against a Prometheus registry.
 // Register it at startup via NewPrometheusMetrics and pass it to

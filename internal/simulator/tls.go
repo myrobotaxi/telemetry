@@ -13,7 +13,7 @@ func tlsHTTPClient(cfg *tls.Config) *http.Client {
 	tlsCfg.NextProtos = []string{"http/1.1"}
 	return &http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig: tlsCfg,
+			TLSClientConfig:   tlsCfg,
 			ForceAttemptHTTP2: false,
 		},
 	}
