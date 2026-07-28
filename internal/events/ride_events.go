@@ -117,9 +117,8 @@ type RideStartedEvent struct {
 func (RideStartedEvent) EventTopic() Topic { return TopicRideStarted }
 
 // RideDueEvent is the reservation-due seam (MYR-179): published once when a
-// SCHEDULED ride reaches its ScheduledFor instant and the reservation sweeper
-// wins the leg-1 dispatch claim — the moment the pickup nav push fires for
-// that reservation. Deliberately SUMMARY-ONLY (ids + the two instants): unlike
+// SCHEDULED ride reaches its ScheduledFor instant and its pickup nav push has
+// been DELIVERED to the car (outcome `sent`). Deliberately SUMMARY-ONLY (ids + the two instants): unlike
 // RideAcceptedEvent it carries no places and no passenger contact, because its
 // intended consumer is a rider push notification, not a Tesla command — a
 // future consumer that needs the pickup refetches the ride.
@@ -134,10 +133,14 @@ type RideDueEvent struct {
 	OwnerID       string
 	// ScheduledFor is the reservation instant that came due.
 	ScheduledFor time.Time
-	// DueAt is the sweeper-clock instant the reservation was actually picked
-	// up. It is >= ScheduledFor by up to one sweep interval (plus any
-	// vehicle-busy hold), so a consumer can tell a punctual dispatch from a
-	// held-then-released one without re-reading the row.
+	// DueAt is the sweeper-clock instant the reservation was picked up for
+	// dispatch (read in the worker, just before the claim — the push itself
+	// then takes up to the dispatcher's OverallTimeout). It is >= ScheduledFor
+	// by up to one sweep interval plus any vehicle-busy hold, and is bounded
+	// above by ScheduledFor + the lateness ceiling: past that the reservation
+	// is failed instead and no RideDueEvent is ever published. So a consumer
+	// can tell a punctual dispatch from a held-then-released one without
+	// re-reading the row.
 	DueAt time.Time
 }
 
