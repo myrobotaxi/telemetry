@@ -98,6 +98,13 @@
       "maxLength": 10,
       "pattern": "^[A-Z0-9 -]*$",
       "examples": ["ABC 1234"]
+    },
+    "serviceEstimatedEndAt": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "ISO 8601 / RFC 3339 UTC instant at which this vehicle's CURRENT SERVICE VISIT is estimated to END — same value and same semantics as VehicleState.serviceEstimatedEndAt (MYR-316). Meaningful only while the sibling `status` is 'in_service': owners render it as 'Estimated completion …' beneath the In Service status in the catalog row, and the rider scheduling flow uses it as a FLOOR on when a ride may be booked against this vehicle. SERVER-COMPUTED, never client-supplied, with a fixed SOURCE PRECEDENCE: (1) Tesla's own estimate, `service_data.service_etc` from the Fleet API `GET /api/1/vehicles/{vin}/service_data`, polled on connectivity edges while the vehicle is in service; (2) failing that, the OWNER-ENTERED 'expected back' value, set via `PUT /api/tesla/vehicles/{vehicleId}/service-window` (MYR-316); (3) null when neither exists. Tesla returns an ALL-NULL service_data body for visits that have no appointment record, so an absent estimate is COMMON AND NORMAL — it is not an error, not a fetch failure, and not a claim that the car is back. CLEARED AUTOMATICALLY when the vehicle leaves 'in_service': a row whose `status` is driving/parked/charging/offline never carries a non-null value, so consumers never need to age this field out themselves. CONSUMER RULES: the rider scheduling picker floors its selectable range at this instant plus a small buffer, and the server likewise REFUSES scheduled ride requests for a time before it; when the field is ABSENT or NULL there is NO BOUND and scheduling stays fully open — consumers MUST NEVER block or gate scheduling on missing data. Delivery: NOT STREAMED. This field is REST-derived and carries no live WebSocket delta — a `vehicle_update` frame NEVER contains serviceEstimatedEndAt — so it is SNAPSHOT-ONLY for the Kit merger and refreshes only on the next read of `GET /api/vehicles` (this envelope) or the REST `/snapshot`. Classified P0: operational timing about the car, not identifying data and not user content — the same tier as the sibling `status`.",
+      "x-classification": "P0",
+      "examples": ["2026-07-29T18:00:00Z"]
     }
   }
 }

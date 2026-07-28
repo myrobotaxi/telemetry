@@ -1192,6 +1192,34 @@ components:
             WebSocket delta in v1; it refreshes on the next list fetch.
           example: ABC 1234
           x-classification: P1
+        serviceEstimatedEndAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            When this vehicle's CURRENT SERVICE VISIT is estimated to end —
+            same value and semantics as VehicleState.serviceEstimatedEndAt
+            (MYR-316). SERVER-COMPUTED, never client-supplied, with a fixed
+            precedence: Tesla's own `service_data.service_etc` (Fleet API
+            `GET /api/1/vehicles/{vin}/service_data`, read on connectivity
+            edges while the car is in service) first, the owner-entered
+            "expected back" value from
+            `PUT /api/tesla/vehicles/{vehicleId}/service-window` second,
+            null when neither exists. Emitted ONLY while the sibling
+            `status` is `in_service`, and the columns are physically
+            cleared when the car leaves service — so a
+            driving/parked/charging/offline row NEVER carries a non-null
+            value and consumers never age it out themselves. Tesla returns
+            an all-null service_data body for a visit with no appointment
+            record, so an absent estimate is COMMON AND NORMAL, not an
+            error. CONSUMER RULE: the scheduling picker floors its range
+            here (and the server refuses a `scheduledFor` earlier than it),
+            but ABSENT/NULL means NO BOUND — never block scheduling on
+            missing data. Visible to BOTH roles (P0 operational timing,
+            same tier as `status`). No WebSocket delta: a `vehicle_update`
+            NEVER carries it; it refreshes on the next list fetch.
+          example: '2026-07-29T18:00:00Z'
+          x-classification: P0
 
     VehiclesListResponse:
       type: object

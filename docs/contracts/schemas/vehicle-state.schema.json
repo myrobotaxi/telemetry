@@ -497,6 +497,13 @@
       "x-tesla-proto-field": 252,
       "examples": [11]
     },
+    "serviceEstimatedEndAt": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "ISO 8601 / RFC 3339 UTC instant at which the vehicle's CURRENT SERVICE VISIT is estimated to END. Added by MYR-316. Meaningful only while the sibling `status` is 'in_service': owners render it as 'Estimated completion …' beneath the In Service status, and the rider scheduling flow uses it as a FLOOR on when a ride may be booked. SERVER-COMPUTED, never client-supplied on this shape, with a fixed SOURCE PRECEDENCE: (1) Tesla's own estimate, `service_data.service_etc` from the Fleet API `GET /api/1/vehicles/{vin}/service_data`, polled on connectivity edges while the vehicle is in service; (2) failing that, the OWNER-ENTERED 'expected back' value, set via `PUT /api/tesla/vehicles/{vehicleId}/service-window` (MYR-316); (3) null when neither exists. Tesla returns an ALL-NULL service_data body for visits that have no appointment record, so an absent estimate is COMMON AND NORMAL — it is not an error, not a fetch failure, and not a claim that the car is back. CLEARED AUTOMATICALLY when the vehicle leaves 'in_service': a driving/parked/charging/offline vehicle never carries a non-null value, so consumers never need to age this field out themselves. CONSUMER RULES: the rider scheduling picker floors its selectable range at this instant plus a small buffer, and the server likewise REFUSES scheduled ride requests for a time before it; when the field is ABSENT or NULL there is NO BOUND and scheduling stays fully open — consumers MUST NEVER block or gate scheduling on missing data. Delivery: NOT STREAMED. This field is REST-derived and carries no live WebSocket delta — a `vehicle_update` frame NEVER contains serviceEstimatedEndAt — so it is SNAPSHOT-ONLY for the Kit merger and arrives on the DB-backed REST `/snapshot` and on `GET /api/vehicles` list rows. Classified P0: operational timing about the car, not identifying data and not user content — the same tier as the sibling `status`.",
+      "x-classification": "P0",
+      "examples": ["2026-07-29T18:00:00Z"]
+    },
     "lastUpdated": {
       "type": "string",
       "format": "date-time",

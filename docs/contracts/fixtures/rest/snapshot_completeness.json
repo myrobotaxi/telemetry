@@ -519,6 +519,12 @@
       "nullableInSteadyState": false,
       "linearIssue": "MYR-279",
       "comment": "MYR-279 vehicle-detail read-back. Persisted to the Go-owned go_vehicle_control_state SIDE table (migration 0011; not the Prisma Vehicle table) via the /vehicle_data backfill ONLY (vehicle_config.trim_badging; Tesla does not stream trim), and returned on /snapshot via VehicleRepo.GetByID's LEFT JOIN. The synthetic names Trim, a ControlStateUpdate field NOT on VehicleUpdate, so this MYR-48 harness (Vehicle-table writer pipeline via GetByVIN) surfaces it as an EXPECTED-GAP; the side-table round-trip is covered by internal/store/vehicle_control_state_test.go."
+    },
+    "serviceEstimatedEndAt": {
+      "category": "derived",
+      "atomicGroup": "",
+      "nullableInSteadyState": true,
+      "comment": "MYR-316 resolved service window. NOT a single column and NOT a telemetry field: it is COALESCE(service_etc, service_expected_end_at) over two nullable TIMESTAMPTZ columns on the Go-owned go_vehicle_control_state SIDE table (migration 0017), resolved by internal/telemetry/service_window.go and emitted ONLY while the vehicle's status is in_service. Neither column has a writer-pipeline path — service_etc comes from the Fleet API GET /api/1/vehicles/{vin}/service_data on the ServiceStatusMonitor's connectivity-edge path, service_expected_end_at from the owner's PUT /api/tesla/vehicles/{vehicleId}/service-window (rest-api.md §7.16) — and the monitor physically clears both when the car leaves service. nullableInSteadyState is therefore true BY DESIGN, not as a documented gap: this harness's seeded vehicle is not in service, so null is the CORRECT read-back and an expected_failure row would misreport a working field as broken. The write/resolve round-trip is covered by the store and handler tests for vehicle_service_window.go."
     }
   }
 }
