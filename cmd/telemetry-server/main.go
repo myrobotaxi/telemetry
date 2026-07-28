@@ -377,6 +377,7 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 		auditMetrics:   auditMetrics,
 		debugGate:      debugGate,
 		originPatterns: originPatterns,
+		serviceStatus:  serviceStatusMonitor,
 		logger:         logger,
 	})
 
