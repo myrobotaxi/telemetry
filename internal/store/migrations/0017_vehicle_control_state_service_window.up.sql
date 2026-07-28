@@ -1,0 +1,77 @@
+-- 0017_vehicle_control_state_service_window.up.sql
+--
+-- MYR-316: extend the Go-owned go_vehicle_control_state side table (MYR-269,
+-- migration 0008; MYR-273, migration 0010; MYR-279, migration 0011; MYR-274,
+-- migration 0012; MYR-298, migration 0014; MYR-303/308, migration 0015) with
+-- the SERVICE WINDOW -- when the car currently at a service centre is expected
+-- back.
+--
+-- MYR-277 already refuses to dispatch an in-service car, and MYR-313 lets a
+-- SCHEDULED ride be accepted for one anyway (the car is expected back before
+-- the reservation). That combination is only safe if somebody knows WHEN the
+-- car comes back, and until now nobody did: the owner could accept a ride
+-- scheduled for the middle of a service visit, and the rider would be stood up.
+-- These two columns are the answer to "when?", and they feed one wire field,
+-- VehicleState/VehicleSummary.serviceEstimatedEndAt (contracts v0.17.0).
+--
+-- TWO columns rather than one because there are two INDEPENDENT sources with a
+-- fixed precedence, and collapsing them would destroy information:
+--
+--   service_etc             Tesla's own estimate, read from the Fleet API
+--                           GET /api/1/vehicles/{vin}/service_data
+--                           (service_data.service_etc) on the connectivity-edge
+--                           path while the car is in service. Authoritative.
+--   service_expected_end_at The owner's "expected back" answer, typed via
+--                           PUT /api/tesla/vehicles/{vehicleId}/service-window.
+--                           A fallback, used only while Tesla says nothing.
+--
+-- The emitted value is COALESCE(service_etc, service_expected_end_at). Keeping
+-- them apart means Tesla arriving late does NOT erase what the owner typed, and
+-- Tesla going quiet again falls back to it rather than to null. One merged
+-- column could not express either.
+--
+-- Naming convention (CG-DL-9): Go-owned table, "go_" prefix, snake_case
+-- columns, no foreign key to any table owned by the sibling app's ORM. The
+-- columns are added to the existing side table (keyed by vehicle_id) so the
+-- same idempotent per-car upsert and the same snapshot LEFT JOIN carry them.
+--
+-- Both columns are nullable (honest-unknown, matching
+-- 0008/0010/0012/0014/0015): NULL means "no estimate from this source", and the
+-- read path surfaces the absence as null, never a fabricated instant. Tesla
+-- returns an ALL-NULL service_data body for a visit with no appointment record,
+-- so a null service_etc is COMMON AND NORMAL -- not an error, not a fetch
+-- failure, and never a claim that the car is back.
+--
+-- Types: TIMESTAMPTZ, matching the table's only existing timestamp
+-- (updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()) and the wire contract's
+-- RFC 3339 UTC instant. A naive TIMESTAMP would be actively wrong here: a
+-- service centre's estimate crosses a DST boundary about twice a year, and the
+-- scheduler compares this value against a rider-supplied scheduledFor that is
+-- itself absolute.
+--
+-- WRITE PATH -- deliberately NOT the COALESCE upsert. Unlike every other column
+-- in this table, these two must be settable BACK to NULL: the wire contract
+-- clears serviceEstimatedEndAt the moment the car leaves in_service, and an
+-- owner clears their own entry by submitting an empty body. The shared
+-- queryUpsertControlState writes
+-- `col = COALESCE(EXCLUDED.col, existing.col)`, in which a NULL means "leave
+-- alone" and a clear is therefore INEXPRESSIBLE. So these columns get dedicated
+-- statements that assign unconditionally (vehicle_service_window.go), and they
+-- are absent from ControlStateUpdate entirely.
+--
+-- Backfill note (MYR-300 coordination): neither column is fed by the MYR-260
+-- REST /vehicle_data backfill and neither is streamed -- service_data is a
+-- SEPARATE Fleet API endpoint, and Tesla has no proto for either value. Like
+-- trim (MYR-279) and seat_cooling_capable (MYR-308) they carry no fieldMap
+-- entry, so the MYR-300 stream-recency gate is irrelevant to them; unlike those
+-- two they never travel as telemetry fields at all, reaching the table through
+-- their own writer instead. There is consequently no stale-overwrite risk: the
+-- stream can never be their source.
+--
+-- Classification: both columns are P0 -- operational timing about the car, the
+-- same tier as the sibling Vehicle.status they qualify. Not identifying, no
+-- GPS, no tokens, no PII. See data-classification.md section 1.13.
+
+ALTER TABLE go_vehicle_control_state
+    ADD COLUMN IF NOT EXISTS service_etc             TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS service_expected_end_at TIMESTAMPTZ;
