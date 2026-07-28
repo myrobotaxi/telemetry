@@ -27,6 +27,9 @@ type Config struct {
 	// reservationDispatchEnabled is the MYR-179 scheduled-dispatch sweeper
 	// kill-switch, independent of dispatchEnabled.
 	reservationDispatchEnabled bool
+	// MYR-320 periodic in-service re-poll knobs.
+	serviceRepollEnabled  bool
+	serviceRepollInterval time.Duration
 }
 
 // MonitoringConfig holds observability probe settings.
@@ -259,6 +262,17 @@ func (c *Config) DispatchEnabled() bool { return c.dispatchEnabled }
 // affecting instant rides. Defaults to true; set
 // RESERVATION_DISPATCH_ENABLED=false to disable without a deploy.
 func (c *Config) ReservationDispatchEnabled() bool { return c.reservationDispatchEnabled }
+
+// ServiceRepollEnabled is the MYR-320 in-service re-poll kill-switch. False
+// leaves the ServiceStatusMonitor reading on connectivity / ServiceMode EDGES
+// only (pre-MYR-320), so an offline in-service car goes unrefreshed until an
+// edge happens — nothing is lost permanently. Defaults to true.
+func (c *Config) ServiceRepollEnabled() bool { return c.serviceRepollEnabled }
+
+// ServiceRepollInterval is the MYR-320 re-poll cadence — the only lever on the
+// resulting Fleet API request rate. Defaults to 15m; SERVICE_REPOLL_INTERVAL
+// takes a Go duration ("30m").
+func (c *Config) ServiceRepollInterval() time.Duration { return c.serviceRepollInterval }
 
 // Load reads configuration from the JSON file at configPath, overlays
 // environment variable overrides, applies defaults for missing optional

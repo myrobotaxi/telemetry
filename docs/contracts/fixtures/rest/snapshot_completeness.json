@@ -525,6 +525,22 @@
       "atomicGroup": "",
       "nullableInSteadyState": true,
       "comment": "MYR-316 resolved service window. NOT a single column and NOT a telemetry field: it is COALESCE(service_etc, service_expected_end_at) over two nullable TIMESTAMPTZ columns on the Go-owned go_vehicle_control_state SIDE table (migration 0017), resolved by internal/telemetry/service_window.go and emitted ONLY while the vehicle's status is in_service. Neither column has a writer-pipeline path — service_etc comes from the Fleet API GET /api/1/vehicles/{vin}/service_data on the ServiceStatusMonitor's connectivity-edge path, service_expected_end_at from the owner's PUT /api/tesla/vehicles/{vehicleId}/service-window (rest-api.md §7.16) — and the monitor physically clears both when the car leaves service. nullableInSteadyState is therefore true BY DESIGN, not as a documented gap: this harness's seeded vehicle is not in service, so null is the CORRECT read-back and an expected_failure row would misreport a working field as broken. The write/resolve round-trip is covered by the store and handler tests for vehicle_service_window.go."
+    },
+    "trimLabel": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "TrimLabel", "value": "Performance" },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-320",
+      "comment": "MYR-320 vehicle-detail enrichment — the DISPLAY-READY trim label, contrast the sibling trim's raw badge code (trim_badging, e.g. p74d), which is not display-safe; both are kept and neither replaces the other. Persisted to the Go-owned go_vehicle_control_state SIDE table (migration 0018, trim_label TEXT; not the Prisma Vehicle table) from the non-waking /vehicle_data read ONLY (vehicle_config.performance_package; Tesla does not stream it, so it has no proto and no fieldMap entry — exactly what carries it past the MYR-300 stream-recency gate), and returned on /snapshot only. The synthetic names TrimLabel, a ControlStateUpdate field NOT on VehicleUpdate, so this MYR-48 harness (which drives the Vehicle-table writer pipeline via GetByVIN, no side-table join) surfaces it as an EXPECTED-GAP; the side-table round-trip is covered by internal/store/vehicle_control_state_test.go."
+    },
+    "fsdVersion": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "FSDVersion", "value": "FSD (Supervised) v14.3.5" },
+      "nullableInSteadyState": false,
+      "linearIssue": "MYR-320",
+      "comment": "MYR-320 vehicle-detail enrichment — the FSD software DESIGNATION, distinct from the sibling softwareVersion (the installed firmware build); the two move independently and neither derives from the other. Persisted to the Go-owned go_vehicle_control_state SIDE table (migration 0018, fsd_version TEXT; not the Prisma Vehicle table) from the TITLE of the NEWEST entry of the Fleet API GET /api/1/vehicles/{vin}/release_notes — no vehicle_data field and no proto carries it — and returned on /snapshot only, stored and emitted VERBATIM (never parsed). The synthetic names FSDVersion, a ControlStateUpdate field NOT on VehicleUpdate, so this MYR-48 harness (which drives the Vehicle-table writer pipeline via GetByVIN, no side-table join) surfaces it as an EXPECTED-GAP; the side-table round-trip is covered by internal/store/vehicle_control_state_test.go."
     }
   }
 }

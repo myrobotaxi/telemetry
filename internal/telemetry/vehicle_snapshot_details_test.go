@@ -136,3 +136,69 @@ func TestBuildSnapshotResponse_NilSeatVentMediaIsNull(t *testing.T) {
 		t.Errorf("nil mediaPlaybackStatus should map to nil, got %v", m["mediaPlaybackStatus"])
 	}
 }
+
+// TestBuildSnapshotResponse_MYR320Details covers MYR-320: the nullable trimLabel
+// / fsdVersion read-backs are mapped onto the snapshot response and surface in
+// the mask map under their wire names.
+//
+// The assertion that matters is that they land ALONGSIDE their siblings rather
+// than displacing them. `trim` stays the raw badge code and `softwareVersion`
+// the firmware build; each pair holds two values that move independently and
+// neither of which can be derived from the other, so a mapper that transposed
+// them would be silently wrong on the details sheet rather than loudly broken.
+func TestBuildSnapshotResponse_MYR320Details(t *testing.T) {
+	badge := "p74d"
+	label := "Performance"
+	firmware := "2026.20.1 9a8b7c6"
+	fsd := "FSD (Supervised) v14.3.5"
+	row := VehicleSnapshotRow{
+		ID:              "veh_1",
+		Trim:            &badge,
+		TrimLabel:       &label,
+		SoftwareVersion: &firmware,
+		FSDVersion:      &fsd,
+	}
+
+	resp := buildSnapshotResponse(row)
+	if resp.TrimLabel == nil || *resp.TrimLabel != label {
+		t.Errorf("TrimLabel = %v, want %q", resp.TrimLabel, label)
+	}
+	if resp.FSDVersion == nil || *resp.FSDVersion != fsd {
+		t.Errorf("FSDVersion = %v, want %q", resp.FSDVersion, fsd)
+	}
+
+	m := resp.toMaskMap()
+	for _, tc := range []struct{ key, want string }{
+		{"trim", badge},
+		{"trimLabel", label},
+		{"softwareVersion", firmware},
+		{"fsdVersion", fsd},
+	} {
+		if m[tc.key] != tc.want {
+			t.Errorf("mask map %s = %v, want %q", tc.key, m[tc.key], tc.want)
+		}
+	}
+}
+
+// TestBuildSnapshotResponse_NilMYR320DetailsAreNull asserts a never-read label or
+// FSD designation surfaces as JSON null (nil in the mask map) — the
+// honest-unknown contract. For fsdVersion that distinction carries real meaning:
+// null is NOT a claim that the car lacks FSD, and the contract tells consumers to
+// OMIT the row entirely rather than render a placeholder.
+func TestBuildSnapshotResponse_NilMYR320DetailsAreNull(t *testing.T) {
+	m := buildSnapshotResponse(VehicleSnapshotRow{ID: "veh_1"}).toMaskMap()
+	if m["trimLabel"] != nil {
+		t.Errorf("nil trimLabel should map to nil, got %v", m["trimLabel"])
+	}
+	if m["fsdVersion"] != nil {
+		t.Errorf("nil fsdVersion should map to nil, got %v", m["fsdVersion"])
+	}
+	// The keys must still be PRESENT: an omitted key means "the mask denied it",
+	// which is a different statement from "we have not read it yet".
+	if _, ok := m["trimLabel"]; !ok {
+		t.Error("trimLabel key omitted from the mask map")
+	}
+	if _, ok := m["fsdVersion"]; !ok {
+		t.Error("fsdVersion key omitted from the mask map")
+	}
+}

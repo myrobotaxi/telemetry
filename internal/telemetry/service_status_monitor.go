@@ -87,6 +87,18 @@ type ServiceStatusMonitor struct {
 	serviceWindow ServiceWindowWriter
 	vehicleIDs    VehicleIDLookup
 
+	// MYR-320 vehicle-detail enrichment, each independently optional (nil =>
+	// that read/write simply never happens). See
+	// service_status_vehicle_details.go.
+	releaseNotes ReleaseNotesReader
+	vehicleColor VehicleColorWriter
+
+	// MYR-320 periodic in-service re-poll. Set together by
+	// WithPeriodicInServicePoll; nil lister disables the pass entirely. See
+	// service_status_periodic.go.
+	inServiceVINs InServiceLister
+	periodic      PeriodicPollConfig
+
 	now         func() time.Time // injectable clock (debounce tests)
 	lastRead    sync.Map         // VIN string → time.Time
 	serviceMode sync.Map         // VIN string → bool (last-seen ServiceMode from the stream)

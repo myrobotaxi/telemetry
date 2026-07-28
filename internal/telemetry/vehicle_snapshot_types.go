@@ -112,6 +112,14 @@ type VehicleSnapshotRow struct {
 	// Status by resolveServiceEstimatedEndAt — never emitted raw.
 	ServiceETC           *time.Time
 	ServiceExpectedEndAt *time.Time
+
+	// MYR-320 vehicle-detail read-backs, same side table, same LEFT JOIN.
+	// TrimLabel is the DISPLAY-SAFE trim label and stands alongside Trim above
+	// (the raw badge code); FSDVersion is the FSD software designation, a
+	// different value from SoftwareVersion above (the firmware build). Nullable
+	// — nil means never read.
+	TrimLabel  *string
+	FSDVersion *string
 }
 
 // VehicleSnapshotReader returns the snapshot row for a Prisma cuid.
@@ -152,8 +160,15 @@ type vehicleSnapshotResponse struct {
 	// vinLast4. See docs/contracts/data-classification.md section 1.3.
 	VIN string `json:"vin"`
 	// SoftwareVersion / Trim (MYR-279): nullable vehicle-detail read-backs.
-	SoftwareVersion      *string         `json:"softwareVersion"`
-	Trim                 *string         `json:"trim"`
+	SoftwareVersion *string `json:"softwareVersion"`
+	Trim            *string `json:"trim"`
+	// TrimLabel / FSDVersion (MYR-320): nullable vehicle-detail read-backs,
+	// SNAPSHOT-ONLY — REST-derived, so a WS vehicle_update frame never carries
+	// either. TrimLabel is the display-safe sibling of Trim (which stays the raw
+	// badge code and must not be rendered); FSDVersion is passed through
+	// VERBATIM and is distinct from SoftwareVersion (the firmware build).
+	TrimLabel            *string         `json:"trimLabel"`
+	FSDVersion           *string         `json:"fsdVersion"`
 	Status               string          `json:"status"`
 	Speed                int             `json:"speed"`
 	Heading              int             `json:"heading"`
@@ -294,6 +309,9 @@ func (r vehicleSnapshotResponse) toMaskMap() map[string]any {
 	m["vin"] = r.VIN
 	m["softwareVersion"] = derefOrNil(r.SoftwareVersion)
 	m["trim"] = derefOrNil(r.Trim)
+	// MYR-320 — REST-sourced, snapshot-only (never on a WS vehicle_update).
+	m["trimLabel"] = derefOrNil(r.TrimLabel)
+	m["fsdVersion"] = derefOrNil(r.FSDVersion)
 	m["status"] = r.Status
 	m["speed"] = r.Speed
 	m["heading"] = r.Heading
@@ -402,6 +420,8 @@ func buildSnapshotResponse(row VehicleSnapshotRow) vehicleSnapshotResponse {
 		VIN:                  row.VIN,
 		SoftwareVersion:      row.SoftwareVersion,
 		Trim:                 row.Trim,
+		TrimLabel:            row.TrimLabel,
+		FSDVersion:           row.FSDVersion,
 		Status:               row.Status,
 		Speed:                row.Speed,
 		Heading:              row.Heading,

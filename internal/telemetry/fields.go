@@ -49,7 +49,30 @@ const (
 	// ONLY from REST vehicle_data.vehicle_config.trim_badging by the MYR-260
 	// /vehicle_data backfill, routed through the same control-state persist path
 	// as the streamed fields, and surfaced on the REST /snapshot as `trim`.
-	FieldTrim             FieldName = "trim"
+	FieldTrim FieldName = "trim"
+	// FieldTrimLabel (MYR-320) is the DISPLAY-SAFE sibling of FieldTrim, and
+	// like it an INTERNAL-only field name with no Tesla proto and no fieldMap
+	// entry. Sourced ONLY from REST vehicle_data.vehicle_config.performance_package
+	// by the MYR-260 /vehicle_data backfill, routed through the same
+	// control-state persist path as FieldTrim, and surfaced on the REST
+	// /snapshot as `trimLabel`.
+	//
+	// The two are deliberately BOTH kept: `trim` stays the raw badge code
+	// ("p74d") for downstream classification, `trimLabel` is the label a human
+	// reads ("Performance") and the only one of the pair a consumer may render.
+	FieldTrimLabel FieldName = "trimLabel"
+	// FieldFSDVersion (MYR-320) is the vehicle's current FSD software
+	// designation, e.g. "FSD (Supervised) v14.3.5". INTERNAL-only, no proto, no
+	// fieldMap entry — and uniquely among the REST-only fields it comes from
+	// neither the stream NOR /vehicle_data: its only source anywhere in the
+	// Fleet API is the TITLE of the newest GET /api/1/vehicles/{vin}/release_notes
+	// entry, read on the same non-waking trigger as the /vehicle_data backfill.
+	//
+	// DISTINCT from FieldVersion (`softwareVersion`), which is the installed
+	// FIRMWARE BUILD. The two strings move independently and neither can be
+	// derived from the other. Passed through VERBATIM — never parsed, never
+	// version-compared.
+	FieldFSDVersion       FieldName = "fsdVersion"
 	FieldLocked           FieldName = "locked"
 	FieldSentryMode       FieldName = "sentryMode"
 	FieldOriginLocation   FieldName = "originLocation"

@@ -50,6 +50,24 @@ func setupServiceStatusMonitor(
 			vehicleRepo,
 			&vehicleIDAdapter{cache: vinCache},
 		),
+		// MYR-320: ONE extra non-waking GET on the same trigger, for the FSD
+		// designation — the release-notes title is the only place the Fleet API
+		// exposes it. Same direct-Fleet-API client, same unsigned read style.
+		telemetry.WithReleaseNotes(reader),
+		// MYR-320: populate the Prisma-owned "Vehicle".color column from
+		// vehicle_config.exterior_color. The narrow owner-scoped UPDATE carve-out
+		// (data-lifecycle.md §1.4); the wire field `color` already exists and is
+		// already emitted from that column, so this needs no contract change.
+		telemetry.WithVehicleColor(vehicleRepo),
+		// MYR-320: the periodic in-service re-poll. STRUCTURAL — the edge-only
+		// triggers above never fire for a car that sits offline at a service
+		// centre for days, so nothing re-read it and a mid-visit service_etc was
+		// missed. The pass runs the SAME read bundle through the SAME per-VIN
+		// debounce; only the trigger is new.
+		telemetry.WithPeriodicInServicePoll(vehicleRepo, telemetry.PeriodicPollConfig{
+			Enabled:  cfg.ServiceRepollEnabled(),
+			Interval: cfg.ServiceRepollInterval(),
+		}),
 	)
 	if err := monitor.Start(); err != nil {
 		return nil, err

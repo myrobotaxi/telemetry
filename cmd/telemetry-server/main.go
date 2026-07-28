@@ -319,6 +319,14 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 	}
 	defer serviceStatusMonitor.Stop()
 
+	// MYR-320: the edge subscriptions above are blind to a car that sits
+	// in_service — typically offline — for days, because it raises no
+	// connectivity edge and streams no ServiceMode transition. This loop
+	// re-runs the SAME read bundle for every in-service vehicle on a jittered
+	// ~15m cadence, with one pass shortly after startup so a deploy takes
+	// effect in seconds. No-ops when SERVICE_REPOLL_ENABLED=false.
+	go serviceStatusMonitor.RunPeriodicInServicePoll(ctx)
+
 	// --- Identity module keystore (MYR-193, ADR-001) ---
 	// The ES256 signing keystore backs both access-token minting and the
 	// dual-alg validator's ES256 verification. Nil => module disabled

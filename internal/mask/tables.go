@@ -109,6 +109,17 @@ var vehicleStateOwnerFields = []string{
 	// MYR-279 vehicle-detail read-backs (P0, non-identifying, side-table sourced).
 	"softwareVersion",
 	"trim",
+	// MYR-320 vehicle-detail read-backs. P0 BOTH ROLES, matching their direct
+	// siblings exactly rather than being reasoned about afresh: `trimLabel` is
+	// an equipment/trim fact, the same tier as `trim`/`model`/`year`, and
+	// `fsdVersion` is a software designation, the same tier as
+	// `softwareVersion` — all four of which are already viewer-visible (the
+	// viewer list below removes ONLY `vin`). Nothing here identifies a person
+	// or links to a physical car, which is the property that makes `vin` the
+	// one owner-only snapshot field. Snapshot-only (REST-derived; Tesla streams
+	// neither), and deliberately NOT on the vehicles-list row.
+	"trimLabel",
+	"fsdVersion",
 	// licensePlate (MYR-286) — owner-entered, P1, and in the VIEWER
 	// allow-list too (vehicleStateViewerFields removes only `vin`).
 	// Deliberate product decision: the plate exists so a rider can
@@ -253,7 +264,8 @@ var vehicleStateOwnerFields = []string{
 // access sees model/year/color/softwareVersion/trim but NOT the full VIN, which
 // links to the physical car / its location history (data-classification.md
 // §1.3, §2.1). softwareVersion and trim stay visible to viewers (P0,
-// non-identifying, same tier as model).
+// non-identifying, same tier as model), and since MYR-320 so do their siblings
+// trimLabel and fsdVersion, for exactly the same reason.
 //
 // MYR-286 REMOVED the previous `licensePlate` exclusion. The plate is now a
 // both-roles field by deliberate product decision (a rider must be able to read

@@ -1,0 +1,72 @@
+-- 0018_vehicle_details_trim_label_fsd.up.sql
+--
+-- MYR-320: extend the Go-owned go_vehicle_control_state side table (MYR-269,
+-- migration 0008; MYR-273, migration 0010; MYR-279, migration 0011; MYR-274,
+-- migration 0012; MYR-298, migration 0014; MYR-303/308, migration 0015;
+-- MYR-316, migration 0017) with the two remaining owner-facing vehicle DETAIL
+-- read-backs the app renders on the details sheet and the Prisma-owned
+-- "Vehicle" table does not carry: the HUMAN-READABLE TRIM LABEL and the FSD
+-- SOFTWARE DESIGNATION. They feed VehicleState.trimLabel and
+-- VehicleState.fsdVersion (contracts v0.18.0).
+--
+--   trim_label   From REST vehicle_data.vehicle_config.performance_package
+--                (e.g. "Performance"). Live-verified against the client's own
+--                car. This is a SEPARATE column from the MYR-279 `trim`, not a
+--                replacement for it, because the two hold DIFFERENT THINGS:
+--                `trim` is the raw badge code from vehicle_config.trim_badging
+--                ("p74d"), a wire-level identifier that is NOT display-safe;
+--                trim_label is the label a human reads. Collapsing them would
+--                either destroy the classification code or start rendering it
+--                to owners. Only trim_label is ever displayed.
+--   fsd_version  From the TITLE of the NEWEST entry returned by the Fleet API
+--                GET /api/1/vehicles/{vin}/release_notes (e.g.
+--                "FSD (Supervised) v14.3.5"). Live-verified. NO vehicle_data
+--                field and NO proto carries this anywhere -- the release-notes
+--                title is the only source Tesla exposes -- so it is the first
+--                column here fed by its own dedicated Fleet API endpoint.
+--                DISTINCT from the sibling software_version (MYR-279), which is
+--                the installed FIRMWARE BUILD ("2026.20.1 9a8b7c6"): the two
+--                strings move independently and neither can be derived from the
+--                other, so one column could not carry both.
+--
+-- Like the MYR-269/273/279 read-backs these land here (a Go side table) rather
+-- than in the Prisma-owned "Vehicle" table so no cross-repo Prisma migration is
+-- needed (MYR-253 hydration pattern), and they are returned on the DB-backed
+-- REST /snapshot via VehicleRepo.GetByID's existing LEFT JOIN.
+--
+-- Naming convention (CG-DL-9): Go-owned table, "go_" prefix, snake_case
+-- columns, no foreign key to any table owned by the sibling app's ORM. The
+-- columns are added to the existing side table (keyed by vehicle_id) so the
+-- same idempotent per-car upsert and the same snapshot LEFT JOIN carry them.
+--
+-- WRITE PATH: the shared COALESCE upsert (queryUpsertControlState), like every
+-- column here except the MYR-316 service window. Both values are FACTS ABOUT
+-- THE CAR that only ever get better-known, never retracted, so "a NULL bind
+-- leaves the stored value alone" is exactly right: a partial payload, an
+-- unreadable release_notes endpoint, or a car that answers 408 must never blank
+-- a value an earlier read got. The mapper enforces the same rule on the way in
+-- by dropping EMPTY strings, so a blank cannot reach the bind either.
+--
+-- Backfill note (MYR-300 coordination): neither column is streamed and neither
+-- has a fieldMap entry, exactly like trim (MYR-279) and seat_cooling_capable
+-- (MYR-308). That absence is what carries them past the stream-recency gate --
+-- the stream can never be their source, so there is no stale-overwrite risk,
+-- and a busily-streaming car can still acquire them. It also means an
+-- IN-SERVICE car, which never streams at all, acquires them on the ordinary
+-- non-waking read -- including the MYR-320 periodic pass, which exists because
+-- such a car may produce no connectivity edge for days.
+--
+-- Both columns are nullable TEXT: NULL means "never read" and the read path
+-- surfaces it as absent (the client omits the row entirely), never a fabricated
+-- value. Absence is COMMON AND NORMAL -- it is not an error, not a fetch
+-- failure, and for fsd_version emphatically NOT a claim that the car lacks FSD.
+--
+-- Classification: both columns are P0 -- an equipment designation and a
+-- software designation of the car, the same tier as the siblings `trim`,
+-- `model`, `year` and `software_version`. Publicly-legible attributes, not
+-- identifying, no GPS, no tokens, no PII. See data-classification.md section
+-- 1.9a.
+
+ALTER TABLE go_vehicle_control_state
+    ADD COLUMN IF NOT EXISTS trim_label  TEXT,
+    ADD COLUMN IF NOT EXISTS fsd_version TEXT;

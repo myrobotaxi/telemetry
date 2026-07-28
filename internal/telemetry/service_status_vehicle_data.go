@@ -92,8 +92,11 @@ var (
 // no-op for it by construction and the full field set flows.
 //
 // Because the read includes vehicle_config, an owner-triggered refresh also
-// re-acquires the REST-only spec facts `trim` (MYR-279) and
-// `seatCoolingCapable` (MYR-308) for free.
+// re-acquires the REST-only spec facts `trim` (MYR-279), `seatCoolingCapable`
+// (MYR-308) and `trimLabel` (MYR-320) for free, and writes the exterior colour
+// to its own column. MYR-320 additionally issues ONE extra GET
+// (/release_notes) here for `fsdVersion`, which no vehicle_data field carries;
+// it is non-fatal and adds nothing when it fails.
 //
 // It NEVER force-wakes — waking is the caller's decision (the event path
 // deliberately does not; the refresh endpoint does, under the bounded
@@ -106,6 +109,22 @@ func (m *ServiceStatusMonitor) RefreshFromVehicleData(ctx context.Context, vin, 
 	}
 
 	fields := vehicleDataToFields(data)
+
+	// MYR-320: the exterior colour goes to its OWN column (Prisma
+	// "Vehicle".color), not into the telemetry frame — see syncVehicleColor.
+	// Runs before the empty-frame short-circuit below so a car whose
+	// vehicle_data carries nothing but a colour still gets it. A nil payload is
+	// tolerated the same way vehicleDataToFields tolerates it: Tesla can answer
+	// 200 with an empty body, and that must be a no-op, not a crash.
+	if data != nil {
+		m.syncVehicleColor(ctx, vin, data.VehicleConfig)
+	}
+
+	// MYR-320: ONE additional non-waking GET on the same trigger, for the one
+	// value no vehicle_data field carries. Non-fatal: a failure or an empty list
+	// simply adds no field, leaving any stored fsdVersion alone.
+	m.addFSDVersionField(ctx, vin, token, fields)
+
 	if m.streamFresh(vin) {
 		dropped := dropStreamSourcedFields(fields)
 		m.logger.Info("service-status: vehicle_data backfill gated by fresh stream (MYR-300)",
@@ -162,129 +181,4 @@ func vehicleDataToFields(data *VehicleData) map[string]events.TelemetryValue {
 	addChargeStateFields(fields, data.ChargeState)
 	addVehicleConfigFields(fields, data.VehicleConfig)
 	return fields
-}
-
-// addVehicleStateFields maps the vehicle_state subset: lock, trunk positions
-// (folded into the DoorState bitmask so the frunk/trunk unpack path is reused),
-// and odometer.
-func addVehicleStateFields(fields map[string]events.TelemetryValue, vs *VehicleDataVehicleState) {
-	if vs == nil {
-		return
-	}
-	if vs.Locked != nil {
-		fields[string(FieldLocked)] = events.TelemetryValue{BoolVal: vs.Locked}
-	}
-	if vs.FrontTrunk != nil || vs.RearTrunk != nil {
-		bits := doorBitsFromTrunks(vs.FrontTrunk, vs.RearTrunk)
-		fields[string(FieldDoorState)] = events.TelemetryValue{IntVal: &bits}
-	}
-	if vs.Odometer != nil {
-		o := *vs.Odometer
-		fields[string(FieldOdometer)] = events.TelemetryValue{FloatVal: &o}
-	}
-	if vs.CarVersion != nil && *vs.CarVersion != "" {
-		ver := *vs.CarVersion
-		fields[string(FieldVersion)] = events.TelemetryValue{StringVal: &ver}
-	}
-}
-
-// addVehicleConfigFields maps the vehicle_config subset: the trim badge
-// (MYR-279) and the ventilated-seat capability (MYR-308). Neither is a streamed
-// telemetry field, so this REST read is their only source; both flow through the
-// identical control-state persist path as the streamed fields and surface on the
-// /snapshot as `trim` and `seatCoolingCapable`.
-//
-// Being REST-ONLY is precisely what carries them past the MYR-300 stream-recency
-// gate. That gate drops every field in streamSourcedFields, which is built from
-// fieldMap (service_status_stream_freshness.go) — and neither FieldTrim nor
-// FieldSeatCoolingCapable is in fieldMap, because Tesla has no proto for either.
-// So a car that is busily streaming still acquires them, and an IN-SERVICE car —
-// which never streams at all, and is the case MYR-308 exists for — acquires the
-// capability on the ordinary connectivity-edge read with no stream required.
-//
-// vehicle_config needs no `endpoints=` query parameter: GetVehicleData calls
-// /vehicle_data bare, and Tesla's default response already includes the
-// vehicle_config sub-object (that is how MYR-279's trim_badging arrives today).
-//
-// A real FALSE for has_seat_cooling is KEPT, unlike the empty-string skip on
-// trim above: false is the authoritative "this car has no cooled seats", which
-// is the whole value of the field — it lets a client stop offering a control the
-// hardware cannot honour. Only an ABSENT key leaves the column NULL.
-func addVehicleConfigFields(fields map[string]events.TelemetryValue, vc *VehicleDataVehicleConfig) {
-	if vc == nil {
-		return
-	}
-	if vc.TrimBadging != nil && *vc.TrimBadging != "" {
-		trim := *vc.TrimBadging
-		fields[string(FieldTrim)] = events.TelemetryValue{StringVal: &trim}
-	}
-	if vc.HasSeatCooling != nil {
-		capable := *vc.HasSeatCooling
-		fields[string(FieldSeatCoolingCapable)] = events.TelemetryValue{BoolVal: &capable}
-	}
-}
-
-// doorBitsFromTrunks folds the ft/rt open/closed ints back into the DoorState
-// bitmask layout shared with the stream decoder (0 = closed, non-zero = open).
-func doorBitsFromTrunks(front, rear *int) int64 {
-	var bits int64
-	if front != nil && *front != 0 {
-		bits |= int64(events.DoorFrunk)
-	}
-	if rear != nil && *rear != 0 {
-		bits |= int64(events.DoorTrunk)
-	}
-	return bits
-}
-
-// addClimateStateFields maps the climate_state subset: is_climate_on (as the
-// hvacPower enum string) and cabin/ambient temps (Celsius -> Fahrenheit).
-func addClimateStateFields(fields map[string]events.TelemetryValue, cs *VehicleDataClimateState) {
-	if cs == nil {
-		return
-	}
-	if cs.IsClimateOn != nil {
-		p := hvacPowerFromBool(*cs.IsClimateOn)
-		fields[string(FieldHvacPower)] = events.TelemetryValue{StringVal: &p}
-	}
-	if cs.InsideTemp != nil {
-		f := celsiusToFahrenheit(*cs.InsideTemp)
-		fields[string(FieldInsideTemp)] = events.TelemetryValue{FloatVal: &f}
-	}
-	if cs.OutsideTemp != nil {
-		f := celsiusToFahrenheit(*cs.OutsideTemp)
-		fields[string(FieldOutsideTemp)] = events.TelemetryValue{FloatVal: &f}
-	}
-}
-
-// addChargeStateFields maps the charge_state subset: charging_state (proto 179
-// DetailedChargeState enum strings), charge-port door, and battery level.
-func addChargeStateFields(fields map[string]events.TelemetryValue, ch *VehicleDataChargeState) {
-	if ch == nil {
-		return
-	}
-	if ch.ChargingState != nil {
-		fields[string(FieldChargeState)] = events.TelemetryValue{StringVal: ch.ChargingState}
-	}
-	if ch.ChargePortDoorOpen != nil {
-		fields[string(FieldChargePortDoorOpen)] = events.TelemetryValue{BoolVal: ch.ChargePortDoorOpen}
-	}
-	if ch.BatteryLevel != nil {
-		// Emit under FieldSOC ("soc"), NOT FieldBatteryLevel: only "soc"
-		// translates to the wire "chargeLevel" (field_mapping.go) and is on the
-		// owner mask allow-list. "batteryLevel" is dropped by mask.Apply, so the
-		// charge % would never reach the app over live WS (MYR-260 review). Tesla
-		// REST battery_level is the same usable SOC %.
-		bl := float64(*ch.BatteryLevel)
-		fields[string(FieldSOC)] = events.TelemetryValue{FloatVal: &bl}
-	}
-}
-
-// hvacPowerFromBool renders is_climate_on as the capitalized hvacPower enum
-// string the stream emits, so field_mapping.go derives isClimateOn identically.
-func hvacPowerFromBool(on bool) string {
-	if on {
-		return "On"
-	}
-	return "Off"
 }

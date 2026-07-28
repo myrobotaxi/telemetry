@@ -32,7 +32,7 @@ WHERE "vin" = $1`
 
 // queryVehicleByID is the snapshot (GET /snapshot) read path. It LEFT JOINs the
 // Go-owned go_vehicle_control_state side table (MYR-269, MYR-273, MYR-279,
-// MYR-274, MYR-298, MYR-303, MYR-308) so the response carries the durable
+// MYR-274, MYR-298, MYR-303, MYR-308, MYR-316, MYR-320) so the response carries the durable
 // owner-control read-backs for a
 // non-streaming car: the five MYR-269 booleans (lock, trunk/frunk, climate,
 // charge-port), the eleven MYR-273 cabin-setting levels (driver/passenger temp
@@ -40,7 +40,9 @@ WHERE "vin" = $1`
 // vehicle-detail strings (software version, trim), and the two MYR-274 climate-mode
 // read-backs (hvac auto mode, A/C enabled), the two MYR-298 read-backs (seat
 // ventilation, media playback status), the eight MYR-303 media now-playing
-// columns, and the MYR-308 ventilated-seat capability bit. The control columns
+// columns, the MYR-308 ventilated-seat capability bit, the two MYR-316
+// service-window timestamps, and the two MYR-320 detail strings (trim label,
+// FSD version). The control columns
 // are appended AFTER the
 // *Enc columns so scanVehicleRowExtra reads them as trailing `extra` destinations.
 // Joining a Go-owned table into a Prisma-owned read is a runtime SELECT, not a
@@ -60,7 +62,8 @@ const queryVehicleByID = `SELECT ` + vehicleSelectColumns + `,
 	gcs.media_now_playing_station, gcs.media_playback_source,
 	gcs.media_now_playing_duration_ms, gcs.media_now_playing_elapsed_ms, gcs.media_volume_max,
 	gcs.seat_cooling_capable,
-	gcs.service_etc, gcs.service_expected_end_at
+	gcs.service_etc, gcs.service_expected_end_at,
+	gcs.trim_label, gcs.fsd_version
 FROM "Vehicle"
 LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"
 WHERE "Vehicle"."id" = $1`
