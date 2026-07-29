@@ -192,15 +192,7 @@ func applyEnvOverrides(fc *fileConfig) error {
 
 	applyProxyEnvOverrides(fc)
 
-	if err := applyDispatchEnvOverrides(fc); err != nil {
-		return err
-	}
-
-	if err := applyServiceRepollEnvOverrides(fc); err != nil {
-		return err
-	}
-
-	if err := applyPushEnvOverrides(fc); err != nil {
+	if err := applySubsystemEnvOverrides(fc); err != nil {
 		return err
 	}
 
@@ -385,13 +377,7 @@ func buildConfig(fc *fileConfig) *Config {
 		monitoring: MonitoringConfig{
 			CertEndpoints: fc.certMonitorEndpoints,
 		},
-		push: PushConfig{
-			Enabled:  fc.pushEnabled,
-			KeyP8PEM: fc.apnsKeyP8,
-			KeyID:    fc.apnsKeyID,
-			TeamID:   fc.apnsTeamID,
-			Topic:    fc.apnsTopic,
-		},
+		push:                       buildPushConfig(fc),
 		mapboxToken:                fc.mapboxToken,
 		teslaPublicKey:             fc.teslaPublicKey,
 		dispatchEnabled:            fc.dispatchEnabled,

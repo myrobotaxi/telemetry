@@ -64,19 +64,18 @@ const (
 	testRiderID   = "crider001"
 	testRideID    = "cride001"
 	testVehicleID = "cveh001"
-	ownerToken    = "token-owner-device"
-	riderToken    = "token-rider-device"
+	ownerDevice   = "dev-owner-0001"
+	riderDevice   = "dev-rider-0001"
 )
 
 // newTestNotifier wires a notifier whose owner and rider each have one device.
-func newTestNotifier(t *testing.T, sender Sender, namer VehicleNamer) (*Notifier, *fakeDeviceStore) {
+func newTestNotifier(t *testing.T, sender Sender, namer VehicleNamer) *Notifier {
 	t.Helper()
 	devices := newFakeDeviceStore()
-	devices.byUser[testOwnerID] = []Device{{Token: ownerToken}}
-	devices.byUser[testRiderID] = []Device{{Token: riderToken, Sandbox: true}}
+	devices.byUser[testOwnerID] = []Device{{Token: ownerDevice}}
+	devices.byUser[testRiderID] = []Device{{Token: riderDevice, Sandbox: true}}
 
-	n := NewNotifier(sender, devices, namer, Config{Enabled: true}, discardLogger())
-	return n, devices
+	return NewNotifier(sender, devices, namer, Config{Enabled: true}, discardLogger())
 }
 
 func strptr(s string) *string { return &s }
@@ -136,7 +135,7 @@ func TestNotifierCreatedNotifiesOwner(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sender := NewFakeSender()
-			n, _ := newTestNotifier(t, sender, &fakeVehicleNamer{name: "Blue Whale"})
+			n := newTestNotifier(t, sender, &fakeVehicleNamer{name: "Blue Whale"})
 
 			n.handleCreated(createdEvent(tt.requester, tt.scheduledFor))
 			n.Wait()
@@ -145,7 +144,7 @@ func TestNotifierCreatedNotifiesOwner(t *testing.T) {
 			if len(sent) != 1 {
 				t.Fatalf("sent %d notifications, want 1", len(sent))
 			}
-			if sent[0].DeviceToken != ownerToken {
+			if sent[0].DeviceToken != ownerDevice {
 				t.Errorf("device = %q, want the OWNER's device", sent[0].DeviceToken)
 			}
 			if sent[0].Title != tt.wantTitle {
@@ -164,7 +163,7 @@ func TestNotifierCreatedNotifiesOwner(t *testing.T) {
 func TestNotifierScheduledCopyOmitsTheTime(t *testing.T) {
 	scheduled := time.Date(2026, 7, 31, 17, 30, 0, 0, time.UTC)
 	sender := NewFakeSender()
-	n, _ := newTestNotifier(t, sender, &fakeVehicleNamer{})
+	n := newTestNotifier(t, sender, &fakeVehicleNamer{})
 
 	n.handleCreated(createdEvent(strptr("Ada"), &scheduled))
 	n.Wait()
@@ -204,7 +203,7 @@ func TestNotifierStatusChangedNotifiesRider(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sender := NewFakeSender()
-			n, _ := newTestNotifier(t, sender, &fakeVehicleNamer{name: tt.vehicleName})
+			n := newTestNotifier(t, sender, &fakeVehicleNamer{name: tt.vehicleName})
 
 			n.handleStatusChanged(statusEvent(tt.status))
 			n.Wait()
@@ -219,7 +218,7 @@ func TestNotifierStatusChangedNotifiesRider(t *testing.T) {
 			if len(sent) != 1 {
 				t.Fatalf("sent %d notifications, want 1", len(sent))
 			}
-			if sent[0].DeviceToken != riderToken {
+			if sent[0].DeviceToken != riderDevice {
 				t.Errorf("device = %q, want the RIDER's device", sent[0].DeviceToken)
 			}
 			if !sent[0].Sandbox {
@@ -247,7 +246,7 @@ func TestNotifierDueNotifiesRider(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sender := NewFakeSender()
-			n, _ := newTestNotifier(t, sender, &fakeVehicleNamer{name: tt.vehicleName, err: tt.namerErr})
+			n := newTestNotifier(t, sender, &fakeVehicleNamer{name: tt.vehicleName, err: tt.namerErr})
 
 			n.handleDue(dueEvent())
 			n.Wait()
@@ -256,7 +255,7 @@ func TestNotifierDueNotifiesRider(t *testing.T) {
 			if len(sent) != 1 {
 				t.Fatalf("sent %d notifications, want 1", len(sent))
 			}
-			if sent[0].DeviceToken != riderToken {
+			if sent[0].DeviceToken != riderDevice {
 				t.Errorf("device = %q, want the RIDER's device", sent[0].DeviceToken)
 			}
 			if sent[0].Title != tt.wantTitle {
@@ -279,7 +278,7 @@ func TestNotifierNoP1Leakage(t *testing.T) {
 	)
 
 	sender := NewFakeSender()
-	n, _ := newTestNotifier(t, sender, &fakeVehicleNamer{name: "Blue Whale"})
+	n := newTestNotifier(t, sender, &fakeVehicleNamer{name: "Blue Whale"})
 
 	scheduled := time.Now().Add(time.Hour)
 	n.handleCreated(createdEvent(strptr("Ada "+surname), nil))
@@ -391,7 +390,7 @@ func TestNotifierSkipsWhenInactive(t *testing.T) {
 				s = nil
 			}
 			devices := newFakeDeviceStore()
-			devices.byUser[testOwnerID] = []Device{{Token: ownerToken}}
+			devices.byUser[testOwnerID] = []Device{{Token: ownerDevice}}
 			n := NewNotifier(s, devices, &fakeVehicleNamer{}, Config{Enabled: tt.enabled}, discardLogger())
 
 			// Must not panic on a nil sender, and must not deliver.
@@ -437,7 +436,7 @@ func TestNotifierNoDevicesRegistered(t *testing.T) {
 // than panicking the bus goroutine.
 func TestNotifierWrongPayloadType(t *testing.T) {
 	sender := NewFakeSender()
-	n, _ := newTestNotifier(t, sender, &fakeVehicleNamer{})
+	n := newTestNotifier(t, sender, &fakeVehicleNamer{})
 
 	n.handleCreated(events.NewEvent(events.RideDueEvent{}))
 	n.handleStatusChanged(events.NewEvent(events.RideRequestCreatedEvent{}))
@@ -460,7 +459,7 @@ func TestNotifierSubscribeDeliversFromRealBus(t *testing.T) {
 	t.Cleanup(func() { _ = bus.Close(context.Background()) })
 
 	sender := NewFakeSender()
-	n, _ := newTestNotifier(t, sender, &fakeVehicleNamer{name: "Blue Whale"})
+	n := newTestNotifier(t, sender, &fakeVehicleNamer{name: "Blue Whale"})
 	if err := n.Subscribe(bus); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}

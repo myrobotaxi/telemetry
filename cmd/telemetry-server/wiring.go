@@ -179,19 +179,19 @@ func setupAuthenticator(cfg *config.Config, dbPool *pgxpool.Pool, devMode bool, 
 // stays readable and so adding a new dep doesn't ripple through call
 // sites.
 type httpRouteDeps struct {
-	cfg            *config.Config
-	srv            *server.Server
-	hub            *ws.Hub
-	authenticator  ws.Authenticator
-	recv           *telemetry.Receiver
-	bus            events.Bus
-	vinCache       *store.VINCache
-	vehicleRepo    *store.VehicleRepo
-	driveRepo      *store.DriveRepo
-	rideRepo       *store.RideRequestRepo
-	accountRepo    *store.AccountRepo
+	cfg           *config.Config
+	srv           *server.Server
+	hub           *ws.Hub
+	authenticator ws.Authenticator
+	recv          *telemetry.Receiver
+	bus           events.Bus
+	vinCache      *store.VINCache
+	vehicleRepo   *store.VehicleRepo
+	driveRepo     *store.DriveRepo
+	rideRepo      *store.RideRequestRepo
+	accountRepo   *store.AccountRepo
 	// pushRepo backs the MYR-186 device-registry endpoints.
-	pushRepo *store.PushDeviceRepo
+	pushRepo       *store.PushDeviceRepo
 	pool           *pgxpool.Pool
 	encryptor      cryptox.Encryptor
 	auditEmitter   mask.AuditEmitter
@@ -304,20 +304,14 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 
 	setupTeslaLinkEndpoints(deps.cfg, deps.srv, deps.authenticator, deps.pool, deps.encryptor, deps.logger)
 
+	// Per-feature endpoint groups, each in its own wiring_*.go.
 	setupVehicleTeardownEndpoint(deps)
-
 	setupVehicleReaddEndpoint(deps)
-
 	setupVehiclePlateEndpoint(deps)
-
 	setupVehicleRefreshEndpoint(deps)
-
 	setupVehicleServiceWindowEndpoint(deps)
-
 	setupVehicleCommandEndpoint(deps, snapshotAdapter)
-
 	setupPushDeviceEndpoints(deps)
-
 	setupDebugFieldsEndpoint(deps)
 }
 

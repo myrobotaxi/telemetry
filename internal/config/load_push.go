@@ -20,6 +20,24 @@ const (
 	defaultAPNSTopic  = "app.myrobotaxi.ios"
 )
 
+// applySubsystemEnvOverrides runs the per-subsystem env loaders that can fail.
+// They are collected here rather than inlined in applyEnvOverrides so that
+// adding the next one is a single line in this function instead of another
+// branch in an already-branchy loader.
+func applySubsystemEnvOverrides(fc *fileConfig) error {
+	loaders := []func(*fileConfig) error{
+		applyDispatchEnvOverrides,
+		applyServiceRepollEnvOverrides,
+		applyPushEnvOverrides,
+	}
+	for _, load := range loaders {
+		if err := load(fc); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // applyPushEnvOverrides reads the push-notification settings.
 //
 // PUSH_ENABLED FAILS FAST on a non-boolean value rather than silently falling
@@ -33,7 +51,7 @@ const (
 // notification as skipped, so the pipeline is observable before the secrets
 // are set on the deploy. Absent credentials must never block startup.
 func applyPushEnvOverrides(fc *fileConfig) error {
-	enabled, err := parseBoolEnv("PUSH_ENABLED", true)
+	enabled, err := parseKillSwitchEnv("PUSH_ENABLED")
 	if err != nil {
 		return err
 	}
@@ -56,6 +74,18 @@ func applyPushEnvOverrides(fc *fileConfig) error {
 	}
 
 	return nil
+}
+
+// buildPushConfig projects the loaded push env values onto the immutable
+// PushConfig.
+func buildPushConfig(fc *fileConfig) PushConfig {
+	return PushConfig{
+		Enabled:  fc.pushEnabled,
+		KeyP8PEM: fc.apnsKeyP8,
+		KeyID:    fc.apnsKeyID,
+		TeamID:   fc.apnsTeamID,
+		Topic:    fc.apnsTopic,
+	}
 }
 
 // readAPNsKeyEnv reads the APNs .p8 auth key from the environment.

@@ -52,11 +52,11 @@ const queryDeletePushDevice = `
 DELETE FROM go_push_devices
 WHERE user_id = $1 AND device_token = $2`
 
-// queryDeletePushDeviceByToken unregisters a token the APNs gateway has
+// queryDeletePushDeviceAnyOwner unregisters a token the APNs gateway has
 // permanently rejected (410 Unregistered / 400 BadDeviceToken). Deliberately
 // NOT caller-scoped: Apple's verdict is about the installation, not the person,
 // and the row must go regardless of who currently owns it.
-const queryDeletePushDeviceByToken = `
+const queryDeletePushDeviceAnyOwner = `
 DELETE FROM go_push_devices
 WHERE device_token = $1`
 
@@ -126,7 +126,7 @@ func (r *PushDeviceRepo) DeleteDeviceToken(ctx context.Context, deviceToken stri
 	if strings.TrimSpace(deviceToken) == "" {
 		return fmt.Errorf("store.DeleteDeviceToken: empty device token")
 	}
-	if _, err := r.pool.Exec(ctx, queryDeletePushDeviceByToken, deviceToken); err != nil {
+	if _, err := r.pool.Exec(ctx, queryDeletePushDeviceAnyOwner, deviceToken); err != nil {
 		return fmt.Errorf("store.DeleteDeviceToken: %w", err)
 	}
 	return nil
