@@ -115,5 +115,12 @@ func snapshotRowFromVehicle(v store.Vehicle) telemetry.VehicleSnapshotRow {
 		SeatCoolingCapable:      v.SeatCoolingCapable,
 		ServiceETC:              v.ServiceETC,
 		ServiceExpectedEndAt:    v.ServiceExpectedEndAt,
+
+		// MYR-320 vehicle-detail read-backs. Both stand ALONGSIDE a sibling
+		// already copied above and must not be confused with it: TrimLabel is
+		// the display-safe label next to Trim (the raw badge code), FSDVersion
+		// the FSD designation next to SoftwareVersion (the firmware build).
+		TrimLabel:  v.TrimLabel,
+		FSDVersion: v.FSDVersion,
 	}
 }
