@@ -76,7 +76,8 @@ func TestSnapshotResponse_MYR320DetailsReachTheWire(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.Handle("GET /api/vehicles/{vehicleId}/snapshot", handler)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/vehicles/"+v.ID+"/snapshot", nil)
+	req := httptest.NewRequestWithContext(
+		context.Background(), http.MethodGet, "/api/vehicles/"+v.ID+"/snapshot", nil)
 	req.Header.Set("Authorization", "Bearer test-token")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
