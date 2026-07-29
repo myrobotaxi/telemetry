@@ -283,6 +283,11 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		-- them or both endpoints 500 on a missing column.
 		"service_etc"             TIMESTAMPTZ,
 		"service_expected_end_at" TIMESTAMPTZ,
+		-- MYR-320 vehicle details (migration 0018). Same trap as the MYR-316
+		-- pair above: GetByID's LEFT JOIN selects both, so omitting them here
+		-- 500s the snapshot and drives endpoints on a missing column.
+		"trim_label"              TEXT,
+		"fsd_version"             TEXT,
 		"updated_at"       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);
 
