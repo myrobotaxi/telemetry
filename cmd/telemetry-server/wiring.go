@@ -190,6 +190,8 @@ type httpRouteDeps struct {
 	driveRepo      *store.DriveRepo
 	rideRepo       *store.RideRequestRepo
 	accountRepo    *store.AccountRepo
+	// pushRepo backs the MYR-186 device-registry endpoints.
+	pushRepo *store.PushDeviceRepo
 	pool           *pgxpool.Pool
 	encryptor      cryptox.Encryptor
 	auditEmitter   mask.AuditEmitter
@@ -313,6 +315,8 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 	setupVehicleServiceWindowEndpoint(deps)
 
 	setupVehicleCommandEndpoint(deps, snapshotAdapter)
+
+	setupPushDeviceEndpoints(deps)
 
 	setupDebugFieldsEndpoint(deps)
 }

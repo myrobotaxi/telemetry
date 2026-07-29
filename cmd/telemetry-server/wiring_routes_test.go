@@ -145,10 +145,32 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 	}{
 		{"vehicle license plate (MYR-286)", "/api/tesla/vehicles/clxyz1234567890abcdef/plate"},
 		{"vehicle service window (MYR-316, §7.16)", "/api/tesla/vehicles/clxyz1234567890abcdef/service-window"},
+		{"push device register (MYR-186, §7.17)", "/api/push/devices"},
 	}
 	for _, rt := range putRoutes {
 		t.Run(rt.name, func(t *testing.T) {
 			req := httptest.NewRequestWithContext(context.Background(), http.MethodPut, rt.path, nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code == http.StatusNotFound {
+				t.Fatalf("route %q returned 404 — handler not mounted. Body: %s", rt.path, rec.Body.String())
+			}
+		})
+	}
+
+	// MYR-186 DELETE route: push device unregister on sign-out (§7.17). The
+	// PUT and DELETE share a path, so mounting only one of the two verbs is a
+	// live failure mode this catches — the other 404s.
+	deleteRoutes := []struct {
+		name string
+		path string
+	}{
+		{"push device unregister (MYR-186, §7.17)", "/api/push/devices"},
+	}
+	for _, rt := range deleteRoutes {
+		t.Run(rt.name, func(t *testing.T) {
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodDelete, rt.path, nil)
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
 
