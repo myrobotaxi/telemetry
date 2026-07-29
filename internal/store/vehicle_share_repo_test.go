@@ -620,3 +620,57 @@ func TestNewShareCode_Distribution(t *testing.T) {
 			len(symbols), draws, draws*6)
 	}
 }
+
+// TestVehicleShareRepo_TeardownRevokesGrants pins the MYR-184 addition to the
+// owner-offboarding transaction: a car that leaves the fleet must not leave
+// live grants behind.
+//
+// There is no FK cascade to rely on (CG-DL-9 forbids one), so nothing revokes
+// these rows unless the teardown statement does it explicitly — which makes
+// this exactly the kind of thing that silently regresses.
+func TestVehicleShareRepo_TeardownRevokesGrants(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable")
+	}
+	ctx := context.Background()
+	vehA1, _, _ := seedShareFixtures(t)
+	// The teardown transaction touches tables the shared fixture omits
+	// (AuditLog, TripStop, the cascade FKs); reuse the owner-teardown suite's
+	// own schema helper rather than a second copy of it.
+	ensureTeardownSchema(t)
+	shares := newShareRepo(t)
+	cleanVehicleShares(t)
+
+	invite := mustCreateInvite(t, shares, shareOwnerA, vehA1, []string{vehA1}, store.SharePermissionRides)
+	if _, err := shares.RedeemCode(ctx, invite.Code, shareViewer1); err != nil {
+		t.Fatalf("redeem: %v", err)
+	}
+	if _, err := shares.SharePermissionFor(ctx, shareViewer1, vehA1); err != nil {
+		t.Fatalf("precondition — the viewer should hold a grant: %v", err)
+	}
+
+	if _, err := newTestTeardown().RemoveVehicle(ctx, shareOwnerA, vehA1); err != nil {
+		t.Fatalf("RemoveVehicle: %v", err)
+	}
+
+	if _, err := shares.SharePermissionFor(ctx, shareViewer1, vehA1); !errors.Is(err, sdk.ErrNotFound) {
+		t.Errorf("the viewer still holds a grant on an offboarded car: err = %v", err)
+	}
+	ids, err := shares.SharedVehicleIDs(ctx, shareViewer1)
+	if err != nil {
+		t.Fatalf("SharedVehicleIDs: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Errorf("the offboarded car is still in the viewer's access set: %v", ids)
+	}
+
+	// Tombstoned, not deleted — the audit trail outlives the car.
+	var status string
+	if err := testPool.QueryRow(ctx,
+		`SELECT status FROM go_vehicle_shares WHERE id = $1`, invite.ID).Scan(&status); err != nil {
+		t.Fatalf("tombstone lookup: %v", err)
+	}
+	if status != store.ShareStatusRevoked {
+		t.Errorf("grant status = %q, want revoked", status)
+	}
+}

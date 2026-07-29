@@ -233,17 +233,6 @@ func (r *VehicleShareRepo) RevokeInvite(ctx context.Context, inviteID, ownerUser
 	}
 }
 
-// RevokeSharesForVehicle tombstones every live grant on a vehicle. Called when
-// a car leaves the fleet: a viewer must not keep an entry for a vehicle that
-// no longer exists. Returns the number of rows tombstoned.
-func (r *VehicleShareRepo) RevokeSharesForVehicle(ctx context.Context, vehicleID string) (int64, error) {
-	tag, err := r.pool.Exec(ctx, queryRevokeSharesForVehicle, vehicleID)
-	if err != nil {
-		return 0, fmt.Errorf("store.RevokeSharesForVehicle(vehicle=%s): %w", vehicleID, err)
-	}
-	return tag.RowsAffected(), nil
-}
-
 // scanShare reads one full row in the shareColumns order. rowScanner (declared
 // in vehicle_repo_scan.go) is the shared pgx.Row / pgx.Rows surface, so this
 // serves both the single-row RETURNING path and the list iteration.
