@@ -55,11 +55,13 @@ func TestOwnerLink_UpdateTeslaToken(t *testing.T) {
 		prov := &fakeProvisioner{}
 		hook := &fakeHook{}
 		link := &ownerLink{
-			provisioner:   prov,
-			profiles:      &fakeProfiles{name: "Ada", email: "ada@apple.example"},
-			fetchUserInfo: func(context.Context, string) (teslaauth.UserInfo, error) { return teslaauth.UserInfo{Sub: "tsub-9", Email: "ada@tesla.example"}, nil },
-			hook:          hook,
-			logger:        testLogger(),
+			provisioner: prov,
+			profiles:    &fakeProfiles{name: "Ada", email: "ada@apple.example"},
+			fetchUserInfo: func(context.Context, string) (teslaauth.UserInfo, error) {
+				return teslaauth.UserInfo{Sub: "tsub-9", Email: "ada@tesla.example"}, nil
+			},
+			hook:   hook,
+			logger: testLogger(),
 		}
 		if err := link.UpdateTeslaToken(ctx, "cuser1", "acc", "ref", 123); err != nil {
 			t.Fatalf("UpdateTeslaToken: %v", err)
@@ -103,11 +105,13 @@ func TestOwnerLink_UpdateTeslaToken(t *testing.T) {
 		prov := &fakeProvisioner{}
 		hook := &fakeHook{}
 		link := &ownerLink{
-			provisioner:   prov,
-			profiles:      &fakeProfiles{},
-			fetchUserInfo: func(context.Context, string) (teslaauth.UserInfo, error) { return teslaauth.UserInfo{}, errors.New("userinfo 401") },
-			hook:          hook,
-			logger:        testLogger(),
+			provisioner: prov,
+			profiles:    &fakeProfiles{},
+			fetchUserInfo: func(context.Context, string) (teslaauth.UserInfo, error) {
+				return teslaauth.UserInfo{}, errors.New("userinfo 401")
+			},
+			hook:   hook,
+			logger: testLogger(),
 		}
 		if err := link.UpdateTeslaToken(ctx, "cuser2", "acc", "ref", 1); err == nil {
 			t.Fatal("expected error, got nil")
@@ -141,11 +145,13 @@ func TestOwnerLink_UpdateTeslaToken(t *testing.T) {
 	t.Run("empty Apple email is NOT replaced by the Tesla email (no unverified merge)", func(t *testing.T) {
 		prov := &fakeProvisioner{}
 		link := &ownerLink{
-			provisioner:   prov,
-			profiles:      &fakeProfiles{name: "Ada", email: ""}, // Apple hidden relay
-			fetchUserInfo: func(context.Context, string) (teslaauth.UserInfo, error) { return teslaauth.UserInfo{Sub: "s", Email: "tesla@tesla.example"}, nil },
-			hook:          nil, // nil hook must be safe
-			logger:        testLogger(),
+			provisioner: prov,
+			profiles:    &fakeProfiles{name: "Ada", email: ""}, // Apple hidden relay
+			fetchUserInfo: func(context.Context, string) (teslaauth.UserInfo, error) {
+				return teslaauth.UserInfo{Sub: "s", Email: "tesla@tesla.example"}, nil
+			},
+			hook:   nil, // nil hook must be safe
+			logger: testLogger(),
 		}
 		if err := link.UpdateTeslaToken(ctx, "cuser4", "acc", "ref", 1); err != nil {
 			t.Fatalf("UpdateTeslaToken: %v", err)

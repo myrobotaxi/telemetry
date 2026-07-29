@@ -127,7 +127,7 @@ func TestVehicleDrivesHandler_ServeHTTP(t *testing.T) {
 			drives:         &stubDriveLister{},
 			wantStatus:     http.StatusForbidden,
 			wantErrCode:    wserrors.ErrCodeVehicleNotOwned,
-			wantErrSubstr:  "you do not own this vehicle",
+			wantErrSubstr:  "you do not have access to this vehicle",
 		},
 		{
 			name:           "vehicle lookup internal error returns 500",

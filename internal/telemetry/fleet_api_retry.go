@@ -11,10 +11,10 @@ import (
 )
 
 const (
-	defaultMaxRetries   = 3
-	defaultBaseDelay    = 1 * time.Second
-	defaultMaxDelay     = 30 * time.Second
-	retryAfterHeader    = "Retry-After"
+	defaultMaxRetries = 3
+	defaultBaseDelay  = 1 * time.Second
+	defaultMaxDelay   = 30 * time.Second
+	retryAfterHeader  = "Retry-After"
 )
 
 // retryPolicy governs how the Fleet API client retries failed requests.

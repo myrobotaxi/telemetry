@@ -64,90 +64,41 @@ type VehicleLister interface {
 // VehicleLister, projects each row through the per-role
 // VehicleSummary mask, and returns the catalog.
 //
-// v1 only emits the owner pathway. Viewer-merged enumeration —
-// merging in vehicles the caller has accepted-invite access to —
-// requires the Go server to read the Prisma-owned Invite table and is
-// tracked as a follow-up. Per rest-api.md §7.0, viewer-tier callers
-// receive an empty list in v1.
+// MYR-184 DELIVERED THE VIEWER MERGE this comment used to describe as
+// PLANNED. Owned vehicles are emitted first under the owner mask; vehicles
+// somebody has SHARED with the caller are then appended as `role: "viewer"`
+// rows carrying their `sharePermission`, projected through the viewer mask
+// (see vehicles_list_viewer.go). The old note said viewer-tier callers "receive
+// an empty list in v1" and that the merge needed a Prisma-owned Invite table —
+// neither is true: sharing is Go-owned end to end (go_vehicle_shares), and a
+// rider who owns nothing now gets exactly the cars they were granted.
 type VehiclesListHandler struct {
 	auth     tokenValidator
 	vehicles VehicleLister
-	logger   *slog.Logger
+	// shared supplies the MYR-184 viewer merge. Nil leaves the endpoint
+	// owner-only (see vehicles_list_viewer.go).
+	shared SharedVehicleLister
+	logger *slog.Logger
 }
 
 // NewVehiclesListHandler creates a handler that serves the
-// GET /api/vehicles list endpoint.
+// GET /api/vehicles list endpoint. Pass WithSharedVehicles to enable the
+// MYR-184 viewer merge.
 func NewVehiclesListHandler(
 	tokens tokenValidator,
 	vehicles VehicleLister,
 	logger *slog.Logger,
+	opts ...VehiclesListOption,
 ) *VehiclesListHandler {
-	return &VehiclesListHandler{
+	h := &VehiclesListHandler{
 		auth:     tokens,
 		vehicles: vehicles,
 		logger:   logger,
 	}
-}
-
-// vehicleSummary is the per-row catalog shape returned by the list
-// endpoint. JSON tags mirror the wire schema in rest-api.md §7.0 and
-// `VehicleSummary` in specs/rest.openapi.yaml. See also the mask
-// allow-list in `internal/mask/tables.go` (vehicleSummaryOwnerFields).
-type vehicleSummary struct {
-	VehicleID string `json:"vehicleId"`
-	Name      string `json:"name"`
-	Model     string `json:"model"`
-	Year      int    `json:"year"`
-	Color     string `json:"color"`
-	// LicensePlate (MYR-286) follows the SAME emission convention as its
-	// sibling identity field `color`: plain string, NO omitempty, so the
-	// key is ALWAYS present and "no plate set" is an empty string rather
-	// than a missing key. In BOTH role allow-lists — a rider identifies
-	// the car at pickup from this row (contrast VinLast4/`vin`).
-	LicensePlate   string `json:"licensePlate"`
-	VinLast4       string `json:"vinLast4"`
-	Status         string `json:"status"`
-	ChargeLevel    int    `json:"chargeLevel"`
-	EstimatedRange int    `json:"estimatedRange"`
-	LastUpdated    string `json:"lastUpdated"`
-	Role           string `json:"role"`
-	// HasActiveRide is OPTIONAL on the wire contract but ALWAYS emitted
-	// by this server version (true or false) — absence signals a server
-	// that predates MYR-233, never "vehicle is free". Consumers treat an
-	// absent value as "availability unknown → treat as available".
-	HasActiveRide bool `json:"hasActiveRide"`
-	// ServiceEstimatedEndAt is when this car's CURRENT SERVICE VISIT is
-	// expected to end (MYR-316, contracts v0.17.0) — the same value and the
-	// same semantics as VehicleState.serviceEstimatedEndAt. RFC 3339 UTC, or
-	// null. Server-computed: Tesla's `service_etc` wins, else the owner-entered
-	// §7.16 value, else null. Meaningful ONLY while `status` is `in_service`
-	// and null otherwise. ALWAYS emitted (as an explicit null when there is no
-	// estimate) so a consumer can tell "no estimate" from a pre-MYR-316 server.
-	ServiceEstimatedEndAt *string `json:"serviceEstimatedEndAt"`
-}
-
-// toMaskMap returns the row as a wire-name-keyed map suitable for
-// projection through the role-based mask. Mirrors the pattern in
-// vehicle_status_handler.go ToMaskMap.
-func (v vehicleSummary) toMaskMap() map[string]any {
-	return map[string]any{
-		"vehicleId":      v.VehicleID,
-		"name":           v.Name,
-		"model":          v.Model,
-		"year":           v.Year,
-		"color":          v.Color,
-		"licensePlate":   v.LicensePlate,
-		"vinLast4":       v.VinLast4,
-		"status":         v.Status,
-		"chargeLevel":    v.ChargeLevel,
-		"estimatedRange": v.EstimatedRange,
-		"lastUpdated":    v.LastUpdated,
-		"role":           v.Role,
-		"hasActiveRide":  v.HasActiveRide,
-		// MYR-316 — already resolved (precedence + in-service gate) by
-		// buildResponse; this is the emitted value, not a raw column.
-		"serviceEstimatedEndAt": v.ServiceEstimatedEndAt,
+	for _, opt := range opts {
+		opt(h)
 	}
+	return h
 }
 
 // vehiclesListResponse is the envelope shape returned by the
@@ -186,43 +137,27 @@ func (h *VehiclesListHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// v1: ListByUser returns vehicles where Vehicle.userId == userID, so
-	// every row is owned by the caller. Viewer-merged enumeration is
-	// PLANNED — see rest-api.md §7.0 RBAC v1 implementation note.
+	// ListByUser returns vehicles where Vehicle.userId == userID, so every
+	// row here is owned by the caller and gets the owner mask. Vehicles
+	// somebody SHARED with the caller are appended separately as viewer rows
+	// (MYR-184 / MYR-91 viewer merge) — owner rows first, then shared.
 	resp := h.buildResponse(rows, auth.RoleOwner)
+	resp = h.appendSharedRows(ctx, userID, resp)
 	h.writeJSON(w, http.StatusOK, resp)
 }
 
 // buildResponse projects each Vehicle row through the per-role
 // VehicleSummary mask and assembles the response envelope.
 //
-// The mask is applied per-row so a future viewer-merged implementation
-// (where different rows have different roles) lands without rewriting
-// the projection. In v1 every row gets the same RoleOwner mask, which
-// is the identity for the v1 owner allow-list.
+// Every row this function sees is OWNED by the caller, so they all get the
+// RoleOwner mask (the identity for the owner allow-list). The viewer rows the
+// merge appends are projected separately, in viewerSummaryMap — the per-row
+// mask application here is what made that separation cheap.
 func (h *VehiclesListHandler) buildResponse(rows []VehicleCatalogRow, role auth.Role) vehiclesListResponse {
 	items := make([]map[string]any, 0, len(rows))
 	maskSpec := mask.For(mask.ResourceVehicleSummary, role)
 	for i := range rows {
-		v := &rows[i]
-		summary := vehicleSummary{
-			VehicleID:      v.ID,
-			Name:           v.Name,
-			Model:          v.Model,
-			Year:           v.Year,
-			Color:          v.Color,
-			LicensePlate:   v.LicensePlate,
-			VinLast4:       lastFourOfVIN(v.VIN),
-			Status:         v.Status,
-			ChargeLevel:    v.ChargeLevel,
-			EstimatedRange: v.EstimatedRange,
-			LastUpdated:    v.LastUpdated.UTC().Format(time.RFC3339),
-			Role:           string(role),
-			HasActiveRide:  v.HasActiveRide,
-			// MYR-316: resolved here so the precedence and the in-service gate
-			// are applied exactly once per surface (service_window.go).
-			ServiceEstimatedEndAt: serviceEstimatedEndAtWire(v.Status, v.ServiceETC, v.ServiceExpectedEndAt),
-		}
+		summary := newVehicleSummary(&rows[i], role, "")
 		// `fieldsMasked` is intentionally discarded in v1: §7.0 reads
 		// are not audited per `data-lifecycle.md` §4.2, and the v1
 		// path only ever projects RoleOwner (which is the identity for
@@ -236,6 +171,37 @@ func (h *VehiclesListHandler) buildResponse(rows []VehicleCatalogRow, role auth.
 		items = append(items, projected)
 	}
 	return vehiclesListResponse{Items: items}
+}
+
+// newVehicleSummary builds the per-row wire shape for a catalog row under a
+// given role. tier is the caller's share permission and is stamped ONLY on
+// viewer rows — pass the empty string for an owner.
+//
+// Shared by the owner list, the viewer merge (vehicles_list_viewer.go), and the
+// redeem response, so all three emit byte-identical rows for the same vehicle.
+func newVehicleSummary(v *VehicleCatalogRow, role auth.Role, tier auth.SharePermission) vehicleSummary {
+	summary := vehicleSummary{
+		VehicleID:      v.ID,
+		Name:           v.Name,
+		Model:          v.Model,
+		Year:           v.Year,
+		Color:          v.Color,
+		LicensePlate:   v.LicensePlate,
+		VinLast4:       lastFourOfVIN(v.VIN),
+		Status:         v.Status,
+		ChargeLevel:    v.ChargeLevel,
+		EstimatedRange: v.EstimatedRange,
+		LastUpdated:    v.LastUpdated.UTC().Format(time.RFC3339),
+		Role:           string(role),
+		HasActiveRide:  v.HasActiveRide,
+		// MYR-316: resolved here so the precedence and the in-service gate
+		// are applied exactly once per surface (service_window.go).
+		ServiceEstimatedEndAt: serviceEstimatedEndAtWire(v.Status, v.ServiceETC, v.ServiceExpectedEndAt),
+	}
+	if role == auth.RoleViewer {
+		summary.SharePermission = string(tier)
+	}
+	return summary
 }
 
 // lastFourOfVIN returns the last 4 characters of a VIN. Empty input

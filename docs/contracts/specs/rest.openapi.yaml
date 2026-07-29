@@ -1067,9 +1067,13 @@ components:
       type: object
       description: |
         Thin catalog representation of a vehicle returned by
-        GET /api/vehicles. Owner sees every field; viewer sees every
-        field EXCEPT `name`. No GPS / nav / charge-detail / climate
-        fields — those live in the per-vehicle snapshot (§7.1).
+        GET /api/vehicles. Owner and viewer see the same field set;
+        the viewer row additionally carries `sharePermission` (MYR-184).
+        The viewer mask subtracts NOTHING — `name` included, since the
+        rider UI renders "{Owner}'s {Vehicle}" and the field is
+        `required` in schemas/vehicle-summary.schema.json. No GPS / nav
+        / charge-detail / climate fields — those live in the
+        per-vehicle snapshot (§7.1).
       required:
         - vehicleId
         - model

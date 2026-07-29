@@ -84,4 +84,3 @@ type fleetConfigResponse struct {
 	Status string `json:"status"`
 	VIN    string `json:"vin"`
 }
-

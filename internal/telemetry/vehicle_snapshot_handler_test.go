@@ -131,7 +131,7 @@ func TestVehicleSnapshotHandler_ServeHTTP(t *testing.T) {
 			reader:         &stubVehicleSnapshotReader{row: fixtureSnapshotRow("other-user")},
 			wantStatus:     http.StatusForbidden,
 			wantErrCode:    wserrors.ErrCodeVehicleNotOwned,
-			wantErrSubstr:  "you do not own this vehicle",
+			wantErrSubstr:  "you do not have access to this vehicle",
 		},
 		{
 			name:           "store internal error returns 500",

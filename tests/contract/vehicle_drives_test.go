@@ -6,7 +6,7 @@
 // Scope (MYR-141 Phase 1):
 //   - Empty list: vehicle with zero drives -> 200 {items: [], hasMore: false}.
 //   - Pagination: 25 drives, default limit 20 -> 20 items + nextCursor
-//     + hasMore=true; following the cursor returns the remaining 5
+//   - hasMore=true; following the cursor returns the remaining 5
 //     with hasMore=false.
 //   - Cursor opacity: the returned nextCursor round-trips through the
 //     pagination endpoint (we don't inspect its bytes — the contract

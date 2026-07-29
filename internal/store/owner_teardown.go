@@ -262,14 +262,23 @@ type teardownDeletion struct {
 
 // applyTeardownDeletes runs the destructive tail of RemoveVehicle inside the
 // open transaction: (4a) delete the Go-owned ride-request rows (P1 GPS +
-// passenger PII, no FK cascade reaches them), (4b) delete the vehicle
-// (owner-scoped; cascades + fires the NOTIFY), (4c) write the removed-vehicle
-// tombstone (MYR-261) so a later re-link sync cannot resurrect the still-Tesla-
-// owned VIN, and (5) on the owner's last vehicle clear the Tesla tokens + reset
-// the link/pairing flags.
+// passenger PII, no FK cascade reaches them), (4a-bis) revoke every sharing
+// grant on the car (MYR-184), (4b) delete the vehicle (owner-scoped; cascades
+// + fires the NOTIFY), (4c) write the removed-vehicle tombstone (MYR-261) so a
+// later re-link sync cannot resurrect the still-Tesla-owned VIN, and (5) on the
+// owner's last vehicle clear the Tesla tokens + reset the link/pairing flags.
 func applyTeardownDeletes(ctx context.Context, tx pgx.Tx, d teardownDeletion) error {
 	if _, err := tx.Exec(ctx, queryTeardownDeleteRideRequests, d.vehicleID); err != nil {
 		return fmt.Errorf("store.RemoveVehicle(user=%s): delete ride requests: %w", d.userID, err)
+	}
+	// MYR-184: tombstone the sharing grants IN THIS TRANSACTION, so a car
+	// cannot leave the fleet while its viewers still hold live access rows.
+	// Revoked rather than deleted, like every other revocation — the audit
+	// trail of who could see this car survives the car itself. There is no FK
+	// cascade to lean on (CG-DL-9 forbids one), which is exactly why this
+	// statement has to be here rather than implied.
+	if _, err := tx.Exec(ctx, queryRevokeSharesForVehicle, d.vehicleID); err != nil {
+		return fmt.Errorf("store.RemoveVehicle(user=%s): revoke vehicle shares: %w", d.userID, err)
 	}
 	if _, err := tx.Exec(ctx, queryTeardownDeleteVehicle, d.vehicleID, d.userID); err != nil {
 		return fmt.Errorf("store.RemoveVehicle(user=%s): delete vehicle: %w", d.userID, err)

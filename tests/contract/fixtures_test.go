@@ -172,16 +172,22 @@ func TestFixturesValidateAgainstSchemas(t *testing.T) {
 
 	envelopeSchema := compileSchema(t, c, "https://myrobotaxi.com/schemas/ws-envelope.schema.json")
 	vehicleStateSchema := compileSchema(t, c, "https://myrobotaxi.com/schemas/vehicle-state.schema.json")
+	// The vehicles-list envelope. Validating the fixtures against it (rather
+	// than only against a hand-written required-field list) is what catches a
+	// row that satisfies every assertion someone remembered to write and still
+	// violates the schema its consumer decodes — the MYR-184 viewer-`name`
+	// class of defect.
+	vehicleSummaryListSchema := compileSchema(t, c, "https://myrobotaxi.com/schemas/vehicle-summary.schema.json")
 
 	// Pre-compile all WS message payload schemas.
 	payloadSchemas := map[string]*jsonschema.Schema{
-		"auth":         compileDef(t, c, "AuthPayload"),
-		"auth_ok":      compileDef(t, c, "AuthOkPayload"),
+		"auth":           compileDef(t, c, "AuthPayload"),
+		"auth_ok":        compileDef(t, c, "AuthOkPayload"),
 		"vehicle_update": compileDef(t, c, "VehicleUpdatePayload"),
-		"drive_started": compileDef(t, c, "DriveStartedPayload"),
-		"drive_ended":   compileDef(t, c, "DriveEndedPayload"),
-		"connectivity":  compileDef(t, c, "ConnectivityPayload"),
-		"error":         compileDef(t, c, "ErrorPayload"),
+		"drive_started":  compileDef(t, c, "DriveStartedPayload"),
+		"drive_ended":    compileDef(t, c, "DriveEndedPayload"),
+		"connectivity":   compileDef(t, c, "ConnectivityPayload"),
+		"error":          compileDef(t, c, "ErrorPayload"),
 	}
 
 	// Build a table of all fixture files and their expected validation.
@@ -276,9 +282,11 @@ func TestFixturesValidateAgainstSchemas(t *testing.T) {
 				case strings.HasPrefix(baseName, "vehicles_list"):
 					// MYR-91: VehiclesListResponse — `{ items: VehicleSummary[] }`
 					// per rest-api.md §7.0. Owner and viewer fixtures share
-					// the same envelope; the viewer fixture strips `name`
-					// per §5.2.0 but the envelope shape is identical.
+					// the same envelope AND, since MYR-184, the same field
+					// set: the viewer mask subtracts nothing and adds
+					// `sharePermission` (§5.2.0).
 					validateVehiclesList(t, stripped, baseName)
+					validate(t, vehicleSummaryListSchema, stripped, "VehicleListResponse")
 
 				case strings.HasPrefix(baseName, "error."):
 					validateRESTError(t, stripped)
@@ -564,12 +572,20 @@ func validateDriveDetail(t *testing.T, m map[string]any) {
 // validateVehiclesList performs structural validation on the
 // GET /api/vehicles response fixture per rest-api.md §7.0 (MYR-91).
 //
-// The envelope is `{ items: VehicleSummary[] }`. Each item must carry
-// the required VehicleSummary fields; the owner-tier fixture includes
-// `name` (P1, owner-only per §5.2.0) while the viewer-tier fixture
-// omits it. The empty-list fixture has no items at all — that's the
-// canonical v1 viewer-tier response since invite-merged enumeration
-// is PLANNED.
+// The envelope is `{ items: VehicleSummary[] }`. Every item must carry
+// every required VehicleSummary field, OWNER AND VIEWER ALIKE.
+//
+// MYR-184 changed that last clause: the viewer fixture used to omit
+// `name`, matching a viewer mask that stripped it — and both were
+// wrong, because `name` is in the `required` list of
+// vehicle-summary.schema.json, so the "canonical viewer response" did
+// not satisfy the schema it was canonical for. The nickname is now
+// viewer-visible (the rider UI renders the shared car as the owner's),
+// and this function no longer special-cases the viewer file. The
+// schema validation added at the call site is the belt to this braces.
+//
+// The empty-list fixture has no items at all — a caller with no
+// vehicles and no shares.
 func validateVehiclesList(t *testing.T, m map[string]any, baseName string) {
 	t.Helper()
 
@@ -588,14 +604,13 @@ func validateVehiclesList(t *testing.T, m map[string]any, baseName string) {
 		return
 	}
 
-	// Every row in non-empty fixtures must include the role-agnostic
-	// required fields. `name` is P1 (owner-only) — required for owner
-	// fixtures but absent on the viewer fixture per the §5.2.0 mask.
+	// The full VehicleSummary required set, applied to every row of
+	// every fixture regardless of tier.
 	required := []string{
-		"vehicleId", "model", "year", "color", "vinLast4",
+		"vehicleId", "name", "model", "year", "color", "vinLast4",
 		"status", "chargeLevel", "estimatedRange", "lastUpdated", "role",
 	}
-	includesName := !strings.HasSuffix(baseName, "_viewer.json")
+	isViewer := strings.HasSuffix(baseName, "_viewer.json")
 
 	for i, raw := range items {
 		row, ok := raw.(map[string]any)
@@ -608,12 +623,14 @@ func validateVehiclesList(t *testing.T, m map[string]any, baseName string) {
 				t.Errorf("vehicles_list items[%d] missing required field %q", i, field)
 			}
 		}
-		if includesName {
-			if _, ok := row["name"]; !ok {
-				t.Errorf("vehicles_list items[%d] (owner-tier) missing required field 'name'", i)
-			}
-		} else if _, ok := row["name"]; ok {
-			t.Errorf("vehicles_list items[%d] (viewer-tier) MUST NOT include 'name' per §5.2.0 mask", i)
+		// sharePermission is the one field whose asymmetry runs toward
+		// the viewer: present iff the row is a viewer row (§5.2.0).
+		_, hasTier := row["sharePermission"]
+		switch {
+		case isViewer && !hasTier:
+			t.Errorf("vehicles_list items[%d] (viewer-tier) missing 'sharePermission'", i)
+		case !isViewer && hasTier:
+			t.Errorf("vehicles_list items[%d] (owner-tier) carries 'sharePermission'; an owner is not on a tier", i)
 		}
 	}
 }

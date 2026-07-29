@@ -384,9 +384,9 @@ func TestMapTelemetryToUpdate_RouteLine(t *testing.T) {
 	validRouteLine := "CjRnfWZ1fUBwYXJxd0R9eEBsQGdKTH1JTWtHTG1JP3tGP29OTWFTP19jQD95YEBPc0w/Z0Q/"
 
 	tests := []struct {
-		name  string
+		name   string
 		fields map[string]events.TelemetryValue
-		check func(t *testing.T, u *VehicleUpdate)
+		check  func(t *testing.T, u *VehicleUpdate)
 	}{
 		{
 			name: "valid routeLine decoded to navRouteCoordinates JSON",
@@ -489,7 +489,7 @@ func TestMapTelemetryToUpdate_RouteLine(t *testing.T) {
 
 // test helpers
 
-func strPtr(s string) *string    { return &s }
+func strPtr(s string) *string     { return &s }
 func floatPtr(f float64) *float64 { return &f }
 func intPtr(i int) *int           { return &i }
 
@@ -499,4 +499,3 @@ func ptrVal[T any](p *T) any {
 	}
 	return *p
 }
-

@@ -56,7 +56,7 @@ func WithReleaseNotes(reader ReleaseNotesReader) ServiceStatusMonitorOption {
 
 // WithVehicleColor enables the MYR-320 exterior-colour column write. Without it
 // the monitor decodes exterior_color and discards it, leaving "Vehicle".color at
-// whatever the provisioning placeholder ('') left behind.
+// whatever the provisioning placeholder (”) left behind.
 func WithVehicleColor(writer VehicleColorWriter) ServiceStatusMonitorOption {
 	return func(m *ServiceStatusMonitor) {
 		if writer != nil {

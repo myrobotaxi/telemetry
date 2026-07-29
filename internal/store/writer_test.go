@@ -31,7 +31,7 @@ type recordedControlWrite struct {
 }
 
 type mockVehicleUpdater struct {
-	mu             sync.Mutex
+	mu              sync.Mutex
 	telemetryWrites []recordedTelemetryWrite
 	statusWrites    []recordedStatusWrite
 	controlWrites   []recordedControlWrite

@@ -351,4 +351,3 @@ func (r *Receiver) reconcileVIN(evt *events.VehicleTelemetryEvent, envelopeVIN, 
 		evt.VIN = certVIN
 	}
 }
-

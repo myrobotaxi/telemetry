@@ -53,6 +53,9 @@ type DriveRouteHandler struct {
 	vehicles VehicleSnapshotReader // owner check via GetByID(vehicleId)
 	drives   DriveRouteFetcher
 	roles    roleResolver // optional: nil disables role-based mask plumbing
+	// shares admits VIEWERS holding an accepted share of at least
+	// `live_history` (MYR-184). Nil keeps the endpoint owner-only.
+	shares VehicleShareReader
 
 	// Mask-audit fields (MYR-71, rest-api.md §5.3). All optional —
 	// nil auditEmitter disables emit.
@@ -61,36 +64,6 @@ type DriveRouteHandler struct {
 	auditEndpoint string
 
 	logger *slog.Logger
-}
-
-// DriveRouteOption configures optional dependencies on DriveRouteHandler.
-type DriveRouteOption func(*DriveRouteHandler)
-
-// WithDriveRouteRoleResolver enables role-based field masking on the
-// handler. Owners and viewers share the DriveRoute allow-list (just
-// `routePoints`) per rest-api.md §5.2.4, so this is plumbed for FR-5.1
-// sharing readiness — the mask is a no-op for both roles today.
-func WithDriveRouteRoleResolver(roles roleResolver) DriveRouteOption {
-	return func(h *DriveRouteHandler) {
-		h.roles = roles
-	}
-}
-
-// WithDriveRouteMaskAudit attaches a mask-audit emitter (MYR-71,
-// rest-api.md §5.3). endpoint is the route pattern written to
-// metadata.endpoint. emitter MAY be nil — in which case this is a no-op.
-func WithDriveRouteMaskAudit(emitter mask.AuditEmitter, metrics mask.AuditMetrics, endpoint string) DriveRouteOption {
-	return func(h *DriveRouteHandler) {
-		if emitter == nil {
-			return
-		}
-		h.auditEmitter = emitter
-		if metrics == nil {
-			metrics = mask.NoopAuditMetrics{}
-		}
-		h.auditMetrics = metrics
-		h.auditEndpoint = endpoint
-	}
 }
 
 // NewDriveRouteHandler creates a handler that serves
@@ -160,7 +133,9 @@ func (h *DriveRouteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.writeMaskedRoute(r, w, userID, data)
 }
 
-// verifyOwnership checks that userID owns the drive's vehicle. Returns
+// verifyOwnership resolves the caller's access to the drive's vehicle: the
+// owner, or a viewer holding an accepted share of at least `live_history`
+// (MYR-184). Returns
 // true on success; on failure writes an HTTP error and returns false.
 // A drive that points at a missing vehicle is a data-integrity fault
 // (500), distinct from an ownership mismatch (403, vehicle_not_owned).
@@ -185,13 +160,21 @@ func (h *DriveRouteHandler) verifyOwnership(ctx context.Context, w http.Response
 		return false
 	}
 
-	if row.UserID != userID {
-		h.logger.Warn("drive route: ownership mismatch",
-			slog.String("drive_id", driveID),
+	// MYR-184: a viewer needs `live_history` or better here. The drives
+	// surfaces are exactly the increment that tier buys — the tier below it
+	// (`live`) grants the live map and nothing historical — so a bare
+	// `live` viewer is refused 403 while the owner and the two higher
+	// tiers pass. The comparison is cumulative (AtLeast), never equality.
+	if _, err := vehicleAccessFor(ctx, h.shares, userID, vehicleID, row.UserID, auth.PermissionLiveHistory); err != nil {
+		if errors.Is(err, errNoVehicleAccess) {
+			denyVehicleAccess(w, h.logger, "drive route", vehicleID, userID)
+			return false
+		}
+		h.logger.Error("drive route: access resolution failed",
 			slog.String("vehicle_id", vehicleID),
-			slog.String("user_id", userID),
+			slog.String("error", err.Error()),
 		)
-		h.writeError(w, http.StatusForbidden, wserrors.ErrCodeVehicleNotOwned, "you do not own this drive")
+		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
 		return false
 	}
 

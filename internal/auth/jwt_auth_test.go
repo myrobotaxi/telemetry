@@ -309,11 +309,16 @@ func TestJWTAuthenticator_ResolveRole(t *testing.T) {
 			wantRole:  RoleOwner,
 		},
 		{
-			name:      "caller is non-owner -> viewer (forward-looking)",
+			// MYR-184 closed the fail-open branch this case used to
+			// assert. A non-owner with no accepted share is DENIED, not
+			// silently handed the viewer projection. The stub
+			// authenticator below configures no share lookup, which is
+			// the same fail-closed path.
+			name:      "caller is non-owner with no share -> denied",
 			ownerByID: map[string]string{vehicleID: "other-user"},
 			userID:    callerUserID,
 			vehicleID: vehicleID,
-			wantRole:  RoleViewer,
+			wantErr:   true,
 		},
 		{
 			name:      "vehicle not found -> error (no role leak)",

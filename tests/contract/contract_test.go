@@ -41,6 +41,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -587,7 +588,7 @@ type vehicleSeed struct {
 	Model           string
 	Year            int
 	Color           string
-	Status          string  // empty string falls through to schema default 'offline'
+	Status          string // empty string falls through to schema default 'offline'
 	ChargeLevel     int
 	EstimatedRange  int
 	LocationName    string
@@ -663,7 +664,7 @@ type driveSeed struct {
 }
 
 // seedDrive inserts a Drive row. Empty Start/End Location + Address
-// values rely on the table's NOT NULL DEFAULT '' to stay consistent
+// values rely on the table's NOT NULL DEFAULT ” to stay consistent
 // with the Prisma-owned column semantics.
 func (h *seedHelpers) seedDrive(ctx context.Context, t *testing.T, d driveSeed) {
 	t.Helper()
@@ -753,20 +754,33 @@ func jsonMarshal(v any) ([]byte, error) { return json.Marshal(v) }
 
 // validateAgainstSchema validates body against the schema at schemaPath
 // (relative to the repo root, e.g. "docs/contracts/schemas/vehicle-state.schema.json").
+//
+// schemaPath MAY carry a JSON-pointer fragment to target a sub-schema —
+// "docs/contracts/schemas/vehicle-summary.schema.json#/$defs/VehicleSummary"
+// validates ONE ROW rather than the list envelope the file's root describes.
+// The fragment form exists because several canonical schemas are envelope-rooted
+// with the interesting object under $defs, and a test that has a single decoded
+// item in hand should not have to re-wrap it.
+//
 // The compiler is loaded fresh per call — schemas are small and the
 // jsonschema/v6 compiler caches them internally; perf is not a concern
 // at test scale.
 func validateAgainstSchema(t *testing.T, schemaPath string, body []byte) {
 	t.Helper()
 
+	filePath, fragment, hasFragment := strings.Cut(schemaPath, "#")
+
 	root := repoRoot(t)
 	schemasAbs := filepath.Join(root, "docs/contracts/schemas")
-	mainSchema := filepath.Join(root, schemaPath)
+	mainSchema := filepath.Join(root, filePath)
 
 	compiler := jsonschema.NewCompiler()
 	loadSchemaResources(t, compiler, schemasAbs)
 
 	mainID := schemaIDFromFile(t, mainSchema)
+	if hasFragment {
+		mainID += "#" + fragment
+	}
 	schema, err := compiler.Compile(mainID)
 	if err != nil {
 		t.Fatalf("compile schema %s: %v", schemaPath, err)
