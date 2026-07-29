@@ -95,15 +95,49 @@ RETURNING COALESCE(accepted_by_user_id, '')`
 const queryShareExistsForOwner = `
 SELECT status FROM go_vehicle_shares WHERE id = $1 AND owner_user_id = $2`
 
-// queryResendShare re-mints the code and pushes the expiry out, on the SAME row
-// — the invite id a client holds stays valid across a resend, and created_at is
-// deliberately untouched (the owner's "sent {ago}" line still refers to the
-// original send). Guarded on 'pending': an accepted grant cannot be resent, and
-// a revoked tombstone cannot be resurrected.
+// queryLockResendSiblings selects and LOCKS every pending row that shares the
+// TARGET ROW'S CURRENT CODE, for the same owner — that set is the invite, and
+// the row named in the path is only one member of it.
+//
+// The subquery is what makes the set the right one. Keying on the code (not on
+// the owner, and not on the id) is deliberate in both directions: an owner may
+// hold several unrelated pending invites, which a resend must not disturb, and
+// one invite may span N vehicles, every one of which must be re-minted or the
+// old code stays live on the rest. A NULL subquery result — no such pending row
+// for this owner — matches nothing, which is how "not yours / not pending" falls
+// through to the explain probe.
+//
+// FOR UPDATE serializes this against a concurrent redemption of the same code:
+// whichever transaction locks first wins outright, and the loser re-reads rows
+// that no longer qualify rather than acting on a stale code.
+const queryLockResendSiblings = `
+SELECT id FROM go_vehicle_shares
+WHERE owner_user_id = $2 AND status = 'pending'
+  AND code = (
+    SELECT code FROM go_vehicle_shares
+    WHERE id = $1 AND owner_user_id = $2 AND status = 'pending'
+  )
+FOR UPDATE`
+
+// queryResendShare re-mints the code and pushes the expiry out across the WHOLE
+// locked sibling set, in one statement. The invite ids a client holds stay valid
+// across a resend, and created_at is deliberately untouched (the owner's
+// "sent {ago}" line still refers to the original send).
+//
+// The 'pending' predicate AND `owner_user_id` are re-asserted even though the
+// ids came from an owner-scoped, already-locked SELECT in the same transaction.
+// That is invariant (1) at the top of this file holding: the write itself
+// carries the ownership predicate, so no reordering, refactor, or future caller
+// of this statement can produce a cross-owner mutation. Same belt-and-braces
+// principle as queryAcceptSharesByID — the predicate is the contract, the lock
+// is only the serialization.
+//
+// RETURNING hands back every re-minted row so the caller can pick out the path
+// row without a second read.
 const queryResendShare = `
 UPDATE go_vehicle_shares
-SET code = $3, expires_at = NOW() + ` + shareInviteTTLInterval + `
-WHERE id = $1 AND owner_user_id = $2 AND status = 'pending'
+SET code = $2, expires_at = NOW() + ` + shareInviteTTLInterval + `
+WHERE id = ANY($1) AND owner_user_id = $3 AND status = 'pending'
 RETURNING` + shareColumns
 
 // queryLockPendingByCode selects the candidate rows a redemption would grant

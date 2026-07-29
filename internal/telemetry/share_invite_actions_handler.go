@@ -56,10 +56,17 @@ func (h *ShareInviteHandler) ServeRevoke(w http.ResponseWriter, r *http.Request)
 
 // ServeResend handles POST /api/invites/{inviteId}/resend.
 //
-// Mints a NEW code on the SAME row and resets the expiry to a full TTL from
-// now, invalidating the previous code. The invite id and createdAt are
-// unchanged, so a client holding the id keeps working and the owner's
-// "sent {ago}" line still refers to the original send.
+// Mints a NEW code and resets the expiry to a full TTL from now, invalidating
+// the previous code. The invite ids and createdAt are unchanged, so a client
+// holding an id keeps working and the owner's "sent {ago}" line still refers to
+// the original send.
+//
+// ACROSS EVERY ROW OF THE INVITE, not just the one named in the path. A
+// multi-vehicle invite is ONE code backing one row per vehicle, so re-minting a
+// single row would leave the old code live and pending on its siblings for the
+// rest of the 7-day TTL — a leaked code the owner believes they just killed —
+// and would split the invite in two. The store does the whole set in one
+// transaction; the RESPONSE is still the path row's ShareInvite.
 //
 // PENDING ONLY. Resending an accepted grant is 409 conflict, because changing
 // who holds an accepted grant is a revoke plus a fresh invite, not a resend —
