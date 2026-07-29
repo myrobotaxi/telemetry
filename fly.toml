@@ -10,6 +10,8 @@
 # Deploy: fly deploy
 # Secrets: fly secrets set DATABASE_URL=... AUTH_SECRET=... ENCRYPTION_KEY=... TESLA_KEY_FILE_B64=...
 # Generate ENCRYPTION_KEY with: openssl rand -base64 32 (see docs/contracts/key-rotation.md).
+# Push (MYR-186): fly secrets set APNS_KEY_P8_B64=... APNS_KEY_ID=...
+# Without both, push sends are skipped (the service still runs) — see docs/deployment.md.
 
 app = 'my-robo-taxi-telemetry'
 primary_region = 'iad'

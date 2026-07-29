@@ -206,6 +206,11 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 	// constructor panics on nil). Backs the P10 ride-hailing REST surface.
 	rideRepo := store.NewRideRequestRepo(db.Pool(), storeMetrics, encryptor)
 
+	// MYR-186: APNs device registry + the lean vehicle-nickname read the push
+	// copy needs. Both are plain reads/writes with no encryption dependency.
+	pushRepo := store.NewPushDeviceRepo(db.Pool(), logger.With(slog.String("component", "push-device-repo")))
+	vehicleNameRepo := store.NewVehicleNameRepo(db.Pool())
+
 	// --- Drive detector ---
 	// MYR-146: reconciler reads open Drive rows on Start so a Fly
 	// redeploy mid-drive doesn't leave forever-active rows. The
@@ -364,6 +369,17 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 		return fmt.Errorf("setting up nav dispatcher: %w", err)
 	}
 
+	// --- Push notifications (MYR-186) ---
+	// Subscribes to ride.request.created / ride.status.changed / ride.due and
+	// alerts the relevant party's registered phones. Gated by PUSH_ENABLED;
+	// runs keyless (every send logged as skipped) until the APNs secrets are
+	// set. Drained after the bus closes so in-flight sends finish.
+	notifier, err := setupPushNotifier(cfg, bus, pushRepo, vehicleNameRepo, logger)
+	if err != nil {
+		return fmt.Errorf("setting up push notifier: %w", err)
+	}
+	defer notifier.Wait()
+
 	// --- HTTP server + route registration ---
 	srv := server.New(cfg.Server(), logger, db, reg, cfg.TeslaPublicKey())
 	originPatterns := resolveWSOriginPatterns(cfg.WebSocket().AllowedOrigins, *devMode, logger)
@@ -379,6 +395,7 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 		driveRepo:      driveRepo,
 		rideRepo:       rideRepo,
 		accountRepo:    accountRepo,
+		pushRepo:       pushRepo,
 		pool:           db.Pool(),
 		encryptor:      encryptor,
 		auditEmitter:   auditEmitter,

@@ -35,7 +35,7 @@ func applyServiceRepollEnvOverrides(fc *fileConfig) error {
 	// ServiceMode EDGES only — which is a safe place to stand while an operator
 	// investigates Fleet API rate limiting. Nothing is lost permanently: the
 	// next edge, or re-enabling the switch, re-reads everything.
-	enabled, err := parseBoolEnv("SERVICE_REPOLL_ENABLED", true)
+	enabled, err := parseKillSwitchEnv("SERVICE_REPOLL_ENABLED")
 	if err != nil {
 		return err
 	}

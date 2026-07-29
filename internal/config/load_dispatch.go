@@ -22,7 +22,7 @@ import (
 func applyDispatchEnvOverrides(fc *fileConfig) error {
 	// DISPATCH_ENABLED is the MYR-176 nav-dispatch kill-switch: false records
 	// every dispatch (instant OR reservation) as `skipped` with no Tesla call.
-	enabled, err := parseBoolEnv("DISPATCH_ENABLED", true)
+	enabled, err := parseKillSwitchEnv("DISPATCH_ENABLED")
 	if err != nil {
 		return err
 	}
@@ -35,7 +35,7 @@ func applyDispatchEnvOverrides(fc *fileConfig) error {
 	// latch-unclaimed and outcome-absent, so turning it back on picks up the
 	// ones still inside their lateness window and honestly failing the rest,
 	// instead of having burned them.
-	reservation, err := parseBoolEnv("RESERVATION_DISPATCH_ENABLED", true)
+	reservation, err := parseKillSwitchEnv("RESERVATION_DISPATCH_ENABLED")
 	if err != nil {
 		return err
 	}
@@ -44,12 +44,19 @@ func applyDispatchEnvOverrides(fc *fileConfig) error {
 	return nil
 }
 
-// parseBoolEnv reads a boolean env var, returning def when unset and a
-// descriptive ErrInvalidValue when set to something ParseBool rejects.
-func parseBoolEnv(name string, def bool) (bool, error) {
+// parseKillSwitchEnv reads a boolean env var that defaults to ENABLED when
+// unset, returning a descriptive ErrInvalidValue when it is set to something
+// ParseBool rejects.
+//
+// Every switch this loads is a KILL-switch — the feature ships on and the
+// variable exists to stop it without a deploy — so the default is fixed rather
+// than a parameter. A future flag that must default OFF is a different thing
+// (a feature gate, not a kill-switch) and should get its own helper rather
+// than re-introducing an argument that only ever takes one value.
+func parseKillSwitchEnv(name string) (bool, error) {
 	v, ok := os.LookupEnv(name)
 	if !ok {
-		return def, nil
+		return true, nil
 	}
 	parsed, err := strconv.ParseBool(v)
 	if err != nil {

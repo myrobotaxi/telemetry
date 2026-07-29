@@ -44,6 +44,14 @@ type fileConfig struct {
 	serviceRepollEnabled  bool
 	serviceRepollInterval time.Duration
 
+	// MYR-186 push-notification settings (PUSH_ENABLED, APNS_*). The key is
+	// P0 secret material; see load_push.go.
+	pushEnabled bool
+	apnsKeyP8   string
+	apnsKeyID   string
+	apnsTeamID  string
+	apnsTopic   string
+
 	// Identity module secrets/identifiers (env, not JSON).
 	es256PrivateKeyPEM string
 	appleClientID      string
@@ -184,11 +192,7 @@ func applyEnvOverrides(fc *fileConfig) error {
 
 	applyProxyEnvOverrides(fc)
 
-	if err := applyDispatchEnvOverrides(fc); err != nil {
-		return err
-	}
-
-	if err := applyServiceRepollEnvOverrides(fc); err != nil {
+	if err := applySubsystemEnvOverrides(fc); err != nil {
 		return err
 	}
 
@@ -373,6 +377,7 @@ func buildConfig(fc *fileConfig) *Config {
 		monitoring: MonitoringConfig{
 			CertEndpoints: fc.certMonitorEndpoints,
 		},
+		push:                       buildPushConfig(fc),
 		mapboxToken:                fc.mapboxToken,
 		teslaPublicKey:             fc.teslaPublicKey,
 		dispatchEnabled:            fc.dispatchEnabled,
