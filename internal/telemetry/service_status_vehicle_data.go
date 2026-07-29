@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/events"
 )
@@ -79,6 +80,11 @@ var (
 	ErrVehicleDataPublish = errors.New("vehicle_data broadcast publish failed")
 )
 
+// publishTimeout bounds the detached backfill publish (MYR-320). The bus send
+// is a buffered channel write per subscriber, so this is a deadlock guard rather
+// than a latency budget — it must never be the reason a frame is dropped.
+const publishTimeout = 5 * time.Second
+
 // RefreshFromVehicleData is the error-returning core of the vehicle_data
 // backfill: ONE Fleet API read, mapped through vehicleDataToFields, gated by
 // the MYR-300 stream-recency rule, and republished as a synthetic
@@ -148,7 +154,28 @@ func (m *ServiceStatusMonitor) RefreshFromVehicleData(ctx context.Context, vin, 
 		// counts our own output as evidence the car is streaming (MYR-300).
 		Source: events.SourceRESTBackfill,
 	}
-	if err := m.bus.Publish(ctx, events.NewEvent(evt)); err != nil {
+	// MYR-320: publish on a context DETACHED from the caller's Fleet API
+	// deadline. That deadline exists to bound Tesla; this fan-out is in-process
+	// and has already been paid for by the reads that succeeded, so letting the
+	// two share a budget means a slow car can cost us data we already hold.
+	//
+	// It was reachable in production: the connectivity-edge bundle spends ONE
+	// 30s budget on up to four sequential Fleet API GETs (vehicle, service_data,
+	// vehicle_data, release_notes), each with its own retry/backoff — and the
+	// fourth is the one MYR-320 added. ChannelBus.Publish re-checks ctx.Done()
+	// before EVERY subscriber and returns without delivering to any of them, so a
+	// budget spent during the reads silently discards the whole backfilled field
+	// set. The signature of that failure is exactly what the client saw: `color`
+	// populated (a direct column UPDATE, written earlier in this function) while
+	// its same-payload siblings `trim` / `trimLabel` / `fsdVersion` — which
+	// travel only on this frame — stayed null.
+	//
+	// The publish stays BOUNDED rather than unbounded: a wedged subscriber must
+	// not pin this goroutine, and publishTimeout is generous next to a buffered
+	// channel send.
+	pubCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), publishTimeout)
+	defer cancel()
+	if err := m.bus.Publish(pubCtx, events.NewEvent(evt)); err != nil {
 		return fmt.Errorf("%w: %w", ErrVehicleDataPublish, err)
 	}
 	m.logger.Info("service-status: populated owner controls from REST vehicle_data",
