@@ -187,10 +187,19 @@ func (h *VehicleCommandHandler) decodeParams(w http.ResponseWriter, r *http.Requ
 func (h *VehicleCommandHandler) writeCommandError(w http.ResponseWriter, name, vin string, err error) {
 	var cmdErr *commands.CommandError
 	if errors.As(err, &cmdErr) {
+		// reason is the upstream (Tesla/proxy) explanation for the refusal,
+		// already sanitized by the transport (commands.sanitizeReason strips
+		// URLs + coordinates and collapses the charset), so it is safe to log
+		// and carries no P1 value. It is the RAW upstream prose rather than the
+		// canonical token the wire message may carry (MYR-329): when an owner
+		// reports a rejection we still want the exact words the car used, and
+		// an unrecognized reason — the case where the owner sees only the
+		// generic copy — is precisely the one worth reading here.
 		h.logger.Info("vehicle command rejected",
 			slog.String("vin", redactVIN(vin)),
 			slog.String("command", name),
 			slog.String("code", string(cmdErr.Code)),
+			slog.String("reason", cmdErr.Detail),
 		)
 		h.writeError(w, cmdErr.Status, cmdErr.Code, cmdErr.Message)
 		return

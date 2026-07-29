@@ -192,7 +192,11 @@ func (e *Executor) invoke(ctx context.Context, cmd Command, req Request, body []
 			return Result{}, withDetail(errInvalidParams("Tesla rejected command parameters"), res.Reason)
 
 		default: // OutcomeFailed
-			return Result{}, withDetail(errCommandFailed("vehicle command failed"), res.Reason)
+			// The car refused. When its reason is one we recognize, name it in
+			// the message so the owner is not left guessing (MYR-329); an
+			// unrecognized reason keeps the generic sentence. Detail still
+			// carries the full sanitized reason for the server-side log.
+			return Result{}, withDetail(errCommandFailed(commandFailedMessage(res.Reason)), res.Reason)
 		}
 	}
 }

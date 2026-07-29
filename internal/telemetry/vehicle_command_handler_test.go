@@ -190,3 +190,94 @@ func TestVehicleCommandHandler_PerVehicleCooldown(t *testing.T) {
 		t.Fatalf("expected 429 after burst, got %d", lastCode)
 	}
 }
+
+// inServiceTransport is a commands.Transport that answers every command the way
+// the tesla-http-proxy answers one sent to a car in service mode: HTTP 200 with
+// a negative car response whose reason is the car's own plain text, relayed
+// under the proxy's "car could not execute command: " prefix.
+type inServiceTransport struct{}
+
+func (inServiceTransport) Command(_ context.Context, _ commands.TransportRequest) (commands.TransportResult, error) {
+	return commands.TransportResult{
+		Outcome: commands.OutcomeFailed,
+		Reason:  "car could not execute command: vehicle is in service",
+	}, nil
+}
+func (inServiceTransport) Wake(_ context.Context, _, _ string) error { return nil }
+func (inServiceTransport) Enabled() bool                            { return true }
+func (inServiceTransport) RESTEnabled() bool                        { return true }
+
+// TestVehicleCommandHandler_RejectionReasonReachesTheWire is MYR-329 end to
+// end, through the REAL commands.Executor rather than a scripted CommandError:
+// the client's own Jul 28 situation (climate off, car in service) must arrive
+// at the app as a 502 command_failed whose message NAMES the reason, so the
+// owner is not left guessing at his battery.
+func TestVehicleCommandHandler_RejectionReasonReachesTheWire(t *testing.T) {
+	reader := &stubVehicleSnapshotReader{row: fixtureSnapshotRow("u1")}
+	exec := commands.NewExecutor(inServiceTransport{}, discardLogger())
+	h := newCommandHandler(exec, reader, &stubTokenValidator{userID: "u1"})
+
+	rec := postCommand(h, fixtureSnapshotRowID, "auto_conditioning_stop", "", "Bearer x")
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d want 502", rec.Code)
+	}
+	if got := decodeErrCode(t, rec); got != wserrors.ErrCodeCommandFailed {
+		t.Fatalf("code = %q want command_failed", got)
+	}
+
+	var env wserrors.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode envelope: %v (body=%s)", err, rec.Body.String())
+	}
+	if !strings.Contains(env.Error.Message, commands.ReasonVehicleInService) {
+		t.Errorf("message = %q, want it to name %q", env.Error.Message, commands.ReasonVehicleInService)
+	}
+	// The car's own prose must NOT ride out to the client — only our token.
+	if strings.Contains(env.Error.Message, "could not execute") {
+		t.Errorf("message = %q leaks upstream prose", env.Error.Message)
+	}
+	// P1 hygiene: nothing in the error body may carry the VIN.
+	if strings.Contains(rec.Body.String(), "5YJ3E1") {
+		t.Errorf("body leaks the VIN: %s", rec.Body.String())
+	}
+}
+
+// TestVehicleCommandHandler_UnknownRejectionStaysGeneric is the other half of
+// the allow-list: a refusal we do not recognize must keep today's generic
+// message, so the app keeps its generic copy rather than naming a cause we are
+// not sure of.
+func TestVehicleCommandHandler_UnknownRejectionStaysGeneric(t *testing.T) {
+	reader := &stubVehicleSnapshotReader{row: fixtureSnapshotRow("u1")}
+	exec := commands.NewExecutor(unknownReasonTransport{}, discardLogger())
+	h := newCommandHandler(exec, reader, &stubTokenValidator{userID: "u1"})
+
+	rec := postCommand(h, fixtureSnapshotRowID, "auto_conditioning_stop", "", "Bearer x")
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d want 502", rec.Code)
+	}
+	var env wserrors.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode envelope: %v (body=%s)", err, rec.Body.String())
+	}
+	if env.Error.Message != "vehicle command failed" {
+		t.Errorf("message = %q want the unchanged generic sentence", env.Error.Message)
+	}
+	for _, token := range commands.KnownRejectionReasons() {
+		if strings.Contains(env.Error.Message, token) {
+			t.Errorf("message = %q named %q for an unrecognized reason", env.Error.Message, token)
+		}
+	}
+}
+
+// unknownReasonTransport answers with a real refusal that is deliberately
+// outside the allow-list (the SDK's own fallback when the car sends no prose).
+type unknownReasonTransport struct{ inServiceTransport }
+
+func (unknownReasonTransport) Command(_ context.Context, _ commands.TransportRequest) (commands.TransportResult, error) {
+	return commands.TransportResult{
+		Outcome: commands.OutcomeFailed,
+		Reason:  "car could not execute command: unspecified error",
+	}, nil
+}
