@@ -191,13 +191,20 @@ type httpRouteDeps struct {
 	rideRepo      *store.RideRequestRepo
 	accountRepo   *store.AccountRepo
 	// pushRepo backs the MYR-186 device-registry endpoints.
-	pushRepo       *store.PushDeviceRepo
-	pool           *pgxpool.Pool
-	encryptor      cryptox.Encryptor
-	auditEmitter   mask.AuditEmitter
-	auditMetrics   mask.AuditMetrics
-	debugGate      debugFieldsGate
-	originPatterns []string
+	pushRepo *store.PushDeviceRepo
+	// shareRepo backs the MYR-184 vehicle-sharing endpoints.
+	shareRepo *store.VehicleShareRepo
+	// accessInvalidator busts a user's cached vehicle access set when a
+	// share is redeemed or revoked (MYR-184). Satisfied by the
+	// authenticator; separate from it so the sharing handlers depend on the
+	// one-method interface rather than the whole authenticator.
+	accessInvalidator telemetry.AccessCacheInvalidator
+	pool              *pgxpool.Pool
+	encryptor         cryptox.Encryptor
+	auditEmitter      mask.AuditEmitter
+	auditMetrics      mask.AuditMetrics
+	debugGate         debugFieldsGate
+	originPatterns    []string
 	// serviceStatus is the running in-service monitor. It also owns the
 	// per-VIN stream-recency state (MYR-300) and the vehicle_data backfill
 	// mapping (MYR-260) that the MYR-315 refresh endpoint reuses.
@@ -239,6 +246,9 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 		deps.authenticator,
 		&vehicleListerAdapter{repo: deps.vehicleRepo},
 		deps.logger.With(slog.String("component", "vehicles-list")),
+		// MYR-184 / MYR-91 viewer merge: shared vehicles are appended as
+		// `role: "viewer"` rows carrying their sharePermission.
+		telemetry.WithSharedVehicles(&sharedVehicleListerAdapter{repo: deps.vehicleRepo}),
 	)
 	deps.srv.HandleFunc("GET /api/vehicles", vehiclesListHandler.ServeHTTP)
 
@@ -254,6 +264,7 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 		snapshotAdapter,
 		deps.logger.With(slog.String("component", "vehicle-snapshot")),
 		telemetry.WithSnapshotRoleResolver(deps.authenticator),
+		telemetry.WithSnapshotShareReader(&shareReaderAdapter{repo: deps.shareRepo}),
 		telemetry.WithSnapshotMaskAudit(deps.auditEmitter, deps.auditMetrics, "/api/vehicles/{vehicleId}/snapshot"),
 	)
 	deps.srv.HandleFunc("GET /api/vehicles/{vehicleId}/snapshot", snapshotHandler.ServeHTTP)
@@ -264,6 +275,7 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 		&driveListerAdapter{repo: deps.driveRepo},
 		deps.logger.With(slog.String("component", "vehicle-drives")),
 		telemetry.WithDrivesRoleResolver(deps.authenticator),
+		telemetry.WithDrivesShareReader(&shareReaderAdapter{repo: deps.shareRepo}),
 		telemetry.WithDrivesMaskAudit(deps.auditEmitter, deps.auditMetrics, "/api/vehicles/{vehicleId}/drives"),
 	)
 	deps.srv.HandleFunc("GET /api/vehicles/{vehicleId}/drives", drivesHandler.ServeHTTP)
@@ -278,6 +290,7 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 		&driveRouteAdapter{repo: deps.driveRepo},
 		deps.logger.With(slog.String("component", "drive-route")),
 		telemetry.WithDriveRouteRoleResolver(deps.authenticator),
+		telemetry.WithDriveRouteShareReader(&shareReaderAdapter{repo: deps.shareRepo}),
 		telemetry.WithDriveRouteMaskAudit(deps.auditEmitter, deps.auditMetrics, "/api/drives/{driveId}/route"),
 	)
 	deps.srv.HandleFunc("GET /api/drives/{driveId}/route", driveRouteHandler.ServeHTTP)
@@ -294,6 +307,7 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 		&driveDetailAdapter{repo: deps.driveRepo},
 		deps.logger.With(slog.String("component", "drive-detail")),
 		telemetry.WithDriveDetailRoleResolver(deps.authenticator),
+		telemetry.WithDriveDetailShareReader(&shareReaderAdapter{repo: deps.shareRepo}),
 		telemetry.WithDriveDetailMaskAudit(deps.auditEmitter, deps.auditMetrics, "/api/drives/{driveId}"),
 	)
 	deps.srv.HandleFunc("GET /api/drives/{driveId}", driveDetailHandler.ServeHTTP)
@@ -312,6 +326,7 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 	setupVehicleServiceWindowEndpoint(deps)
 	setupVehicleCommandEndpoint(deps, snapshotAdapter)
 	setupPushDeviceEndpoints(deps)
+	setupVehicleSharingEndpoints(deps, snapshotAdapter)
 	setupDebugFieldsEndpoint(deps)
 }
 
@@ -355,6 +370,10 @@ func setupRideRequestEndpoints(deps httpRouteDeps, vehicles telemetry.VehicleSna
 		&rideRequestStoreAdapter{repo: deps.rideRepo},
 		deps.bus,
 		deps.logger.With(slog.String("component", "ride-request")),
+		// MYR-184: a rider holding a `rides` share may request a ride on a
+		// car they do not own. This is the SEPARATE code path the read-side
+		// access-set widening does not cover.
+		telemetry.WithRideShareReader(&shareReaderAdapter{repo: deps.shareRepo}),
 	)
 	deps.srv.HandleFunc("POST /api/ride-requests", rideHandler.ServeCreate)
 	deps.srv.HandleFunc("GET /api/ride-requests", rideHandler.ServeList)

@@ -94,6 +94,8 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 		{"ride requests list (MYR-174)", "/api/ride-requests"},
 		{"ride request detail (MYR-174)", "/api/ride-requests/crr0123456789abcdef0123456789abcd"},
 		{"ride requests incoming feed (MYR-175)", "/api/ride-requests/incoming"},
+		// MYR-184 vehicle sharing (§7.5). The owner's invite list.
+		{"share invite list (MYR-184, §7.5)", "/api/vehicles/clxyz1234567890abcdef/invites"},
 	}
 
 	for _, rt := range routes {
@@ -124,6 +126,13 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 		{"vehicle command (MYR-180)", "/api/vehicles/clxyz1234567890abcdef/command/door_lock"},
 		{"vehicle re-add (MYR-262)", "/api/tesla/vehicles/vid-12345/re-add"},
 		{"vehicle refresh (MYR-315, §7.15)", "/api/tesla/vehicles/clxyz1234567890abcdef/refresh"},
+		// MYR-184 vehicle sharing (§7.5). `/redeem` and `/{inviteId}/resend`
+		// are both POST under /api/invites/, so mounting them is also the
+		// assertion that ServeMux resolves the literal-vs-wildcard pair —
+		// a collision would show up here as one of the two 404ing.
+		{"share invite create (MYR-184, §7.5)", "/api/vehicles/clxyz1234567890abcdef/invites"},
+		{"share invite resend (MYR-184, §7.5)", "/api/invites/csh0123456789abcdef0123456789abcd/resend"},
+		{"share invite redeem (MYR-184, §7.5)", "/api/invites/redeem"},
 	}
 	for _, rt := range postRoutes {
 		t.Run(rt.name, func(t *testing.T) {
@@ -167,6 +176,7 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 		path string
 	}{
 		{"push device unregister (MYR-186, §7.17)", "/api/push/devices"},
+		{"share invite revoke (MYR-184, §7.5)", "/api/invites/csh0123456789abcdef0123456789abcd"},
 	}
 	for _, rt := range deleteRoutes {
 		t.Run(rt.name, func(t *testing.T) {

@@ -97,7 +97,10 @@ func (a *JWTAuthenticator) ResolveVehicleAccess(ctx context.Context, userID, veh
 // needs a cross-instance signal (the LISTEN/NOTIFY channel the user-deletion
 // path already uses is the obvious carrier).
 func (a *JWTAuthenticator) InvalidateVehicles(userID string) {
-	if a.cache == nil || userID == "" {
+	// Nil-receiver tolerant: dev mode has no JWTAuthenticator, and a
+	// cache-bust that silently does nothing is strictly better than a panic
+	// on a path whose whole job is housekeeping.
+	if a == nil || a.cache == nil || userID == "" {
 		return
 	}
 	a.cache.invalidate(userID)

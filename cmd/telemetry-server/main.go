@@ -209,6 +209,9 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 	// MYR-186: APNs device registry + the lean vehicle-nickname read the push
 	// copy needs. Both are plain reads/writes with no encryption dependency.
 	pushRepo := store.NewPushDeviceRepo(db.Pool(), logger.With(slog.String("component", "push-device-repo")))
+	// MYR-184 vehicle sharing: the go_vehicle_shares repository behind the
+	// §7.5 invite/redeem endpoints and behind every viewer access check.
+	shareRepo := store.NewVehicleShareRepo(db.Pool(), logger.With(slog.String("component", "vehicle-share-repo")))
 	vehicleNameRepo := store.NewVehicleNameRepo(db.Pool())
 
 	// --- Drive detector ---
@@ -355,6 +358,17 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 	// user-existence cache. Production wires a real JWTAuthenticator;
 	// dev mode uses NoopAuthenticator (no user cache to invalidate).
 	jwtAuth, _ := authenticator.(*auth.JWTAuthenticator)
+
+	// MYR-184: the sharing handlers bust the access-set cache on redeem and
+	// revoke. Only the real JWTAuthenticator owns that cache — dev mode runs
+	// a NoopAuthenticator with nothing to invalidate — so the interface stays
+	// nil there rather than carrying a typed-nil pointer, which the handlers
+	// check for and skip.
+	var accessInvalidator telemetry.AccessCacheInvalidator
+	if jwtAuth != nil {
+		accessInvalidator = jwtAuth
+	}
+
 	dispatcher := newVehicleDeletedDispatcher(hub, recv, vinCache, jwtAuth, logger.With(slog.String("component", "vehicle-deleted-dispatcher")))
 	if _, err := dispatcher.Subscribe(bus); err != nil {
 		return fmt.Errorf("subscribe vehicle_deleted dispatcher: %w", err)
@@ -384,26 +398,30 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 	srv := server.New(cfg.Server(), logger, db, reg, cfg.TeslaPublicKey())
 	originPatterns := resolveWSOriginPatterns(cfg.WebSocket().AllowedOrigins, *devMode, logger)
 	setupHTTPHandlers(httpRouteDeps{
-		cfg:            cfg,
-		srv:            srv,
-		hub:            hub,
-		authenticator:  authenticator,
-		recv:           recv,
-		bus:            bus,
-		vinCache:       vinCache,
-		vehicleRepo:    vehicleRepo,
-		driveRepo:      driveRepo,
-		rideRepo:       rideRepo,
-		accountRepo:    accountRepo,
-		pushRepo:       pushRepo,
-		pool:           db.Pool(),
-		encryptor:      encryptor,
-		auditEmitter:   auditEmitter,
-		auditMetrics:   auditMetrics,
-		debugGate:      debugGate,
-		originPatterns: originPatterns,
-		serviceStatus:  serviceStatusMonitor,
-		logger:         logger,
+		cfg:           cfg,
+		srv:           srv,
+		hub:           hub,
+		authenticator: authenticator,
+		recv:          recv,
+		bus:           bus,
+		vinCache:      vinCache,
+		vehicleRepo:   vehicleRepo,
+		driveRepo:     driveRepo,
+		rideRepo:      rideRepo,
+		accountRepo:   accountRepo,
+		pushRepo:      pushRepo,
+		shareRepo:     shareRepo,
+		// The authenticator owns the access-set cache the sharing handlers
+		// bust on redeem and revoke.
+		accessInvalidator: accessInvalidator,
+		pool:              db.Pool(),
+		encryptor:         encryptor,
+		auditEmitter:      auditEmitter,
+		auditMetrics:      auditMetrics,
+		debugGate:         debugGate,
+		originPatterns:    originPatterns,
+		serviceStatus:     serviceStatusMonitor,
+		logger:            logger,
 	})
 
 	// --- Identity module endpoints (MYR-193, ADR-001) ---
