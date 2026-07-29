@@ -176,17 +176,48 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		FleetFieldMinutesToArrival: {IntervalSeconds: 1, ResendIntervalSeconds: intPtr(30)},
 
 		// Battery / Charging — medium frequency
-		FleetFieldSOC:                               {IntervalSeconds: 30},
-		FleetFieldBatteryLevel:                      {IntervalSeconds: 30},
-		FleetFieldEstBatteryRange:                   {IntervalSeconds: 30},
-		FleetFieldIdealBatteryRange:                 {IntervalSeconds: 30},
-		FleetFieldRatedRange:                        {IntervalSeconds: 30},
-		FleetFieldEnergyRemaining:                   {IntervalSeconds: 30},
-		FleetFieldPackVoltage:                       {IntervalSeconds: 30},
-		FleetFieldPackCurrent:                       {IntervalSeconds: 30},
-		FleetFieldDetailedChargeState:               {IntervalSeconds: 30}, // proto 179 — sources the `chargeState` wire field as of MYR-42 (2026-04-23)
-		FleetFieldTimeToFullCharge:                  {IntervalSeconds: 30}, // proto 43, hours (decimal double) — v1 charge atomic group member
-		FleetFieldEstimatedHoursToChargeTermination: {IntervalSeconds: 30}, // MYR-25 observation: proto 190, MYR-28 flip-condition guard
+		FleetFieldSOC:               {IntervalSeconds: 30},
+		FleetFieldBatteryLevel:      {IntervalSeconds: 30},
+		FleetFieldEstBatteryRange:   {IntervalSeconds: 30},
+		FleetFieldIdealBatteryRange: {IntervalSeconds: 30},
+		FleetFieldRatedRange:        {IntervalSeconds: 30},
+		FleetFieldEnergyRemaining:   {IntervalSeconds: 30},
+		FleetFieldPackVoltage:       {IntervalSeconds: 30},
+		FleetFieldPackCurrent:       {IntervalSeconds: 30},
+		// MYR-333: DetailedChargeState MUST carry a resend, for exactly the
+		// reason HvacPower does (MYR-300) and the seat coolers do (MYR-299).
+		// Tesla emits proto 179 ON CHANGE ONLY, and the change fires once — at
+		// the moment the car is plugged in. A server that was not listening at
+		// that instant (a reconnect, a deploy, a car plugged in while asleep, a
+		// fleet-config pushed after the session began) never hears "Charging"
+		// again for the WHOLE session; `chargeState` stays at its last value
+		// (commonly "Disconnected", or null on a car that has never charged)
+		// until the session ends and the next transition fires.
+		//
+		// That is the client-reported defect: a car being charged at a service
+		// centre showed no charging state, while the SAME screenshot showed the
+		// Charge tile reading "Port open" — because its proto 183 sibling below
+		// has had a 120s resend since MYR-252 and re-asserts itself, and this
+		// one did not. Battery % climbed 74->76 in the same window, so the data
+		// path was healthy; only this field was latched.
+		//
+		// 120s matches the comfort/media family and defaultStreamFreshness
+		// (service_status_stream_freshness.go), which keeps the MYR-300 backfill
+		// gate coherent: a genuinely-streaming car re-emits chargeState at least
+		// once per freshness window, so dropping the REST copy of it is safe.
+		//
+		// The three charge-group SIBLINGS need no resend: SOC, EstBatteryRange
+		// and TimeToFullCharge all move continuously while charging, so
+		// on-change emission refreshes them by itself. chargeState is the only
+		// member of the group that latches.
+		//
+		// NOTE: a config change only reaches a car on a re-push (POST
+		// /api/fleet-config/{vin}, `ops fleet-config push`, or the next owner
+		// link) — there is no config version/hash that re-pushes itself. Every
+		// already-linked VIN needs that re-push before it resends this field.
+		FleetFieldDetailedChargeState:               {IntervalSeconds: 30, ResendIntervalSeconds: intPtr(120)}, // proto 179 — sources the `chargeState` wire field as of MYR-42 (2026-04-23)
+		FleetFieldTimeToFullCharge:                  {IntervalSeconds: 30},                                     // proto 43, hours (decimal double) — v1 charge atomic group member
+		FleetFieldEstimatedHoursToChargeTermination: {IntervalSeconds: 30},                                     // MYR-25 observation: proto 190, MYR-28 flip-condition guard
 
 		// Climate. InsideTemp at 10s so the owner sees the cabin temperature
 		// change as climate runs (MYR-276: client saw it lag ~a minute at 60s —
