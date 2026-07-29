@@ -23,9 +23,28 @@ var (
 	ErrMissingSubject = errors.New("missing subject claim")
 )
 
-// queryUserVehicleIDs fetches all vehicle IDs belonging to a user from
-// the Prisma-owned "Vehicle" table.
-const queryUserVehicleIDs = `SELECT "id" FROM "Vehicle" WHERE "userId" = $1`
+// queryUserVehicleIDs fetches the caller's full VEHICLE ACCESS SET — the
+// vehicles they own, UNIONed with the vehicles somebody has shared with them
+// (MYR-91 viewer merge / MYR-184 sharing).
+//
+// Before MYR-184 the access set was ownership alone, which is why the `viewer`
+// role existed in the mask matrix without a single row that could produce it.
+// The second leg is what makes it real: an accepted go_vehicle_shares grant
+// (Go-owned, migration 0020) puts the vehicle in the grantee's set, so it flows
+// through EVERY consumer of this query at once — the WebSocket subscribed set,
+// GET /api/vehicles, and every per-vehicle handler that asks "can this caller
+// see this car".
+//
+// Revoked and pending rows are excluded by the `status = 'accepted'` predicate:
+// an invite that was never redeemed grants nothing, and revocation is a
+// tombstone flip, so a revoked grant drops out of the set on the next lookup.
+// UNION (not UNION ALL) de-duplicates the case where an owner also holds a
+// stale grant row for their own car.
+const queryUserVehicleIDs = `
+SELECT "id" FROM "Vehicle" WHERE "userId" = $1
+UNION
+SELECT vehicle_id FROM go_vehicle_shares
+WHERE accepted_by_user_id = $1 AND status = 'accepted'`
 
 // queryUserExists is a slim row-existence probe used by the FR-10.1
 // fail-closed JWT existence check (data-lifecycle.md §3.5, MYR-73). A user
@@ -53,6 +72,10 @@ type JWTAuthenticator struct {
 	cache           *vehicleCache
 	ownerLookup     vehicleOwnerLookup
 	userExistsCache *userExistenceCache
+	// shares resolves accepted vehicle-sharing grants (MYR-184). Nil means
+	// no share lookup is configured, in which case ResolveVehicleAccess
+	// fails closed and viewer is unreachable.
+	shares shareLookup
 	// es256 optionally verifies ES256 tokens minted by the identity module
 	// (ADR-001 §3). Nil => HS256-only (legacy behaviour, unchanged).
 	es256 ES256KeyResolver
@@ -92,6 +115,10 @@ func NewJWTAuthenticator(secret, issuer, audience string, pool *pgxpool.Pool, op
 		cache:           newVehicleCache(querier, vehicleCacheTTL),
 		ownerLookup:     querier,
 		userExistsCache: newUserExistenceCache(existenceQuerier, userExistenceTTL),
+		// The same querier serves the accepted-share lookup (MYR-184), so
+		// the DB-backed authenticator resolves viewers out of the box —
+		// nothing has to remember to opt in.
+		shares: querier,
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -167,26 +194,18 @@ func (a *JWTAuthenticator) GetUserVehicles(ctx context.Context, userID string) (
 // (websocket-protocol.md §4.6) and the REST handler-layer mask
 // (rest-api.md §5.1).
 //
-// The query reads "Vehicle"."userId" by primary key. If the row's
-// userId matches the caller, the caller is the owner. Otherwise the
-// caller is treated as a viewer. Vehicle-not-found is surfaced as an
-// error so the caller can convert it to 404 / fail-closed at the
-// handler layer; an unknown vehicle MUST NOT be silently downgraded to
-// "viewer" because that would leak the vehicle's existence.
+// MYR-184 CLOSED THE FAIL-OPEN HOLE THAT USED TO LIVE HERE. This function
+// previously returned RoleViewer for ANY caller who was not the owner, on the
+// grounds that the only way to reach the branch was a stale cache. That is no
+// longer a safe assumption now that viewer is a role real callers hold: a
+// non-owner with no accepted share gets ErrNoVehicleAccess, and callers convert
+// that to 403 / deny-all rather than to a viewer projection.
+//
+// See ResolveVehicleAccess (vehicle_access.go) for the tier-carrying form that
+// handlers gating on live_history / rides need.
 func (a *JWTAuthenticator) ResolveRole(ctx context.Context, userID, vehicleID string) (Role, error) {
-	ownerID, err := a.ownerLookup.GetVehicleOwnerByID(ctx, vehicleID)
-	if err != nil {
-		return Role(""), fmt.Errorf("ResolveRole: vehicle %s not found: %w", vehicleID, err)
-	}
-	if ownerID == userID {
-		return RoleOwner, nil
-	}
-	// TODO: when Invite-based viewer access lands, query the Invite table
-	// (Prisma-owned, see data-classification.md §1.6) to verify this user has
-	// an accepted invite granting viewer access to vehicleID. Until then,
-	// returning RoleViewer is forward-looking — the only path to reach this
-	// branch today is a stale GetUserVehicles cache or a test fixture.
-	return RoleViewer, nil
+	role, _, err := a.ResolveVehicleAccess(ctx, userID, vehicleID)
+	return role, err
 }
 
 // pgVehicleQuerier queries PostgreSQL for a user's vehicle IDs.

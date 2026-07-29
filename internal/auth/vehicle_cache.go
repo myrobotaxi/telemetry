@@ -74,6 +74,14 @@ func (c *vehicleCache) lookup(ctx context.Context, userID string) ([]string, err
 	return val.([]string), nil
 }
 
+// invalidate drops the cached access set for a user so the next lookup
+// refetches. Called when a share is redeemed or revoked (MYR-184) — see
+// JWTAuthenticator.InvalidateVehicles for the policy and its single-instance
+// caveat. Idempotent: invalidating an absent entry is a no-op.
+func (c *vehicleCache) invalidate(userID string) {
+	c.entries.Delete(userID)
+}
+
 // loadValid returns the cache entry if it exists and has not expired.
 func (c *vehicleCache) loadValid(userID string) (*cacheEntry, bool) {
 	val, ok := c.entries.Load(userID)
