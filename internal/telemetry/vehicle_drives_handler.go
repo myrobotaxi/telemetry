@@ -24,6 +24,9 @@ type VehicleDrivesHandler struct {
 	vehicles VehicleSnapshotReader // owner check via GetByID(vehicleId)
 	drives   DriveLister
 	roles    roleResolver // optional: nil disables role-based mask plumbing
+	// shares admits VIEWERS holding an accepted share of at least
+	// `live_history` (MYR-184). Nil keeps the endpoint owner-only.
+	shares VehicleShareReader
 
 	// Mask-audit fields (MYR-71, rest-api.md §5.3). All optional —
 	// nil auditEmitter disables emit.
@@ -44,6 +47,16 @@ type VehicleDrivesOption func(*VehicleDrivesHandler)
 func WithDrivesRoleResolver(roles roleResolver) VehicleDrivesOption {
 	return func(h *VehicleDrivesHandler) {
 		h.roles = roles
+	}
+}
+
+// WithDrivesShareReader lets the handler admit VIEWERS holding an accepted
+// vehicle share of at least `live_history` (MYR-184). Without it the
+// handler is owner-only, which is the pre-MYR-184 behaviour and the
+// fail-closed default.
+func WithDrivesShareReader(shares VehicleShareReader) VehicleDrivesOption {
+	return func(h *VehicleDrivesHandler) {
+		h.shares = shares
 	}
 }
 
@@ -161,10 +174,12 @@ func (h *VehicleDrivesHandler) parseQuery(w http.ResponseWriter, r *http.Request
 	return limit, cursor, true
 }
 
-// verifyOwnership checks that userID owns the vehicle identified by
-// vehicleID. Returns true if the check passes; on failure writes an
-// HTTP error response and returns false. The 404 / 403 split mirrors
-// the snapshot handler.
+// verifyOwnership resolves the caller's access to the vehicle identified by
+// vehicleID: the owner, or a viewer holding an accepted share of at least
+// `live_history` (MYR-184). Returns true if the check passes; on failure
+// writes an HTTP error response and returns false. The 404 / 403 split mirrors
+// the snapshot handler — an unknown vehicle is never distinguishable from one
+// the caller cannot see.
 func (h *VehicleDrivesHandler) verifyOwnership(ctx context.Context, w http.ResponseWriter, vehicleID, userID string) bool {
 	row, err := h.vehicles.GetByID(ctx, vehicleID)
 	if err != nil {
@@ -180,12 +195,21 @@ func (h *VehicleDrivesHandler) verifyOwnership(ctx context.Context, w http.Respo
 		return false
 	}
 
-	if row.UserID != userID {
-		h.logger.Warn("vehicle drives: ownership mismatch",
+	// MYR-184: a viewer needs `live_history` or better here. The drives
+	// surfaces are exactly the increment that tier buys — the tier below it
+	// (`live`) grants the live map and nothing historical — so a bare
+	// `live` viewer is refused 403 while the owner and the two higher
+	// tiers pass. The comparison is cumulative (AtLeast), never equality.
+	if _, err := vehicleAccessFor(ctx, h.shares, userID, vehicleID, row.UserID, auth.PermissionLiveHistory); err != nil {
+		if errors.Is(err, errNoVehicleAccess) {
+			denyVehicleAccess(w, h.logger, "vehicle drives", vehicleID, userID)
+			return false
+		}
+		h.logger.Error("vehicle drives: access resolution failed",
 			slog.String("vehicle_id", vehicleID),
-			slog.String("user_id", userID),
+			slog.String("error", err.Error()),
 		)
-		h.writeError(w, http.StatusForbidden, wserrors.ErrCodeVehicleNotOwned, "you do not own this vehicle")
+		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
 		return false
 	}
 

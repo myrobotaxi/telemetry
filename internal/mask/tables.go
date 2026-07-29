@@ -310,11 +310,23 @@ var vehicleSummaryOwnerFields = []string{
 	"serviceEstimatedEndAt",
 }
 
-// vehicleSummaryViewerFields is owner minus `name` per rest-api.md
-// §5.2.0. The user-assigned nickname is P1 and stays owner-only;
-// viewers still see model/year/color so they can identify the car in
-// their list.
-var vehicleSummaryViewerFields = removeField(vehicleSummaryOwnerFields, "name")
+// vehicleSummaryViewerFields is owner minus `name`, PLUS `sharePermission`
+// (rest-api.md §5.2.0).
+//
+// The user-assigned nickname is P1 and stays owner-only; viewers still see
+// model/year/color so they can identify the car in their list.
+//
+// MYR-184 added `sharePermission`, and it is the first field that is
+// VIEWER-ONLY rather than owner-only — the asymmetry runs the other way for
+// once. It describes the tier the caller holds over a car they do NOT own, so
+// it is meaningless on an owner row (an owner is not on a tier) and is
+// deliberately absent from the owner list above rather than being emitted
+// empty. P0: an authorization tier describing a relationship, not identifying
+// data — the same classification as its sibling `role`.
+var vehicleSummaryViewerFields = append(
+	removeField(vehicleSummaryOwnerFields, "name"),
+	"sharePermission",
+)
 
 // driveSummaryFields is the per-row drive-list allow-list shared by
 // owner and viewer per rest-api.md §5.2.2.
@@ -387,18 +399,48 @@ var driveRouteFields = []string{
 	"routePoints",
 }
 
-// inviteOwnerFields is the owner-visible Invite shape per
-// rest-api.md §7.5.2. email is P1 per data-classification.md §1.6 but
-// the owner already knows who they invited; the field is intentionally
-// included for owners.
+// inviteOwnerFields is the owner-visible ShareInvite shape per rest-api.md
+// §7.5 and schemas/vehicle-sharing.schema.json (contracts v0.19.0).
+//
+// MYR-184 REBUILT THIS LIST. It previously described a shape that never
+// existed on this server: an `id`/`email` invite modelled on the retired
+// Prisma `Invite` table, plus a `revokedAt` field. That drift was harmless
+// only because nothing projected through it; now that the endpoints are real,
+// the list is the allow-list an owner's invite rows are actually filtered
+// through, so every name here is the wire name the handler emits.
+//
+// Three corrections worth naming, because each was a real field on the old
+// list or a real omission from it:
+//
+//   - `email` is GONE and has no replacement. This contract is CODE-based —
+//     there is no email infrastructure and no address is ever collected. Its
+//     stand-in is `label`, an owner-typed memo ("Mom", "Mira Chen") that is
+//     never resolved to an account.
+//   - `revokedAt` is GONE. Revocation is a server-side tombstone; a revoked
+//     row is never serialized at all, so a field describing when it happened
+//     has no wire moment to appear in. Keeping it would imply revoked rows
+//     are returned.
+//   - `code` is NEW, and is the one field here that is a live CREDENTIAL
+//     rather than a description of one. It is owner-only by construction —
+//     the viewer role has no entry in this resource at all — and the handler
+//     additionally omits it from any row that is not pending. Never log it.
+//
+// `id` became `inviteId` to match the wire; `expiresAt` was missing entirely.
 var inviteOwnerFields = []string{
-	"id",
+	"inviteId",
 	"vehicleId",
-	"email",
+	// label is P1 — a person's name, typed by the owner. Included for
+	// owners because it is THEIR memo about a person they chose to invite;
+	// it is never delivered to the invited party.
+	"label",
+	"permission",
 	"status",
+	// code is P1 and BEARER. Present only on pending rows (enforced in the
+	// handler and again in SQL); never logged, never echoed into an error.
+	"code",
 	"createdAt",
+	"expiresAt",
 	"acceptedAt",
-	"revokedAt",
 }
 
 // setFromFields converts a slice of field names into a set keyed by

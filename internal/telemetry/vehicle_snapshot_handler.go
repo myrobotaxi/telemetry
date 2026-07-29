@@ -19,14 +19,24 @@ import (
 // the canonical v1 VehicleState shape per
 // docs/contracts/schemas/vehicle-state.schema.json.
 //
-// v1 only the owner path reaches a 200 — viewer-merged ownership for
-// snapshot requires the Go server to read the Prisma-owned Invite
-// table and is PLANNED. Until then, non-owner callers receive
-// 403 vehicle_not_owned.
+// MYR-184 OPENED THIS ENDPOINT TO VIEWERS. It previously 403'd every
+// non-owner, on the grounds that viewer access needed a table the Go server
+// did not read. It now reads go_vehicle_shares: a caller holding an ACCEPTED
+// share of at least the `live` tier — which is every tier, since the tiers are
+// cumulative and `live` is the floor — gets a 200 under the VIEWER mask.
+//
+// P1 LOCATION IS VISIBLE TO VIEWERS, deliberately. Live location is the entire
+// product being shared ("Live location" is the lowest tier's own name), so the
+// viewer mask strips only the full `vin` (MYR-279). What stays owner-only is
+// everything that MUTATES the car — commands, plate, service window, teardown,
+// refresh — and those endpoints are untouched by this change.
 type VehicleSnapshotHandler struct {
 	auth     tokenValidator
 	vehicles VehicleSnapshotReader
 	roles    roleResolver // optional: nil disables role-based mask plumbing
+	// shares resolves accepted share grants (MYR-184). Nil keeps the
+	// pre-MYR-184 owner-only behaviour — the fail-closed direction.
+	shares VehicleShareReader
 
 	// Mask-audit fields (MYR-71, rest-api.md §5.3). All optional —
 	// nil auditEmitter disables emit.
@@ -48,6 +58,15 @@ type VehicleSnapshotOption func(*VehicleSnapshotHandler)
 func WithSnapshotRoleResolver(roles roleResolver) VehicleSnapshotOption {
 	return func(h *VehicleSnapshotHandler) {
 		h.roles = roles
+	}
+}
+
+// WithSnapshotShareReader lets the handler admit VIEWERS holding an accepted
+// vehicle share (MYR-184). Without it the handler is owner-only, which is the
+// pre-MYR-184 behaviour and the fail-closed default.
+func WithSnapshotShareReader(shares VehicleShareReader) VehicleSnapshotOption {
+	return func(h *VehicleSnapshotHandler) {
+		h.shares = shares
 	}
 }
 
@@ -118,23 +137,27 @@ func (h *VehicleSnapshotHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	row, ok := h.loadSnapshot(ctx, w, vehicleID, userID)
+	row, access, ok := h.loadSnapshot(ctx, w, vehicleID, userID)
 	if !ok {
 		return
 	}
 
 	resp := buildSnapshotResponse(row)
-	h.writeMaskedResponse(r, w, vehicleID, userID, resp)
+	h.writeMaskedResponse(r, w, vehicleID, userID, access, resp)
 }
 
-// loadSnapshot fetches the snapshot row and verifies the caller owns
-// the vehicle. Returns the row on success. On failure writes an HTTP
+// loadSnapshot fetches the snapshot row and resolves the caller's access to it.
+// Returns the row and the resolved access on success. On failure writes an HTTP
 // error response and returns ok=false.
+//
+// The access check requires only PermissionLive — the floor tier — because the
+// snapshot IS the live-location surface the lowest tier exists to grant. Higher
+// tiers add history and rides, neither of which this endpoint serves.
 func (h *VehicleSnapshotHandler) loadSnapshot(
 	ctx context.Context,
 	w http.ResponseWriter,
 	vehicleID, userID string,
-) (VehicleSnapshotRow, bool) {
+) (VehicleSnapshotRow, vehicleAccess, bool) {
 	row, err := h.vehicles.GetByID(ctx, vehicleID)
 	if err != nil {
 		if errors.Is(err, sdk.ErrNotFound) {
@@ -142,26 +165,33 @@ func (h *VehicleSnapshotHandler) loadSnapshot(
 			// from "filtered out by ownership" so the server never
 			// leaks the existence of vehicles the caller cannot see.
 			h.writeError(w, http.StatusNotFound, wserrors.ErrCodeNotFound, "vehicle not found")
-			return VehicleSnapshotRow{}, false
+			return VehicleSnapshotRow{}, vehicleAccess{}, false
 		}
 		h.logger.Error("vehicle snapshot: lookup failed",
 			slog.String("vehicle_id", vehicleID),
 			slog.String("error", err.Error()),
 		)
 		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
-		return VehicleSnapshotRow{}, false
+		return VehicleSnapshotRow{}, vehicleAccess{}, false
 	}
 
-	if row.UserID != userID {
-		h.logger.Warn("vehicle snapshot: ownership mismatch",
+	access, err := vehicleAccessFor(ctx, h.shares, userID, vehicleID, row.UserID, auth.PermissionLive)
+	if err != nil {
+		if errors.Is(err, errNoVehicleAccess) {
+			denyVehicleAccess(w, h.logger, "vehicle snapshot", vehicleID, userID)
+			return VehicleSnapshotRow{}, vehicleAccess{}, false
+		}
+		// A share-lookup outage is a 500, not a 403 — hiding an outage
+		// behind a permissions error is how it goes uninvestigated.
+		h.logger.Error("vehicle snapshot: access resolution failed",
 			slog.String("vehicle_id", vehicleID),
-			slog.String("user_id", userID),
+			slog.String("error", err.Error()),
 		)
-		h.writeError(w, http.StatusForbidden, wserrors.ErrCodeVehicleNotOwned, "you do not own this vehicle")
-		return VehicleSnapshotRow{}, false
+		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
+		return VehicleSnapshotRow{}, vehicleAccess{}, false
 	}
 
-	return row, true
+	return row, access, true
 }
 
 // writeMaskedResponse projects the response through the role-based
@@ -176,13 +206,22 @@ func (h *VehicleSnapshotHandler) writeMaskedResponse(
 	r *http.Request,
 	w http.ResponseWriter,
 	vehicleID, userID string,
+	access vehicleAccess,
 	resp vehicleSnapshotResponse,
 ) {
 	if h.roles == nil {
-		// No role plumbing — emit the unmasked response. Owners (the
-		// only v1 reachable path) see the same fields the mask would
-		// return them.
-		h.writeJSON(w, http.StatusOK, resp)
+		if access.Role == auth.RoleOwner {
+			// No role plumbing and the caller owns the car — emit
+			// unmasked, which is the identity for the owner allow-list.
+			h.writeJSON(w, http.StatusOK, resp)
+			return
+		}
+		// A VIEWER without a role resolver must still be masked. Before
+		// MYR-184 this branch was unreachable because viewers were 403'd
+		// upstream; now that they are not, falling through to the unmasked
+		// response would hand a viewer the owner-only full `vin`.
+		projected, _ := mask.Apply(resp.toMaskMap(), mask.For(mask.ResourceVehicleState, access.Role))
+		h.writeJSON(w, http.StatusOK, projected)
 		return
 	}
 

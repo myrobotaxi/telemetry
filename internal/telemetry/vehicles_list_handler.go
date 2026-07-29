@@ -72,21 +72,30 @@ type VehicleLister interface {
 type VehiclesListHandler struct {
 	auth     tokenValidator
 	vehicles VehicleLister
-	logger   *slog.Logger
+	// shared supplies the MYR-184 viewer merge. Nil leaves the endpoint
+	// owner-only (see vehicles_list_viewer.go).
+	shared SharedVehicleLister
+	logger *slog.Logger
 }
 
 // NewVehiclesListHandler creates a handler that serves the
-// GET /api/vehicles list endpoint.
+// GET /api/vehicles list endpoint. Pass WithSharedVehicles to enable the
+// MYR-184 viewer merge.
 func NewVehiclesListHandler(
 	tokens tokenValidator,
 	vehicles VehicleLister,
 	logger *slog.Logger,
+	opts ...VehiclesListOption,
 ) *VehiclesListHandler {
-	return &VehiclesListHandler{
+	h := &VehiclesListHandler{
 		auth:     tokens,
 		vehicles: vehicles,
 		logger:   logger,
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 // vehicleSummary is the per-row catalog shape returned by the list
@@ -116,6 +125,12 @@ type vehicleSummary struct {
 	// that predates MYR-233, never "vehicle is free". Consumers treat an
 	// absent value as "availability unknown → treat as available".
 	HasActiveRide bool `json:"hasActiveRide"`
+	// SharePermission is the cumulative tier the caller holds over a SHARED
+	// vehicle (MYR-184). Emitted if and only if Role is `viewer`; omitted on
+	// owner rows, where it would be meaningless — an owner is not on a tier.
+	// It is a UI-affordance hint: the server enforces every gate it
+	// describes independently, so a client that ignores it cannot escalate.
+	SharePermission string `json:"sharePermission,omitempty"`
 	// ServiceEstimatedEndAt is when this car's CURRENT SERVICE VISIT is
 	// expected to end (MYR-316, contracts v0.17.0) — the same value and the
 	// same semantics as VehicleState.serviceEstimatedEndAt. RFC 3339 UTC, or
@@ -130,6 +145,19 @@ type vehicleSummary struct {
 // projection through the role-based mask. Mirrors the pattern in
 // vehicle_status_handler.go ToMaskMap.
 func (v vehicleSummary) toMaskMap() map[string]any {
+	m := v.baseMaskMap()
+	// Emitted only on viewer rows (MYR-184). Adding the key unconditionally
+	// would put an empty-string tier on every owner row, which a consumer
+	// told to treat an absent tier as the LOWEST one would read as "this
+	// owner has `live` access to their own car".
+	if v.SharePermission != "" {
+		m["sharePermission"] = v.SharePermission
+	}
+	return m
+}
+
+// baseMaskMap is the role-independent field set.
+func (v vehicleSummary) baseMaskMap() map[string]any {
 	return map[string]any{
 		"vehicleId":      v.VehicleID,
 		"name":           v.Name,
@@ -186,10 +214,12 @@ func (h *VehiclesListHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// v1: ListByUser returns vehicles where Vehicle.userId == userID, so
-	// every row is owned by the caller. Viewer-merged enumeration is
-	// PLANNED — see rest-api.md §7.0 RBAC v1 implementation note.
+	// ListByUser returns vehicles where Vehicle.userId == userID, so every
+	// row here is owned by the caller and gets the owner mask. Vehicles
+	// somebody SHARED with the caller are appended separately as viewer rows
+	// (MYR-184 / MYR-91 viewer merge) — owner rows first, then shared.
 	resp := h.buildResponse(rows, auth.RoleOwner)
+	resp = h.appendSharedRows(ctx, userID, resp)
 	h.writeJSON(w, http.StatusOK, resp)
 }
 
@@ -204,25 +234,7 @@ func (h *VehiclesListHandler) buildResponse(rows []VehicleCatalogRow, role auth.
 	items := make([]map[string]any, 0, len(rows))
 	maskSpec := mask.For(mask.ResourceVehicleSummary, role)
 	for i := range rows {
-		v := &rows[i]
-		summary := vehicleSummary{
-			VehicleID:      v.ID,
-			Name:           v.Name,
-			Model:          v.Model,
-			Year:           v.Year,
-			Color:          v.Color,
-			LicensePlate:   v.LicensePlate,
-			VinLast4:       lastFourOfVIN(v.VIN),
-			Status:         v.Status,
-			ChargeLevel:    v.ChargeLevel,
-			EstimatedRange: v.EstimatedRange,
-			LastUpdated:    v.LastUpdated.UTC().Format(time.RFC3339),
-			Role:           string(role),
-			HasActiveRide:  v.HasActiveRide,
-			// MYR-316: resolved here so the precedence and the in-service gate
-			// are applied exactly once per surface (service_window.go).
-			ServiceEstimatedEndAt: serviceEstimatedEndAtWire(v.Status, v.ServiceETC, v.ServiceExpectedEndAt),
-		}
+		summary := newVehicleSummary(&rows[i], role, "")
 		// `fieldsMasked` is intentionally discarded in v1: §7.0 reads
 		// are not audited per `data-lifecycle.md` §4.2, and the v1
 		// path only ever projects RoleOwner (which is the identity for
@@ -236,6 +248,37 @@ func (h *VehiclesListHandler) buildResponse(rows []VehicleCatalogRow, role auth.
 		items = append(items, projected)
 	}
 	return vehiclesListResponse{Items: items}
+}
+
+// newVehicleSummary builds the per-row wire shape for a catalog row under a
+// given role. tier is the caller's share permission and is stamped ONLY on
+// viewer rows — pass the empty string for an owner.
+//
+// Shared by the owner list, the viewer merge (vehicles_list_viewer.go), and the
+// redeem response, so all three emit byte-identical rows for the same vehicle.
+func newVehicleSummary(v *VehicleCatalogRow, role auth.Role, tier auth.SharePermission) vehicleSummary {
+	summary := vehicleSummary{
+		VehicleID:      v.ID,
+		Name:           v.Name,
+		Model:          v.Model,
+		Year:           v.Year,
+		Color:          v.Color,
+		LicensePlate:   v.LicensePlate,
+		VinLast4:       lastFourOfVIN(v.VIN),
+		Status:         v.Status,
+		ChargeLevel:    v.ChargeLevel,
+		EstimatedRange: v.EstimatedRange,
+		LastUpdated:    v.LastUpdated.UTC().Format(time.RFC3339),
+		Role:           string(role),
+		HasActiveRide:  v.HasActiveRide,
+		// MYR-316: resolved here so the precedence and the in-service gate
+		// are applied exactly once per surface (service_window.go).
+		ServiceEstimatedEndAt: serviceEstimatedEndAtWire(v.Status, v.ServiceETC, v.ServiceExpectedEndAt),
+	}
+	if role == auth.RoleViewer {
+		summary.SharePermission = string(tier)
+	}
+	return summary
 }
 
 // lastFourOfVIN returns the last 4 characters of a VIN. Empty input

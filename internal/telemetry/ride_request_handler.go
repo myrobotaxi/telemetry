@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/myrobotaxi/telemetry/internal/auth"
 	"github.com/myrobotaxi/telemetry/internal/events"
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
 	"github.com/myrobotaxi/telemetry/pkg/sdk"
@@ -19,20 +20,43 @@ import (
 // (incoming feed, accept/decline — MYR-175) is served by the sibling
 // RideRequestOwnerHandler.
 //
-// Authorization model (v1): the create access check reuses the existing
-// vehicle-access pattern (VehicleSnapshotReader.GetByID + owner match, same
-// as /snapshot and /drives), so today only a caller who owns the vehicle may
-// request a ride on it and the ride's ownerId is that same owner. Broader
-// shared-viewer requests (rider != owner) are DEFERRED to the app-side
-// sharing tiers: they land when the server's vehicle-access set gains the
-// viewer-merge pathway (GetUserVehicles, PLANNED MYR-91) — no change to this
-// handler is needed, only a wider access set.
+// Authorization model. The create access check is the vehicle owner OR a
+// viewer holding an accepted share at the `rides` tier — the top tier, whose
+// entire increment over `live_history` is exactly this: "send the car to pick
+// them up".
+//
+// MYR-184 CORRECTED THE PREDICTION THIS COMMENT USED TO MAKE. It previously
+// said shared-viewer requests would "land when the access set widens, with no
+// change to this handler". That was wrong, and rest-api.md §7.8 repeated the
+// same error. The owner-equality check below is a SEPARATE code path from the
+// read-side access set: widening GetUserVehicles put shared cars in a viewer's
+// list and let them read the snapshot, but this check would still have refused
+// every one of their ride requests. Granting `rides` required changing it, and
+// this is that change.
+//
+// The ride's ownerId is still the VEHICLE's owner, never the requester, so a
+// rider≠owner request routes to the car's owner for accept/decline exactly as
+// an owner's own request does.
 type RideRequestHandler struct {
 	auth     tokenValidator
 	vehicles VehicleSnapshotReader
 	store    RideRequestStore
 	events   RideEventPublisher
-	logger   *slog.Logger
+	// shares admits a non-owner rider holding an accepted `rides` share.
+	// Nil keeps the endpoint owner-only — the fail-closed default.
+	shares VehicleShareReader
+	logger *slog.Logger
+}
+
+// RideRequestOption configures optional dependencies on RideRequestHandler.
+type RideRequestOption func(*RideRequestHandler)
+
+// WithRideShareReader admits riders who are not the vehicle's owner but hold
+// an accepted share at the `rides` tier (MYR-184).
+func WithRideShareReader(shares VehicleShareReader) RideRequestOption {
+	return func(h *RideRequestHandler) {
+		h.shares = shares
+	}
 }
 
 // NewRideRequestHandler constructs the rider-facing handler. events may be
@@ -44,14 +68,19 @@ func NewRideRequestHandler(
 	store RideRequestStore,
 	publisher RideEventPublisher,
 	logger *slog.Logger,
+	opts ...RideRequestOption,
 ) *RideRequestHandler {
-	return &RideRequestHandler{
+	h := &RideRequestHandler{
 		auth:     tokens,
 		vehicles: vehicles,
 		store:    store,
 		events:   publisher,
 		logger:   logger,
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 // ServeCreate handles POST /api/ride-requests.
@@ -73,8 +102,8 @@ func (h *RideRequestHandler) ServeCreate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Derive ownerId from the vehicle + enforce vehicle access (v1: owner
-	// match; see the type doc for the deferred shared-viewer expansion).
+	// Derive ownerId from the vehicle + enforce vehicle access: the owner,
+	// or a viewer at the `rides` tier (see the type doc).
 	row, err := h.vehicles.GetByID(ctx, in.VehicleID)
 	if err != nil {
 		if errors.Is(err, sdk.ErrNotFound) {
@@ -88,15 +117,26 @@ func (h *RideRequestHandler) ServeCreate(w http.ResponseWriter, r *http.Request)
 		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
 		return
 	}
-	if row.UserID != userID {
-		h.logger.Warn("ride-request create: vehicle access denied",
+	// `rides` is the TOP tier and its whole increment is this endpoint, so a
+	// viewer at `live` or `live_history` is refused here even though they can
+	// see the car and (at live_history) its trip history.
+	if _, accessErr := vehicleAccessFor(ctx, h.shares, userID, in.VehicleID, row.UserID, auth.PermissionRides); accessErr != nil {
+		if errors.Is(accessErr, errNoVehicleAccess) {
+			denyVehicleAccess(w, h.logger, "ride-request create", in.VehicleID, userID)
+			return
+		}
+		h.logger.Error("ride-request create: access resolution failed",
 			slog.String("vehicle_id", in.VehicleID),
-			slog.String("user_id", userID),
+			slog.String("error", accessErr.Error()),
 		)
-		h.writeError(w, http.StatusForbidden, wserrors.ErrCodeVehicleNotOwned, "you do not have access to this vehicle")
+		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
 		return
 	}
 	in.RiderID = userID
+	// The ride's owner is the VEHICLE's owner, which for a shared rider is
+	// somebody other than the requester — that asymmetry is the point of the
+	// `rides` tier, and it is what routes the accept/decline to the right
+	// person.
 	in.OwnerID = row.UserID
 
 	// MYR-316: a scheduled ride may not be booked for a time before the car is
