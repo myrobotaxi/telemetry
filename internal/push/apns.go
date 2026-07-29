@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -96,25 +97,73 @@ func (c *Client) attempt(ctx context.Context, n Notification, body []byte) (retr
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	return classify(resp.StatusCode)
+	return classify(resp.StatusCode, drainReason(resp.Body))
 }
 
-// classify maps an APNs status code onto (retryable, error).
-func classify(status int) (bool, error) {
+// maxAPNsErrorBody caps the rejection body we read. Apple's is a two-field
+// JSON object; the bound stops a misbehaving proxy from making us read a
+// stream on the notification path.
+const maxAPNsErrorBody = 4 << 10
+
+// drainReason consumes the response body and returns APNs's `reason` string
+// when there is one (`BadDeviceToken`, `ExpiredProviderToken`, `TopicDisallowed`,
+// …). Draining matters twice over: it lets the connection be reused, and
+// without the reason a 400 or 403 log line says only "status 400" — true, and
+// useless, since the four things that produce a 403 need four different fixes.
+// A body we cannot read or parse is not an error; the status alone still
+// classifies the response.
+func drainReason(body io.Reader) string {
+	data, err := io.ReadAll(io.LimitReader(body, maxAPNsErrorBody))
+	// Drain whatever is left so the connection is reusable even if the body
+	// exceeded the cap.
+	_, _ = io.Copy(io.Discard, body)
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+
+	var payload struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return ""
+	}
+	return payload.Reason
+}
+
+// classify maps an APNs status code (and its optional reason) onto
+// (retryable, error).
+func classify(status int, reason string) (bool, error) {
 	switch {
 	case status == http.StatusOK:
 		return false, nil
 	case status == http.StatusGone, status == http.StatusBadRequest:
 		// 410 Unregistered, and 400 (BadDeviceToken / DeviceTokenNotForTopic).
 		// Both mean this token will never accept another push.
-		return false, ErrUnregistered
+		return false, withReason(ErrUnregistered, reason)
 	case status == http.StatusTooManyRequests:
-		return false, ErrThrottled
+		return false, withReason(ErrThrottled, reason)
 	case status >= http.StatusInternalServerError:
-		return true, fmt.Errorf("push: apns status %d", status)
+		return true, statusError(status, reason)
 	default:
-		return false, fmt.Errorf("push: apns status %d", status)
+		return false, statusError(status, reason)
 	}
+}
+
+// withReason annotates a sentinel with APNs's reason while keeping errors.Is
+// working against the sentinel.
+func withReason(sentinel error, reason string) error {
+	if reason == "" {
+		return sentinel
+	}
+	return fmt.Errorf("push: apns reason %s: %w", reason, sentinel)
+}
+
+// statusError renders a non-sentinel APNs rejection.
+func statusError(status int, reason string) error {
+	if reason == "" {
+		return fmt.Errorf("push: apns status %d", status)
+	}
+	return fmt.Errorf("push: apns status %d (%s)", status, reason)
 }
 
 // newRequest builds the POST /3/device/{token} request with the APNs headers.

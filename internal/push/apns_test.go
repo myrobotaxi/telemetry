@@ -135,6 +135,67 @@ func TestClientSendRetriesNetworkErrorOnce(t *testing.T) {
 	}
 }
 
+// TestClientSendSurfacesAPNsReason proves the rejection body reaches the error
+// (and so the log line). Without it a 403 says only "status 403", which is
+// true and useless — the several conditions that produce one need different
+// fixes. The sentinel must still match errors.Is so the 410 row-delete path is
+// unaffected by the annotation.
+func TestClientSendSurfacesAPNsReason(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      int
+		respBody    string
+		wantErr     error
+		wantErrText string
+	}{
+		{
+			name: "403 carries the reason", status: http.StatusForbidden,
+			respBody: `{"reason":"ExpiredProviderToken"}`, wantErrText: "apns status 403 (ExpiredProviderToken)",
+		},
+		{
+			name: "410 keeps the sentinel and adds the reason", status: http.StatusGone,
+			respBody: `{"reason":"Unregistered"}`, wantErr: ErrUnregistered, wantErrText: "Unregistered",
+		},
+		{
+			name: "400 keeps the sentinel", status: http.StatusBadRequest,
+			respBody: `{"reason":"BadDeviceToken"}`, wantErr: ErrUnregistered, wantErrText: "BadDeviceToken",
+		},
+		{
+			name: "429 keeps the sentinel", status: http.StatusTooManyRequests,
+			respBody: `{"reason":"TooManyRequests"}`, wantErr: ErrThrottled, wantErrText: "TooManyRequests",
+		},
+		{
+			name: "empty body still classifies", status: http.StatusForbidden,
+			wantErrText: "apns status 403",
+		},
+		{
+			name: "unparseable body still classifies", status: http.StatusForbidden,
+			respBody: "<html>gateway</html>", wantErrText: "apns status 403",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tt.status)
+				_, _ = io.WriteString(w, tt.respBody)
+			}))
+			defer srv.Close()
+
+			err := newTestClient(t, srv.URL).Send(context.Background(), testNotification())
+			if err == nil {
+				t.Fatal("Send() error = nil, want an error")
+			}
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Errorf("Send() error = %v, want errors.Is %v", err, tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErrText) {
+				t.Errorf("Send() error = %q, want containing %q", err, tt.wantErrText)
+			}
+		})
+	}
+}
+
 // TestClientRequestShape asserts the wire contract: path, headers, signed
 // provider token, and a payload whose only userInfo key is rideId.
 func TestClientRequestShape(t *testing.T) {

@@ -235,6 +235,13 @@ func (n *Notifier) logUnexpectedPayload(evt events.Event) {
 
 // async runs fn on a bounded worker under a fresh timeout, returning
 // immediately so the bus's serial per-subscriber loop is never blocked.
+//
+// The goroutine is spawned before the semaphore is acquired, which looks
+// unbounded but is not: the bus delivers SERIALLY per subscriber, so at most
+// one handler per topic can be in flight here at a time, and each spawned
+// goroutine either runs or parks on sem — it never fans out further. The cap
+// therefore bounds concurrent APNs traffic, not goroutine count, which is the
+// resource actually worth limiting.
 func (n *Notifier) async(fn func(context.Context)) {
 	n.wg.Add(1)
 	go func() {
