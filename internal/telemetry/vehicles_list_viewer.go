@@ -87,12 +87,18 @@ func (h *VehiclesListHandler) appendSharedRows(ctx context.Context, userID strin
 // viewerSummaryMap projects one shared vehicle through the VIEWER
 // VehicleSummary mask.
 //
-// The mask is the real gate, not the struct: `name` (the owner-curated
-// nickname, P1) is stripped here and nowhere else, so a field added to
-// vehicleSummary without a matching allow-list entry is dropped from viewer
-// rows rather than silently leaked. Used by both the list merge and the redeem
-// response so a redeemer cannot see one field more on the join screen than in
-// their catalog a second later.
+// The mask is the real gate, not the struct: a field added to vehicleSummary
+// without a matching allow-list entry is dropped from viewer rows rather than
+// silently leaked. Used by both the list merge and the redeem response so a
+// redeemer cannot see one field more on the join screen than in their catalog a
+// second later.
+//
+// The v1 viewer allow-list subtracts NOTHING from the owner list and adds
+// `sharePermission` — including `name`, the owner-curated nickname the rider UI
+// renders as "{Owner}'s {Vehicle}". That is not incidental: every field
+// vehicle-summary.schema.json marks `required` must survive this projection, or
+// the rows this function emits are invalid against the shape their own consumer
+// decodes. Asserted in vehicles_list_viewer_schema_test.go.
 func viewerSummaryMap(row VehicleCatalogRow, tier auth.SharePermission) map[string]any {
 	summary := newVehicleSummary(&row, auth.RoleViewer, tier)
 	projected, _ := mask.Apply(

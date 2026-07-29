@@ -127,13 +127,20 @@ func TestShareRedeemHandler_Success(t *testing.T) {
 		t.Errorf("sharePermission = %v, want rides", row["sharePermission"])
 	}
 
-	// The VIEWER mask must have stripped the owner-curated nickname. This is
-	// the assertion that the redeem response reuses the catalog projection
-	// rather than serializing the raw row.
-	if _, leaked := row["name"]; leaked {
-		t.Error("the owner-curated `name` reached the redeemer — the viewer mask was not applied")
+	// The redeemer's join screen renders "{Owner}'s {Vehicle}", so the vehicle
+	// nickname comes through (MYR-184) — and must, since `name` is `required`
+	// in vehicle-summary.schema.json and this row is a VehicleSummary.
+	if row["name"] != "Alex's Model 3" {
+		t.Errorf("name = %v, want the vehicle nickname on the join screen", row["name"])
 	}
-	// ...but the fields a rider genuinely needs are present.
+	// What the viewer mask DOES withhold is the owner-facing invite shape —
+	// no label, no code, no invite id — asserted below.
+	for _, withheld := range []string{"label", "code", "inviteId", "vin"} {
+		if _, leaked := row[withheld]; leaked {
+			t.Errorf("the redeemer's row carried %q — the viewer projection leaked owner-facing state", withheld)
+		}
+	}
+	// ...and the fields a rider genuinely needs are present.
 	for _, want := range []string{"vehicleId", "model", "color", "licensePlate", "vinLast4", "chargeLevel"} {
 		if _, ok := row[want]; !ok {
 			t.Errorf("the viewer row is missing %q", want)

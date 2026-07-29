@@ -33,16 +33,30 @@ var masksByResource = map[ResourceType]map[auth.Role]ResourceMask{
 		auth.RoleViewer: setFromFields(vehicleStateViewerFields),
 	},
 
-	// rest-api.md §5.2.0 — Vehicles list (vehicle summary). Owners see
-	// every field; viewers see every field EXCEPT `name` (P1,
-	// owner-curated nickname). `licensePlate` (MYR-286) is in BOTH
-	// lists for the same deliberate reason as the snapshot resource
-	// above — a rider identifies the car at pickup from the catalog
-	// row. Per §7.0, v1 only reaches the owner
-	// branch (viewer-merged enumeration depends on the Go server
-	// reading the Prisma-owned Invite table — PLANNED), but the viewer
-	// mask is wired now so the data-side is ready when the invite-read
-	// pathway lands.
+	// rest-api.md §5.2.0 — Vehicles list (vehicle summary). Owners and
+	// viewers see the same field set; the viewer list adds
+	// `sharePermission` and subtracts NOTHING. `licensePlate` (MYR-286)
+	// is in both lists for the same deliberate reason as the snapshot
+	// resource above — a rider identifies the car at pickup from the
+	// catalog row.
+	//
+	// MYR-184 REMOVED the previous `name` subtraction. Two reasons, and
+	// the second is the binding one:
+	//
+	//   - Product: the rider UI renders "{Owner}'s {Vehicle}", so the
+	//     nickname is the label a viewer reads. Vehicle nicknames are
+	//     P1-acceptable for viewers under the same policy that puts
+	//     first names in the push payloads.
+	//   - Contract: `name` is in the `required` list of
+	//     schemas/vehicle-summary.schema.json. Stripping it made EVERY
+	//     viewer row — the §7.0 merge and the §7.5.5 redeem response
+	//     alike — fail its own schema. A field this mask removes must
+	//     be OPTIONAL in the schema; that is asserted directly by
+	//     TestViewerMaskKeepsEverySchemaRequiredField in
+	//     internal/telemetry.
+	//
+	// The viewer merge is live (MYR-184), so this projection runs on
+	// every list call from anyone who has redeemed an invite.
 	ResourceVehicleSummary: {
 		auth.RoleOwner:  setFromFields(vehicleSummaryOwnerFields),
 		auth.RoleViewer: setFromFields(vehicleSummaryViewerFields),
@@ -280,6 +294,10 @@ var vehicleStateViewerFields = removeField(vehicleStateOwnerFields, "vin")
 // telemetry is fetched via `/snapshot` (§7.1).
 var vehicleSummaryOwnerFields = []string{
 	"vehicleId",
+	// name is the owner-curated nickname (P1). Viewer-visible since
+	// MYR-184: the rider UI renders "{Owner}'s {Vehicle}", and it is
+	// `required` in vehicle-summary.schema.json, so it cannot be masked
+	// away without making every viewer row schema-invalid.
 	"name",
 	"model",
 	"year",
@@ -294,27 +312,34 @@ var vehicleSummaryOwnerFields = []string{
 	// right now?), P0 like its sibling `status`. Riders need it to
 	// render a Busy badge and route new instant requests to the
 	// scheduling flow, so it is NOT owner-private: the viewer list
-	// below inherits it (owner minus `name`).
+	// below inherits it (the viewer list subtracts nothing).
 	"hasActiveRide",
-	// MYR-286 — owner-entered license plate (P1). Like `hasActiveRide`
-	// and unlike `name`, it is NOT owner-private: the viewer list below
-	// inherits it (owner minus `name`) because a rider identifies the
-	// car at pickup from this catalog row. Deliberate product decision;
+	// MYR-286 — owner-entered license plate (P1). Like `hasActiveRide`,
+	// it is NOT owner-private: the viewer list below inherits it because
+	// a rider identifies the car at pickup from this catalog row —
+	// exactly the reason `name` is viewer-visible too, since MYR-184.
+	// Deliberate product decision;
 	// contrast the full `vin`, which the catalog never carries at all
 	// (`vinLast4` only) and which the snapshot gates to owners.
 	"licensePlate",
 	// MYR-316 — service window. P0, and NOT owner-private for the same reason
 	// as `hasActiveRide`: the rider scheduling flow floors its picker at this
 	// instant, so a viewer who cannot see it cannot schedule correctly. The
-	// viewer list below inherits it (owner minus `name`).
+	// viewer list below inherits it (the viewer list subtracts nothing).
 	"serviceEstimatedEndAt",
 }
 
-// vehicleSummaryViewerFields is owner minus `name`, PLUS `sharePermission`
-// (rest-api.md §5.2.0).
+// vehicleSummaryViewerFields is the owner list PLUS `sharePermission`, with
+// NOTHING subtracted (rest-api.md §5.2.0).
 //
-// The user-assigned nickname is P1 and stays owner-only; viewers still see
-// model/year/color so they can identify the car in their list.
+// `name` used to be subtracted here. It is not any more: the rider UI renders
+// the shared car as "{Owner}'s {Vehicle}", so the owner-curated nickname is the
+// label the viewer reads, and a vehicle nickname is P1-acceptable for viewers
+// under the same policy that puts the owner's first name in the push payloads
+// and in RedeemShareInviteResponse.ownerFirstName. It was also a CONTRACT
+// violation: `name` is `required` in schemas/vehicle-summary.schema.json, so
+// stripping it made every viewer row invalid against the shape its own consumer
+// decodes. Anything removed here in future MUST be optional in that schema.
 //
 // MYR-184 added `sharePermission`, and it is the first field that is
 // VIEWER-ONLY rather than owner-only — the asymmetry runs the other way for
@@ -323,8 +348,12 @@ var vehicleSummaryOwnerFields = []string{
 // deliberately absent from the owner list above rather than being emitted
 // empty. P0: an authorization tier describing a relationship, not identifying
 // data — the same classification as its sibling `role`.
+//
+// The owner list is COPIED before the append: appending straight onto it would
+// share backing array with vehicleSummaryOwnerFields and could overwrite an
+// owner entry the next time the owner list grows.
 var vehicleSummaryViewerFields = append(
-	removeField(vehicleSummaryOwnerFields, "name"),
+	append([]string(nil), vehicleSummaryOwnerFields...),
 	"sharePermission",
 )
 

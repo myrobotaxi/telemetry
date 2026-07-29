@@ -92,8 +92,12 @@ func TestVehiclesListViewerMerge(t *testing.T) {
 		if viewerRow["sharePermission"] != "live_history" {
 			t.Errorf("sharePermission = %v, want live_history", viewerRow["sharePermission"])
 		}
-		if _, leaked := viewerRow["name"]; leaked {
-			t.Error("the owner-curated `name` reached a viewer row — the viewer mask was not applied")
+		// `name` is VIEWER-VISIBLE (MYR-184): the rider UI renders
+		// "{Owner}'s {Vehicle}", and the field is `required` in
+		// vehicle-summary.schema.json, so a viewer row without it is invalid
+		// against its own contract.
+		if viewerRow["name"] != "Alex's Model 3" {
+			t.Errorf("viewer row name = %v, want the vehicle nickname", viewerRow["name"])
 		}
 		if viewerRow["licensePlate"] == nil {
 			t.Error("a viewer row is missing licensePlate; a rider identifies the car at pickup from it")

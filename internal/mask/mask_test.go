@@ -195,8 +195,7 @@ func TestFor_VehicleState_BothRolesHaveLicensePlate(t *testing.T) {
 }
 
 // TestFor_VehicleSummary_BothRolesHaveLicensePlate is the vehicles-list half of
-// the same MYR-286 decision — the viewer list is owner-minus-`name`, so the
-// plate must survive into it.
+// the same MYR-286 decision.
 func TestFor_VehicleSummary_BothRolesHaveLicensePlate(t *testing.T) {
 	for _, role := range []auth.Role{auth.RoleOwner, auth.RoleViewer} {
 		m := For(ResourceVehicleSummary, role)
@@ -204,10 +203,44 @@ func TestFor_VehicleSummary_BothRolesHaveLicensePlate(t *testing.T) {
 			t.Errorf("%s summary mask must contain licensePlate (MYR-286)", role)
 		}
 	}
-	// The viewer list still strips the owner-curated nickname — proving the
-	// plate's presence is a deliberate carve-out, not a broken viewer mask.
-	if _, ok := For(ResourceVehicleSummary, auth.RoleViewer).Allowed["name"]; ok {
-		t.Error("viewer summary mask must NOT contain name")
+}
+
+// TestFor_VehicleSummary_ViewerIsOwnerPlusSharePermission pins the MYR-184
+// shape of the vehicles-list viewer mask: it subtracts NOTHING from the owner
+// list and adds exactly one field.
+//
+// `name` is the field this test exists for. It used to be subtracted, which
+// made every viewer row invalid against vehicle-summary.schema.json (`name` is
+// in that schema's `required` list) while every field-by-field assertion still
+// passed. The product answer is that viewers SEE the nickname — the rider UI
+// renders "{Owner}'s {Vehicle}" — so re-introducing the subtraction has to
+// break a test rather than ship quietly. Any future subtraction here MUST be
+// paired with making the field optional in the schema.
+func TestFor_VehicleSummary_ViewerIsOwnerPlusSharePermission(t *testing.T) {
+	owner := For(ResourceVehicleSummary, auth.RoleOwner)
+	viewer := For(ResourceVehicleSummary, auth.RoleViewer)
+
+	for field := range owner.Allowed {
+		if _, ok := viewer.Allowed[field]; !ok {
+			t.Errorf("%q is owner-visible but viewer-denied — the vehicles-list viewer mask "+
+				"subtracts nothing from the owner list", field)
+		}
+	}
+	for field := range viewer.Allowed {
+		if field == "sharePermission" {
+			continue
+		}
+		if _, ok := owner.Allowed[field]; !ok {
+			t.Errorf("%q is viewer-visible but owner-denied; sharePermission is the only "+
+				"viewer-only field on this resource", field)
+		}
+	}
+	if _, ok := viewer.Allowed["name"]; !ok {
+		t.Error("viewer summary mask is missing `name`, which vehicle-summary.schema.json " +
+			"marks required — every viewer row would fail its own schema")
+	}
+	if _, ok := owner.Allowed["sharePermission"]; ok {
+		t.Error("owner summary mask contains sharePermission — an owner is not on a tier")
 	}
 }
 
