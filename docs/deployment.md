@@ -140,6 +140,11 @@ Set secrets via the Fly CLI:
 fly secrets set DATABASE_URL="postgres://..."
 fly secrets set AUTH_SECRET="$(openssl rand -hex 32)"
 fly secrets set LOG_FORMAT=json
+
+# Push notifications (MYR-186). The .p8 is multi-line, so use the base64
+# form — a single env line with no embedded newlines.
+fly secrets set APNS_KEY_P8_B64="$(base64 -i AuthKey_XXXXXXXXXX.p8)"
+fly secrets set APNS_KEY_ID="XXXXXXXXXX"
 ```
 
 ---
@@ -155,6 +160,38 @@ fly secrets set LOG_FORMAT=json
 
 Secrets are **never** embedded in the Docker image or config files. They are
 injected at runtime via environment variables.
+
+### Push notifications (MYR-186)
+
+| Variable | Required | Description |
+|---|---|---|
+| `APNS_KEY_P8` | No | The APNs `.p8` auth key as raw PKCS#8 PEM. **Empty → sending disabled** (see below). |
+| `APNS_KEY_P8_B64` | No | The same PEM, base64-encoded — the container-friendly form. `APNS_KEY_P8` wins if both are set. |
+| `APNS_KEY_ID` | No | Apple's 10-character key id, sent as the provider token's `kid`. **Empty → sending disabled.** |
+| `APNS_TEAM_ID` | No | Apple developer team id (the token's `iss`). Defaults to `NFKX777598`. |
+| `APNS_TOPIC` | No | iOS bundle id sent as `apns-topic`. Defaults to `app.myrobotaxi.ios`. |
+| `PUSH_ENABLED` | No | Kill-switch, default `true`. **Fails fast** on a non-boolean (`off`, `no`, `""` are errors, not "enabled") — a switch you cannot trust is worse than none. Accepted values are exactly `strconv.ParseBool`'s. |
+
+**Keyless is a supported state.** Without `APNS_KEY_P8`/`APNS_KEY_ID` the
+service starts normally, `PUT`/`DELETE /api/push/devices` stay mounted,
+registrations still persist, and every would-be notification is logged as
+`push skipped` with `apns_configured=false`. That is deliberate: clients can
+register their tokens before the secrets exist, so the first deploy carrying
+them reaches phones immediately instead of waiting for every installed app to
+relaunch. A key that is **present but unparseable fails startup**, because at
+that point the operator believes push is on.
+
+**Sandbox vs production is per-device, not per-deploy.** The gateway is chosen
+from the `sandbox` flag each client sends at registration, so one deployment
+serves TestFlight and App Store builds simultaneously. Nothing here needs
+changing between them.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Startup log `push notifications not configured; sends will be skipped` | `APNS_KEY_P8` and/or `APNS_KEY_ID` unset | Set both secrets per the block above, then `fly deploy` (or restart) — the sender is built at startup |
+| Startup fails: `push: build apns client: …` | The key is set but is not a valid PKCS#8 PEM ECDSA key | Re-export the `.p8` from the Apple Developer portal; if using the `_B64` form, check the base64 encoding round-trips |
+| Sends log `apns status 403` | Wrong `APNS_KEY_ID`/`APNS_TEAM_ID`, or the key was revoked | Verify the key id and team id against the Apple Developer portal |
+| Sends log `apns status 400` and devices vanish | Token/gateway mismatch — a sandbox token sent to production or vice versa | Check the client is sending the correct `sandbox` flag for its build |
 
 ---
 

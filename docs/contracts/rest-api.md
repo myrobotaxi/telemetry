@@ -78,6 +78,7 @@ Every FR/NFR listed here is anchored in at least one section of this doc. The ta
    14. `PUT /api/tesla/vehicles/{vehicleId}/plate` (owner license-plate entry — MYR-286)
    15. `POST /api/tesla/vehicles/{vehicleId}/refresh` (owner on-demand state refresh — MYR-315)
    16. `PUT /api/tesla/vehicles/{vehicleId}/service-window` (owner expected-back entry — MYR-316)
+   17. Push notification device registry (2 operations — MYR-186)
 8. Resource schemas
 9. Observability
 10. Code <-> spec divergences
@@ -563,6 +564,8 @@ No contract changes are required for the new role's wire shape (the REST respons
 | `POST` | `/api/vehicles/{vehicleId}/command/{name}` | Send a Tesla vehicle command (P11 actuation + P10 dispatch) | Bearer + owner of vehicleId | FR-11.x, NFR-3.21 |
 | `POST` | `/api/tesla/vehicles/{vehicleId}/refresh` | On-demand state refresh: wake if needed, one `vehicle_data` read (§7.15) | Bearer + owner of vehicleId | FR-1.1, FR-2.1, NFR-3.21 |
 | `PUT` | `/api/tesla/vehicles/{vehicleId}/service-window` | Owner's "expected back" fallback for `serviceEstimatedEndAt` — the value Tesla's own estimate outranks (§7.16) | Bearer + owner of vehicleId | FR-9.3, NFR-3.21 |
+| `PUT` | `/api/push/devices` | Register or refresh this installation's APNs device token (§7.17.1) | Bearer (self only) | FR-9.3, NFR-3.21, MYR-186 |
+| `DELETE` | `/api/push/devices` | Unregister an APNs device token on sign-out (§7.17.2) | Bearer (self only) | FR-9.3, NFR-3.21, MYR-186 |
 | `POST` | `/api/auth/apple` | Native Sign in with Apple → ES256 access + refresh pair | None (pre-auth; per-IP rate-limited) | FR-6.1, MYR-193 |
 | `POST` | `/api/auth/refresh` | Single-use refresh-token rotation | Refresh token in body (pre-auth; per-IP rate-limited) | FR-6.2, MYR-193 |
 | `POST` | `/api/auth/revoke` | Revoke a refresh-token family (sign-out) | Refresh token in body (pre-auth; per-IP rate-limited) | MYR-193 |
@@ -2498,6 +2501,187 @@ wiring `cmd/telemetry-server/wiring_vehicle_service_window.go`.
 
 ---
 
+### 7.17 Push notification device registry (MYR-186)
+
+The address book behind ride-lifecycle push notifications: two user-scoped
+operations on one path, letting a signed-in phone say "reach me here" and
+"stop reaching me here."
+
+**Why this exists.** Every client-facing signal before MYR-186 travelled the
+WebSocket, which means it only arrived while the app was in the foreground
+holding a live socket. That is exactly the wrong assumption for the ride
+lifecycle: the owner who needs to see an incoming request has their phone in a
+pocket, and the rider who needs to know their car has arrived is not staring at
+a map. APNs is the only channel that reaches a locked screen, and APNs needs a
+per-installation device token that only the device itself can supply.
+
+**Both operations are user-scoped and there is no vehicle in the path**, so —
+unlike §7.12 / §7.14 / §7.16 — there is no ownership check to perform: the JWT
+subject *is* the resource owner, the same shape as the §7.6 / §7.7 `/api/users/me`
+surface.
+
+**Always mounted.** The routes exist whether or not the deployment carries APNs
+credentials. A client must be able to register before the secrets are set, so
+that the first deploy carrying them can reach phones immediately instead of
+waiting for every installed app to relaunch.
+
+**Classification.** `deviceToken` is **P1** — a device identifier and a
+capability (anyone holding it plus the team's APNs key can push to that phone).
+It is stored raw in the Go-owned `go_push_devices` table (migration 0019) and
+protected by log redaction rather than app-level encryption; see
+`data-classification.md` §1.14 and §3.2. Consequences that show up in this
+contract: the token is **never echoed** in a success response or an error
+envelope, and only an 8-character prefix ever reaches a log line.
+
+#### 7.17.1 `PUT /api/push/devices` (register / refresh)
+
+**Request.**
+
+```
+PUT /api/push/devices
+Authorization: Bearer <app session JWT>        # device owner = JWT sub
+Content-Type: application/json
+
+{ "deviceToken": "aabbccdd…", "sandbox": false }
+```
+
+| Field | Type | Classification | Notes |
+|-------|------|----------------|-------|
+| `deviceToken` | `string` | **P1** | The APNs token for this app installation. Required. Trimmed of surrounding whitespace; must be non-empty, at most 256 characters, and free of embedded whitespace or control characters. |
+| `sandbox` | `boolean` | P0 | `true` when the token was minted by a development or TestFlight build. Optional, defaults to `false`. **Not cosmetic:** a sandbox token is only valid against `api.sandbox.push.apple.com` and a release token only against `api.push.apple.com`; sending to the wrong gateway returns `BadDeviceToken`, which the server treats as a permanent rejection and deletes the row. |
+
+**Behavior / sequence:**
+
+1. Validate the bearer → `userId`. Missing/invalid → `401 auth_failed`. Non-`PUT`
+   method → `405 invalid_request`.
+2. Strict-decode the body (unknown keys are a `400`, matching §7.14 — a typo'd
+   key must fail loudly rather than silently registering an empty token).
+   Malformed JSON or a token that violates the rule above → `400 invalid_request`,
+   describing the RULE and **never echoing the value**.
+3. Upsert on `device_token`, stamping `last_seen_at`.
+
+**Idempotent (§4.5), and re-parenting is the point.** The conflict target is the
+token alone, **not** `(userId, deviceToken)`. A token identifies a physical
+installation, so when a second person signs in on the same phone the row must
+transfer to them. Keying on the pair would instead leave two rows claiming one
+device and keep delivering the previous occupant's ride notifications to the new
+occupant's lock screen. The same upsert refreshes `sandbox`, because a device can
+move between a TestFlight and an App Store build.
+
+**Response `200`** (`application/json`):
+
+```json
+{ "registered": true, "sandbox": false }
+```
+
+| Field | Type | Classification | Notes |
+|-------|------|----------------|-------|
+| `registered` | `boolean` | P0 | Always `true` on a `200`. |
+| `sandbox` | `boolean` | P0 | The flavour now stored. **The response deliberately does NOT echo `deviceToken`** — it is P1, the caller already knows the value it sent, and echoing it would put the token in every client log and proxy trace for no benefit. |
+
+**Errors:**
+
+| HTTP | `error.code` | When |
+|------|--------------|------|
+| 400 | `invalid_request` | Malformed JSON; unknown key; missing/empty `deviceToken`; token longer than 256 characters; token containing whitespace or control characters. |
+| 401 | `auth_failed` | Missing/malformed/invalid bearer. |
+| 405 | `invalid_request` | Non-`PUT` method. |
+| 500 | `internal_error` | Store-layer failure. Nothing written; retryable. |
+
+#### 7.17.2 `DELETE /api/push/devices` (unregister)
+
+**Request.** Same path, same body shape; `sandbox` is ignored (a token is
+unregistered by identity, not by flavour).
+
+```
+DELETE /api/push/devices
+Authorization: Bearer <app session JWT>
+Content-Type: application/json
+
+{ "deviceToken": "aabbccdd…" }
+```
+
+**Caller-scoped by SQL, not just by check.** The `DELETE` carries
+`WHERE user_id = <caller>`, so one person can never unregister another's phone
+even though the token alone would identify the row.
+
+**Response `200`** (`application/json`):
+
+```json
+{ "unregistered": true }
+```
+
+| Field | Type | Classification | Notes |
+|-------|------|----------------|-------|
+| `unregistered` | `boolean` | P0 | Whether a registration was actually removed. **`false` covers BOTH "already gone" and "registered to somebody else", deliberately indistinguishable** — otherwise the endpoint would be an oracle for whether an arbitrary token is registered, and to whom. Sign-out is idempotent: a miss is still a `200`. |
+
+**Errors:** identical to §7.17.1, except `405 invalid_request` is a non-`DELETE`
+method.
+
+#### Server-side sends (informative — no client contract)
+
+The registry exists to feed three internal bus seams. There is **no REST or
+WebSocket surface for the notifications themselves**; this subsection documents
+the behavior a client can rely on.
+
+| Bus topic | Audience | Notification title | Body |
+|-----------|----------|--------------------|------|
+| `ride.request.created` (on-demand) | vehicle **owner** | `«FirstName» wants a ride` (`New ride request` when unresolved) | `Open MyRoboTaxi to accept or decline.` |
+| `ride.request.created` (scheduled) | vehicle **owner** | `«FirstName» requested a scheduled ride` (`New scheduled ride request`) | `Open MyRoboTaxi to accept or decline.` |
+| `ride.status.changed` → `accepted` | **rider** | `Your ride is confirmed` | `Open MyRoboTaxi to see the details.` |
+| `ride.status.changed` → `declined` | **rider** | `«Vehicle» can't take this ride` (`Your car can't take this ride`) | `Try booking another car.` |
+| `ride.status.changed` → `arrived` | **rider** | `Your car is here — your turn to start` | `Open MyRoboTaxi to start the ride.` |
+| `ride.due` | **rider** | `«Vehicle» is heading your way` (`Your car is heading your way`) | `Your scheduled ride is starting now.` |
+
+Every other transition (`requested`, `enroute`, `completed`, `cancelled`) sends
+nothing — each is either the recipient's own action or invisible to them.
+
+**Payload policy — first names and vehicle nicknames ONLY.** A notification
+renders on a **locked screen**, to whoever is holding the phone. Pickup and
+dropoff labels, street addresses, coordinates and passenger phone numbers are P1
+(§1.9 of `data-classification.md`) and **never** appear in a notification. The
+APNs `userInfo` carries exactly one key, `{"rideId": "…"}`; a client that needs
+anything more refetches §7.8 detail over authenticated REST.
+
+**Scheduled rides do not name the time.** The server holds `scheduledFor` in UTC
+and knows nothing about the rider's or the owner's time zone, so any absolute
+rendering here would be either wrong (`5:30 PM` in the wrong zone) or unreadable
+(`Jul 31, 5:30 PM UTC`). The notification says only that the request is
+scheduled; correct local rendering belongs to the client, which knows the
+device's zone.
+
+**At-most-once is NOT guaranteed (v1).** The bus makes no exactly-once promise,
+and `ride.status.changed` is published on every lifecycle mutation — including a
+reschedule sub-state change, which re-publishes the ride's *unchanged* main
+status. So an accepted ride that is later rescheduled can produce a second
+"Your ride is confirmed". This is accepted for v1: a duplicate notification is a
+minor annoyance to a human, whereas a missed one is a rider standing on a
+sidewalk. `ride.due` has no such exposure — its publisher holds a one-winner
+latch for the ride's whole lifetime (§7.8's reservation-due seam).
+
+**Self-healing registry.** APNs answers `410 Unregistered` (and `400
+BadDeviceToken`) for a token that will never accept another push; the sender
+deletes that row. Since `go_push_devices` carries no Prisma FK (CG-DL-9),
+this feedback loop — not a cascade — is what keeps the table from accumulating
+dead installations.
+
+**Kill-switch and keyless operation.** `PUSH_ENABLED=false` stops all sending;
+so does a deployment with no `APNS_KEY_P8` / `APNS_KEY_ID`. In both states the
+endpoints stay mounted, registrations still persist, and each would-be
+notification is logged as `push skipped` — the service runs normally, it simply
+does not reach phones. See `docs/deployment.md`.
+
+**Observability.** The registration lines carry the P0 `user_id`, a `sandbox`
+flag, and the **8-character token prefix only** — never a whole token
+(`data-classification.md` §3.2). The send line carries `topic`, `ride_id`,
+`user_id` and device counts, and deliberately **not** the notification copy,
+which embeds a first name. Handlers:
+[`internal/push/devices_handler.go`](../../internal/push/devices_handler.go);
+consumers `internal/push/{notifier,notifier_send,copy}.go`; sender
+`internal/push/{apns,token}.go`; store
+[`internal/store/push_device_repo.go`](../../internal/store/push_device_repo.go);
+wiring `cmd/telemetry-server/wiring_push.go`.
+
 ---
 
 ## 8. Resource schemas
@@ -2570,6 +2754,7 @@ Same as [`websocket-protocol.md`](websocket-protocol.md) §10 divergence managem
 ## 11. Change log
 
 | Date | Change | Author |
+| 2026-07-28 | **Push notification infrastructure — §7.17 device registry, an APNs sender, and ride-lifecycle notifications ([MYR-186](https://linear.app/myrobotaxi/issue/MYR-186)).** The first server→phone channel that does **not** require a live WebSocket. Every client signal before this arrived only while the app was foregrounded holding a socket — precisely the wrong assumption for the ride lifecycle, where the owner who must see an incoming request has their phone pocketed and the rider who must know their car has arrived is not staring at a map. **New Go-owned table `go_push_devices` (migration 0019**, `0019_push_devices.up.sql`): `id` (Go cuid), `user_id`, `device_token` (**UNIQUE**), `platform` (`CHECK IN ('ios')`), `sandbox`, `created_at`, `last_seen_at`; no Prisma FK (CG-DL-9). **`device_token` is P1** — a device identifier AND a capability, since anyone holding it plus the team's APNs key can push to that phone — stored raw with **log-redaction only** (never encrypted): the sender needs the exact bytes on every send, and the token is useless without `APNS_KEY_P8`, which a database-read attacker does not get from this table (`data-classification.md` §1.14, §3.2; only an 8-character prefix is ever logged). **New §7.17: `PUT` and `DELETE /api/push/devices`**, both user-scoped with **no vehicle in the path and therefore no ownership check** — the JWT subject IS the resource owner, the §7.6/§7.7 shape. **The upsert's conflict target is `device_token` ALONE, not `(userId, deviceToken)`, and that IS the design:** a token identifies a physical installation, so a phone handed over (or a second account signing in) must **RE-PARENT** the row; keying on the pair would leave two rows claiming one device and keep delivering the previous occupant's rides to the new occupant's lock screen. `DELETE` is caller-scoped **in the SQL** (`WHERE user_id = <caller>`) and idempotent — a miss is still a `200` with `unregistered:false`, a value that covers BOTH "already gone" and "belongs to someone else", deliberately indistinguishable so the endpoint cannot oracle whether an arbitrary token is registered and to whom. **The token is NEVER echoed** in a success body or an error envelope. **New `internal/push` sender:** ES256 provider JWT signed with the `.p8`, cached **40 minutes** (the middle of Apple's 20–60m window — younger is `TooManyProviderTokenUpdates`, older is `ExpiredProviderToken`), HTTP/2 over plain `net/http` (**verified against `api.sandbox.push.apple.com`, which answers `HTTP/2.0` — no `x/net/http2` dependency**), gateway chosen per the row's `sandbox` flag. Best-effort with a **one-retry** budget on 5xx/transport; **`410 Unregistered` and `400 BadDeviceToken` DELETE the row** — with no Prisma FK that self-healing feedback loop, not a cascade, is what keeps the table from accumulating dead installations — and `429` drops. **Three new bus consumers** on `ride.request.created` (→ owner), `ride.status.changed` (→ rider, on `accepted`/`declined`/`arrived` only) and `ride.due` (→ rider); every other transition is silent. Each handler hands the event to a bounded worker and **returns to the bus immediately**, so a slow APNs round-trip can never stall the ride's own WS broadcast behind it, and no send failure can touch the ride flow. **Payload policy — first names and vehicle nicknames ONLY:** a notification renders on a **LOCKED screen** to whoever holds the phone, so pickup/dropoff labels, addresses, coordinates and passenger phone numbers (§1.9 P1) **never** appear; `userInfo` is exactly `{"rideId":"…"}`. **Scheduled rides deliberately OMIT the time** — the server holds `scheduledFor` in UTC and knows no client time zone, so an absolute rendering would be either wrong ("5:30 PM" in the wrong zone) or unreadable ("Jul 31, 5:30 PM UTC"); the copy says only that the request is scheduled and correct local rendering belongs to the client. **At-most-once is NOT guaranteed and is accepted for v1:** `ride.status.changed` fires on every mutation including a reschedule sub-state change, which re-publishes the UNCHANGED main status, so an accepted-then-rescheduled ride can produce a second "Your ride is confirmed" — a duplicate is a minor annoyance, a miss is a rider on a sidewalk. (`ride.due` is exempt: its publisher holds a one-winner latch for the ride's lifetime.) **Runs KEYLESS and that is a supported state, not a failure:** without `APNS_KEY_P8`/`APNS_KEY_ID` the endpoints stay mounted, registrations persist, and each would-be send is logged `push skipped` — so the first deploy carrying the secrets reaches phones immediately instead of waiting for every app to relaunch. A key that is PRESENT but unusable fails fast, because then the operator believes push is on. New env: `PUSH_ENABLED` (bool, default `true`, `ParseBool` fail-fast), `APNS_KEY_P8` / `APNS_KEY_P8_B64`, `APNS_KEY_ID`, `APNS_TEAM_ID` (default `NFKX777598`), `APNS_TOPIC` (default `app.myrobotaxi.ios`). §7.17 added; §1 TOC + §6 catalog rows added; `data-classification.md` §1.14/§3.2/§6 and `docs/deployment.md` updated. Implementation: `internal/push/*`, `internal/store/{push_device_repo,vehicle_name}.go`, `internal/store/migrations/0019_push_devices.{up,down}.sql`, `internal/config/load_push.go`, `cmd/telemetry-server/wiring_push.go`. | go-engineer |
 | 2026-07-28 | **Vehicle-details enrichment — `trimLabel` + `fsdVersion` on `/snapshot`, a Tesla-populated `color`, and a periodic in-service re-poll ([MYR-320](https://linear.app/myrobotaxi/issue/MYR-320)).** Contracts **v0.18.0**. Two OPTIONAL nullable **P0** string fields on `VehicleState` only — deliberately **NOT** on `VehicleSummary`, so unlike MYR-286/MYR-316 the list row is untouched: these are DETAILS-SHEET facts, and a catalog row that has to render six cars does not want them. **`trimLabel`** (`vehicle_data.vehicle_config.performance_package`, live-verified `"Performance"` on the owner's own car) is the DISPLAY-READY twin of `trim`, which stays the raw `trim_badging` badge code (e.g. `p74d`) for downstream classification — **both are kept, neither replaces the other, and only `trimLabel` may be rendered**: compose `<year> <model> <trimLabel>` and OMIT the label entirely when it is absent, never substituting `trim`, never re-casing it, never leaving a dangling separator. **`fsdVersion`** (live-verified `"FSD (Supervised) v14.3.5"`) comes from the **TITLE of the NEWEST `GET /api/1/vehicles/{vin}/release_notes` entry** — **no `vehicle_data` field and no proto carries it**, so that call is the only source Tesla exposes — and is DISTINCT from `softwareVersion`, the installed firmware build; the two move independently and neither derives from the other, so it is stored and emitted **VERBATIM** and consumers MUST NOT parse it, compare it ordinally, or gate a feature on a number extracted from it (its shape is Tesla's and may change). **Both are SNAPSHOT-ONLY:** no proto and no `fieldMap` entry — which is also exactly what carries them past the MYR-300 stream-recency gate — so **no fleet-config change** and a `vehicle_update` frame NEVER carries either, matching `trim` (MYR-279), `seatCoolingCapable` (MYR-308) and `serviceEstimatedEndAt` (MYR-316). Persisted by migration **0018** (`0018_vehicle_details_trim_label_fsd.up.sql`: `trim_label TEXT`, `fsd_version TEXT`, both nullable) on the Go-owned `go_vehicle_control_state` side table and LEFT-joined into `VehicleRepo.GetByID`; `null` means never read, never a fabricated value. **RBAC — BOTH roles:** added to `vehicleStateOwnerFields` in `internal/mask/tables.go`, with the viewer list inheriting them by the existing `removeField(…, "vin")` derivation — the identical treatment `trim` and `softwareVersion` already get, and both are P0 equipment/software facts about the car, so log-safe. **`color` gains a source without changing shape.** The field and its Prisma `Vehicle.color` column BOTH already existed and are unchanged — same type, same masks, same empty-string convention — but were never actually populated (the MYR-257 provisioning INSERT seeds `''`); they are now filled from `vehicle_data.vehicle_config.exterior_color` (live-verified `"Quicksilver"`) by the **FOURTH** sanctioned Go-side write carve-out on the Prisma-owned `Vehicle` table (`store.VehicleRepo.UpdateVehicleColor`, `internal/store/vehicle_color.go`), after MYR-257 provision, MYR-258 teardown and MYR-286 license-plate. That carve-out is the narrowest yet: **one column**, **owner-scoped in the WHERE clause**, UPDATE only, **no migration** (so CG-DL-9 does not fire — an application-runtime Prisma UPDATE is the sanctioned class), and an **EMPTY colour is NEVER written**, so a partial Tesla payload cannot blank a good value. **ZERO contract change to `color` itself** — only its provenance, recorded in `data-lifecycle.md` §1.3/§1.4. **Freshness:** all three reads are **non-waking** and ride the existing connectivity-edge path, now joined by a **periodic in-service re-poll** — a ~15m jittered ticker plus a startup pass, per-VIN debounced against the connectivity-edge reads and respecting the MYR-300 stream-recency gate — so a car that never flips a connectivity edge still acquires its details. Two new config knobs, validated at startup: `SERVICE_REPOLL_ENABLED` (bool, default `true`, `ParseBool` fail-fast) and `SERVICE_REPOLL_INTERVAL` (Go duration, default `15m`). §7.0 `color` row and §7.1 field table updated; `schemas/vehicle-state.schema.json` (before `lastUpdated`), `vehicle-state-schema.md` §1.1/§4, `data-classification.md` §1.3/§1.13, `data-lifecycle.md` §1.3/§1.4, and the `snapshot_completeness` fixture updated. Implementation: `internal/store/vehicle_color.go`, `internal/store/migrations/0018_vehicle_details_trim_label_fsd.{up,down}.sql`, `internal/mask/tables.go`. | go-engineer |
 | 2026-07-28 | **The service window — `serviceEstimatedEndAt` on `VehicleState` + `VehicleSummary`, a new §7.16 owner write, and a scheduler bound ([MYR-316](https://linear.app/myrobotaxi/issue/MYR-316)).** Contracts **v0.17.0**. One OPTIONAL nullable **P0** RFC 3339 field answering the question an "In Service" badge cannot — *when do I get my car back?* — and, more consequentially, FLOORING the rider's scheduling picker. **Two columns, deliberately, added by migration 0017** (`0017_vehicle_control_state_service_window.up.sql`) to the Go-owned `go_vehicle_control_state` side table: `service_etc TIMESTAMPTZ` (Tesla's own estimate, from the Fleet API `GET /api/1/vehicles/{vin}/service_data` → `service_data.service_etc`) and `service_expected_end_at TIMESTAMPTZ` (owner-entered). Both nullable, both P0 — operational timing about the car, the same tier as the sibling `Vehicle.status`, so log-safe and unencrypted. **The wire value is `COALESCE(service_etc, service_expected_end_at)` — Tesla wins, the owner is the fallback — and the two-column split IS the design:** one merged column would let a late Tesla estimate ERASE what the owner typed, and would make a WITHDRAWN Tesla estimate fall back to `null` instead of back to the owner's answer. Both columns sit deliberately OUTSIDE the shared per-field COALESCE control-state upsert every other column in that table uses — that upsert **cannot express a NULL write** and clearing is first-class here — so they have dedicated writers in `internal/store/vehicle_service_window.go`. **Emission is gated on `status = 'in_service'`; every other status is `null`** — and the ServiceStatusMonitor ALSO physically CLEARS both columns when it observes the car leaving service, so the gate is belt-and-braces: a stale window can neither outlive the visit nor be resurrected by a status flip, and consumers never age the field out themselves. One shared resolver (`internal/telemetry/service_window.go`) serves the snapshot, the list, and the scheduler bound, so three readers cannot drift. **`null` is COMMON AND NORMAL, not a failure:** every field of Tesla's `service_data` response is nullable and an ALL-NULL body is the ordinary shape for a visit with no appointment record — it is not an error, not a fetch failure, and not a claim that the car is back. **Tesla read piggybacks, it does not poll:** it fires on the ServiceStatusMonitor's existing connectivity-edge path for an `in_service` vehicle, sharing the SAME per-VIN read debounce (`defaultServiceReadCooldown`, 45s) as the existing `GET /api/1/vehicles/{vin}` edge read and the MYR-260 `/vehicle_data` backfill, and reusing the token that read already resolved; non-fatal on error, leaving the last-known estimate. **New §7.16 `PUT /api/tesla/vehicles/{vehicleId}/service-window`** (body `{"expectedEndAt":"<RFC3339>"}`), owner-only: **four accepted spellings CLEAR** — absent key, explicit `null`, empty/whitespace string, empty body — and the value MUST be in the FUTURE, else `400 invalid_request` `expectedEndAt must be in the future` (a malformed timestamp gives `expectedEndAt must be an RFC 3339 date-time`). Ownership semantics are byte-identical to §7.12/§7.14 (unknown → `404 not_found`, indistinguishable from ownership-filtered; mismatch → `403 vehicle_not_owned`), non-`PUT` → `405 invalid_request`, store failure → `500 internal_error`. **That ownership check is load-bearing in a way §7.14's is not:** the plate `UPDATE` re-scopes `WHERE "userId" = <caller>` as a second enforcement, but the side table has **no `userId` column** (CG-DL-9, no Prisma FKs), so there is no owner-scoped SQL predicate to fall back on. The `200` body `{"vehicleId":"…","expectedEndAt":"…" or null}` echoes the **OWNER column, not the resolved `serviceEstimatedEndAt`** — echoing the resolved value would tell a client its write was overruled when it was merely outranked by Tesla on the next read. **Scheduler bound (create AND accept):** `POST /api/ride-requests` and `POST /api/ride-requests/{id}/accept` refuse a `scheduledFor` EARLIER than the vehicle's current `serviceEstimatedEndAt` with **`400 invalid_request`** — **no new error code**, and not a `409`: a reservation for a time the car provably cannot serve is a bad *request*, not an illegal transition or a capability conflict — message `scheduledFor must not be earlier than the vehicle's estimated service end (<RFC3339>)`. **Three rules:** a **null estimate ⇒ NO BOUND** (scheduling stays fully open; neither consumers nor the server may ever block on missing data), **EQUAL is ALLOWED** (strictly "earlier than"), and **INSTANT rides are unaffected** (no `scheduledFor` to compare; already gated by MYR-277's in-service `409 vehicle_unavailable`). **MYR-313 interaction, stated explicitly:** a scheduled ACCEPT now **does** read the vehicle, where [MYR-313](https://linear.app/myrobotaxi/issue/MYR-313) short-circuited before the read — but that read **FAILS OPEN for scheduled rides** (an unreadable vehicle leaves the reservation UNBOUNDED rather than refused), the exact inverse of the instant path's fail-closed `500`, so the MYR-313 stranding defect cannot return; MYR-313's exemption from the AVAILABILITY gate is **unchanged** (in_service/offline scheduled accepts still succeed). **RBAC — BOTH roles**, on `vehicleStateOwnerFields` AND `vehicleSummaryOwnerFields` in `internal/mask/tables.go` (viewer inherits by the existing `removeField` derivation): a rider needs the window for the same reason the owner does — it floors the picker, so withholding it would break the one consumer it was built for. **Delivery: NOT STREAMED** — Tesla has no proto for a service ETC, so there is no `fieldMap` entry, **no fleet-config change**, and a `vehicle_update` frame NEVER carries `serviceEstimatedEndAt`; it is snapshot/list-only and lands on the next §7.0 / §7.1 read. §7.16 added; §7 index + §6 catalog rows added; §7.0 + §7.1 field tables, examples and RBAC lines, the §7.1 blockquote notes, §5.2.0 / §5.2.1 mask matrices, §7.8 create + accept error lines, the accept bound + MYR-313 paragraphs, the transition-matrix bullet, and the §4.1.1.b emission audit all updated; `schemas/vehicle-state.schema.json` (before `lastUpdated`) + `schemas/vehicle-summary.schema.json`, the OpenAPI `VehicleSummary` component, `data-classification.md` §1.13 (two columns + note), `vehicle-state-schema.md` §1.1/§2.4/§4, and the `snapshot`/`vehicles_list*`/`snapshot_completeness` fixtures updated. Implementation: `internal/telemetry/{service_window,vehicle_service_window_handler}.go`, `internal/store/vehicle_service_window.go`, `internal/store/migrations/0017_vehicle_control_state_service_window.{up,down}.sql`, `internal/mask/tables.go`, `cmd/telemetry-server/wiring_vehicle_service_window.go`. | go-engineer |
 | 2026-07-28 | **On-demand state refresh — new §7.15 owner endpoint ([MYR-315](https://linear.app/myrobotaxi/issue/MYR-315)).** New `POST /api/tesla/vehicles/{vehicleId}/refresh` (no body), the **pull half of an otherwise entirely push-based read surface**: the WebSocket carries only what the car volunteers, and an asleep / in-service / merely quiet car volunteers nothing, so §7.1 keeps returning the last frame it ever saw while the MYR-260 backfills — which fire on *connectivity edges* — never trigger for a car that simply sits parked. Without this endpoint a user looking at stale data has no action available at all. **Three-rung ladder, in order.** (1) **Freshness short-circuit:** a LIVE streamed frame inside the **120 s** MYR-300 stream-authoritative window answers `200 {"status":"fresh","lastUpdated":"<last frame>"}` with **zero Tesla calls and no cooldown consumed** — refreshing already-current data would only cost the owner battery, and a healthy car must never be rate-limited for being healthy. (2) **Cooldown:** otherwise one Tesla-hitting refresh per vehicle per **60 s**, else `429 rate_limited` + `Retry-After: 60`. (3) **Wake + ONE read:** wake under the **same bounded budget vehicle commands use** (§7.9 — 3 attempts, 2 s backoff) via the new `commands.Executor.EnsureAwake`, which shares `wakeStep` with `Execute`'s asleep branch so the two can never drift; **probe-first**, so an *online but quiet* car (the common case) costs one cheap `GET /api/1/vehicles/{vin}` and **no wake at all**; then exactly ONE `vehicle_data` read republished through the **existing MYR-260 mapping** so values land on the identical broadcast + persist path a streamed frame takes and live clients see an ordinary `vehicle_update`. Budget spent → `503 vehicle_asleep`; a car that slept between probe and read (Tesla `408`) reports the **same** `503` rather than a misleading `502`. **`seatCoolingCapable` and `trim` come along free** — the read includes `vehicle_config`, so an owner whose car has produced no connectivity edge since MYR-308 shipped can acquire the capability bit by tapping refresh, with no drive and no reconnect. **Ownership is byte-identical to §7.12/§7.14** (unknown → `404 not_found`, indistinguishable from ownership-filtered; real mismatch → `403 vehicle_not_owned`). **Cooldown is in-memory, per-process** — it resets on restart and is not shared across replicas (effective limit: N refreshes/min/vehicle under N replicas), a deliberate trade since the real backstop is the bounded wake budget plus the single-read shape; a failed refresh does **not** refund its token, so a client retrying a sleeping car backs off instead of re-waking it every second. **No new error code** (reuses `vehicle_asleep`, `rate_limited`, `invalid_request`), **no migration**, **no fleet-config change** (no new streamed fields), and **no schema change** — the endpoint returns a REST-only body, not a `VehicleState`. §7.15 added; §6 catalog + §7 index rows added. Implementation: `internal/commands/wake.go`, `internal/telemetry/{vehicle_refresh,vehicle_refresh_handler,service_status_stream_freshness,service_status_vehicle_data}.go`, `cmd/telemetry-server/wiring_vehicle_refresh.go`. | go-engineer |
