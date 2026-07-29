@@ -23,10 +23,6 @@ import (
 type VehicleShareRepo struct {
 	pool   *pgxpool.Pool
 	logger *slog.Logger
-	// now is injectable so expiry arithmetic is testable without sleeping.
-	// The database clock still decides whether a code is expired at redeem
-	// time; this only computes the value written to expires_at.
-	now func() time.Time
 }
 
 // NewVehicleShareRepo builds the sharing repository over the given pool.
@@ -34,7 +30,7 @@ func NewVehicleShareRepo(pool *pgxpool.Pool, logger *slog.Logger) *VehicleShareR
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &VehicleShareRepo{pool: pool, logger: logger, now: time.Now}
+	return &VehicleShareRepo{pool: pool, logger: logger}
 }
 
 // maxShareCodeMintAttempts bounds the collision-retry loop. Each attempt has a
@@ -72,15 +68,13 @@ func (r *VehicleShareRepo) CreateInvite(ctx context.Context, in CreateShareInvit
 		return VehicleShare{}, fmt.Errorf("store.CreateInvite(owner=%s): %w", in.OwnerUserID, err)
 	}
 
-	createdAt := r.now().UTC()
-	expiresAt := createdAt.Add(shareInviteTTL)
-
 	var pathRow VehicleShare
 	for _, vehicleID := range in.VehicleIDs {
 		id := newProvisionID()
-		if _, err := tx.Exec(ctx, queryInsertShare,
-			id, vehicleID, in.OwnerUserID, in.Label, in.Permission, code, expiresAt,
-		); err != nil {
+		var createdAt, expiresAt time.Time
+		if err := tx.QueryRow(ctx, queryInsertShare,
+			id, vehicleID, in.OwnerUserID, in.Label, in.Permission, code,
+		).Scan(&createdAt, &expiresAt); err != nil {
 			return VehicleShare{}, fmt.Errorf("store.CreateInvite(owner=%s, vehicle=%s): insert: %w",
 				in.OwnerUserID, vehicleID, err)
 		}
@@ -251,9 +245,8 @@ func (r *VehicleShareRepo) ResendInvite(ctx context.Context, inviteID, ownerUser
 	if err != nil {
 		return VehicleShare{}, fmt.Errorf("store.ResendInvite(invite=%s): %w", inviteID, err)
 	}
-	expiresAt := r.now().UTC().Add(shareInviteTTL)
 
-	row := r.pool.QueryRow(ctx, queryResendShare, inviteID, ownerUserID, code, expiresAt)
+	row := r.pool.QueryRow(ctx, queryResendShare, inviteID, ownerUserID, code)
 	share, err := scanShare(row)
 	if err == nil {
 		return share, nil

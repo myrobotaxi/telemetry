@@ -44,12 +44,23 @@ SELECT "id" FROM "Vehicle" WHERE "id" = ANY($1) AND "userId" = $2`
 const queryShareCodeInUse = `
 SELECT EXISTS (SELECT 1 FROM go_vehicle_shares WHERE code = $1 AND status = 'pending')`
 
+// shareInviteTTLInterval is the 7-day code lifetime, expressed in SQL so the
+// TTL is measured against the DATABASE clock — the same clock the redeem
+// statement's `expires_at > NOW()` predicate reads. Computing it in Go instead
+// would make "expired" depend on two clocks agreeing.
+const shareInviteTTLInterval = `INTERVAL '7 days'`
+
 // queryInsertShare creates one pending invite row. Called once per vehicle in a
 // multi-vehicle create, all rows sharing the code passed as $6.
+//
+// RETURNING hands back the timestamps the database actually wrote, so the row
+// the caller returns to the client is the row on disk — not a Go-side
+// approximation that drifts from it by however long the round trip took.
 const queryInsertShare = `
 INSERT INTO go_vehicle_shares
 	(id, vehicle_id, owner_user_id, label, permission, code, status, created_at, expires_at)
-VALUES ($1, $2, $3, $4, $5, $6, 'pending', NOW(), $7)`
+VALUES ($1, $2, $3, $4, $5, $6, 'pending', NOW(), NOW() + ` + shareInviteTTLInterval + `)
+RETURNING created_at, expires_at`
 
 // queryListSharesByVehicle is the owner's sharing screen: pending invites and
 // accepted grants for one car, newest first. Revoked tombstones are filtered
@@ -91,7 +102,7 @@ SELECT status FROM go_vehicle_shares WHERE id = $1 AND owner_user_id = $2`
 // a revoked tombstone cannot be resurrected.
 const queryResendShare = `
 UPDATE go_vehicle_shares
-SET code = $3, expires_at = $4
+SET code = $3, expires_at = NOW() + ` + shareInviteTTLInterval + `
 WHERE id = $1 AND owner_user_id = $2 AND status = 'pending'
 RETURNING` + shareColumns
 

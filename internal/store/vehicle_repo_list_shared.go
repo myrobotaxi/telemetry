@@ -26,6 +26,19 @@ JOIN go_vehicle_shares s
  AND s.accepted_by_user_id = $1
  AND s.status = 'accepted'`
 
+// sharedSummaryColumns is vehicleListSummaryColumns with every name qualified
+// to the vehicle relation.
+//
+// The qualification is REQUIRED, not stylistic: go_vehicle_shares also has `id`
+// and `status` columns, so the unqualified list is ambiguous the moment the
+// grant join is added and Postgres refuses the statement outright (42702).
+// Listing the columns again rather than reusing the shared constant is the cost
+// of joining a table with overlapping names; the two lists must be kept in
+// lockstep, and the scan function asserts the order.
+const sharedSummaryColumns = `"Vehicle"."id", "Vehicle"."userId", "Vehicle"."vin", "Vehicle"."name",
+	"Vehicle"."model", "Vehicle"."year", "Vehicle"."color", "Vehicle"."licensePlate", "Vehicle"."status",
+	"Vehicle"."chargeLevel", "Vehicle"."estimatedRange", "Vehicle"."lastUpdated"`
+
 // queryVehiclesSharedWithUser is the viewer-side companion of
 // queryVehiclesByUserList: identical lean projection plus the grant's tier, so
 // the handler can stamp VehicleSummary.sharePermission without a second lookup.
@@ -35,14 +48,14 @@ JOIN go_vehicle_shares s
 // response, which reports only what that redemption granted). Expressing it as
 // one statement keeps the two callers provably on the same access predicate —
 // a second copy of this SQL is exactly where an access-control drift would hide.
-const queryVehiclesSharedWithUser = `SELECT ` + vehicleListSummaryColumns + `,
+const queryVehiclesSharedWithUser = `SELECT ` + sharedSummaryColumns + `,
 	` + vehicleListHasActiveRideExpr + `,
 	gcs.service_etc, gcs.service_expected_end_at,
 	s.permission
 FROM "Vehicle"` + sharedSummaryJoin + `
 LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"
 WHERE ($2::text[] IS NULL OR "Vehicle"."id" = ANY($2))
-ORDER BY "name", "vin"`
+ORDER BY "Vehicle"."name", "Vehicle"."vin"`
 
 // SharedVehicleSummary is a catalog row the caller sees as a VIEWER, carrying
 // the tier the grant conveys. Permission is always one of the three tiers —

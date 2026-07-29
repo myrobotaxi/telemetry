@@ -8,6 +8,12 @@ import (
 	"github.com/myrobotaxi/telemetry/pkg/sdk"
 )
 
+// Code lifetime is SEVEN DAYS, and it lives in SQL rather than here — see
+// shareInviteTTLInterval in vehicle_share_queries.go. Both the value written to
+// expires_at and the `expires_at > NOW()` predicate that reads it are evaluated
+// by the database, so "expired" never depends on the app server's clock
+// agreeing with the database's.
+
 // go_vehicle_shares (migration 0020, MYR-184) is the vehicle-sharing grant
 // table: one row per (owner → recipient → vehicle) grant, created as a pending
 // invite carrying a redeemable code and flipped to an accepted viewer grant
@@ -37,11 +43,6 @@ const (
 	SharePermissionLiveHistory = "live_history"
 	SharePermissionRides       = "rides"
 )
-
-// shareInviteTTL is how long a freshly minted (or resent) code stays
-// redeemable. Seven days per the contract; a resend pushes this out from the
-// moment of the resend, never from the original creation.
-const shareInviteTTL = 7 * 24 * time.Hour
 
 var (
 	// ErrShareNotFound is returned when an invite lookup, or a conditional
