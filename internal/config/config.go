@@ -21,6 +21,7 @@ type Config struct {
 	teslaOAuth      TeslaOAuthConfig
 	teslaLink       TeslaLinkConfig
 	monitoring      MonitoringConfig
+	push            PushConfig
 	mapboxToken     string
 	teslaPublicKey  string
 	dispatchEnabled bool
@@ -238,6 +239,36 @@ func (c *Config) TeslaLink() TeslaLinkConfig { return c.teslaLink }
 // Monitoring returns the observability probe configuration. When
 // CertEndpoints is empty, the endpoint TLS cert monitor is disabled.
 func (c *Config) Monitoring() MonitoringConfig { return c.monitoring }
+
+// PushConfig holds the APNs push-notification settings (MYR-186). The signing
+// key is P0 secret material from the environment; the team id and topic are
+// app-level constants with env overrides. An empty KeyP8PEM is the supported
+// KEYLESS mode: the notifier subscribes and logs every would-be notification
+// as skipped, so the service runs normally before the secrets are set.
+type PushConfig struct {
+	// Enabled is the PUSH_ENABLED kill-switch. False sends nothing even with
+	// a valid key.
+	Enabled bool
+	// KeyP8PEM is the PKCS#8 PEM of the APNs auth key (APNS_KEY_P8 or the
+	// base64 APNS_KEY_P8_B64). Secret — never logged. Empty disables sending.
+	KeyP8PEM string
+	// KeyID is Apple's 10-character key identifier (APNS_KEY_ID), carried as
+	// the JWT `kid` header. Empty disables sending.
+	KeyID string
+	// TeamID is the Apple developer team id, the JWT `iss` claim
+	// (APNS_TEAM_ID, default NFKX777598).
+	TeamID string
+	// Topic is the iOS bundle id sent as `apns-topic` (APNS_TOPIC, default
+	// app.myrobotaxi.ios).
+	Topic string
+}
+
+// Configured reports whether both APNs credentials are present, i.e. whether
+// a real sender can be constructed. False is the keyless mode.
+func (p PushConfig) Configured() bool { return p.KeyP8PEM != "" && p.KeyID != "" }
+
+// Push returns the push-notification settings (MYR-186).
+func (c *Config) Push() PushConfig { return c.push }
 
 // MapboxToken returns the Mapbox API token. Empty string means geocoding
 // is disabled.
