@@ -173,7 +173,7 @@ type redeemShareInviteResponse struct {
 // non-pending rows in SQL; this is the second, independent gate, because a
 // leaked accepted-grant code is a live credential handed to whoever can list
 // the invite.
-func toShareInviteWire(row ShareInviteRow) shareInviteWire {
+func toShareInviteWire(row *ShareInviteRow) shareInviteWire {
 	out := shareInviteWire{
 		InviteID:   row.ID,
 		VehicleID:  row.VehicleID,
@@ -206,7 +206,7 @@ func toShareInviteWire(row ShareInviteRow) shareInviteWire {
 // never served. The viewer role has no entry for this resource, so if a viewer
 // ever reached this code the same call would return an empty object rather than
 // an owner's labels and a live code.
-func toShareInviteMasked(row ShareInviteRow, role auth.Role) map[string]any {
+func toShareInviteMasked(row *ShareInviteRow, role auth.Role) map[string]any {
 	wire := toShareInviteWire(row)
 	fields := map[string]any{
 		"inviteId":   wire.InviteID,

@@ -58,7 +58,7 @@ func seedShareFixtures(t *testing.T) (vehA1, vehA2, vehB string) {
 }
 
 // mustCreateInvite mints an invite and fails the test if it does not.
-func mustCreateInvite(t *testing.T, repo *store.VehicleShareRepo, owner, pathVehicle string, ids []string, permission string) store.VehicleShare {
+func mustCreateInvite(t *testing.T, repo *store.VehicleShareRepo, owner, pathVehicle string, ids []string, permission string) store.VehicleShare { //nolint:unparam // owner is spelled at every call site on purpose: these are access-control tests and an implicit actor would make them unreadable
 	t.Helper()
 	row, err := repo.CreateInvite(context.Background(), store.CreateShareInviteInput{
 		OwnerUserID:   owner,

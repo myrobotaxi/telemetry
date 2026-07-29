@@ -89,17 +89,13 @@ func (r *VehicleShareRepo) RedeemCode(ctx context.Context, code, redeemerID stri
 // A code resolving to more than one owner can only happen through an
 // astronomically unlikely mint collision, and granting it would hand the
 // redeemer access to two unrelated people's cars. It is refused, not guessed.
-func lockPendingRows(ctx context.Context, tx pgx.Tx, code string) ([]string, string, error) {
+func lockPendingRows(ctx context.Context, tx pgx.Tx, code string) (ids []string, owner string, err error) {
 	rows, err := tx.Query(ctx, queryLockPendingByCode, code)
 	if err != nil {
 		return nil, "", fmt.Errorf("store.RedeemCode: lock candidates: %w", err)
 	}
 	defer rows.Close()
 
-	var (
-		ids   []string
-		owner string
-	)
 	for rows.Next() {
 		var id, vehicleID, ownerID, permission string
 		if err := rows.Scan(&id, &vehicleID, &ownerID, &permission); err != nil {
@@ -173,12 +169,12 @@ func scanGrants(rows pgx.Rows) ([]ShareGrant, error) {
 	for rows.Next() {
 		var g ShareGrant
 		if err := rows.Scan(&g.VehicleID, &g.OwnerUserID, &g.Permission); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan share grant: %w", err)
 		}
 		out = append(out, g)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("iterate share grants: %w", err)
 	}
 	return out, nil
 }

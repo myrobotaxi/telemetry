@@ -36,7 +36,7 @@ func (a *shareInviteAdapter) CreateInvite(ctx context.Context, in telemetry.Shar
 	if err != nil {
 		return telemetry.ShareInviteRow{}, translateShareError(err)
 	}
-	return toShareInviteRow(row), nil
+	return toShareInviteRow(&row), nil
 }
 
 // ListInvitesForVehicle returns the owner's live rows for one vehicle.
@@ -46,8 +46,8 @@ func (a *shareInviteAdapter) ListInvitesForVehicle(ctx context.Context, vehicleI
 		return nil, translateShareError(err)
 	}
 	out := make([]telemetry.ShareInviteRow, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, toShareInviteRow(row))
+	for i := range rows {
+		out = append(out, toShareInviteRow(&rows[i]))
 	}
 	return out, nil
 }
@@ -67,7 +67,7 @@ func (a *shareInviteAdapter) ResendInvite(ctx context.Context, inviteID, ownerUs
 	if err != nil {
 		return telemetry.ShareInviteRow{}, translateShareError(err)
 	}
-	return toShareInviteRow(row), nil
+	return toShareInviteRow(&row), nil
 }
 
 // shareRedeemAdapter binds store.VehicleShareRepo to telemetry.ShareRedeemStore.
@@ -177,7 +177,7 @@ func toSharedVehicleRows(rows []store.SharedVehicleSummary) []telemetry.SharedVe
 
 // toShareInviteRow drops the two server-only columns (accepted_by_user_id,
 // revoked_at) that the owner-facing wire shape deliberately never carries.
-func toShareInviteRow(row store.VehicleShare) telemetry.ShareInviteRow {
+func toShareInviteRow(row *store.VehicleShare) telemetry.ShareInviteRow {
 	return telemetry.ShareInviteRow{
 		ID:         row.ID,
 		VehicleID:  row.VehicleID,

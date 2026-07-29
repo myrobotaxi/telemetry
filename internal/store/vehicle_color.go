@@ -58,7 +58,7 @@ WHERE "vin" = $2 AND "userId" = $3`
 // call site: Tesla omitting `exterior_color` from a partial `vehicle_data`
 // payload must never blank a colour that an earlier read already got right. The
 // column is NOT NULL and has only ever held either a real colour or the
-// provisioning placeholder `''`, so "leave it alone" is always the correct
+// provisioning placeholder `”`, so "leave it alone" is always the correct
 // response to having nothing to say.
 //
 // Returns updated=false (and a nil error) when no row matched, which the

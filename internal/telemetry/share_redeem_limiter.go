@@ -58,7 +58,7 @@ type redeemWindow struct {
 // newRedeemLimiter builds a limiter with the given cap and window. A limit of
 // zero or less disables limiting — used only by tests that are exercising
 // something else.
-func newRedeemLimiter(limit int, window time.Duration) *redeemLimiter {
+func newRedeemLimiter(limit int, window time.Duration) *redeemLimiter { //nolint:unparam // window varies in tests
 	return &redeemLimiter{
 		limit:    limit,
 		window:   window,

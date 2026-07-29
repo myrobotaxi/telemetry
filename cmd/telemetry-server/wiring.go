@@ -280,37 +280,7 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 	)
 	deps.srv.HandleFunc("GET /api/vehicles/{vehicleId}/drives", drivesHandler.ServeHTTP)
 
-	// DV-20 (FR-3.3): GET /api/drives/{driveId}/route — the recorded
-	// breadcrumb polyline for a completed drive. Same auth + ownership +
-	// role-mask flow as the drives list; the route's vehicleId comes off
-	// the drive record, then snapshotAdapter checks ownership.
-	driveRouteHandler := telemetry.NewDriveRouteHandler(
-		deps.authenticator,
-		snapshotAdapter,
-		&driveRouteAdapter{repo: deps.driveRepo},
-		deps.logger.With(slog.String("component", "drive-route")),
-		telemetry.WithDriveRouteRoleResolver(deps.authenticator),
-		telemetry.WithDriveRouteShareReader(&shareReaderAdapter{repo: deps.shareRepo}),
-		telemetry.WithDriveRouteMaskAudit(deps.auditEmitter, deps.auditMetrics, "/api/drives/{driveId}/route"),
-	)
-	deps.srv.HandleFunc("GET /api/drives/{driveId}/route", driveRouteHandler.ServeHTTP)
-
-	// MYR-130 (FR-3.4): GET /api/drives/{driveId} — the full per-drive
-	// stats record (distance, duration, energy, FSD, interventions,
-	// start/end loc+addr) minus routePoints. Closes the last DV-20
-	// SDK-surface gap. Same auth + ownership + role-mask flow as the
-	// route endpoint; the drive's vehicleId comes off the drive record,
-	// then snapshotAdapter checks ownership.
-	driveDetailHandler := telemetry.NewDriveDetailHandler(
-		deps.authenticator,
-		snapshotAdapter,
-		&driveDetailAdapter{repo: deps.driveRepo},
-		deps.logger.With(slog.String("component", "drive-detail")),
-		telemetry.WithDriveDetailRoleResolver(deps.authenticator),
-		telemetry.WithDriveDetailShareReader(&shareReaderAdapter{repo: deps.shareRepo}),
-		telemetry.WithDriveDetailMaskAudit(deps.auditEmitter, deps.auditMetrics, "/api/drives/{driveId}"),
-	)
-	deps.srv.HandleFunc("GET /api/drives/{driveId}", driveDetailHandler.ServeHTTP)
+	setupDriveReadEndpoints(deps, snapshotAdapter)
 
 	setupRideRequestEndpoints(deps, snapshotAdapter)
 

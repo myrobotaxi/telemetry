@@ -168,15 +168,15 @@ const (
 // comment for design intent.
 //
 // Test plan:
-//   1. Schema enumeration: every schema property MUST have a fixture row.
-//   2. Fixture enumeration: every fixture row MUST be a schema property.
-//   3. Atomic-group consistency: fixture atomicGroup == schema x-atomic-group.
-//   4. Steady-state scenario: per telemetry field with nullableInSteadyState=false,
-//      apply a single-field VehicleUpdate, read back, assert non-null.
-//   5. Active-group scenario: per atomic group, apply ALL members in one
-//      VehicleUpdate, read back, assert ALL non-null.
-//   6. Identity / derived / writer_metadata fields are evaluated against
-//      the seeded row + the side-effects of UpdateTelemetry/UpdateStatus.
+//  1. Schema enumeration: every schema property MUST have a fixture row.
+//  2. Fixture enumeration: every fixture row MUST be a schema property.
+//  3. Atomic-group consistency: fixture atomicGroup == schema x-atomic-group.
+//  4. Steady-state scenario: per telemetry field with nullableInSteadyState=false,
+//     apply a single-field VehicleUpdate, read back, assert non-null.
+//  5. Active-group scenario: per atomic group, apply ALL members in one
+//     VehicleUpdate, read back, assert ALL non-null.
+//  6. Identity / derived / writer_metadata fields are evaluated against
+//     the seeded row + the side-effects of UpdateTelemetry/UpdateStatus.
 func TestSnapshotCompleteness(t *testing.T) {
 	if !dockerAvailable {
 		t.Skip("docker unavailable; skipping store integration test")

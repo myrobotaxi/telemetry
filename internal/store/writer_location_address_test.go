@@ -435,8 +435,8 @@ func TestHaversineMeters(t *testing.T) {
 		tolerance              float64
 	}{
 		{
-			name:       "identical points",
-			lat1:       33.086131, lng1: -96.852202,
+			name: "identical points",
+			lat1: 33.086131, lng1: -96.852202,
 			lat2: 33.086131, lng2: -96.852202,
 			wantMeters: 0,
 			tolerance:  0.001,

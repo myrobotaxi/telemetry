@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -77,7 +78,7 @@ func vehicleAccessFor(
 		if errors.Is(err, sdk.ErrNotFound) {
 			return vehicleAccess{}, errNoVehicleAccess
 		}
-		return vehicleAccess{}, err
+		return vehicleAccess{}, fmt.Errorf("resolve share tier(vehicle=%s): %w", vehicleID, err)
 	}
 	if !tier.AtLeast(minTier) {
 		return vehicleAccess{}, errNoVehicleAccess

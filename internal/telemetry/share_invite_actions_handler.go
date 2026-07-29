@@ -78,15 +78,15 @@ func (h *ShareInviteHandler) ServeResend(w http.ResponseWriter, r *http.Request)
 	}
 
 	h.logger.Info("share invite resent", slog.String("invite_id", inviteID))
-	h.writeJSON(w, http.StatusOK, toShareInviteMasked(row, auth.RoleOwner))
+	h.writeJSON(w, http.StatusOK, toShareInviteMasked(&row, auth.RoleOwner))
 }
 
 // authInvite validates the bearer token and extracts the invite id. It does NOT
 // pre-check ownership: every invite-scoped statement carries
 // `owner_user_id = $n` itself, so a separate read here would only add a
 // check-then-write window and a second way for the two to disagree.
-func (h *ShareInviteHandler) authInvite(w http.ResponseWriter, r *http.Request, surface string) (string, string, bool) {
-	inviteID := r.PathValue("inviteId")
+func (h *ShareInviteHandler) authInvite(w http.ResponseWriter, r *http.Request, surface string) (inviteID, userID string, ok bool) {
+	inviteID = r.PathValue("inviteId")
 	if inviteID == "" {
 		h.writeError(w, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest, "missing inviteId")
 		return "", "", false

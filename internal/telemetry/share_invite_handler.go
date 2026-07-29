@@ -93,7 +93,7 @@ func (h *ShareInviteHandler) ServeCreate(w http.ResponseWriter, r *http.Request)
 		slog.Int("vehicle_count", len(in.VehicleIDs)),
 		slog.String("permission", in.Permission),
 	)
-	h.writeJSON(w, http.StatusCreated, toShareInviteMasked(row, auth.RoleOwner))
+	h.writeJSON(w, http.StatusCreated, toShareInviteMasked(&row, auth.RoleOwner))
 }
 
 // writeCreateError maps a create failure onto a response. A vehicle in the set
@@ -118,7 +118,7 @@ func (h *ShareInviteHandler) writeCreateError(w http.ResponseWriter, vehicleID, 
 
 // validateCreateInvite checks the body and normalizes the vehicle set.
 // Returns a non-empty reason when the request must be rejected 400.
-func validateCreateInvite(body createShareInviteRequest, pathVehicleID, ownerID string) (ShareInviteCreateInput, string) {
+func validateCreateInvite(body createShareInviteRequest, pathVehicleID, ownerID string) (in ShareInviteCreateInput, rejectReason string) {
 	label := strings.TrimSpace(body.Label)
 	switch {
 	case label == "":
@@ -197,8 +197,8 @@ func (h *ShareInviteHandler) ServeList(w http.ResponseWriter, r *http.Request) {
 
 	// Always an array, never null: an owner with no invites gets [].
 	invites := make([]map[string]any, 0, len(rows))
-	for _, row := range rows {
-		invites = append(invites, toShareInviteMasked(row, auth.RoleOwner))
+	for i := range rows {
+		invites = append(invites, toShareInviteMasked(&rows[i], auth.RoleOwner))
 	}
 	h.writeJSON(w, http.StatusOK, shareInviteListResponse{Invites: invites})
 }
@@ -210,8 +210,8 @@ func (h *ShareInviteHandler) ServeList(w http.ResponseWriter, r *http.Request) {
 // the rest of the per-vehicle surface. There is no viewer branch: a viewer's
 // vehicle read succeeds, so they reach the ownership check and are refused
 // exactly as an unrelated caller is.
-func (h *ShareInviteHandler) authOwner(w http.ResponseWriter, r *http.Request, surface string) (string, string, bool) {
-	vehicleID := r.PathValue("vehicleId")
+func (h *ShareInviteHandler) authOwner(w http.ResponseWriter, r *http.Request, surface string) (vehicleID, userID string, ok bool) {
+	vehicleID = r.PathValue("vehicleId")
 	if vehicleID == "" {
 		h.writeError(w, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest, "missing vehicleId")
 		return "", "", false
