@@ -77,6 +77,12 @@ func TestDefaultFieldConfig_DetailedChargeStateResend(t *testing.T) {
 // emission already re-delivers them; adding a resend would spend vehicle-side
 // buffer for nothing. If a future change gives one of them a resend, that is a
 // deliberate decision that should update this test rather than slip in.
+//
+// The list is exactly `groupCharge` (internal/ws/atomic_groups.go) MINUS
+// chargeState. `BatteryLevel` is deliberately NOT here despite sharing the 30s
+// cadence: it is not an atomic-group member, so the sibling argument — "its
+// group-mates move together while charging, so on-change emission is enough" —
+// simply does not apply to it. Do not add it to this loop.
 func TestDefaultFieldConfig_ChargeGroupSiblingsSelfRefresh(t *testing.T) {
 	t.Parallel()
 
