@@ -1,13 +1,14 @@
 {
   "_meta": {
-    "description": "Forward-looking viewer-tier response for GET /api/vehicles. The viewer projection per rest-api.md §5.2.0 strips the P1 `name` field (owner-curated nickname stays owner-only); every other VehicleSummary field remains visible so the viewer can identify the vehicle in their list. This fixture is documented now to lock the wire shape; v1 SERVER behavior returns an empty list to viewer-tier callers because viewer-merged enumeration requires the Go server to read the Prisma-owned Invite table (PLANNED follow-up). Once that lands, this fixture is the canonical viewer response. The MYR-233 `hasActiveRide` flag is in BOTH role allow-lists — it is derived operational state (P0, same tier as `status`), not owner-curated data. The MYR-286 `licensePlate` is in BOTH allow-lists too — a deliberate product decision, because the entire purpose of the plate is that a rider can identify the correct car at pickup. Contrast the full `vin`, which the catalog never carries at all (`vinLast4` only) and which the /snapshot gates to owners. The MYR-316 `serviceEstimatedEndAt` is in BOTH allow-lists too — P0 operational timing, same tier as `status`, and a rider needs it for exactly the reason the owner does: it FLOORS the scheduling picker. This row is `parked`, so the value is `null` (no bound; scheduling stays fully open).",
+    "description": "Forward-looking viewer-tier response for GET /api/vehicles. The viewer projection per rest-api.md §5.2.0 subtracts NOTHING from the owner field set and adds `sharePermission`. MYR-184 removed the previous `name` subtraction: the rider UI renders a shared car as '{Owner}'s {Vehicle}', and `name` is in the `required` list of vehicle-summary.schema.json, so masking it made every viewer row invalid against its own shape. Any field a future viewer mask removes MUST be optional in that schema. The viewer merge is LIVE as of MYR-184 (a rider who has redeemed an invite code sees these rows appended to their own cars), so this fixture is the canonical viewer response, not a forward-looking one. The MYR-233 `hasActiveRide` flag is in BOTH role allow-lists — it is derived operational state (P0, same tier as `status`), not owner-curated data. The MYR-286 `licensePlate` is in BOTH allow-lists too — a deliberate product decision, because the entire purpose of the plate is that a rider can identify the correct car at pickup. Contrast the full `vin`, which the catalog never carries at all (`vinLast4` only) and which the /snapshot gates to owners. The MYR-316 `serviceEstimatedEndAt` is in BOTH allow-lists too — P0 operational timing, same tier as `status`, and a rider needs it for exactly the reason the owner does: it FLOORS the scheduling picker. This row is `parked`, so the value is `null` (no bound; scheduling stays fully open).",
     "anchoredFRs": ["FR-5.4"],
-    "scenario": "transitional",
+    "scenario": "happy-path",
     "addedBy": "MYR-91"
   },
   "items": [
     {
       "vehicleId": "clxyz1234567890abcdef",
+      "name": "Alex's Model 3",
       "model": "Model 3",
       "year": 2024,
       "color": "Midnight Silver Metallic",
@@ -19,7 +20,8 @@
       "role": "viewer",
       "hasActiveRide": false,
       "licensePlate": "ABC 1234",
-      "serviceEstimatedEndAt": null
+      "serviceEstimatedEndAt": null,
+      "sharePermission": "live_history"
     }
   ]
 }
