@@ -43,6 +43,16 @@ var fieldConverters = map[tpb.Field]func(*tpb.Value) (events.TelemetryValue, err
 	tpb.Field_HvacAutoMode:        convertHvacAutoMode,
 	tpb.Field_MediaPlaybackStatus: convertMediaStatus,
 	tpb.Field_DoorState:           convertDoorState,
+	// MYR-303 free-text now-playing fields. These MUST be listed: without an
+	// entry they fall through to convertNumericOrString, which ParseFloats a
+	// numeric-looking title and returns a FloatVal with no StringVal — and both
+	// consumers (store.mapControlMediaNowPlaying, the WS field mapping) read
+	// StringVal only, so the value is silently dropped. See convertMediaText.
+	tpb.Field_MediaNowPlayingTitle:   convertMediaText,
+	tpb.Field_MediaNowPlayingArtist:  convertMediaText,
+	tpb.Field_MediaNowPlayingAlbum:   convertMediaText,
+	tpb.Field_MediaNowPlayingStation: convertMediaText,
+	tpb.Field_MediaPlaybackSource:    convertMediaText,
 	// Temperatures (incl. driver/passenger setpoints) — Celsius→Fahrenheit.
 	tpb.Field_InsideTemp:                  convertTemperature,
 	tpb.Field_OutsideTemp:                 convertTemperature,
@@ -89,6 +99,36 @@ func convertLocation(v *tpb.Value) (events.TelemetryValue, error) {
 // coerce a rare purely-numeric-looking version (e.g. "2026") to a float that the
 // string-typed store column then drops. Forcing StringVal persists it verbatim.
 func convertVersion(v *tpb.Value) (events.TelemetryValue, error) {
+	if sv, ok := v.Value.(*tpb.Value_StringValue); ok {
+		s := sv.StringValue
+		return events.TelemetryValue{StringVal: &s}, nil
+	}
+	return convertNumericOrString(v)
+}
+
+// convertMediaText keeps the MYR-303 now-playing free-text fields as strings —
+// the same guarantee convertVersion gives softwareVersion, and for the same
+// reason.
+//
+// Media metadata is arbitrary human text that very often parses as a number:
+// track titles ("1979", "22", "7"), album names ("21", "1989"), FM station
+// labels ("94.7"). Without this converter the numeric-or-string fallback wins
+// that ParseFloat race and hands back a FloatVal with StringVal nil. Every
+// consumer of these five fields reads StringVal — the control-state persist
+// (store.mapControlMediaNowPlaying) and the WS field mapping both do — so such a
+// value is not merely mistyped, it VANISHES: nothing is persisted, nothing is
+// broadcast, and the stored column stays at whatever it held, indistinguishable
+// on read from "the car never told us".
+//
+// An EMPTY string is returned as a non-nil empty StringVal, never dropped: under
+// MYR-303 semantics that is the car reporting the track ENDED, a real
+// observation that must overwrite a stale title through the COALESCE upsert.
+//
+// Non-string Value variants fall back to convertNumericOrString rather than
+// being forced into a string. Tesla sends these as string_value; inventing a
+// rendering for a variant we have never observed would be guessing, and the
+// fallback's behaviour for them is unchanged from before this converter existed.
+func convertMediaText(v *tpb.Value) (events.TelemetryValue, error) {
 	if sv, ok := v.Value.(*tpb.Value_StringValue); ok {
 		s := sv.StringValue
 		return events.TelemetryValue{StringVal: &s}, nil
