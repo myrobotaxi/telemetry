@@ -26,21 +26,21 @@ func TestContract_GETVehicleSnapshot(t *testing.T) {
 	ctx := context.Background()
 
 	const (
-		ownerID         = "user_owner_snap"
-		otherOwnerID    = "user_other_snap"
-		vehicleID       = "veh_snap_001"
-		otherVehicleID  = "veh_snap_other_001"
-		ownerVIN        = "5YJ3E1EA1PF000201"
-		otherVIN        = "5YJ3E1EA1PF000299"
-		unknownVehicle  = "veh_does_not_exist"
-		locName         = "Home"
-		locAddr         = "123 Market St, San Francisco, CA"
-		modelStr        = "Model 3"
-		colorStr        = "Midnight Silver Metallic"
-		modelYear       = 2024
-		fsdMilesSince   = 412.7
-		chargeLvl       = 78
-		rangeMiles      = 245
+		ownerID        = "user_owner_snap"
+		otherOwnerID   = "user_other_snap"
+		vehicleID      = "veh_snap_001"
+		otherVehicleID = "veh_snap_other_001"
+		ownerVIN       = "5YJ3E1EA1PF000201"
+		otherVIN       = "5YJ3E1EA1PF000299"
+		unknownVehicle = "veh_does_not_exist"
+		locName        = "Home"
+		locAddr        = "123 Market St, San Francisco, CA"
+		modelStr       = "Model 3"
+		colorStr       = "Midnight Silver Metallic"
+		modelYear      = 2024
+		fsdMilesSince  = 412.7
+		chargeLvl      = 78
+		rangeMiles     = 245
 	)
 
 	tests := []struct {

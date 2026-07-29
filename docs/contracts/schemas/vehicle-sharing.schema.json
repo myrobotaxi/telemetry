@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://myrobotaxi.com/schemas/vehicle-sharing.schema.json",
+  "title": "ShareInviteListResponse",
+  "description": "Envelope returned by GET /api/vehicles/{vehicleId}/invites — the owner's invite list for one vehicle (MYR-184 vehicle-sharing self-serve). Wraps the rows under `invites` (NOT the `items` key used by the paginated list envelopes VehicleListResponse / DrivesListResponse / RideRequestsListResponse): this surface is deliberately UNPAGINATED — an owner's per-vehicle invite set is small and bounded, there is no cursor and no `hasMore`, and naming the key `invites` keeps it from being mistaken for a page of a cursor-paginated collection by an SDK pagination helper. The envelope itself is part of the wire contract: consumers MUST NOT strip it silently. Sharing is Go-owned end to end (table `go_vehicle_shares`, no FKs to Prisma tables, CG-DL-9); the email-keyed Prisma `Invite` table is retired unused, and this schema amends rest-api.md DV-23, which had assigned invites to the now-deprecated Next.js app. Single-resource endpoints in this family return a bare ShareInvite from `$defs`: POST /api/vehicles/{vehicleId}/invites (create) and POST /api/invites/{inviteId}/resend (new code + reset expiry). DELETE /api/invites/{inviteId} (cancel a pending invite or revoke an accepted grant) returns no body.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["invites"],
+  "properties": {
+    "invites": {
+      "type": "array",
+      "description": "Invite rows for the path vehicle that the calling OWNER may see. Always present; an empty array (never null) means this vehicle has no pending invites and no accepted viewers. Order is server-defined (currently newest first, ORDER BY created_at DESC). REVOKED rows are NEVER serialized: revocation is a tombstone flip in `go_vehicle_shares` (status 'revoked', not a delete) kept server-side for audit, and the wire status enum has no 'revoked' member — a revoked row simply disappears from this list. Drives the owner's sharing screen, which splits these rows into its two sections by `status`: accepted rows render under 'Viewers · N' and pending rows under 'Pending' (ios-app design/app/screens.jsx InvitesScreen, jsx:1296-1330).",
+      "x-classification": "P1",
+      "items": { "$ref": "#/$defs/ShareInvite" }
+    }
+  },
+  "$defs": {
+    "SharePermission": {
+      "type": "string",
+      "enum": ["live", "live_history", "rides"],
+      "description": "Access tier an owner grants to one invited person for one vehicle. STRICTLY CUMULATIVE — the tiers form a total order, live < live_history < rides, and each tier grants everything the tier below it grants PLUS its own increment. That is the design's own wording ('Everything in Live, plus past trips & drives.' / 'Everything above, plus send the car to pick them up.' — ios-app design/app/screens.jsx SHARE_ACCESS, jsx:1235-1239), so consumers MUST compare tiers with a >= over this order and MUST NOT treat them as an unordered set of independent capabilities. Increments: 'live' (design label 'Live location') — the vehicle appears in the viewer's GET /api/vehicles list (viewer-merged, MYR-91), the REST snapshot is readable under the viewer mask, and the WS vehicle subscription is allowed; 'live_history' (design label 'Live + history') — everything in 'live', plus the drives surfaces (GET /api/drives, drive detail, drive route); 'rides' (design label 'Can request rides') — everything in 'live_history', plus creating a ride request against the vehicle as a rider who is NOT its owner. NOTE for server implementors: the ride-create gate is a SEPARATE code path from the read-path viewer merge (telemetry internal/telemetry/ride_request_handler.go owner-equality check on GetByID), so granting 'rides' requires changing that check too — the 'no change needed' comments there and in rest-api.md §7.8 are wrong. Swift consumers get the decode-tolerant unrecognized(String) catch-all via codegen (MYR-195), so appending a higher tier later never breaks installed clients; new members MUST be appended in increasing-privilege order to preserve the total order.",
+      "x-classification": "P0"
+    },
+    "ShareInvite": {
+      "title": "ShareInvite",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inviteId", "vehicleId", "label", "permission", "status", "createdAt"],
+      "description": "One owner→recipient sharing grant for ONE vehicle, in either of its two wire-visible lives: an unredeemed invite (status 'pending', carrying the redeemable `code`) or an accepted grant (status 'accepted', the viewer row). Backed by one `go_vehicle_shares` row (Go-owned, CG-DL-9). Owner-facing ONLY — this object is returned to the vehicle's owner from the invite endpoints and is never delivered to the invited party, who sees only RedeemShareInviteResponse at redemption time and thereafter a `role: 'viewer'` row in their own GET /api/vehicles. Drives the owner's sharing screen rows (ios-app design/app/screens.jsx InvitesScreen Viewers/Pending sections, jsx:1296-1330) and their Resend / Cancel / Revoke actions. Codes, NOT emails: MyRoboTaxi has no email infrastructure and riders are Apple-native, so the owner sends the minted `code` out-of-band through the iOS system share sheet.",
+      "properties": {
+        "inviteId": {
+          "type": "string",
+          "description": "Opaque database identifier for this invite row (the `go_vehicle_shares` id). Path parameter for the single-invite endpoints — DELETE /api/invites/{inviteId} (cancel a pending invite / revoke an accepted grant) and POST /api/invites/{inviteId}/resend. Stable across a resend: resending re-mints the `code` and resets `expiresAt` on the SAME row, so the id a client is holding stays valid. A multi-vehicle invite mints N rows sharing ONE code, so N distinct inviteIds exist for that one code — cancelling one of them affects only that vehicle.",
+          "x-classification": "P0",
+          "examples": ["csh0123456789abcdef0123456789abcd"]
+        },
+        "vehicleId": {
+          "type": "string",
+          "description": "Vehicle cuid this invite grants access to — matches VehicleState.vehicleId / VehicleSummary.vehicleId. Always the vehicle in the request path for the list/create endpoints. Exactly one vehicle per row: a multi-vehicle invite is N rows, one per vehicle, sharing a single code (see CreateShareInviteRequest.vehicleIds).",
+          "x-classification": "P0",
+          "examples": ["clxyz1234567890abcdef"]
+        },
+        "label": {
+          "type": "string",
+          "description": "OWNER-TYPED display name for the recipient — what the owner calls this person ('Mira Chen', 'Mom', 'Roommate'), captured in the send-invite sheet and echoed on the invite/viewer row (ios-app design/app/screens.jsx InvitesScreen row name, jsx:1301,1325). NOT AN EMAIL ADDRESS and not an identity: this contract is code-based, there is no email infrastructure, and the label is never matched against, resolved to, or validated as any account — it is a free-form owner-side memo for their own list. It is therefore NOT overwritten at redemption: after a rider accepts, the row keeps the label the owner typed, not the redeemer's account name. P1 — a person's name, log-redacted.",
+          "x-classification": "P1",
+          "examples": ["Mira Chen"]
+        },
+        "permission": {
+          "$ref": "#/$defs/SharePermission",
+          "description": "Access tier this invite grants (cumulative — see SharePermission). Chosen by the owner in the send-invite sheet's Access step and fixed for the life of the row: there is no edit-in-place endpoint in v1, so changing someone's tier means revoking the grant and inviting them again. Carried unchanged from the pending invite through redemption onto the accepted grant, and surfaced back to the redeemer as VehicleSummary.sharePermission on their viewer rows."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "accepted"],
+          "description": "Wire lifecycle of this invite row. 'pending' — minted, not yet redeemed; the row carries a live `code` and an `expiresAt`, and the owner's screen lists it under 'Pending' with Resend / Cancel actions. 'accepted' — some rider redeemed the code; the row is now a live viewer grant, carries `acceptedAt`, no longer carries `code`, and the owner's screen lists it under 'Viewers' with a Revoke action. There is deliberately NO 'revoked' member: the server keeps revoked rows as tombstones (status 'revoked' in `go_vehicle_shares`) for audit, but NEVER serializes them — a revoked row vanishes from ShareInviteListResponse instead of appearing with a dead status. Consumers therefore never need to filter this enum, and a Swift/TS client that renders every returned row is correct by construction. Expiry is likewise NOT a status: an expired invite stays 'pending' on the wire (its `expiresAt` is in the past) and simply stops redeeming — the redeem endpoint answers 404 for expired and invalid codes alike.",
+          "x-classification": "P0"
+        },
+        "code": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 6,
+          "pattern": "^[A-Z0-9]{6}$",
+          "description": "The 6-character redemption code the owner shares out-of-band (iOS system share sheet). Uppercase A-Z and 0-9 only — a 36^6 (~2.2 billion) space, which is why the redeem endpoint is rate-limited server-side. OWNER-FACING AND PRESENT ONLY WHILE `status` IS 'pending': the key is OMITTED on every accepted row, so a client MUST NOT expect to re-read the code of a grant that has already been redeemed. Server-minted, never client-supplied. A resend (POST /api/invites/{inviteId}/resend) mints a NEW code and invalidates the previous one. One code may back N rows when the owner invited across multiple vehicles at once — redeeming it grants all N in one atomic operation. Clients MUST send it back verbatim (the entry field upper-cases input and strips non-alphanumerics — ios-app design/app/onboarding.jsx InviteCodeFlow onChange, jsx:428-432). P1 — a live bearer credential for vehicle access: never log it, never put it in an error message, never expose it on any non-owner surface.",
+          "x-classification": "P1",
+          "examples": ["RBO246"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 / RFC 3339 UTC instant this invite row was created — the owner's 'sent {ago}' line on the pending row (ios-app design/app/screens.jsx InvitesScreen, jsx:1326). NOT reset by a resend: a resend re-mints `code` and pushes out `expiresAt` but leaves createdAt at the original send.",
+          "x-classification": "P0",
+          "examples": ["2026-07-29T15:04:05Z"]
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 / RFC 3339 UTC instant after which the `code` stops redeeming — 7 days from mint. PENDING ROWS ONLY: the key is OMITTED on accepted rows (an accepted grant does not expire; ending it is a revoke). Reset forward by a resend. Passing this instant does NOT change `status` — the row stays 'pending' with an expiresAt in the past until the owner cancels or resends it, so consumers that want an 'Expired' affordance MUST derive it by comparing this value to the current time. Also OPTIONAL for forward-compat: absence on a pending row means the server did not supply an expiry, which consumers MUST render as 'no expiry shown', NEVER as expired.",
+          "x-classification": "P0",
+          "examples": ["2026-08-05T15:04:05Z"]
+        },
+        "acceptedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 / RFC 3339 UTC instant a rider redeemed the code and this row became a live viewer grant. OPTIONAL on the wire: the key is OMITTED while `status` is 'pending', and is never cleared afterwards. The redeeming account is deliberately NOT on this object — the redeemer's user id lives server-side in `go_vehicle_shares.accepted_by_user_id` (go_users id space) and is not part of the owner-facing wire shape; the owner identifies the person by the `label` they typed.",
+          "x-classification": "P0",
+          "examples": ["2026-07-30T09:12:44Z"]
+        }
+      }
+    },
+    "CreateShareInviteRequest": {
+      "title": "CreateShareInviteRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "permission"],
+      "description": "Request body for POST /api/vehicles/{vehicleId}/invites — what the owner's send-invite sheet submits (ios-app design/app/screens.jsx InvitesScreen send flow, jsx:1264-1278). Deliberately a strict subset of ShareInvite: the owner is the authenticated JWT sub (never client-supplied), and inviteId / status / code / createdAt / expiresAt are all server-assigned. The caller MUST own the path vehicle. The server responds 201 Created with a single ShareInvite — see `vehicleIds` for exactly WHICH invite that is on a multi-vehicle create.",
+      "properties": {
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Owner-typed recipient name for the invite — see ShareInvite.label. Free-form and NOT an email: it is a memo for the owner's own list, never resolved to an account. Applied identically to every row a multi-vehicle create mints. P1 — a person's name.",
+          "x-classification": "P1",
+          "examples": ["Mira Chen"]
+        },
+        "permission": {
+          "$ref": "#/$defs/SharePermission",
+          "description": "Access tier to grant (cumulative — see SharePermission). Applied identically to every row a multi-vehicle create mints; per-vehicle tiers are NOT expressible in v1. The design collects this in the sheet's Access step and the app previously discarded it (ios-app design/app/screens.jsx SHARE_ACCESS, jsx:1235-1239)."
+        },
+        "vehicleIds": {
+          "type": "array",
+          "description": "MULTI-VEHICLE INVITE: the full set of vehicles this one invite should grant, from the sheet's 'select one or more' vehicle multi-select (design/Handoff for Claude Code.md §send-invite sheet). OPTIONAL — omit it for the ordinary single-vehicle case, which is exactly equivalent to sending `[<path vehicleId>]`. WHEN PRESENT IT MUST INCLUDE THE PATH VEHICLE; a set that omits the vehicle in the URL is rejected 400 `invalid_request`, because the path vehicle is what authorizes the call. Every id MUST be a vehicle the caller owns (otherwise 403 `permission_denied`); an empty array is rejected 400 `invalid_request`. The server creates ONE `go_vehicle_shares` ROW PER VEHICLE, all sharing a SINGLE `code`, so one redemption grants the whole set atomically — but the 201 RESPONSE IS A SINGLE ShareInvite: the row for the PATH VEHICLE. The sibling rows are not returned; the client learns them by listing each vehicle's invites, and the shared `code` on the returned row is the one to hand out for all of them. Cancelling one row (DELETE /api/invites/{inviteId}) removes only that vehicle from the grant set.",
+          "x-classification": "P0",
+          "items": {
+            "type": "string",
+            "description": "Vehicle cuid owned by the caller — same id space as VehicleSummary.vehicleId.",
+            "x-classification": "P0",
+            "examples": ["clxyz1234567890abcdef"]
+          },
+          "examples": [["clxyz1234567890abcdef", "clxyz1234567890abcdeg"]]
+        }
+      }
+    },
+    "RedeemShareInviteRequest": {
+      "title": "RedeemShareInviteRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code"],
+      "description": "Request body for POST /api/invites/redeem — the rider-side join, submitted by the iOS invite-code screen once six characters are entered (ios-app design/app/onboarding.jsx InviteCodeFlow submit, jsx:419-434). Authenticated: the redeeming account is the JWT sub and is never client-supplied. ATOMIC and IDEMPOTENT PER REDEEMER — re-submitting a code the same account already redeemed returns 200 with the same RedeemShareInviteResponse rather than minting a second grant (enforced by the partial-unique index over one accepted grant per (vehicle, user)), so a retried request after a dropped response is safe. RATE-LIMITED server-side (429 `rate_limited`): the code space is only 36^6, so brute-force enumeration is a real threat.",
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 6,
+          "pattern": "^[A-Z0-9]{6}$",
+          "description": "The 6-character invite code the owner shared, uppercase A-Z / 0-9 — see ShareInvite.code. Clients MUST normalize before sending exactly as the design's entry field does: upper-case and strip everything outside [A-Z0-9] (ios-app design/app/onboarding.jsx, jsx:428-432). A code that is unknown, already-consumed for a different account, or past its `expiresAt` all answer 404 `not_found` with an INDISTINGUISHABLE body — the server deliberately does not tell an enumerating caller which of those it hit. An OWNER redeeming their OWN vehicle's code answers 409 `conflict` (you cannot become a viewer of a car you already own). A malformed code — wrong length or illegal characters — is 400 `invalid_request`. P1 — a live bearer credential: never log it and never echo it in an error message.",
+          "x-classification": "P1",
+          "examples": ["RBO246"]
+        }
+      }
+    },
+    "RedeemShareInviteResponse": {
+      "title": "RedeemShareInviteResponse",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ownerFirstName", "vehicles"],
+      "description": "200 response body for POST /api/invites/redeem — everything the rider's success screen needs to render without a second round-trip (ios-app design/app/onboarding.jsx JoinedSuccess: \"You can now ride in {owner}'s Tesla\" plus the vehicle card, jsx:493-527). This is the ONLY sharing payload the invited party ever sees: ShareInvite is owner-facing and is never returned here (it would leak the owner-typed `label` and the still-live `code`). Returned identically on an idempotent re-redeem by the same account.",
+      "properties": {
+        "ownerFirstName": {
+          "type": "string",
+          "description": "The sharing owner's FIRST NAME only — the '{owner}' in \"You can now ride in {owner}'s Tesla\" and in the success card's \"{owner}'s {vehicle name}\" line (ios-app design/app/onboarding.jsx JoinedSuccess, jsx:509,519). Server-derived from the owner's identity with the same ladder RideRequest.requesterName uses: first name -> email local-part -> a generic fallback. DELIBERATELY NARROW: first name only, no surname, no email, no user id — a redeemer learns the minimum needed to recognize whose car they just joined. Always present (the fallback guarantees a non-empty string), so consumers never need an absent-name branch. P1 — a person's name, log-redacted.",
+          "x-classification": "P1",
+          "examples": ["Alex"]
+        },
+        "vehicles": {
+          "type": "array",
+          "description": "The vehicles this redemption granted, as ordinary VehicleSummary rows identical in shape to GET /api/vehicles — so the client can render the success card and seed its catalog from one response. Always present and NEVER empty: a redemption that granted nothing would have answered 404 or 409 instead. Length > 1 when the owner sent a multi-vehicle invite (N rows, one code). Every row carries `role: 'viewer'` and a `sharePermission` equal to the invite's tier. On an idempotent re-redeem the same rows are returned. Rows are the VIEWER-MASKED projection — the same masking GET /api/vehicles applies to a viewer-merged row, with no owner-only fields.",
+          "x-classification": "P1",
+          "items": { "$ref": "vehicle-summary.schema.json#/$defs/VehicleSummary" }
+        }
+      }
+    }
+  }
+}

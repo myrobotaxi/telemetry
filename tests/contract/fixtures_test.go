@@ -175,13 +175,13 @@ func TestFixturesValidateAgainstSchemas(t *testing.T) {
 
 	// Pre-compile all WS message payload schemas.
 	payloadSchemas := map[string]*jsonschema.Schema{
-		"auth":         compileDef(t, c, "AuthPayload"),
-		"auth_ok":      compileDef(t, c, "AuthOkPayload"),
+		"auth":           compileDef(t, c, "AuthPayload"),
+		"auth_ok":        compileDef(t, c, "AuthOkPayload"),
 		"vehicle_update": compileDef(t, c, "VehicleUpdatePayload"),
-		"drive_started": compileDef(t, c, "DriveStartedPayload"),
-		"drive_ended":   compileDef(t, c, "DriveEndedPayload"),
-		"connectivity":  compileDef(t, c, "ConnectivityPayload"),
-		"error":         compileDef(t, c, "ErrorPayload"),
+		"drive_started":  compileDef(t, c, "DriveStartedPayload"),
+		"drive_ended":    compileDef(t, c, "DriveEndedPayload"),
+		"connectivity":   compileDef(t, c, "ConnectivityPayload"),
+		"error":          compileDef(t, c, "ErrorPayload"),
 	}
 
 	// Build a table of all fixture files and their expected validation.

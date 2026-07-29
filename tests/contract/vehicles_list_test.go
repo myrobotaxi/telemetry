@@ -133,7 +133,12 @@ func TestContract_GETVehicles(t *testing.T) {
 
 				// Cross-check against the canonical schema so any
 				// future field rename / type change surfaces here.
-				validateAgainstSchema(t, "docs/contracts/schemas/vehicle-summary.schema.json", marshalRow(t, row))
+				// The file's root is the LIST ENVELOPE (VehicleListResponse);
+				// the per-row object lives under $defs, so the pointer form
+				// is what validates a single decoded item.
+				validateAgainstSchema(t,
+					"docs/contracts/schemas/vehicle-summary.schema.json#/$defs/VehicleSummary",
+					marshalRow(t, row))
 			},
 		},
 		{

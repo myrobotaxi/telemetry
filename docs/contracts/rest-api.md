@@ -406,7 +406,7 @@ v1 REST uses HTTP method semantics as the idempotency boundary. `GET` is always 
 | `DELETE /api/invites/{inviteId}` | Yes (equivalent final state) | Deleting an already-deleted invite returns `404 not_found` on the second call. Clients that need "delete or already deleted" semantics SHOULD treat `404 not_found` on a DELETE as an acceptable terminal state rather than an error. |
 | `DELETE /api/users/me` | Yes (equivalent final state) | After the first successful call the user's token is invalidated; the second call returns `401 auth_failed` because the token no longer resolves to a valid user. The final state is "account deleted" in both cases. |
 
-**Why no `Idempotency-Key` in v1.** The only non-idempotent endpoint is `POST /api/vehicles/{vehicleId}/invites`. In v1 the cost of a double-invite (two rows in the Invite table) is bounded: the owner can revoke either via `DELETE /api/invites/{inviteId}`. The cost of shipping a server-side idempotency key store (Redis or a dedicated table) is higher than the cost of the occasional duplicate invite at v1 scale (NFR-3.6: 1,000 users). If the invite UX suffers, a follow-up can add an `Idempotency-Key` header following RFC draft conventions.
+**Why no `Idempotency-Key` in v1.** The only non-idempotent endpoint is `POST /api/vehicles/{vehicleId}/invites`. The cost of a double-invite (two extra `go_vehicle_shares` rows carrying a second live code) is bounded: the owner cancels either via `DELETE /api/invites/{inviteId}`, and both codes expire in 7 days regardless. (`POST /api/invites/redeem` looks like the other candidate but is not one — it is idempotent per redeemer by construction, backed by the partial-unique accepted-grant index.) The cost of shipping a server-side idempotency key store (Redis or a dedicated table) is higher than the cost of the occasional duplicate invite at v1 scale (NFR-3.6: 1,000 users). If the invite UX suffers, a follow-up can add an `Idempotency-Key` header following RFC draft conventions.
 
 ---
 
@@ -442,7 +442,7 @@ The mask is applied at the **handler layer**: the store returns plaintext, fully
 | Role | Visible fields | Notes |
 |------|----------------|-------|
 | `owner` | All `VehicleSummary` fields: `vehicleId`, `name`, `model`, `year`, `color`, `vinLast4`, `status`, `chargeLevel`, `estimatedRange`, `lastUpdated`, `role`, `hasActiveRide`, `licensePlate`, `serviceEstimatedEndAt` | Full catalog visibility. `role` is always `owner` for the row's caller-vehicle relationship. `hasActiveRide` ([MYR-233](https://linear.app/myrobotaxi/issue/MYR-233)) is P0 derived operational state — same tier as `status` — and is in BOTH role allow-lists: a rider needs it to render Busy and route to the scheduling flow. `licensePlate` ([MYR-286](https://linear.app/myrobotaxi/issue/MYR-286)) is P1 but likewise in BOTH allow-lists — see the viewer row. `serviceEstimatedEndAt` ([MYR-316](https://linear.app/myrobotaxi/issue/MYR-316)) is P0 operational timing — again the same tier as `status` — and is in BOTH allow-lists for the same reason `hasActiveRide` is: it is what floors the rider's scheduling picker, so a rider who cannot see it cannot book correctly. Added to `vehicleSummaryOwnerFields` in `internal/mask/tables.go`; the viewer list derives from it by `removeField`, so it lands in both by construction. |
-| `viewer` | All `VehicleSummary` fields EXCEPT `name` | The user-assigned nickname (P1, owner-curated) is owner-only. Viewers still see model/year/color so they can identify the vehicle in their list, but the nickname stays with the owner. `licensePlate` ([MYR-286](https://linear.app/myrobotaxi/issue/MYR-286)) is deliberately NOT owner-only despite also being P1: the entire purpose of the plate is that a rider can identify the correct car at pickup, which fails if only the owner can see it. That is a product decision, not an oversight — do not "fix" it by analogy with `name`. `serviceEstimatedEndAt` ([MYR-316](https://linear.app/myrobotaxi/issue/MYR-316)) is likewise NOT owner-only, and needs no separate rule: `name` is the sole subtraction, so every field added to the owner list arrives here automatically (`removeField` derivation in `internal/mask/tables.go`). That is the intended outcome, not an accident of the derivation — the window floors the rider's picker. The catalog never carries the full `vin` for either role (`vinLast4` only). Forward-looking — see the §7.0 implementation note about the v1 viewer pathway being PLANNED. |
+| `viewer` | All `VehicleSummary` fields EXCEPT `name` | The user-assigned nickname (P1, owner-curated) is owner-only. Viewers still see model/year/color so they can identify the vehicle in their list, but the nickname stays with the owner. `licensePlate` ([MYR-286](https://linear.app/myrobotaxi/issue/MYR-286)) is deliberately NOT owner-only despite also being P1: the entire purpose of the plate is that a rider can identify the correct car at pickup, which fails if only the owner can see it. That is a product decision, not an oversight — do not "fix" it by analogy with `name`. `serviceEstimatedEndAt` ([MYR-316](https://linear.app/myrobotaxi/issue/MYR-316)) is likewise NOT owner-only, and needs no separate rule: `name` is the sole subtraction, so every field added to the owner list arrives here automatically (`removeField` derivation in `internal/mask/tables.go`). That is the intended outcome, not an accident of the derivation — the window floors the rider's picker. The catalog never carries the full `vin` for either role (`vinLast4` only). **[MYR-184](https://linear.app/myrobotaxi/issue/MYR-184) added `sharePermission` to the VIEWER list only** — the first field whose asymmetry runs this direction. It carries the cumulative tier the caller holds over a car they do NOT own (§7.5.0), which is meaningless on an owner row (an owner is not on a tier), so it is deliberately ABSENT from the owner allow-list rather than emitted empty — a consumer told to read an absent tier as the LOWEST would otherwise conclude an owner has `live` access to their own car. P0, the same tier as its sibling `role`. Because the viewer list is derived by `removeField` from the owner list, this one field is appended explicitly. **This row is no longer forward-looking:** MYR-184 delivered the viewer merge, so viewer rows are real and this projection runs on every list call from anyone who has redeemed an invite. |
 
 #### 5.2.1 Vehicle snapshot (`GET /api/vehicles/{vehicleId}/snapshot`)
 
@@ -476,17 +476,25 @@ Does NOT include `routePoints` -- those are returned by the separate `GET /api/d
 |------|----------------|-------|
 | `owner`, `viewer` | Full `routePoints` array | Both roles see the full polyline. The whole sharing use case is watching someone drive home; a partial polyline would defeat FR-5.1. |
 
-#### 5.2.5 Invite endpoints
+#### 5.2.5 Vehicle-sharing endpoints
 
 | Endpoint | Role access | Notes |
 |----------|-------------|-------|
-| `GET /api/vehicles/{vehicleId}/invites` | `owner` only | Viewers who call this receive `403 permission_denied`. |
-| `POST /api/vehicles/{vehicleId}/invites` | `owner` only | Same. |
-| `DELETE /api/invites/{inviteId}` | `owner` only (of the vehicle the invite targets) | Same. |
+| `POST /api/vehicles/{vehicleId}/invites` | `owner` only | A non-owner — INCLUDING a viewer of that vehicle at any tier — receives `403 vehicle_not_owned`. A viewer who could mint an invite would be re-sharing a car that is not theirs. |
+| `GET /api/vehicles/{vehicleId}/invites` | `owner` only | Same. A viewer who could list would read the owner's private `label` for every other person they invited. |
+| `DELETE /api/invites/{inviteId}` | `owner` only (`owner_user_id` match, enforced in the SQL `WHERE`) | A row that belongs to another owner is `404 not_found`, not 403 — indistinguishable from one that does not exist, so the endpoint is not an oracle for invite ids. |
+| `POST /api/invites/{inviteId}/resend` | `owner` only (same SQL predicate) | Same 404 rule. |
+| `POST /api/invites/redeem` | any authenticated caller | The one RIDER-facing route. It is not vehicle-scoped and has no role gate — the submitted code IS the authorization — but it is rate-limited per user (§7.5.5) and refuses `409` when the caller owns a target vehicle. |
 
-Rationale: FR-5.2 and FR-5.3 assign the viewer list and revocation to owners explicitly. v1 does not support viewers inviting additional viewers.
+Rationale: FR-5.2 and FR-5.3 assign the viewer list and revocation to owners explicitly. v1 does not support viewers inviting additional viewers, and MYR-184 did not change that.
 
-Note on the Invite response shape: `email` is **P1** per `data-classification.md` §1.6. The response returns it to the owner (who already knows who they invited), but any future `limited_viewer` who gains read access to invite metadata would have this field masked out. Since v1 only owners can hit invite endpoints at all, this masking is moot today; it is documented here for FR-5.5 readiness.
+**`ShareInvite` mask (`ResourceInvite` / `inviteOwnerFields` in `internal/mask/tables.go`):** `inviteId`, `vehicleId`, `label`, `permission`, `status`, `code`, `createdAt`, `expiresAt`, `acceptedAt`. The `viewer` role has **no entry at all** for this resource, so the fail-closed lookup produces deny-all — a viewer who somehow reached the projection would get an empty object rather than an owner's labels and a live code.
+
+**MYR-184 rebuilt this allow-list.** It previously described a shape this server never served — `id`, `email`, `status`, `createdAt`, `acceptedAt`, `revokedAt` — modelled on the retired Prisma `Invite` table. Three corrections worth naming:
+
+- **`email` is gone with no replacement.** This contract is code-based; no address is collected. Its stand-in is `label`, an owner-typed memo (P1, a person's name) that is never resolved to an account.
+- **`revokedAt` is gone.** Revoked rows are tombstones and are never serialized at all, so a field describing when it happened has no wire moment to appear in. Keeping it implied revoked rows are returned.
+- **`code` is new**, and is the one entry here that is a live **credential** rather than a description of one. Owner-only by construction, additionally omitted by the handler from any row that is not `pending`, and never logged.
 
 #### 5.2.6 Account deletion
 
@@ -546,9 +554,11 @@ No contract changes are required for the new role's wire shape (the REST respons
 | `GET` | `/api/vehicles/{vehicleId}/drives` | Paginated drive history for vehicle | Bearer + owner-or-viewer of vehicleId | FR-3.2, FR-9.1, FR-9.2 |
 | `GET` | `/api/drives/{driveId}` | Single drive detail (FR-3.4 stats + start/end addresses) | Bearer + owner-or-viewer of drive's vehicle | FR-3.4, FR-9.1 |
 | `GET` | `/api/drives/{driveId}/route` | Full GPS polyline for drive playback | Bearer + owner-or-viewer of drive's vehicle | FR-3.3, NFR-3.23 |
-| `POST` | `/api/vehicles/{vehicleId}/invites` | Create sharing invite | Bearer + owner of vehicleId | FR-5.1 |
-| `GET` | `/api/vehicles/{vehicleId}/invites` | List viewers + pending invites | Bearer + owner of vehicleId | FR-5.2 |
-| `DELETE` | `/api/invites/{inviteId}` | Revoke invite | Bearer + owner of invite's vehicle | FR-5.3 |
+| `POST` | `/api/vehicles/{vehicleId}/invites` | Mint a sharing code (one code, N vehicles) — §7.5.1 | Bearer + owner of vehicleId | FR-5.1 |
+| `GET` | `/api/vehicles/{vehicleId}/invites` | List pending invites + accepted viewers — §7.5.2 | Bearer + owner of vehicleId | FR-5.2 |
+| `DELETE` | `/api/invites/{inviteId}` | Cancel a pending invite / revoke an accepted grant (tombstone, 204, idempotent) — §7.5.3 | Bearer + owner of the invite | FR-5.3 |
+| `POST` | `/api/invites/{inviteId}/resend` | Re-mint the code + reset the 7-day expiry on the same row (pending only) — §7.5.4 | Bearer + owner of the invite | FR-5.1, MYR-184 |
+| `POST` | `/api/invites/redeem` | Rider-side join: accept every row backing a code, atomically — §7.5.5 | Bearer (self); rate-limited 10/min | FR-5.1, FR-5.4, MYR-184 |
 | `DELETE` | `/api/users/me` | Delete own account + all data | Bearer (self only) | FR-10.1, FR-10.2, NFR-3.29 |
 | `GET` | `/api/users/me/export` | GDPR Art. 15 / 20 portability export of every Prisma row owned by the caller | Bearer (self only) | FR-10, NFR-3.29 |
 | `POST` | `/api/ride-requests` | Create a ride request (P10 ride-hailing) | Bearer + vehicle access | FR-9.3, NFR-3.21, NFR-3.23 |
@@ -575,7 +585,7 @@ The `POST`/`GET /api/ride-requests[...]` rows (§7.8) are the P10 ride-hailing s
 
 The `/api/auth/*` rows (§7.10) are the identity module's auth surface (MYR-193, ADR-001 `docs/architecture/adr-001-identity-module.md`): native Sign in with Apple, ES256 access-token minting with a published JWKS, and rotating refresh tokens. Unlike every other row, these are **pre-authentication** endpoints (they mint or rotate the very credential the others require), so they are not Bearer-gated — they are protected by a per-IP token-bucket rate limit instead (§4.1.2).
 
-`GET /api/vehicles` (§7.0) is mounted by the Go server as of MYR-91 (2026-05-10). `GET /api/vehicles/{vehicleId}/snapshot` (§7.1) and `GET /api/vehicles/{vehicleId}/drives` (§7.2) are mounted as of MYR-133 (2026-06-03). `GET /api/drives/{driveId}/route` (§7.4) is mounted as of PR #260 (DV-20), and `GET /api/drives/{driveId}` (§7.3) as of MYR-130 (2026-07-02) — DV-20 is fully RESOLVED (see §10). `GET /api/users/me/export` (and the §7.6 / §7.5 endpoints) is served by the Next.js app per §10 DV-23 and is NOT in scope for the Go server's DV-20 mount.
+`GET /api/vehicles` (§7.0) is mounted by the Go server as of MYR-91 (2026-05-10). `GET /api/vehicles/{vehicleId}/snapshot` (§7.1) and `GET /api/vehicles/{vehicleId}/drives` (§7.2) are mounted as of MYR-133 (2026-06-03). `GET /api/drives/{driveId}/route` (§7.4) is mounted as of PR #260 (DV-20), and `GET /api/drives/{driveId}` (§7.3) as of MYR-130 (2026-07-02) — DV-20 is fully RESOLVED (see §10). The §7.5 vehicle-sharing endpoints are mounted on the Go server as of MYR-184 (2026-07-29), which SUPERSEDES the §7.5 half of DV-23. `GET /api/users/me/export` and the §7.6 endpoint remain served by the Next.js app per the surviving half of DV-23 and are NOT in scope for the Go server's DV-20 mount.
 
 ---
 
@@ -672,8 +682,8 @@ The rationale is "the list is what you see; the snapshot is what you drill into.
 See `§5.2.0` below for the per-role `VehicleSummary` mask. v1 behavior:
 
 - **Owner** sees every `VehicleSummary` field for every vehicle where `Vehicle.userId == callerId`.
-- **Viewer** sees every `VehicleSummary` field **EXCEPT** `name` (P1 — owner-curated nickname) for every vehicle where an accepted `Invite` row exists for the caller's email + the vehicle.
-- v1 implementation note: **owner-only is the only path currently reachable on the Go server.** The viewer-merged behavior is forward-looking — it requires the Go server to read the Prisma-owned `Invite` table, which lands as a follow-up ticket. Until then, viewer-tier callers receive an empty list. The mask matrix for `VehicleSummary` is wired now (in `internal/mask/tables.go`) so the viewer pathway is data-ready when the invite-read pathway lands.
+- **Viewer** sees every `VehicleSummary` field **EXCEPT** `name` (P1 — owner-curated nickname), **PLUS** `sharePermission`, for every vehicle where an ACCEPTED `go_vehicle_shares` grant names the caller.
+- **Implementation note (updated by [MYR-184](https://linear.app/myrobotaxi/issue/MYR-184), 2026-07-29): the viewer merge is LIVE.** This bullet previously said owner-only was the only reachable path, that the merge required reading the Prisma-owned `Invite` table, and that viewer-tier callers received an empty list. None of that is true any more: sharing is Go-owned (`go_vehicle_shares`, migration 0020) and a rider who redeemed a code sees exactly the cars they were granted. The response is **owner rows first, then shared rows** — the two come from separate lean queries so the owner path's index plan is untouched. A failure of the shared-vehicle read is logged and swallowed, degrading to the caller's own cars rather than 500-ing their whole garage; the degraded set is always strictly SMALLER, never wider.
 
 #### Idempotency
 
@@ -681,9 +691,9 @@ See `§5.2.0` below for the per-role `VehicleSummary` mask. v1 behavior:
 
 #### Implementation notes
 
-- The handler lives in `internal/telemetry/vehicles_list_handler.go` (analogous to `vehicle_status_handler.go`). It calls `VehicleRepo.ListByUser(ctx, userId)` for the owner slice. Viewer-shared vehicles are PLANNED (see RBAC v1 note above).
+- The handler lives in `internal/telemetry/vehicles_list_handler.go` (analogous to `vehicle_status_handler.go`). It calls `VehicleRepo.ListSummariesByUser(ctx, userId)` for the owner slice and `VehicleRepo.ListSharedSummariesByUser(ctx, userId)` for the viewer slice (`internal/telemetry/vehicles_list_viewer.go`), the latter joining `go_vehicle_shares` on `accepted_by_user_id` + `status='accepted'` so the grant IS the filter.
 - The mask projection is applied at the handler layer using `mask.For(mask.ResourceVehicleSummary, role)` — same plumbing as the snapshot endpoint. Owners and viewers branch on the role returned by `authenticator.ResolveRole(ctx, userId, vehicleId)` for each list item.
-- No audit-log row is emitted for the list itself (reads are not P1+ per `data-lifecycle.md` §4.2). The per-row mask projection's `fieldsMasked` count is observable via the existing REST mask-audit hook (1% sample) if any viewer-mask field ever strips, but in v1 (owner-only path) the projection is the identity.
+- No audit-log row is emitted for the list itself (reads are not P1+ per `data-lifecycle.md` §4.2). The per-row mask projection's `fieldsMasked` count is observable via the existing REST mask-audit hook (1% sample); since MYR-184 the viewer projection genuinely strips (`name`), so this is no longer always the identity.
 
 #### Forward-looking: pagination
 
@@ -1050,180 +1060,269 @@ See §5.2.4. Owners and viewers see the full polyline; denying viewers would def
 
 ---
 
-### 7.5 Invite endpoints
+### 7.5 Vehicle sharing (invites + redeem)
 
 > **Anchored:** FR-5.1, FR-5.2, FR-5.3, FR-5.4.
+> **Schema:** [`schemas/vehicle-sharing.schema.json`](schemas/vehicle-sharing.schema.json) — `ShareInvite`, `SharePermission`, `CreateShareInviteRequest`, `RedeemShareInviteRequest`, `RedeemShareInviteResponse`, `ShareInviteListResponse` (contracts v0.19.0).
+> **Persisted:** Go-owned `go_vehicle_shares` table (migration 0020 — [`data-classification.md`](data-classification.md) §1.15). No foreign keys to the sibling schema (CG-DL-9).
 
-The Invite table is **Prisma-owned** per [`data-classification.md`](data-classification.md) §1.6 and [`data-lifecycle.md`](data-lifecycle.md) §1.4. No `InviteRepo` exists in `internal/store/` and none will be added: per §10 DV-23 (RESOLVED 2026-05-08, MYR-69), the **Next.js app serves all three invite endpoints directly** against its existing Prisma-owned Invite table, with the public API hostname (`https://api.myrobotaxi.com/api/...`) proxying invite paths to the Next.js app and snapshot/drives/drive-route paths to the Go telemetry server. The REST contract is the SDK's source of truth regardless of where the handler runs; the handler location is an implementation detail the SDK does not observe.
+Mounted on the **Go telemetry server** as of **MYR-184** (2026-07-29). This **SUPERSEDES §10 DV-23**, which had assigned invites to the now-deprecated Next.js app: `react-frontend` is retired, the email-keyed Prisma `Invite` table is retired **unused**, and sharing is Go-owned end to end. See the DV-23 row in §10 for the full supersession note.
+
+**Codes, not emails.** MyRoboTaxi has no email infrastructure and riders are Apple-native, so the owner sends a server-minted **6-character code** out-of-band through the iOS system share sheet. Nothing in this family accepts, stores, or resolves an email address. The pre-MYR-184 shape documented here — `email`, `senderId`, `sentDate`, `isOnline` — never shipped and is gone.
+
+**Five endpoints, two audiences.** Four are OWNER-facing and return the `ShareInvite` object; one is RIDER-facing and returns `RedeemShareInviteResponse`. `ShareInvite` is **never** delivered to an invited party: it carries the owner-typed `label` and, while pending, the live `code`.
+
+| Endpoint | Audience | Returns |
+|----------|----------|---------|
+| `POST /api/vehicles/{vehicleId}/invites` | owner | `ShareInvite` (201) |
+| `GET /api/vehicles/{vehicleId}/invites` | owner | `ShareInviteListResponse` (200) |
+| `DELETE /api/invites/{inviteId}` | owner | no body (204) |
+| `POST /api/invites/{inviteId}/resend` | owner | `ShareInvite` (200) |
+| `POST /api/invites/redeem` | any authenticated caller | `RedeemShareInviteResponse` (200) |
+
+#### 7.5.0 Permission tiers
+
+`SharePermission` is **strictly cumulative** — `live` < `live_history` < `rides` — and every server gate compares with a `>=` over that order, never equality:
+
+| Tier | Grants | Server gate |
+|------|--------|-------------|
+| `live` | The vehicle appears in the viewer's §7.0 list; §7.1 snapshot readable under the viewer mask; WS vehicle subscription allowed. | `internal/telemetry/vehicle_share_access.go` `vehicleAccessFor(..., PermissionLive)` |
+| `live_history` | Everything above, plus §7.2 drives list, §7.3 drive detail, §7.4 drive route. | `vehicleAccessFor(..., PermissionLiveHistory)` |
+| `rides` | Everything above, plus creating a §7.8 ride request as a rider who is **not** the vehicle's owner. | `vehicleAccessFor(..., PermissionRides)` |
+
+**Sharing never grants writes.** Commands (§7.9), plate (§7.14), refresh (§7.15), service window (§7.16), and teardown (§7.12) stay owner-only at every tier, as does this entire §7.5 family — a viewer cannot re-share a car that is not theirs, nor read the owner's private labels for other people.
 
 #### 7.5.1 `POST /api/vehicles/{vehicleId}/invites`
 
 ##### Purpose
 
-Creates a sharing invite that grants the recipient (identified by email) read access to the vehicle as a `viewer`. The recipient accepts the invite out-of-band (via the Next.js app's invite-acceptance flow) and becomes an active viewer upon acceptance.
+Mints ONE code and creates one `go_vehicle_shares` row per vehicle in the requested set. Owner-only.
 
 ##### Request
 
 ```
 POST /api/vehicles/{vehicleId}/invites HTTP/1.1
-Host: api.myrobotaxi.com
 Authorization: Bearer <token>
 Content-Type: application/json; charset=utf-8
-Accept: application/json
 
 {
-  "label": "Viewer",
-  "email": "invitee-a@example.com",
-  "permission": "live_history"
+  "label": "Mira Chen",
+  "permission": "live_history",
+  "vehicleIds": ["clxyz1234567890abcdef", "clxyz1234567890abcdeg"]
 }
 ```
 
 | Field | Type | Required | Classification | Notes |
 |-------|------|----------|----------------|-------|
-| `label` | string | Yes | P0 | Display name the owner chose for the invite (e.g., "Viewer", "Shared user"). Max 64 characters. |
-| `email` | string (RFC 5322 email) | Yes | P1 | Invitee's email address. Server-side validation on format. |
-| `permission` | string (enum) | Yes | P0 | `live` (live state only) or `live_history` (live state + drive history). Matches the `InvitePermission` enum in `data-classification.md` §1.6. |
+| `label` | string | Yes | P1 | Owner-typed recipient name — a memo for the owner's own list, **never** resolved to an account and **not** an email. Max 120 characters. Log-redacted. |
+| `permission` | string (enum) | Yes | P0 | `live` \| `live_history` \| `rides`. Applied identically to every row a multi-vehicle create mints; per-vehicle tiers are not expressible in v1. |
+| `vehicleIds` | string[] | No | P0 | Multi-vehicle invite. **MUST include the path vehicle** (400 otherwise — the path vehicle is what authorizes the call). Every id must be owned by the caller (403 otherwise). Omitting it is exactly equivalent to `[<path vehicleId>]`. Max 20. Duplicates are collapsed. |
 
-##### Response -- 201 Created
+##### Response — 201 Created
+
+A single `ShareInvite`: **the row for the PATH vehicle**. Sibling rows are not returned; the client learns them by listing each vehicle's invites, and the `code` on the returned row is the one to hand out for all of them.
 
 ```json
 {
-  "id": "clxyz1234567890invite01",
+  "inviteId": "csh0123456789abcdef0123456789abcd",
   "vehicleId": "clxyz1234567890abcdef",
-  "senderId": "clxyz1234567890userid",
-  "label": "Viewer",
-  "email": "invitee-a@example.com",
-  "status": "pending",
+  "label": "Mira Chen",
   "permission": "live_history",
-  "sentDate": "2026-04-14T10:00:00Z",
-  "acceptedDate": null,
-  "lastSeen": null,
-  "isOnline": false,
-  "createdAt": "2026-04-14T10:00:00Z",
-  "updatedAt": "2026-04-14T10:00:00Z"
+  "status": "pending",
+  "code": "RBO246",
+  "createdAt": "2026-07-29T15:04:05Z",
+  "expiresAt": "2026-08-05T15:04:05Z"
 }
 ```
 
-The response is a full `Invite` object as defined in §8. The `email` field is returned to the owner (who already knows who they invited); any future `limited_viewer` role would have it masked out (§5.2.5).
+`code` and `expiresAt` are present because the row is `pending`; `acceptedAt` is omitted for the same reason. The 7-day expiry is computed by the **database** (`NOW() + INTERVAL '7 days'`), the same clock the redeem predicate reads.
 
-##### Response -- error
+**All-or-nothing.** The whole create is one transaction and ownership of every requested vehicle is verified inside it. A set containing one car the caller does not own mints nothing at all — a partial grant would hand out a code that grants less than the owner believes.
+
+##### Response — error
 
 | HTTP | `error.code` | When |
 |------|--------------|------|
-| 400 | `invalid_request` | Malformed JSON, missing required field, invalid email, invalid permission enum, label too long |
-| 401 | `auth_failed` | Missing/malformed/invalid token |
-| 403 | `permission_denied` | Caller is not the owner of `vehicleId` (e.g., caller is a viewer or a non-owner) |
-| 404 | `not_found` | `vehicleId` does not exist (or is not visible) |
-| 429 | `rate_limited` | REST rate limit breached |
+| 400 | `invalid_request` | Malformed JSON; missing/blank `label`; label over 120 chars; unknown `permission`; empty `vehicleIds`; `vehicleIds` omitting the path vehicle; over 20 vehicles |
+| 401 | `auth_failed` | Missing/invalid token |
+| 403 | `vehicle_not_owned` | Caller does not own the path vehicle |
+| 403 | `permission_denied` | Some vehicle in `vehicleIds` is not owned by the caller |
+| 404 | `not_found` | Path `vehicleId` does not exist |
 | 500 | `internal_error` | Store-layer error |
 
 ##### Idempotency
 
-`POST` is NOT idempotent in v1 (§4.5). A retry after a network blip MAY create two invites for the same email; the owner can revoke either via `DELETE /api/invites/{inviteId}`.
+`POST` is not idempotent (§4.5). A retry after a network blip mints a second code; the owner cancels either with `DELETE /api/invites/{inviteId}`.
 
 #### 7.5.2 `GET /api/vehicles/{vehicleId}/invites`
 
 ##### Purpose
 
-Returns the list of active viewers and pending invites for a vehicle.
+The owner's sharing screen for one vehicle: pending invites and accepted viewer grants. Owner-only.
 
-##### Request
-
-```
-GET /api/vehicles/{vehicleId}/invites HTTP/1.1
-Host: api.myrobotaxi.com
-Authorization: Bearer <token>
-Accept: application/json
-```
-
-##### Response -- 200 OK
+##### Response — 200 OK
 
 ```json
 {
-  "items": [
+  "invites": [
     {
-      "id": "clxyz1234567890invite01",
+      "inviteId": "csh0123456789abcdef0123456789abcd",
       "vehicleId": "clxyz1234567890abcdef",
-      "senderId": "clxyz1234567890userid",
-      "label": "Viewer A",
-      "email": "invitee-a@example.com",
-      "status": "accepted",
+      "label": "Mira Chen",
       "permission": "live_history",
-      "sentDate": "2026-04-01T10:00:00Z",
-      "acceptedDate": "2026-04-01T11:23:00Z",
-      "lastSeen": "2026-04-14T09:45:00Z",
-      "isOnline": true,
-      "createdAt": "2026-04-01T10:00:00Z",
-      "updatedAt": "2026-04-14T09:45:00Z"
+      "status": "pending",
+      "code": "RBO246",
+      "createdAt": "2026-07-29T15:04:05Z",
+      "expiresAt": "2026-08-05T15:04:05Z"
     },
     {
-      "id": "clxyz1234567890invite02",
+      "inviteId": "csh0123456789abcdef0123456789abce",
       "vehicleId": "clxyz1234567890abcdef",
-      "senderId": "clxyz1234567890userid",
-      "label": "Viewer B",
-      "email": "invitee-b@example.com",
-      "status": "pending",
-      "permission": "live_history",
-      "sentDate": "2026-04-14T10:00:00Z",
-      "acceptedDate": null,
-      "lastSeen": null,
-      "isOnline": false,
-      "createdAt": "2026-04-14T10:00:00Z",
-      "updatedAt": "2026-04-14T10:00:00Z"
+      "label": "Roommate",
+      "permission": "live",
+      "status": "accepted",
+      "createdAt": "2026-07-01T10:00:00Z",
+      "acceptedAt": "2026-07-01T11:23:00Z"
     }
   ]
 }
 ```
 
-**Not paginated in v1.** The response is a simple `{items: Invite[]}` object without `nextCursor` / `hasMore`. Rationale: typical viewer counts per vehicle are small (1-10), well below any reasonable page size. If a future use case requires pagination, an additive change (adding `nextCursor` and `hasMore` fields, unused by v1 clients) can introduce it without breaking compatibility.
+Three rules the response body encodes, all of them server-enforced:
 
-##### Response -- error
+1. **The envelope key is `invites`, not `items`.** This surface is deliberately **unpaginated** — an owner's per-vehicle invite set is small and bounded, there is no cursor and no `hasMore` — and the distinct key keeps an SDK pagination helper from mistaking it for a page. Always an array, never `null`.
+2. **Revoked rows are NEVER serialized.** Revocation is a tombstone flip kept server-side for audit; the wire `status` enum has no `revoked` member, so a revoked row simply disappears from this list. Consumers never need to filter it.
+3. **`code` appears only on `pending` rows**, and `expiresAt` with it; `acceptedAt` appears only on `accepted` rows. Order is newest first (`created_at DESC`).
+
+**Expiry is not a status.** An expired invite stays `pending` with an `expiresAt` in the past and simply stops redeeming. A client that wants an "Expired" affordance derives it by comparing that value to the current time.
+
+##### Response — error
 
 | HTTP | `error.code` | When |
 |------|--------------|------|
-| 401 | `auth_failed` | Missing/malformed/invalid token |
-| 403 | `permission_denied` | Caller is not the owner of `vehicleId` |
-| 404 | `not_found` | `vehicleId` does not exist (or is not visible) |
-| 429 | `rate_limited` | REST rate limit breached |
+| 401 | `auth_failed` | Missing/invalid token |
+| 403 | `vehicle_not_owned` | Caller does not own `vehicleId` — including a **viewer** of that vehicle |
+| 404 | `not_found` | `vehicleId` does not exist |
 | 500 | `internal_error` | Store-layer error |
 
 #### 7.5.3 `DELETE /api/invites/{inviteId}`
 
 ##### Purpose
 
-Revokes a sharing invite. If the invite was in `pending` state, it is deleted and the recipient cannot accept it. If the invite was in `accepted` state, the corresponding viewer immediately loses read access to the vehicle.
+Cancels a pending invite or revokes an accepted grant. Owner-only.
 
-Per [`websocket-protocol.md`](websocket-protocol.md) §10 DV-09, the mid-connection ownership snapshot is stale on the WS path today -- a revoked viewer who is currently connected over the WS continues to receive broadcasts until they reconnect. Closing DV-09 is the mechanism that wires this REST endpoint's effect into the live WebSocket path. Until DV-09 ships, SDK consumers should assume that revocation takes effect on the next WS reconnect, not immediately.
+The row is **tombstoned** (`status` → `revoked`, `revoked_at` stamped), never hard-deleted: an access grant that vanishes leaves no way to answer "who had access to this car in June".
+
+##### Response — 204 No Content
+
+Empty body.
+
+**Idempotent.** Revoking an already-revoked invite that belongs to the caller is also 204, so a client retrying a dropped response never sees a spurious 404. An invite that does not exist and one that belongs to another owner both answer **404**, indistinguishably — this endpoint is not an oracle for other people's invite ids.
+
+**Revocation takes effect immediately on this instance.** The server busts the revoked viewer's cached access set (`auth.JWTAuthenticator.InvalidateVehicles`) as part of the request, so the next REST call and the next WS handshake both see the narrowed set. Two caveats: (a) the cache is per-process, so on a multi-machine deployment only the machine that served the revoke is cleared and the others lapse on the 5-minute TTL — the app runs a single Fly machine today; (b) a viewer holding a **live** WebSocket connection keeps receiving broadcasts until they reconnect, which is [`websocket-protocol.md`](websocket-protocol.md) §10 DV-09 and is unchanged by MYR-184.
+
+##### Response — error
+
+| HTTP | `error.code` | When |
+|------|--------------|------|
+| 401 | `auth_failed` | Missing/invalid token |
+| 404 | `not_found` | `inviteId` does not exist, or belongs to another owner |
+| 500 | `internal_error` | Store-layer error |
+
+#### 7.5.4 `POST /api/invites/{inviteId}/resend`
+
+##### Purpose
+
+Mints a **new** code on the same row and resets `expiresAt` to a full 7 days from now, invalidating the previous code. Owner-only, **pending-only**.
+
+##### Response — 200 OK
+
+The updated `ShareInvite`. `inviteId` is unchanged (a client holding it keeps working) and `createdAt` is unchanged (the owner's "sent {ago}" line still refers to the original send).
+
+##### Response — error
+
+| HTTP | `error.code` | When |
+|------|--------------|------|
+| 401 | `auth_failed` | Missing/invalid token |
+| 409 | `conflict` | The invite has already been **accepted**. Changing who holds an accepted grant is a revoke plus a fresh invite — silently re-opening a live grant for redemption by a different person would be a quiet transfer of access |
+| 404 | `not_found` | `inviteId` does not exist, belongs to another owner, or is a revoked tombstone |
+| 500 | `internal_error` | Store-layer error |
+
+#### 7.5.5 `POST /api/invites/redeem`
+
+##### Purpose
+
+The rider-side join. Accepts **every** pending, unexpired row backing the submitted code, atomically, on behalf of the authenticated caller. This is the only sharing endpoint an invited party ever calls and the only response they ever see.
 
 ##### Request
 
 ```
-DELETE /api/invites/{inviteId} HTTP/1.1
-Host: api.myrobotaxi.com
+POST /api/invites/redeem HTTP/1.1
 Authorization: Bearer <token>
+Content-Type: application/json; charset=utf-8
+
+{ "code": "RBO246" }
 ```
 
-| Parameter | Location | Type | Required | Notes |
-|-----------|----------|------|----------|-------|
-| `inviteId` | path | string (cuid) | Yes | |
+| Field | Type | Required | Classification | Notes |
+|-------|------|----------|----------------|-------|
+| `code` | string | Yes | P1 | 6 characters, `^[A-Z0-9]{6}$`. The server normalizes exactly as the client entry field does (upper-case, strip everything outside `[A-Z0-9]`), so a code pasted with a stray space or hyphen still works. A live bearer credential — never logged, never echoed into an error body. |
 
-##### Response -- 204 No Content
+The redeeming account is the JWT subject and is never client-supplied.
 
-Empty body on success.
+##### Response — 200 OK
 
-##### Response -- error
+```json
+{
+  "ownerFirstName": "Alex",
+  "vehicles": [
+    {
+      "vehicleId": "clxyz1234567890abcdef",
+      "model": "Model 3",
+      "year": 2024,
+      "color": "Pearl White",
+      "licensePlate": "8ABC123",
+      "vinLast4": "0001",
+      "status": "parked",
+      "chargeLevel": 72,
+      "estimatedRange": 210,
+      "lastUpdated": "2026-07-29T15:04:05Z",
+      "hasActiveRide": false,
+      "serviceEstimatedEndAt": null,
+      "role": "viewer",
+      "sharePermission": "rides"
+    }
+  ]
+}
+```
+
+- `ownerFirstName` — the sharing owner's **first name only**, resolved with the same ladder `RideRequest.requesterName` uses (display name → email local-part → the literal `"Owner"`). No surname, no email, no user id: a redeemer learns the minimum needed to recognize whose car they just joined. P1, log-redacted. Always non-empty.
+- `vehicles` — ordinary `VehicleSummary` rows, identical in shape to §7.0, so the client can seed its catalog from this one response. Always present and **never empty**: a redemption that granted nothing answers 404 or 409 instead. Length > 1 for a multi-vehicle invite. Every row carries `role: "viewer"` and a `sharePermission`, and is the **viewer-masked** projection — the same mask §7.0 applies to a viewer-merged row, so `name` (the owner-curated nickname) is absent.
+
+##### Atomicity and idempotency
+
+The whole redemption is one transaction with the candidate rows held under `FOR UPDATE`:
+
+- **Two people racing one code**: the second blocks, re-reads no pending rows, and gets 404. Never a subset granted, never two grants.
+- **The caller owns one of the target vehicles**: 409, with **nothing** written — a multi-vehicle code that includes one of your own cars grants you none of the others rather than a confusing partial set.
+- **The same account retrying** after a dropped response: 200 with the same body. Enforced by the partial-unique index over one accepted grant per `(user, vehicle)`.
+
+On success the server busts the redeemer's cached access set, so the granted vehicles appear on their very next `GET /api/vehicles` rather than after the cache TTL.
+
+##### Response — error
 
 | HTTP | `error.code` | When |
 |------|--------------|------|
-| 401 | `auth_failed` | Missing/malformed/invalid token |
-| 403 | `permission_denied` | Caller is not the owner of the vehicle this invite targets |
-| 404 | `not_found` | `inviteId` does not exist or has already been revoked |
-| 429 | `rate_limited` | REST rate limit breached |
+| 400 | `invalid_request` | The code is malformed after normalization (wrong length or illegal characters). Deliberately **not** 404 — "you sent nonsense" and "that code grants you nothing" are different answers |
+| 401 | `auth_failed` | Missing/invalid token |
+| 404 | `not_found` | The code is unknown, **expired**, or already consumed by a different account. All three answer with an **identical body**: the server does not tell an enumerating caller which one it hit |
+| 409 | `conflict` | The caller owns one of the target vehicles, or already holds a grant on one of them through a different invite |
+| 429 | `rate_limited` | Per-user redemption cap exceeded (10 attempts/minute) |
 | 500 | `internal_error` | Store-layer error |
 
-##### Idempotency
+##### Rate limiting
 
-`DELETE` is idempotent in the "equivalent final state" sense (§4.5). A second DELETE after success returns `404 not_found`; clients MAY treat this as a successful terminal state.
+The code space is only 36^6 (~2.2 billion), so this endpoint is rate-limited **per authenticated user** at 10 attempts per minute — every attempt counted, successes included, so an attacker cannot interleave a known-good code with guesses to stay under the cap. The counter is **in-process**, which is exact only because the app runs a single Fly machine (`fly.toml` declares one `[[vm]]` with no scale-out); a second machine would make the effective cap N × the limit, and this must move to a shared store **before** any scale-out, not after.
 
 ---
 
@@ -1312,7 +1411,7 @@ The full deletion cascade (User -> Account, Vehicle, Invite, Settings; Vehicle -
 
 Returns a JSON archive of every Prisma row owned by the authenticated user — the SDK's single entry point for GDPR Art. 15 / Art. 20 portability exports. The endpoint is the export companion to `DELETE /api/users/me` (§7.6); together they implement the data-export-then-delete flow GDPR requires before erasure. Phase A implementation: [myrobotaxi/react-frontend#259](https://github.com/myrobotaxi/react-frontend/pull/259) (Next.js handler).
 
-The handler runs in the Next.js app per the same DV-23 routing decision that places `DELETE /api/users/me` and the §7.5 invite endpoints there: the public API hostname (`https://api.myrobotaxi.com/api/...`) proxies `/api/users/me/*` paths to the Next.js app. The Go telemetry server has no User repository and no export handler. The SDK is unaware of which process serves the request.
+The handler runs in the Next.js app per the surviving half of the DV-23 routing decision, which places `DELETE /api/users/me` there. (The §7.5 half of DV-23 was SUPERSEDED by MYR-184 — sharing moved to the Go server — but that does not disturb this path.) the public API hostname (`https://api.myrobotaxi.com/api/...`) proxies `/api/users/me/*` paths to the Next.js app. The Go telemetry server has no User repository and no export handler. The SDK is unaware of which process serves the request.
 
 #### Re-auth precondition (MYR-76)
 
@@ -1393,7 +1492,7 @@ The rider-facing surface (mounted as of **MYR-174**) plus the owner-facing surfa
 
 #### Requester name (MYR-229)
 
-The `RideRequest` object carries an **optional** `requesterName` string so an owner sees who asked for the ride instead of a bare `riderId` cuid. It is **populated server-side** from the requester's (`riderId`) identity — the requester is never allowed to set it — resolved from the Prisma-owned `"User"` table (READ-ONLY, CG-DL-9) via the fallback chain:
+The `RideRequest` object carries an **optional** `requesterName` string so an owner sees who asked for the ride instead of a bare `riderId` cuid. It is **populated server-side** from the requester's (`riderId`) identity — the requester is never allowed to set it — resolved READ-ONLY (CG-DL-9) from **three** identity sources in precedence order (MYR-264): the sibling-schema `"User"` row, then the Apple first-consent name in `go_identity_apple`, then `go_users`. The third leg matters more since MYR-184: a rider who joined via an invite code may be Apple-native and have no `"User"` row at all, and a `"User"`-only lookup would show their owner a placeholder. The resolution ladder within a source is:
 
 1. **First name** — the first whitespace-separated token of the user's display `name` (e.g. `"Ada Lovelace"` → `"Ada"`).
 2. **Email local-part** — the part before `@` when there is no usable name (e.g. `"grace.hopper@navy.mil"` → `"grace.hopper"`).
@@ -1403,7 +1502,7 @@ The field is **OMITTED** (never an empty string) in exactly one case: the rider 
 
 #### Authorization model (v1 enforced vs deferred)
 
-- **Create** derives `ownerId` from the target vehicle's owner and enforces a **vehicle-access check identical to `/snapshot` and `/drives`**: the caller must be able to see the vehicle (v1: `vehicle.userId == caller`). So in v1 a rider may only request a ride on a vehicle they own, and `ownerId == riderId`. **Broader shared-viewer requests (rider ≠ owner) are DEFERRED to the app-side sharing tiers**: they light up automatically when the server's vehicle-access set gains the viewer-merge pathway (`GetUserVehicles`, PLANNED MYR-91) — no change to this handler is required, only a wider access set. Unknown vehicle → `404 not_found`; visible-but-not-accessible → `403 vehicle_not_owned`. A rider may hold only **one OPEN instant ride** (MYR-230): a second **instant** create while one is open is `409 ride_active` and returns the existing ride for the client to adopt; **scheduled** creates are exempt (see the `POST` section below).
+- **Create** derives `ownerId` from the target vehicle's owner and enforces a vehicle-access check: the caller must be the vehicle's **owner**, OR hold an accepted share at the **`rides`** tier (§7.5). A rider ≠ owner request is therefore normal as of **MYR-184**, and `ownerId` is still the VEHICLE's owner — that asymmetry is what routes the accept/decline to the right person. **CORRECTION (MYR-184, 2026-07-29):** this bullet previously said shared-viewer requests would "light up automatically" when `GetUserVehicles` gained the viewer merge, with "no change to this handler required". **That was wrong.** The create-time check is a SEPARATE code path from the read-side access set (`internal/telemetry/ride_request_handler.go`, an owner-equality test on the `GetByID` row): widening the access set put shared cars in a viewer's list and let them read the snapshot, but this check still refused every one of their ride requests. Granting `rides` required changing it, and MYR-184 did. The identical claim in `internal/telemetry/ride_request_handler.go`'s type doc has been corrected in lockstep. Unknown vehicle → `404 not_found`; visible-but-not-accessible, and any viewer below the `rides` tier → `403 vehicle_not_owned`. A rider may hold only **one OPEN instant ride** (MYR-230): a second **instant** create while one is open is `409 ride_active` and returns the existing ride for the client to adopt; **scheduled** creates are exempt (see the `POST` section below). Unknown vehicle → `404 not_found`; visible-but-not-accessible → `403 vehicle_not_owned`. A rider may hold only **one OPEN instant ride** (MYR-230): a second **instant** create while one is open is `409 ride_active` and returns the existing ride for the client to adopt; **scheduled** creates are exempt (see the `POST` section below).
 - **Detail (`GET {id}`)** is **party-only**: rider OR vehicle owner. A caller who is neither gets `404 not_found` (not `403`) so the server never confirms the existence of a ride the caller has no relation to.
 - **Cancel** is **rider-only**. The owner is a party but cannot cancel → `403 permission_denied`. A non-party → `404`.
 - **Accept / decline** are **owner-only**. The rider is a party but cannot decide → `403 permission_denied`. A non-party → `404`. (MYR-175)
@@ -2740,10 +2839,10 @@ See [`websocket-protocol.md`](websocket-protocol.md) §10 status legend -- same 
 | ID | Status | Topic | Current behavior | Target behavior | Anchor | Proposed Linear issue title |
 |----|--------|-------|------------------|-----------------|--------|------------------------------|
 | **DV-19** | **New** | REST auth middleware | [`internal/server/server.go`](../../internal/server/server.go) wires a `requestLogger` middleware across the client mux but has NO authentication middleware for REST endpoints. The existing `/api/vehicle-status/{vin}` and `/api/fleet-config/{vin}` handlers perform their own ad-hoc validation. The SDK's REST surface needs a shared middleware that parses `Authorization: Bearer <token>`, calls the same `Authenticator` used by the WS handler, resolves the user's vehicle ownership set, and emits observability signals. | Add a `restAuthMiddleware(Authenticator)` in `internal/server/middleware.go` (or a new file) that: (1) parses the header, (2) validates via `Authenticator.ValidateToken`, (3) loads the user's vehicles via `GetUserVehicles`, (4) puts `userId` and `vehicleIDs` in the request context, (5) returns `401 auth_failed` / `401 auth_timeout` on failure with the error envelope from §4.1, (6) strips the Authorization header from the slog `http request` line. Wire this middleware in front of every `/api/...` handler except the existing Tesla-owned endpoints. | FR-6.1, FR-6.2, NFR-3.21, §3 | `MYR-XX Add REST auth middleware + error envelope to internal/server` |
-| **DV-20** | **RESOLVED** | SDK-surface REST endpoints not yet mounted on the Go server | **RESOLVED — all four Go-server-owned §7 endpoints are mounted.** `GET /api/vehicles` (§7.0) landed in MYR-91 (2026-05-10); `GET /api/vehicles/{vehicleId}/snapshot` (§7.1) and `GET /api/vehicles/{vehicleId}/drives` (§7.2) landed in MYR-133 (2026-06-03); `GET /api/drives/{driveId}/route` (§7.4) landed in PR #260 (`DriveRouteHandler`, existing routePoints column + decryption); `GET /api/drives/{driveId}` (§7.3) landed in MYR-130 (2026-07-02) via `internal/telemetry/drive_detail_handler.go` backed by `DriveRepo.GetByID`. (The §7.5 invite endpoints and §7.6 `DELETE /api/users/me` are NOT in DV-20's scope -- per DV-23 (RESOLVED 2026-05-08, MYR-69) they are served by the Next.js app and are tracked under MYR-70 / MYR-71 / MYR-73 instead. The Go server returning 404 on those paths is the terminal behavior, not a transitional one.) | (Resolved.) All handlers enforce bearer auth + ownership + role-based `internal/mask` projection at the handler layer per §5.1; the shared-enum slice (REST-only `not_found` + `invalid_request` on `ErrorPayload.code`, plus `reauth_required` on `subCode`) was completed by MYR-98 on 2026-05-15. A route-surface regression test (`cmd/telemetry-server/wiring_routes_test.go`) guards against a contract route silently losing its mount. | FR-3.3, FR-3.4, NFR-3.5, §6, §7 | (Resolved — see MYR-91 / MYR-133 / PR #260 / MYR-130.) |
+| **DV-20** | **RESOLVED** | SDK-surface REST endpoints not yet mounted on the Go server | **RESOLVED — all four Go-server-owned §7 endpoints are mounted.** `GET /api/vehicles` (§7.0) landed in MYR-91 (2026-05-10); `GET /api/vehicles/{vehicleId}/snapshot` (§7.1) and `GET /api/vehicles/{vehicleId}/drives` (§7.2) landed in MYR-133 (2026-06-03); `GET /api/drives/{driveId}/route` (§7.4) landed in PR #260 (`DriveRouteHandler`, existing routePoints column + decryption); `GET /api/drives/{driveId}` (§7.3) landed in MYR-130 (2026-07-02) via `internal/telemetry/drive_detail_handler.go` backed by `DriveRepo.GetByID`. (§7.6 `DELETE /api/users/me` is NOT in DV-20's scope -- per the surviving half of DV-23 it is served by the Next.js app and is tracked under MYR-71 / MYR-72. The §7.5 endpoints WERE outside DV-20's scope for the same reason until **MYR-184 superseded that half of DV-23** and mounted all five on the Go server; the "terminal 404" statement that stood here is no longer true for §7.5.) | (Resolved.) All handlers enforce bearer auth + ownership + role-based `internal/mask` projection at the handler layer per §5.1; the shared-enum slice (REST-only `not_found` + `invalid_request` on `ErrorPayload.code`, plus `reauth_required` on `subCode`) was completed by MYR-98 on 2026-05-15. A route-surface regression test (`cmd/telemetry-server/wiring_routes_test.go`) guards against a contract route silently losing its mount. | FR-3.3, FR-3.4, NFR-3.5, §6, §7 | (Resolved — see MYR-91 / MYR-133 / PR #260 / MYR-130.) |
 | **DV-21** | **New** | `service_unavailable` code reserved but not emitted | v1 does not emit `503 service_unavailable`. The code is reserved in this contract for forward-compat. | Server begins emitting `503 service_unavailable` during maintenance windows and graceful-shutdown states, with a `Retry-After` header. SDK error catalog already recognizes the code from day one. | NFR-3.10, §4.1.1 | `MYR-XX Emit 503 service_unavailable during graceful shutdown + maintenance` |
 | **DV-22** | **New** | REST rate limit not enforced | No per-user REST rate limit is configured in [`internal/config/defaults.go`](../../internal/config/defaults.go) or wired through the server. The 120 req/min target in §4.1.2 is a PLANNED default, not an enforced value. | Add `WebSocketConfig.RestRateLimitPerMinutePerUser` (default 120) in `internal/config/defaults.go`. Implement a token-bucket rate limiter in the REST middleware keyed by `userId`. Breach returns `429 rate_limited` with a `Retry-After` header. Independent of `MaxConnectionsPerUser` (which governs concurrent WS sessions, not REST rps). | NFR-3.6, §4.1.2 | `MYR-XX Implement per-user REST rate limit (120 req/min default)` |
-| **DV-23** | **RESOLVED** | Invite endpoints + `DELETE /api/users/me` handler location | The Invite table is Prisma-owned per `data-classification.md` §1.6; `internal/store/` has no `InviteRepo`. The three invite endpoints (§7.5) and the user self-deletion endpoint (§7.6) were PLANNED with two compatible implementation paths: (1) add an `InviteRepo` (and a User-deletion path) to the Go telemetry server that reads the Prisma-managed tables, or (2) serve these endpoints from the Next.js app with edge routing. | **RESOLVED 2026-05-08 (MYR-69): Next.js app owns `DELETE /api/users/me` and the §7.5 invite endpoints; Go telemetry server has Insert-only AuditLog access via raw pgx.** Rationale: aligns with the existing normative statement in `data-lifecycle.md` §3.4 that the Next.js app layer initiates the deletion transaction; sidesteps cross-process token/session invalidation; matches the Prisma-owned-table precedent (Vehicle, Drive, Account); avoids introducing a second migration toolchain in the Go repo just for the AuditLog table. The public API hostname (`https://api.myrobotaxi.com/api/...`) proxies invite + user-deletion paths to the Next.js app and snapshot/drives/drive-route paths to the Go telemetry server. The SDK calls a single base URL regardless of which process serves the request. Implementation follow-ups: MYR-70 (Next.js handler for invites), MYR-71 (Next.js handler for `DELETE /api/users/me`), MYR-72 (AuditLog Prisma model + Insert-only Go pgx writer), MYR-73 (edge routing config). | FR-5.1, FR-5.2, FR-5.3, FR-10.1, FR-10.2, NFR-3.29, §7.5, §7.6 | (Resolved -- see MYR-70 / MYR-71 / MYR-72 / MYR-73 for implementation follow-ups.) |
+| **DV-23** | **SUPERSEDED** | Invite endpoints + `DELETE /api/users/me` handler location | Resolved 2026-05-08 (MYR-69) in favour of **Option 2**: the Next.js app owns `DELETE /api/users/me` and the §7.5 invite endpoints, against its Prisma-owned email-keyed `Invite` table, with the public API hostname proxying invite paths to it. | **SUPERSEDED 2026-07-29 (MYR-184) for the §7.5 half.** The premise expired: `react-frontend` is **deprecated**, so "serve it from the Next.js app" no longer names a running process, and the Prisma `Invite` table is **retired unused** — no invite row was ever written against it. Sharing is now **Go-owned end to end**: table `go_vehicle_shares` (migration 0020, no FKs to the sibling schema per CG-DL-9), five endpoints on the Go telemetry server (§7.5.1–§7.5.5), and the MYR-91 viewer merge that makes the `viewer` role real. The contract shape changed with it — **codes, not emails** (there is no email infrastructure and riders are Apple-native), so `email` / `senderId` / `sentDate` / `isOnline` are gone and `label` / `permission` / `code` / `expiresAt` take their place, per contracts v0.19.0 `vehicle-sharing.schema.json`. The `DELETE /api/users/me` (§7.6) half of DV-23 is **NOT** superseded and its resolution stands. Implementation follow-ups MYR-70 (Next.js invite handler) and MYR-73 (edge routing for invite paths) are **obsolete**; MYR-71 / MYR-72 are unaffected. | FR-5.1, FR-5.2, FR-5.3, FR-10.1, FR-10.2, NFR-3.29, §7.5, §7.6 | (§7.5 superseded — see MYR-184. §7.6 resolved — see MYR-71 / MYR-72.) |
 
 ### Divergence management rules
 
@@ -2790,5 +2889,6 @@ Same as [`websocket-protocol.md`](websocket-protocol.md) §10 divergence managem
 | 2026-05-10 | **New `GET /api/vehicles` list endpoint ([MYR-91](https://linear.app/myrobotaxi/issue/MYR-91)).** Added a thin catalog endpoint to enumerate the signed-in caller's vehicles — closes the gap where the SDK had no way to answer "what are my cars?" without bypassing the contract via direct Prisma reads. Inserted as §7.0 (preserving existing §7.1–§7.7 numbering); §6 endpoint catalog grew a row; §5.2.0 declares the `VehicleSummary` per-role mask (owner sees all fields, viewer sees all minus `name`); OpenAPI spec gains the path + `VehicleSummary` component schema. Implementation: Go server mounts the handler at `GET /api/vehicles` (`internal/telemetry/vehicles_list_handler.go`) reading from `VehicleRepo.ListByUser`. v1 returns owner-owned vehicles only; the viewer-merged pathway is documented but PLANNED — depends on the Go server reading the Prisma-owned `Invite` table in a follow-up. No pagination in v1 (response is bounded; reserved query params for future). Test bench (P6 MYR-88) and SDK `client.vehicles.list()` (P3 MYR-80) consume this endpoint. | sdk-architect |
 | 2026-05-10 | **Recent-login re-auth gate documented ([MYR-79](https://linear.app/myrobotaxi/issue/MYR-79); implementation [MYR-76](https://linear.app/myrobotaxi/issue/MYR-76)).** §7.6 (`DELETE /api/users/me`) and §7.7 (`GET /api/users/me/export`) gain a **Re-auth precondition** subsection requiring the caller's most recent fresh OAuth sign-in to be within `REAUTH_MAX_AGE_SEC` (default 300 s); rejection returns `401 auth_failed` with the new `subCode: reauth_required`. The gate applies symmetrically to deletion (destructive) and export (full-graph exfiltration) per the GDPR Art. 17 recent-auth corollary — both endpoints surface the entire ownership graph, so a stolen Bearer token must not satisfy either path alone. §4.1.1 `auth_failed` row updated to document the new subCode and the **explicit carve-out from the `getToken()` retry path**: SDKs MUST surface `reauth_required` to the consumer's auth layer for an interactive sign-in flow rather than swallowing it with a silent token refresh, because the `auth_time` claim only advances on a fresh OAuth round-trip. The §7.7 deferral note is replaced with the RESOLVED reference. Cross-contract: [`../architecture/requirements.md`](../architecture/requirements.md) §2.10 flipped from Deferred to Resolved. No wire/OpenAPI/schema-shape changes — `subCode` was already an existing field on the §4.1 error envelope. | sdk-architect |
 | 2026-05-09 | **GDPR readiness pack docs ([MYR-75](https://linear.app/myrobotaxi/issue/MYR-75) Phase B).** Adds §7.7 `GET /api/users/me/export` to the endpoint reference (Phase A handler shipped in [myrobotaxi/react-frontend#259](https://github.com/myrobotaxi/react-frontend/pull/259)) — JSON archive of every Prisma row owned by the caller, P1 columns decrypted at the crypto boundary, OAuth credentials explicitly excluded; audit-log side effect documented as the new `data_exported` action in [`data-lifecycle.md`](data-lifecycle.md) §4.2 with `metadata: {vehicleCount, driveCount, inviteCount, auditCount}` (P0 counts only per Rule CG-DL-5). §1 TOC and §6 endpoint catalog summary updated. The optional recent-login re-auth gate from MYR-75's three-piece scoping is deferred to a follow-up issue and noted in §7.7 implementation notes + [`../architecture/requirements.md`](../architecture/requirements.md) §2.10. Companion runbook: [`../operations/backup-retention.md`](../operations/backup-retention.md) (Supabase backup window, redelete-on-restore procedure honoring GDPR Art. 17, legal-basis-for-retention boundary). | sdk-architect |
+| 2026-07-29 | **Vehicle sharing moved to the Go server and the `viewer` role made real ([MYR-184](https://linear.app/myrobotaxi/issue/MYR-184)).** §7.5 rewritten from three email-keyed Prisma-backed invite endpoints to **five code-based endpoints on the Go telemetry server** — create / list / cancel-revoke / resend / redeem — backed by the Go-owned `go_vehicle_shares` table (migration 0020, no FKs to the sibling schema per CG-DL-9). Wire shapes per contracts **v0.19.0** `vehicle-sharing.schema.json`: `ShareInvite`, `SharePermission`, `CreateShareInviteRequest`, `RedeemShareInviteRequest`, `RedeemShareInviteResponse`, `ShareInviteListResponse` (envelope key `invites`, deliberately unpaginated). **§10 DV-23 flipped RESOLVED → SUPERSEDED for its §7.5 half** (the §7.6 half stands): `react-frontend` is deprecated and the Prisma `Invite` table is retired unused. **Codes, not emails** — `email`/`senderId`/`sentDate`/`isOnline` removed, `label`/`permission`/`code`/`expiresAt` added. New §7.5.0 documents the cumulative tier order (`live` < `live_history` < `rides`) and which server gate each tier opens; sharing grants no writes at any tier. **§7.8 CORRECTED**: the bullet claiming shared-viewer ride requests needed "no change to this handler" was wrong — the create-time check is a separate code path from the read-side access set, and MYR-184 changed it to admit a `rides`-tier viewer. The identical stale comment in `internal/telemetry/ride_request_handler.go` was corrected in lockstep. §5.2.0 viewer mask gains `sharePermission`; §5.2.5 `inviteOwnerFields` rebuilt from the never-shipped Prisma shape (`id`/`email`/`revokedAt`) to the real one (`inviteId`/`label`/`permission`/`code`/`expiresAt`). Cross-contract: `data-classification.md` §1.15 classifies `go_vehicle_shares`. Implementation: `internal/store/vehicle_share_*.go`, `internal/telemetry/share_*.go` + `vehicle_share_access.go`, `internal/auth/{share_permission,vehicle_access}.go`, wired in `cmd/telemetry-server/wiring_vehicle_sharing.go`. | go-engineer |
 | 2026-05-08 | **DV-23 RESOLVED by [MYR-69](https://linear.app/myrobotaxi/issue/MYR-69).** Locked the FR-10 deletion + §7.5 invite-endpoint architecture to **Option 2 -- Next.js app owns `DELETE /api/users/me` and the three invite endpoints**, with the Go telemetry server holding **Insert-only** access to the Prisma-owned `AuditLog` table via raw pgx. §7.5 preamble rewritten from "two implementation paths" to a single locking sentence. §7.6 implementation notes' "may also run in the Next.js app layer" hedge replaced with a definitive Next.js-owns statement. §10 DV-23 row flipped from **New** to **RESOLVED** with resolution date, rationale, and pointers to MYR-70 / MYR-71 / MYR-72 / MYR-73 implementation follow-ups. **DV-20 row reduced in scope from six endpoints to four**: invite + user-deletion 404s on the Go server are now the terminal behavior (served by Next.js per DV-23), not transitional Go-server work; implementation order steps (5)/(6) and the FR-5.x / FR-10.1 anchors removed. Cross-contract update: [`data-lifecycle.md`](data-lifecycle.md) §1.4 adds an `AuditLog` row noting the telemetry server has Insert-only access; §4 preamble locks `AuditLog` ownership to the Next.js Prisma schema with the Go server as Insert-only writer (responsibility per §3.4). No wire / OpenAPI / SDK API changes -- the SDK still calls the single `https://api.myrobotaxi.com/api/...` base URL. | sdk-architect |
 | 2026-04-14 | Initial full draft (MYR-12): §2 transport, §3 auth, §4 conventions (error envelope, pagination, versioning, headers, idempotency), §5 RBAC with forward-looking `limited_viewer` extension seam, §6 catalog summary, §7 per-endpoint reference (snapshot, drives list, drive detail, drive route, 3 invite ops, user self-deletion), §8 resource-schema index cross-referencing the inline OpenAPI components, §9 observability, §10 divergences DV-19 through DV-23 (REST auth middleware, unmounted SDK endpoints, reserved `503 service_unavailable`, REST rate limit, invite handler location decision). Adds REST-only error codes `not_found`, `invalid_request`, `service_unavailable` to the shared catalog with a note that the `ErrorPayload.code` enum in `schemas/ws-messages.schema.json` must be extended in the DV-20 follow-up. Canonical machine-readable twin is `specs/rest.openapi.yaml`. | sdk-architect |
