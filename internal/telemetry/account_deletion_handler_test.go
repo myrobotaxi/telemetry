@@ -1,0 +1,619 @@
+package telemetry
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/myrobotaxi/telemetry/internal/events"
+	"github.com/myrobotaxi/telemetry/pkg/sdk"
+)
+
+// --- fakes -----------------------------------------------------------------
+
+type fakeOwnedVehicleLister struct {
+	ids   []string
+	err   error
+	calls int
+}
+
+func (f *fakeOwnedVehicleLister) ListOwnedVehicleIDs(_ context.Context, _ string) ([]string, error) {
+	f.calls++
+	return f.ids, f.err
+}
+
+// fakeAccountTeardown records every vehicle handed to it and can fail on a
+// nominated id, which is how the mid-failure re-run cases are built.
+type fakeAccountTeardown struct {
+	removed  map[string]bool // ids already torn down (survives across runs)
+	failOn   string
+	seen     []string
+	order    *[]string
+	failures int
+}
+
+func newFakeAccountTeardown() *fakeAccountTeardown {
+	return &fakeAccountTeardown{removed: map[string]bool{}}
+}
+
+func (f *fakeAccountTeardown) RemoveVehicle(_ context.Context, _, vehicleID string) (VehicleTeardownResult, error) {
+	f.seen = append(f.seen, vehicleID)
+	if f.order != nil {
+		*f.order = append(*f.order, "teardown:"+vehicleID)
+	}
+	if f.failOn == vehicleID {
+		f.failures++
+		return VehicleTeardownResult{}, errors.New("boom")
+	}
+	if f.removed[vehicleID] {
+		// Idempotent re-run: already gone is a clean no-op success.
+		return VehicleTeardownResult{AlreadyGone: true}, nil
+	}
+	f.removed[vehicleID] = true
+	return VehicleTeardownResult{Removed: true, DriveCount: 2}, nil
+}
+
+type fakeRideCanceller struct {
+	open       []RideRequestData
+	listErr    error
+	updateErr  map[string]error
+	updated    []string
+	order      *[]string
+	fromPassed [][]string
+}
+
+func (f *fakeRideCanceller) ListOpenRidesByRider(_ context.Context, _ string) ([]RideRequestData, error) {
+	return f.open, f.listErr
+}
+
+func (f *fakeRideCanceller) UpdateStatusFrom(_ context.Context, id string, from []string, to string) (RideRequestData, error) {
+	f.fromPassed = append(f.fromPassed, from)
+	if f.order != nil {
+		*f.order = append(*f.order, "cancel:"+id)
+	}
+	if err, ok := f.updateErr[id]; ok {
+		return RideRequestData{}, err
+	}
+	f.updated = append(f.updated, id)
+	for _, r := range f.open {
+		if r.ID == id {
+			r.Status = to
+			return r, nil
+		}
+	}
+	return RideRequestData{ID: id, Status: to}, nil
+}
+
+// fakeAccountData is the store seam. Each counter both records the call and
+// models idempotency: a second run reports zero rows affected, exactly as the
+// real `status <> 'revoked'` / `WHERE user_id` statements do.
+type fakeAccountData struct {
+	driveCount    int
+	driveCountErr error
+
+	sharesRevoked int
+	sharesErr     error
+
+	devicesDeleted int
+	devicesErr     error
+
+	tokensRevoked int
+	tokensErr     error
+
+	identityGone   bool
+	identityErr    error
+	identityCalls  int
+	identityCounts AccountDeletionCounts
+
+	order *[]string
+	calls []string
+}
+
+func (f *fakeAccountData) note(step string) {
+	f.calls = append(f.calls, step)
+	if f.order != nil {
+		*f.order = append(*f.order, step)
+	}
+}
+
+func (f *fakeAccountData) CountUserDrives(_ context.Context, _ string) (int, error) {
+	f.note("count_drives")
+	return f.driveCount, f.driveCountErr
+}
+
+func (f *fakeAccountData) RevokeSharesReceived(_ context.Context, _ string) (int, error) {
+	f.note("revoke_shares")
+	if f.sharesErr != nil {
+		return 0, f.sharesErr
+	}
+	n := f.sharesRevoked
+	f.sharesRevoked = 0 // idempotent: a re-run matches nothing
+	return n, nil
+}
+
+func (f *fakeAccountData) DeletePushDevices(_ context.Context, _ string) (int, error) {
+	f.note("delete_devices")
+	if f.devicesErr != nil {
+		return 0, f.devicesErr
+	}
+	n := f.devicesDeleted
+	f.devicesDeleted = 0
+	return n, nil
+}
+
+func (f *fakeAccountData) RevokeRefreshTokens(_ context.Context, _ string) (int, error) {
+	f.note("revoke_tokens")
+	if f.tokensErr != nil {
+		return 0, f.tokensErr
+	}
+	n := f.tokensRevoked
+	f.tokensRevoked = 0
+	return n, nil
+}
+
+func (f *fakeAccountData) DeleteIdentity(_ context.Context, _ string, counts AccountDeletionCounts) (AccountIdentityOutcome, error) {
+	f.note("delete_identity")
+	f.identityCalls++
+	f.identityCounts = counts
+	if f.identityErr != nil {
+		return AccountIdentityOutcome{}, f.identityErr
+	}
+	if f.identityGone {
+		return AccountIdentityOutcome{AlreadyGone: true}, nil
+	}
+	f.identityGone = true // second run finds nothing left → no second audit row
+	return AccountIdentityOutcome{Deleted: true, AuditLogID: "caudit1"}, nil
+}
+
+type fakeSessionInvalidator struct {
+	users    []string
+	vehicles []string
+}
+
+func (f *fakeSessionInvalidator) InvalidateUser(userID string)     { f.users = append(f.users, userID) }
+func (f *fakeSessionInvalidator) InvalidateVehicles(userID string) { f.vehicles = append(f.vehicles, userID) }
+
+// --- helpers ---------------------------------------------------------------
+
+const deletionUserID = "cuser_355"
+
+func newDeletionHandler(t *testing.T, deps AccountDeletionDeps) *AccountDeletionHandler {
+	t.Helper()
+	return NewAccountDeletionHandler(&stubTokenValidator{userID: deletionUserID}, deps, discardLogger())
+}
+
+func deleteMeRequest() *http.Request {
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/api/users/me", nil)
+	r.Header.Set("Authorization", "Bearer token")
+	return r
+}
+
+// call runs one DELETE and returns the recorder.
+func callDelete(h *AccountDeletionHandler) *httptest.ResponseRecorder {
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, deleteMeRequest())
+	return w
+}
+
+func openRide(id, status string) RideRequestData {
+	return RideRequestData{
+		ID:        id,
+		RiderID:   deletionUserID,
+		OwnerID:   "cowner_1",
+		VehicleID: "cveh_1",
+		Status:    status,
+	}
+}
+
+// --- tests -----------------------------------------------------------------
+
+func TestAccountDeletion_MethodAndAuth(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		authHeader string
+		validator  *stubTokenValidator
+		wantStatus int
+	}{
+		{
+			name:       "GET is rejected",
+			method:     http.MethodGet,
+			authHeader: "Bearer token",
+			validator:  &stubTokenValidator{userID: deletionUserID},
+			wantStatus: http.StatusMethodNotAllowed,
+		},
+		{
+			name:       "missing Authorization is 401",
+			method:     http.MethodDelete,
+			validator:  &stubTokenValidator{userID: deletionUserID},
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "invalid token is 401",
+			method:     http.MethodDelete,
+			authHeader: "Bearer nope",
+			validator:  &stubTokenValidator{err: errors.New("expired")},
+			wantStatus: http.StatusUnauthorized,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			data := &fakeAccountData{}
+			h := NewAccountDeletionHandler(tc.validator, AccountDeletionDeps{
+				Vehicles: &fakeOwnedVehicleLister{},
+				Teardown: newFakeAccountTeardown(),
+				Rides:    &fakeRideCanceller{},
+				Data:     data,
+			}, discardLogger())
+
+			r := httptest.NewRequestWithContext(context.Background(), tc.method, "/api/users/me", nil)
+			if tc.authHeader != "" {
+				r.Header.Set("Authorization", tc.authHeader)
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", w.Code, tc.wantStatus)
+			}
+			if len(data.calls) != 0 {
+				t.Fatalf("deletion ran on a rejected request: %v", data.calls)
+			}
+		})
+	}
+}
+
+// TestAccountDeletion_OwnerWithSharesRunsEveryStepInOrder is the owner case:
+// two cars, grants received, devices and tokens — and the ORDER matters,
+// because the identity rows the caller authenticates with must go last.
+func TestAccountDeletion_OwnerWithSharesRunsEveryStepInOrder(t *testing.T) {
+	var order []string
+	teardown := newFakeAccountTeardown()
+	teardown.order = &order
+	data := &fakeAccountData{
+		driveCount:     7,
+		sharesRevoked:  2,
+		devicesDeleted: 1,
+		tokensRevoked:  3,
+		order:          &order,
+	}
+	sessions := &fakeSessionInvalidator{}
+
+	h := newDeletionHandler(t, AccountDeletionDeps{
+		Vehicles: &fakeOwnedVehicleLister{ids: []string{"cveh_a", "cveh_b"}},
+		Teardown: teardown,
+		Rides:    &fakeRideCanceller{},
+		Data:     data,
+		Sessions: sessions,
+	})
+
+	if got := callDelete(h).Code; got != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", got)
+	}
+
+	want := []string{
+		"count_drives",
+		"teardown:cveh_a",
+		"teardown:cveh_b",
+		"revoke_shares",
+		"delete_devices",
+		"revoke_tokens",
+		"delete_identity",
+	}
+	if fmt.Sprint(order) != fmt.Sprint(want) {
+		t.Fatalf("sequence = %v, want %v", order, want)
+	}
+
+	// The audit metadata carries the P0 tally accumulated along the way.
+	got := data.identityCounts
+	if got.VehicleCount != 2 || got.DriveCount != 7 || got.SharesRevoked != 2 ||
+		got.PushDevicesDeleted != 1 || got.RefreshTokensRevoked != 3 {
+		t.Fatalf("audit counts = %+v", got)
+	}
+
+	if len(sessions.users) != 1 || len(sessions.vehicles) != 1 {
+		t.Fatalf("both auth caches must be invalidated, got users=%v vehicles=%v",
+			sessions.users, sessions.vehicles)
+	}
+}
+
+// TestAccountDeletion_AppleNativeOnlyUserDeletesCleanly covers the dual-source
+// identity case: an Apple-native rider owns no vehicle and has no Prisma
+// "User" row. Nothing about the sequence may depend on either existing.
+func TestAccountDeletion_AppleNativeOnlyUserDeletesCleanly(t *testing.T) {
+	teardown := newFakeAccountTeardown()
+	data := &fakeAccountData{devicesDeleted: 1, tokensRevoked: 1}
+
+	h := newDeletionHandler(t, AccountDeletionDeps{
+		Vehicles: &fakeOwnedVehicleLister{ids: nil},
+		Teardown: teardown,
+		Rides:    &fakeRideCanceller{},
+		Data:     data,
+	})
+
+	if got := callDelete(h).Code; got != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", got)
+	}
+	if len(teardown.seen) != 0 {
+		t.Fatalf("no vehicles owned, but teardown ran for %v", teardown.seen)
+	}
+	if data.identityCalls != 1 {
+		t.Fatalf("identity delete calls = %d, want 1", data.identityCalls)
+	}
+	if data.identityCounts.VehicleCount != 0 {
+		t.Fatalf("vehicle count = %d, want 0", data.identityCounts.VehicleCount)
+	}
+}
+
+// TestAccountDeletion_RiderWithOpenRideCancelsThroughTheGuardAndNotifies is
+// the rider case. Cancellation must go through the SAME guarded from-set the
+// rider-facing cancel endpoint uses, and must publish the standard lifecycle
+// event so the owner is told.
+func TestAccountDeletion_RiderWithOpenRideCancelsThroughTheGuardAndNotifies(t *testing.T) {
+	rides := &fakeRideCanceller{
+		open: []RideRequestData{
+			openRide("cride_1", rideStatusRequested),
+			openRide("cride_2", rideStatusAccepted),
+		},
+	}
+	publisher := &fakeRidePublisher{}
+	data := &fakeAccountData{}
+
+	h := newDeletionHandler(t, AccountDeletionDeps{
+		Vehicles: &fakeOwnedVehicleLister{},
+		Teardown: newFakeAccountTeardown(),
+		Rides:    rides,
+		Events:   publisher,
+		Data:     data,
+	})
+
+	if got := callDelete(h).Code; got != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", got)
+	}
+	if len(rides.updated) != 2 {
+		t.Fatalf("cancelled %v, want both rides", rides.updated)
+	}
+	if data.identityCounts.RidesCancelled != 2 {
+		t.Fatalf("audit RidesCancelled = %d, want 2", data.identityCounts.RidesCancelled)
+	}
+	for _, from := range rides.fromPassed {
+		if fmt.Sprint(from) != fmt.Sprint(rideCancellableFrom) {
+			t.Fatalf("guarded from-set = %v, want the rider-cancel set %v", from, rideCancellableFrom)
+		}
+	}
+	if len(publisher.events) != 2 {
+		t.Fatalf("published %d lifecycle events, want 2", len(publisher.events))
+	}
+	for _, ev := range publisher.events {
+		payload, ok := ev.Payload.(events.RideStatusChangedEvent)
+		if !ok {
+			t.Fatalf("payload type = %T, want RideStatusChangedEvent", ev.Payload)
+		}
+		if payload.Status != rideStatusCancelled {
+			t.Fatalf("published status = %q, want cancelled", payload.Status)
+		}
+		if payload.OwnerID == "" {
+			t.Fatal("owner id missing — the owner is who this event has to reach")
+		}
+	}
+}
+
+// A ride physically in progress is left alone: cancelling a car mid-trip from
+// under its owner is worse than letting it terminate on its own.
+func TestAccountDeletion_RideInProgressIsLeftToFinish(t *testing.T) {
+	rides := &fakeRideCanceller{
+		open: []RideRequestData{
+			openRide("cride_enroute", rideStatusEnroute),
+			openRide("cride_arrived", rideStatusArrived),
+			openRide("cride_open", rideStatusRequested),
+		},
+	}
+	h := newDeletionHandler(t, AccountDeletionDeps{
+		Vehicles: &fakeOwnedVehicleLister{},
+		Teardown: newFakeAccountTeardown(),
+		Rides:    rides,
+		Data:     &fakeAccountData{},
+	})
+
+	if got := callDelete(h).Code; got != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", got)
+	}
+	if fmt.Sprint(rides.updated) != fmt.Sprint([]string{"cride_open"}) {
+		t.Fatalf("cancelled %v, want only the requested ride", rides.updated)
+	}
+}
+
+// Losing the transition race is not a failure: the owner closed the ride
+// first, which is the outcome this step wanted anyway.
+func TestAccountDeletion_RideClosedByTheOwnerFirstIsNotAnError(t *testing.T) {
+	rides := &fakeRideCanceller{
+		open: []RideRequestData{
+			openRide("cride_raced", rideStatusRequested),
+			openRide("cride_gone", rideStatusRequested),
+			openRide("cride_ok", rideStatusRequested),
+		},
+		updateErr: map[string]error{
+			"cride_raced": ErrRideStatusConflict,
+			"cride_gone":  fmt.Errorf("wrapped: %w", sdk.ErrNotFound),
+		},
+	}
+	data := &fakeAccountData{}
+	h := newDeletionHandler(t, AccountDeletionDeps{
+		Vehicles: &fakeOwnedVehicleLister{},
+		Teardown: newFakeAccountTeardown(),
+		Rides:    rides,
+		Data:     data,
+	})
+
+	if got := callDelete(h).Code; got != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", got)
+	}
+	if data.identityCalls != 1 {
+		t.Fatal("the deletion must complete despite the lost races")
+	}
+	if data.identityCounts.RidesCancelled != 1 {
+		t.Fatalf("RidesCancelled = %d, want 1 (only the uncontested ride)", data.identityCounts.RidesCancelled)
+	}
+}
+
+// TestAccountDeletion_MidFailureIsReRunnable is the load-bearing property:
+// every step is idempotent and the identity rows go LAST, so a failure leaves
+// an account that can still authenticate and finish its own deletion.
+func TestAccountDeletion_MidFailureIsReRunnable(t *testing.T) {
+	tests := []struct {
+		name       string
+		breakIt    func(*fakeAccountTeardown, *fakeAccountData)
+		healIt     func(*fakeAccountTeardown, *fakeAccountData)
+		wantAudits int
+	}{
+		{
+			name: "the second vehicle teardown fails",
+			breakIt: func(td *fakeAccountTeardown, _ *fakeAccountData) {
+				td.failOn = "cveh_b"
+			},
+			healIt: func(td *fakeAccountTeardown, _ *fakeAccountData) {
+				td.failOn = ""
+			},
+			wantAudits: 1,
+		},
+		{
+			name: "the share revocation fails",
+			breakIt: func(_ *fakeAccountTeardown, d *fakeAccountData) {
+				d.sharesErr = errors.New("db down")
+			},
+			healIt: func(_ *fakeAccountTeardown, d *fakeAccountData) {
+				d.sharesErr = nil
+			},
+			wantAudits: 1,
+		},
+		{
+			name: "the identity transaction itself fails",
+			breakIt: func(_ *fakeAccountTeardown, d *fakeAccountData) {
+				d.identityErr = errors.New("rollback")
+			},
+			healIt: func(_ *fakeAccountTeardown, d *fakeAccountData) {
+				d.identityErr = nil
+			},
+			wantAudits: 2, // one failed attempt + one that commits
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			teardown := newFakeAccountTeardown()
+			data := &fakeAccountData{sharesRevoked: 1, devicesDeleted: 1, tokensRevoked: 1}
+			h := newDeletionHandler(t, AccountDeletionDeps{
+				Vehicles: &fakeOwnedVehicleLister{ids: []string{"cveh_a", "cveh_b"}},
+				Teardown: teardown,
+				Rides:    &fakeRideCanceller{},
+				Data:     data,
+			})
+
+			tc.breakIt(teardown, data)
+			if got := callDelete(h).Code; got != http.StatusInternalServerError {
+				t.Fatalf("first attempt status = %d, want 500", got)
+			}
+
+			tc.healIt(teardown, data)
+			if got := callDelete(h).Code; got != http.StatusNoContent {
+				t.Fatalf("retry status = %d, want 204", got)
+			}
+
+			if data.identityCalls != tc.wantAudits {
+				t.Fatalf("identity transaction attempts = %d, want %d", data.identityCalls, tc.wantAudits)
+			}
+			// A car torn down on the first attempt is not torn down twice:
+			// the second call sees AlreadyGone and counts it as done.
+			if teardown.removed["cveh_a"] != true {
+				t.Fatal("cveh_a should be gone after the retry")
+			}
+		})
+	}
+}
+
+// A SECOND successful call is still a 204 and writes NO second audit row —
+// which is what makes the client's retry-on-error path safe to offer.
+func TestAccountDeletion_SecondCallAfterSuccessIsStill204AndWritesNoSecondAudit(t *testing.T) {
+	data := &fakeAccountData{sharesRevoked: 1}
+	h := newDeletionHandler(t, AccountDeletionDeps{
+		Vehicles: &fakeOwnedVehicleLister{ids: []string{"cveh_a"}},
+		Teardown: newFakeAccountTeardown(),
+		Rides:    &fakeRideCanceller{},
+		Data:     data,
+	})
+
+	if got := callDelete(h).Code; got != http.StatusNoContent {
+		t.Fatalf("first status = %d, want 204", got)
+	}
+	if got := callDelete(h).Code; got != http.StatusNoContent {
+		t.Fatalf("second status = %d, want 204", got)
+	}
+	// Both calls entered the transaction; only the first found rows to
+	// delete, so only the first wrote an audit row (the AlreadyGone arm).
+	if data.identityCalls != 2 {
+		t.Fatalf("identity calls = %d, want 2", data.identityCalls)
+	}
+	if !data.identityGone {
+		t.Fatal("the second call must observe an already-deleted identity")
+	}
+}
+
+// A failed drive count must not block the deletion: a missing statistic is
+// never a reason to refuse someone erasure of their own account.
+func TestAccountDeletion_DriveCountFailureIsNotFatal(t *testing.T) {
+	data := &fakeAccountData{driveCount: 9, driveCountErr: errors.New("stat query down")}
+	h := newDeletionHandler(t, AccountDeletionDeps{
+		Vehicles: &fakeOwnedVehicleLister{},
+		Teardown: newFakeAccountTeardown(),
+		Rides:    &fakeRideCanceller{},
+		Data:     data,
+	})
+
+	if got := callDelete(h).Code; got != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", got)
+	}
+	if data.identityCounts.DriveCount != 0 {
+		t.Fatalf("DriveCount = %d, want 0 when the count failed", data.identityCounts.DriveCount)
+	}
+}
+
+// A publish failure must not strand the account either: the ride IS cancelled
+// and the owner's next read shows it.
+func TestAccountDeletion_PublishFailureDoesNotFailTheDeletion(t *testing.T) {
+	data := &fakeAccountData{}
+	h := newDeletionHandler(t, AccountDeletionDeps{
+		Vehicles: &fakeOwnedVehicleLister{},
+		Teardown: newFakeAccountTeardown(),
+		Rides:    &fakeRideCanceller{open: []RideRequestData{openRide("cride_1", rideStatusRequested)}},
+		Events:   &fakeRidePublisher{err: errors.New("bus down")},
+		Data:     data,
+	})
+
+	if got := callDelete(h).Code; got != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", got)
+	}
+	if data.identityCounts.RidesCancelled != 1 {
+		t.Fatal("the ride was cancelled; only its notification failed")
+	}
+}
+
+// The 204 carries no body — there is no account left to describe.
+func TestAccountDeletion_SuccessResponseHasNoBody(t *testing.T) {
+	h := newDeletionHandler(t, AccountDeletionDeps{
+		Vehicles: &fakeOwnedVehicleLister{},
+		Teardown: newFakeAccountTeardown(),
+		Rides:    &fakeRideCanceller{},
+		Data:     &fakeAccountData{},
+	})
+	w := callDelete(h)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", w.Code)
+	}
+	if body := w.Body.String(); body != "" {
+		t.Fatalf("body = %q, want empty", body)
+	}
+}

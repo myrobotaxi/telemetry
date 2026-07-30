@@ -23,8 +23,9 @@ func (a *ownedVehicleListerAdapter) ListOwnedVehicleIDs(ctx context.Context, use
 		return nil, err
 	}
 	ids := make([]string, 0, len(vehicles))
-	for _, v := range vehicles {
-		ids = append(ids, v.ID)
+	// Indexed: store.Vehicle is a wide snapshot struct and only the id is read.
+	for i := range vehicles {
+		ids = append(ids, vehicles[i].ID)
 	}
 	return ids, nil
 }
@@ -44,8 +45,8 @@ func (a *accountRideCancellerAdapter) ListOpenRidesByRider(ctx context.Context, 
 		return nil, err
 	}
 	out := make([]telemetry.RideRequestData, 0, len(recs))
-	for _, rec := range recs {
-		out = append(out, fromStoreRideRequest(rec))
+	for i := range recs {
+		out = append(out, fromStoreRideRequest(recs[i]))
 	}
 	return out, nil
 }

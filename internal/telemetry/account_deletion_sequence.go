@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 
 	"github.com/myrobotaxi/telemetry/internal/events"
@@ -103,13 +104,13 @@ func (h *AccountDeletionHandler) run(ctx context.Context, userID string) (accoun
 func (h *AccountDeletionHandler) tearDownOwnedVehicles(ctx context.Context, userID string) (int, error) {
 	ids, err := h.deps.Vehicles.ListOwnedVehicleIDs(ctx, userID)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("list owned vehicles: %w", err)
 	}
 	removed := 0
 	for _, id := range ids {
 		result, err := h.deps.Teardown.RemoveVehicle(ctx, userID, id)
 		if err != nil {
-			return removed, err
+			return removed, fmt.Errorf("remove vehicle %s: %w", id, err)
 		}
 		if result.Removed {
 			removed++
@@ -136,10 +137,13 @@ func (h *AccountDeletionHandler) tearDownOwnedVehicles(ctx context.Context, user
 func (h *AccountDeletionHandler) cancelOpenRides(ctx context.Context, userID string) (int, error) {
 	rides, err := h.deps.Rides.ListOpenRidesByRider(ctx, userID)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("list open rides: %w", err)
 	}
 	cancelled := 0
-	for _, ride := range rides {
+	// Indexed rather than ranged by value: RideRequestData is a wide struct
+	// and the loop only needs two of its fields.
+	for i := range rides {
+		ride := &rides[i]
 		if !cancellableFrom(ride.Status) {
 			continue
 		}
@@ -155,7 +159,7 @@ func (h *AccountDeletionHandler) cancelOpenRides(ctx context.Context, userID str
 				slog.String("ride_request_id", ride.ID),
 			)
 		default:
-			return cancelled, err
+			return cancelled, fmt.Errorf("cancel ride %s: %w", ride.ID, err)
 		}
 	}
 	return cancelled, nil

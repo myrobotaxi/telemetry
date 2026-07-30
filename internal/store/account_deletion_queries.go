@@ -36,6 +36,8 @@ DELETE FROM go_push_devices WHERE user_id = $1`
 // TTL) — the user-existence check in auth.JWTAuthenticator is what closes that
 // window, which is why the handler invalidates the existence cache after the
 // identity rows go.
+// #nosec G101 -- column/predicate SQL over a hash-only table, not a credential
+// (gosec greps the literal 'refresh_tokens' + 'revoked' and misflags it).
 const queryRevokeRefreshTokensForUser = `
 UPDATE go_refresh_tokens
 SET revoked = TRUE, revoked_at = NOW(), reason = 'account_deleted'
