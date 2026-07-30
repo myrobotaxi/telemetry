@@ -369,6 +369,14 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 		accessInvalidator = jwtAuth
 	}
 
+	// MYR-355: account deletion drops BOTH caches — the access set AND the
+	// user-existence entry that keeps a deleted user's unexpired access token
+	// validating. Same typed-nil avoidance as above.
+	var sessionInvalidator telemetry.AccountSessionInvalidator
+	if jwtAuth != nil {
+		sessionInvalidator = jwtAuth
+	}
+
 	dispatcher := newVehicleDeletedDispatcher(hub, recv, vinCache, jwtAuth, logger.With(slog.String("component", "vehicle-deleted-dispatcher")))
 	if _, err := dispatcher.Subscribe(bus); err != nil {
 		return fmt.Errorf("subscribe vehicle_deleted dispatcher: %w", err)
@@ -414,7 +422,10 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 		// The authenticator owns the access-set cache the sharing handlers
 		// bust on redeem and revoke.
 		accessInvalidator: accessInvalidator,
-		pool:              db.Pool(),
+		// The same authenticator also owns the user-existence cache the
+		// account-deletion endpoint must drop (MYR-355).
+		sessionInvalidator: sessionInvalidator,
+		pool:               db.Pool(),
 		encryptor:         encryptor,
 		auditEmitter:      auditEmitter,
 		auditMetrics:      auditMetrics,

@@ -46,6 +46,22 @@ func (r *RideRequestRepo) ListByOwner(ctx context.Context, ownerID string, statu
 	return recs, nil
 }
 
+// ListOpenByRider returns every OPEN ride request the rider holds — instant
+// and scheduled alike, oldest first — for the account-deletion sweep
+// (MYR-355). "Open" is the non-terminal lifecycle set: a deleted account must
+// not leave an owner holding a request from someone who no longer exists.
+//
+// Oldest first, deliberately: the sweep cancels them one at a time through the
+// guarded transition, and resolving the queue in arrival order is the same
+// order the owner saw them in.
+func (r *RideRequestRepo) ListOpenByRider(ctx context.Context, riderID string) ([]RideRequestRecord, error) {
+	recs, err := r.list(ctx, "ride_request.list_open_by_rider", queryOpenRideRequestsByRider, riderID)
+	if err != nil {
+		return nil, fmt.Errorf("RideRequestRepo.ListOpenByRider(%s): %w", riderID, err)
+	}
+	return recs, nil
+}
+
 func normalizeLimit(limit int) int {
 	if limit <= 0 {
 		return defaultRideRequestListLimit
