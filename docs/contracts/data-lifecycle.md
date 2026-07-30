@@ -109,7 +109,16 @@ Live drive events (start, route point, speed update) flow over the WebSocket in 
 
 ### 1.4 DB-only tables (Prisma-managed)
 
-These tables have no WebSocket representation. They are managed primarily by the Next.js app's Prisma layer, with a small set of narrowly-scoped, sanctioned exceptions where the Go telemetry server owns a specific owner-facing flow: `Account`, which the Go server reads/writes for OAuth token management; `AuditLog`, which the Go server writes (Insert-only) via raw pgx; the owner-onboarding **provision** carve-out (`store.OwnerProvisioner`, MYR-257) that upserts `User`/`Settings`/`Account`/`Vehicle` on a completed Tesla link; and its exact inverse, the owner-offboarding **teardown** carve-out (`store.OwnerTeardown`, MYR-258) that owner-scoped **DELETEs** a single `Vehicle` (+ its cascade) plus the Go-owned `go_ride_requests` rows for that vehicle (P1 encrypted pickup/dropoff GPS + passenger PII — no FK cascade reaches them, so a complete removal deletes them explicitly) and, on the owner's last vehicle, clears the `Account` tokens + resets `Settings`, writing the user-initiated `vehicle_deleted` audit row in the same transaction. Since **MYR-261** the teardown also writes a **removed-vehicle tombstone** into the Go-owned `go_removed_vehicles` table in that same transaction (see §1.4.1); since **MYR-286**, the owner **license-plate** carve-out (`store.VehicleRepo.UpdateLicensePlate`) that performs a **single-column owner-scoped UPDATE** of `Vehicle.licensePlate` and nothing else; and, since **MYR-320**, the **exterior-colour** carve-out (`store.VehicleRepo.UpdateVehicleColor`, [`internal/store/vehicle_color.go`](../../internal/store/vehicle_color.go)) that likewise performs a **single-column owner-scoped UPDATE** of `Vehicle.color` and nothing else, from Tesla's `vehicle_data.vehicle_config.exterior_color`. All four carve-outs are gated by `sdk-architect` + `contract-guard` and a cross-repo schema-verification against the Next.js Prisma source.
+These tables have no WebSocket representation. They are managed primarily by the Next.js app's Prisma layer, with a small set of narrowly-scoped, sanctioned exceptions where the Go telemetry server owns a specific owner-facing flow: `Account`, which the Go server reads/writes for OAuth token management; `AuditLog`, which the Go server writes (Insert-only) via raw pgx; the owner-onboarding **provision** carve-out (`store.OwnerProvisioner`, MYR-257) that upserts `User`/`Settings`/`Account`/`Vehicle` on a completed Tesla link; and its exact inverse, the owner-offboarding **teardown** carve-out (`store.OwnerTeardown`, MYR-258) that owner-scoped **DELETEs** a single `Vehicle` (+ its cascade) plus the Go-owned `go_ride_requests` rows for that vehicle (P1 encrypted pickup/dropoff GPS + passenger PII — no FK cascade reaches them, so a complete removal deletes them explicitly) and, on the owner's last vehicle, clears the `Account` tokens + resets `Settings`, writing the user-initiated `vehicle_deleted` audit row in the same transaction. Since **MYR-261** the teardown also writes a **removed-vehicle tombstone** into the Go-owned `go_removed_vehicles` table in that same transaction (see §1.4.1); since **MYR-286**, the owner **license-plate** carve-out (`store.VehicleRepo.UpdateLicensePlate`) that performs a **single-column owner-scoped UPDATE** of `Vehicle.licensePlate` and nothing else; and, since **MYR-320**, the **exterior-colour** carve-out (`store.VehicleRepo.UpdateVehicleColor`, [`internal/store/vehicle_color.go`](../../internal/store/vehicle_color.go)) that likewise performs a **single-column owner-scoped UPDATE** of `Vehicle.color` and nothing else, from Tesla's `vehicle_data.vehicle_config.exterior_color`. and, since **MYR-355**, the **account-deletion** carve-out (`store.AccountDeleter`, [`internal/store/account_deletion_identity.go`](../../internal/store/account_deletion_identity.go)) — the only one that **DELETEs the `User` row itself**, described in full below. All five carve-outs are gated by `sdk-architect` + `contract-guard` and a cross-repo schema-verification against the Next.js Prisma source.
+
+**Account-deletion carve-out (MYR-355) — scope and rationale.** This is the widest of the five and the only one that touches `User`, so its justification has to be the strongest. It is the FR-10.1 deletion transaction itself, moved to the Go server because the native iOS client is the only consumer and never reaches the Next.js app (§3). Its scope:
+
+- **One transaction, three DELETEs, one INSERT.** The `account_deleted` AuditLog INSERT first (CG-DL-3), then `go_identity_apple`, `go_users`, and `"User"`. Nothing else — every other table the deletion touches is handled by an earlier, separately-atomic step of §3.1 (the per-vehicle teardown, or a single caller-scoped statement).
+- **Caller-scoped in SQL.** Every statement is `WHERE … = $1` on the caller's own cuid. There is no vehicle id, no other user's id, and no path by which a caller reaches a second account: the endpoint is `/users/me`, so the id is the token subject and nothing else.
+- **The `User` DELETE is a BACKSTOP, not the mechanism.** The Prisma cascade (`Account`, `Settings`, `Invite`, `Vehicle` → `Drive`/`TripStop`) is real, but by the time this statement runs, step 2 of §3.1 has already torn each owned vehicle down through the audited `store.OwnerTeardown` transaction — which is what writes the per-vehicle `vehicle_deleted` audit rows and fires the NOTIFY. Relying on the cascade alone would delete the same cars **silently and unaudited**.
+- **It runs LAST and it may run again.** See §3.4. The already-gone arm commits an empty transaction and writes no audit row.
+- **Audit row required.** Unlike the plate and colour carve-outs, this one destroys data, so CG-DL-3 applies in full: `action='account_deleted'`, `targetType='user'`, `targetId`=the caller's own cuid, `initiator='user'`, `metadata` = P0 counts only (CG-DL-5).
+- **No migration.** All three tables already exist. **CG-DL-9 does not fire:** that rule constrains Go *migration SQL* referencing Prisma-owned tables, and this ships none — an application-runtime Prisma DELETE is the sanctioned class, exactly as `store.OwnerTeardown`'s runtime DELETE is.
 
 **License-plate carve-out (MYR-286) — scope and rationale.** The plate is a `Vehicle` column with **no other possible writer**. It is not telemetry and not a Tesla value: the Fleet API exposes no license plate on any endpoint, in any telemetry field, or in any proto, so there is nothing to sync or decode — and no Next.js/Prisma surface writes it either. The column is populated **only** by the owner typing it into `PUT /api/tesla/vehicles/{vehicleId}/plate` ([`rest-api.md`](rest-api.md) §7.14), which the Go server owns. (Since **MYR-320** it is no longer the *only* such column — `color` is the other, for the mirror-image reason: Tesla is its sole source and Prisma never writes it either. The two single-column carve-outs are deliberately shaped alike; see the MYR-320 note below.) The carve-out is deliberately narrow — at the time it landed, the narrowest of the three:
 
@@ -148,7 +157,7 @@ The MYR-258 teardown deletes the local `Vehicle` row but does **not** revoke the
 | `Vehicle` | DB-only | Read + Update (telemetry) + **Insert (identity seed, MYR-257)** + **Delete (owner teardown, MYR-258)** | Prisma-owned. The streaming pipeline updates live columns; the in-app link's best-effort sync may INSERT identity columns (`teslaVehicleId`/`vin`/`name`, `ON CONFLICT ("teslaVehicleId")`) so a new owner's car appears without the web app. The owner "Remove this car" flow DELETEs one row owner-scoped (`WHERE "id"=… AND "userId"=…`) via `store.OwnerTeardown` — cascading `Drive`/`TripStop`/vehicle-scoped `Invite` + the encrypted route blobs and firing the existing `vehicle_deleted` NOTIFY (§3.5). The delete is paired with a `vehicle_deleted` AuditLog INSERT in the same transaction (CG-DL-3) |
 | `Invite` | DB-only | None | Prisma-owned. Sharing invites. Per [`rest-api.md`](rest-api.md) §10 DV-23 (RESOLVED 2026-05-08, MYR-69), the Next.js app serves the §7.5 invite endpoints directly; no `InviteRepo` exists in `internal/store/`. |
 | `TripStop` | DB-only | None | Prisma-owned. Trip waypoints |
-| `AuditLog` | DB-only | **Insert-only** (raw pgx) | Prisma-owned schema. The Next.js app initiates the FR-10.1 account-deletion transaction (and writes its `account_deleted` audit row in the same `$transaction`). The Go telemetry server holds Insert-only access via raw pgx for system-initiated rows — `drives_pruned` (NFR-3.27 pruning job, §5), `mask_applied` (1% sampling, §4.2 / [`rest-api.md`](rest-api.md) §5.3), `tokens_refreshed` (OAuth refresh) — **and, since MYR-258, the ONE user-initiated row it owns: `vehicle_deleted`**, written by `store.OwnerTeardown` inside the same transaction as the owner-scoped `Vehicle` delete (CG-DL-3 requires the audit BEFORE the delete). `targetType='vehicle'`, `initiator='user'`, `metadata={driveCount, wasLastVehicle, tombstoned}` — P0 counts/flags only (CG-DL-5). Since **MYR-261** the Go server also owns the user-initiated `vehicle_readd_allowed` row (written by `store.RemovedVehicleRegistry.ClearTombstone` when an owner deliberately re-adds a previously removed car; `targetType='vehicle'`, `targetId`=Tesla vehicle id, `initiator='user'`, `metadata={existed}`). UPDATE/DELETE remain prohibited at the database level (§4.3 triggers) and the application level (no `UpdateAuditLog` / `DeleteAuditLog` methods exist; `contract-guard` CG-DL-2 enforces this on every PR). |
+| `AuditLog` | DB-only | **Insert-only** (raw pgx) | Prisma-owned schema. **Since MYR-355 the Go server initiates the FR-10.1 account deletion and writes the `account_deleted` row itself**, inside the same transaction as the identity delete (§3.1 step 7). The Go telemetry server holds Insert-only access via raw pgx for system-initiated rows — `drives_pruned` (NFR-3.27 pruning job, §5), `mask_applied` (1% sampling, §4.2 / [`rest-api.md`](rest-api.md) §5.3), `tokens_refreshed` (OAuth refresh) — **and, since MYR-258, the ONE user-initiated row it owns: `vehicle_deleted`**, written by `store.OwnerTeardown` inside the same transaction as the owner-scoped `Vehicle` delete (CG-DL-3 requires the audit BEFORE the delete). `targetType='vehicle'`, `initiator='user'`, `metadata={driveCount, wasLastVehicle, tombstoned}` — P0 counts/flags only (CG-DL-5). Since **MYR-261** the Go server also owns the user-initiated `vehicle_readd_allowed` row (written by `store.RemovedVehicleRegistry.ClearTombstone` when an owner deliberately re-adds a previously removed car; `targetType='vehicle'`, `targetId`=Tesla vehicle id, `initiator='user'`, `metadata={existed}`). UPDATE/DELETE remain prohibited at the database level (§4.3 triggers) and the application level (no `UpdateAuditLog` / `DeleteAuditLog` methods exist; `contract-guard` CG-DL-2 enforces this on every PR). |
 
 ### 1.5 Transient data — NOT persisted (NFR-3.28)
 
@@ -209,14 +218,33 @@ The Vehicle table does **not** maintain historical versions. Each telemetry even
 
 When a user requests deletion of their account (FR-10.1), the system MUST delete all user data and write an immutable audit log entry (FR-10.2).
 
+> **REWRITTEN BY [MYR-355](https://linear.app/myrobotaxi/issue/MYR-355) (2026-07-30).** This section previously specified a single Prisma `$transaction` initiated by the Next.js app, and stated that "the telemetry server does not initiate account deletions". Both are superseded. The **Go telemetry server** owns `DELETE /api/users/me` ([`rest-api.md`](rest-api.md) §7.6) because the native iOS client is the only consumer and never reaches the Next.js app — and because the `User` cascade was never the whole deletion: `go_ride_requests`, `go_vehicle_shares`, `go_push_devices`, `go_refresh_tokens`, `go_users`, `go_identity_apple` and `go_removed_vehicles` carry no FK to `User` (CG-DL-9 forbids one), so no Prisma cascade has ever reached a single one of them.
+>
+> **The consequence is that the deletion is NOT one transaction, and the contract's guarantee changes shape.** §3.4 below states the new one.
+
 ### 3.1 Deletion ordering
 
-The deletion is executed as a single database transaction with the following steps in order:
+The deletion is a SEQUENCE of independently-atomic steps, executed in this order by `telemetry.AccountDeletionHandler` (`internal/telemetry/account_deletion_sequence.go`) over `store.OwnerTeardown` and `store.AccountDeleter`:
+
+| # | Step | Writer | Idempotent because |
+|---|------|--------|--------------------|
+| 1 | Count the user's drives (audit metadata only) | `AccountDeleter.CountUserDrives` | Read-only; a failure is logged and ignored — a missing statistic must never block erasure |
+| 2 | For EACH owned vehicle: the §1.4 owner-teardown transaction | `OwnerTeardown.RemoveVehicle` | An already-removed car returns `AlreadyGone` — a clean no-op success with no duplicate audit row |
+| 3 | Revoke every grant the user REDEEMED | `AccountDeleter.RevokeSharesReceived` | `WHERE accepted_by_user_id = $1 AND status <> 'revoked'` matches nothing on a re-run |
+| 4 | Cancel every OPEN ride the user holds as RIDER | the guarded §7.8 transition + `ride_status_changed` publish | The guarded `UPDATE … WHERE status = ANY(from)` cannot re-fire; a lost race is not an error |
+| 5 | Delete the user's push devices | `AccountDeleter.DeletePushDevices` | `DELETE … WHERE user_id = $1` affects zero rows on a re-run |
+| 6 | Revoke the user's refresh tokens | `AccountDeleter.RevokeRefreshTokens` | `WHERE user_id = $1 AND revoked = FALSE` matches nothing on a re-run |
+| 7 | Identity + audit, ONE transaction | `AccountDeleter.DeleteIdentity` | The transaction probes the three identity sources first; finding none it commits empty and writes NO audit row |
+| 8 | Invalidate the auth caches | `auth.JWTAuthenticator` | Pure cache eviction |
+
+**Step 7 is the only transaction that deletes identity, and it runs LAST. That ordering is normative**, because the caller authenticates with a token that resolves through exactly those rows: deleting them earlier would leave a half-deleted account that nobody — not even its owner — could finish deleting.
+
+Step 7, in full (CG-DL-3 requires the audit BEFORE the destructive delete):
 
 ```
 BEGIN TRANSACTION;
 
--- Step 1: Write audit log FIRST (before any destructive operations)
+-- Step 1: Write audit log FIRST (before the destructive deletes in this tx)
 INSERT INTO "AuditLog" ("id", "userId", "timestamp", "action", "targetType", "targetId", "initiator", "metadata")
 VALUES (
   cuid(),
@@ -229,7 +257,17 @@ VALUES (
   '{"vehicleCount": N, "driveCount": M, "inviteCount": K}'
 );
 
--- Step 2: Delete the User row — Prisma cascades handle the rest
+-- Step 2: Delete the Go-owned identity rows. An Apple-native user has no
+-- "User" row and a legacy web user has no go_users row; BOTH statements run
+-- unconditionally and simply affect zero rows in the case that does not apply
+-- (dual-source identity — neither case is special-cased, neither is an error).
+DELETE FROM go_identity_apple WHERE user_id = '<user-id>';
+DELETE FROM go_users         WHERE id      = '<user-id>';
+
+-- Step 3: Delete the Prisma User row IF one exists — its cascades are the
+-- BACKSTOP, not the mechanism: by now step 2 of §3.1 has already torn down
+-- every owned vehicle one transaction at a time, so the cascade normally has
+-- nothing left to take.
 DELETE FROM "User" WHERE "id" = '<user-id>';
 
 -- Prisma onDelete: Cascade propagation (automatic):
@@ -242,12 +280,14 @@ DELETE FROM "User" WHERE "id" = '<user-id>';
 --   Vehicle delete -> TripStop[]   (all trip stops for this vehicle)
 --   Vehicle delete -> Invite[]     (all invites TO this vehicle)
 
--- Step 3: Invalidate sessions (NextAuth sessions table)
--- NextAuth sessions are FK'd to User — cascade delete handles this.
--- Active WebSocket connections for this user's vehicles are terminated
--- by the telemetry server when it detects the vehicle record is gone.
-
 COMMIT;
+
+-- Sessions are already gone before this transaction opens: step 6 of §3.1
+-- revoked every go_refresh_tokens row, and step 8 evicts the user-existence
+-- cache immediately after the commit so the caller's still-unexpired ES256
+-- access token stops validating at once rather than at the cache TTL. Active
+-- WebSocket connections for this user's vehicles were closed during step 2 by
+-- the vehicle_deleted NOTIFY (§3.5).
 ```
 
 ### 3.2 Cascade map
@@ -268,13 +308,48 @@ User (deleted)
 | Record | Reason |
 |--------|--------|
 | `AuditLog` entries | Retained indefinitely per NFR-3.29. No FK to User — orphaned `userId` is intentional. |
-| Invites where user is the recipient (by email) | Invite table FKs are to sender (`senderId`) and vehicle (`vehicleId`). If the deleted user was an invite recipient (matched by email), the invite row is orphaned but harmless — it references a non-existent email. These are cleaned up by the vehicle owner's cascade. |
+| **Terminal `go_ride_requests` rows where the deleted user was the RIDER** | **Counterparty records — see §3.3.1.** |
+| Revoked `go_vehicle_shares` tombstones | Revocation has always been a tombstone rather than a delete (migration 0020). The owner's trail of who could see their car outlives the viewer's account. |
+| Revoked `go_refresh_tokens` rows | The rotation lineage is reuse-detection evidence. Only the SHA-256 digest was ever stored — the raw token never was — so the retained row is not a credential. |
+| `go_removed_vehicles` tombstones | They exist to stop a removed VIN being resurrected by a later Tesla sync; deleting them would restore exactly the bug MYR-261 closed. |
+| The Tesla-side grant and virtual key | Revoking OUR access is not revoking the owner's consent at Tesla — that is the owner-confirmed consent page (§1.2). |
+| Invites where user is the recipient (by email) | The Prisma `Invite` table is **retired unused** (data-classification.md §1.6) — no row was ever written against it. Retained here only because the relation still exists in the sibling schema. |
+
+#### 3.3.1 Ride history is a counterparty record
+
+A completed ride has **two** parties. Erasing the rider's copy erases the owner's history of their own car — a second person's data, deleted to satisfy the first person's request. So terminal rows (`completed` / `declined` / `cancelled`) in which the deleted user was the **rider** are **kept, whole and unmodified**: `rider_id` still holds the deleted user's cuid, and nothing is rewritten.
+
+**No column was added, and none was needed.** The requester-name resolution built by MYR-229 and extended by MYR-264 (`requesterIdentitySelect`, `internal/store/ride_request_queries.go`) already distinguishes the two cases that matter, via its `requester_exists` probe across all three identity sources:
+
+| Situation | `requester_exists` | `requesterName` on the wire |
+|---|---|---|
+| Rider exists, has a name or email | `true` | the resolved first name / email local-part |
+| Rider exists, has neither | `true` | the literal `"Rider"` — *"a rider with no name on file"* |
+| **Rider's account was deleted** | `false` | **OMITTED** |
+
+An omitted `requesterName` on the live path therefore means precisely *"this account was deleted"*, and the iOS client renders it as **"Former rider"**. The alternative designs — a nullable `requester_display_name` snapshot column, or rewriting `rider_id` to a sentinel — were both rejected: the first duplicates a value that already resolves correctly, and the second destroys the only linkage that makes the retained row auditable.
+
+`TestAccountDeletion_RideHistorySurvivesAsFormerRider` pins it end to end: a real first name before the deletion, an omitted one after, with the row and its status intact.
+
+**The asymmetry, stated rather than hidden.** An OWNER's deletion runs the §1.4 teardown per car, and that teardown **deletes** the car's `go_ride_requests` rows outright — so riders lose their history of rides in that owner's car. That is pre-existing MYR-258 behaviour (those rows carry P1 encrypted pickup/dropoff GPS for a vehicle leaving the platform, and no FK cascade reaches them) and MYR-355 deliberately did not change it. **A rider's deletion preserves the owner's history; an owner's deletion does not preserve the rider's.** Revisiting that is its own decision, not a side effect of this one.
 
 ### 3.4 Transactional guarantees
 
-- The audit log write and the User delete MUST be in the same transaction. If the audit log insert fails, the deletion is aborted.
-- If the transaction fails at any point, no data is deleted and no audit log entry is created. The operation is atomic.
-- The Next.js app layer is responsible for initiating this transaction (Prisma `$transaction`). The telemetry server does not initiate account deletions.
+**The guarantee is RE-RUNNABILITY, not whole-sequence atomicity.** The two cannot both be had here, and the reason is structural rather than a matter of effort:
+
+- Step 2 of §3.1 is `store.OwnerTeardown`, which is **already** a transaction — one that takes `SELECT … FOR UPDATE` locks over the owner's whole vehicle set (so the last-vehicle decision is race-safe) and fires the `vehicle_deleted` NOTIFY whose consumers must not observe uncommitted work.
+- Step 4 publishes `ride_status_changed`, which sends **push notifications**. A notification cannot be rolled back.
+
+Wrapping N teardowns plus a notifying step in one outer transaction would therefore either deadlock against those locks or tell people about work a later rollback undid. What the contract guarantees instead:
+
+- **Every step is idempotent.** Re-running affects zero rows for work already done (the "Idempotent because" column of §3.1 is normative).
+- **The sequence is re-runnable.** A failure answers `500` and leaves a partially-deleted account; calling `DELETE /api/users/me` again resumes from wherever it stopped.
+- **The identity delete is LAST**, so a failure never leaves an account that cannot authenticate to finish deleting itself.
+- **The audit row and the identity delete are in the SAME transaction** (CG-DL-3), audit first. If the audit insert fails, no identity row is deleted.
+- **Exactly one `account_deleted` row is ever written**, however many times the endpoint is called: the transaction probes the identity sources first and writes nothing on the already-gone arm.
+- The **Go telemetry server** initiates the deletion. The previous sentence assigning this to the Next.js app is superseded (MYR-355).
+
+**What a mid-sequence failure genuinely leaves.** Between steps, the account is real but degraded — some cars torn down, some grants revoked. This is a deliberate trade: the alternative is refusing the erasure entirely on any transient database error, which serves the user worse and satisfies neither FR-10.1 nor the App Store requirement. Partial state is visible only to the account's own owner, resolves on the next call, and cannot leak another user's data (every statement is caller-scoped in SQL).
 
 ### 3.5 WebSocket session cleanup
 
@@ -300,7 +375,7 @@ Both choices are individually correct for their context: the WS path is user-fac
 
 ## 4. Audit log table schema
 
-> **Ownership.** The `AuditLog` table is part of the **Next.js app's Prisma schema** (consistent with the §1.4 Prisma-managed-table list and [`rest-api.md`](rest-api.md) §10 DV-23, RESOLVED 2026-05-08, MYR-69). Migrations are authored in the Next.js repo via Prisma; the Go telemetry server does NOT own the migration toolchain for this table. The Next.js app writes the `account_deleted` row (FR-10.1) inside the Prisma `$transaction` defined in §3.1, with responsibility for initiating that transaction per §3.4. The Go telemetry server holds **Insert-only** access via raw pgx for the system-initiated rows (`drives_pruned`, `mask_applied`, `tokens_refreshed`) and — since MYR-258 — the user-initiated `vehicle_deleted` row, which `store.OwnerTeardown` writes inside the same transaction as the owner-scoped per-vehicle delete it backs (`DELETE /api/tesla/vehicles/{vehicleId}`; the Go server owns that endpoint, so it owns that audit row). UPDATE and DELETE are prohibited at both the database level (§4.3 triggers) and the application level (`contract-guard` CG-DL-2). The schema below is the canonical definition that both the Prisma model and the Go pgx writer MUST mirror exactly; drift between them is a contract violation.
+> **Ownership.** The `AuditLog` table is part of the **Next.js app's Prisma schema** (consistent with the §1.4 Prisma-managed-table list and [`rest-api.md`](rest-api.md) §10 DV-23, RESOLVED 2026-05-08, MYR-69). Migrations are authored in the Next.js repo via Prisma; the Go telemetry server does NOT own the migration toolchain for this table. **Since MYR-355 the Go telemetry server writes the `account_deleted` row (FR-10.1)**, inside the same transaction as the identity delete defined in §3.1 step 7, and owns the deletion sequence per §3.4 — it serves `DELETE /api/users/me`, so it owns that audit row, by the same rule that gave it `vehicle_deleted`. The Go telemetry server holds **Insert-only** access via raw pgx for the system-initiated rows (`drives_pruned`, `mask_applied`, `tokens_refreshed`) and — since MYR-258 — the user-initiated `vehicle_deleted` row, which `store.OwnerTeardown` writes inside the same transaction as the owner-scoped per-vehicle delete it backs (`DELETE /api/tesla/vehicles/{vehicleId}`; the Go server owns that endpoint, so it owns that audit row). UPDATE and DELETE are prohibited at both the database level (§4.3 triggers) and the application level (`contract-guard` CG-DL-2). The schema below is the canonical definition that both the Prisma model and the Go pgx writer MUST mirror exactly; drift between them is a contract violation.
 
 ### 4.1 Table definition
 
@@ -333,7 +408,7 @@ CREATE INDEX "AuditLog_timestamp_idx" ON "AuditLog" ("timestamp");
 
 | Action | Description | Triggered by |
 |--------|-------------|--------------|
-| `account_deleted` | User account and all associated data deleted | User (FR-10.1) |
+| `account_deleted` | User account and all associated data deleted (FR-10.1). **Emitted by the Go telemetry server since MYR-355** — `store.AccountDeleter.DeleteIdentity`, in the same transaction as the identity delete (§3.1 step 7, CG-DL-3). `targetType='user'`, `targetId`=the caller's own cuid, `initiator='user'`, `metadata={vehicleCount, driveCount, ridesCancelled, sharesRevoked, pushDevicesDeleted, refreshTokensRevoked, hadPrismaUser}` — P0 counts/flags only (CG-DL-5). Written at most ONCE per account: the transaction probes the three identity sources first and the already-gone arm writes nothing, so the endpoint's re-run path cannot duplicate it | User (FR-10.1) |
 | `vehicle_deleted` | Single vehicle and its drives/stops/invites deleted. Since MYR-261 the same-tx write also creates a `go_removed_vehicles` tombstone (§1.4.1); `metadata.tombstoned` records whether one was written | User |
 | `vehicle_readd_allowed` | Owner deliberately re-added a previously removed car — the `go_removed_vehicles` tombstone for `(userId, teslaVehicleId)` was cleared so the next Tesla sync may provision the VIN again (MYR-261, §1.4.1). `targetType='vehicle'`, `targetId` is the Tesla vehicle id, `initiator='user'`, `metadata={existed}` (P0 only). Emitted by `store.RemovedVehicleRegistry.ClearTombstone` in the same transaction as the tombstone DELETE (CG-DL-3) | User |
 | `drives_pruned` | Batch of drives older than 365 days deleted | System pruning job (NFR-3.27) |

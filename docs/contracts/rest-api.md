@@ -593,7 +593,7 @@ The `POST`/`GET /api/ride-requests[...]` rows (§7.8) are the P10 ride-hailing s
 
 The `/api/auth/*` rows (§7.10) are the identity module's auth surface (MYR-193, ADR-001 `docs/architecture/adr-001-identity-module.md`): native Sign in with Apple, ES256 access-token minting with a published JWKS, and rotating refresh tokens. Unlike every other row, these are **pre-authentication** endpoints (they mint or rotate the very credential the others require), so they are not Bearer-gated — they are protected by a per-IP token-bucket rate limit instead (§4.1.2).
 
-`GET /api/vehicles` (§7.0) is mounted by the Go server as of MYR-91 (2026-05-10). `GET /api/vehicles/{vehicleId}/snapshot` (§7.1) and `GET /api/vehicles/{vehicleId}/drives` (§7.2) are mounted as of MYR-133 (2026-06-03). `GET /api/drives/{driveId}/route` (§7.4) is mounted as of PR #260 (DV-20), and `GET /api/drives/{driveId}` (§7.3) as of MYR-130 (2026-07-02) — DV-20 is fully RESOLVED (see §10). The §7.5 vehicle-sharing endpoints are mounted on the Go server as of MYR-184 (2026-07-29), which SUPERSEDES the §7.5 half of DV-23. `GET /api/users/me/export` and the §7.6 endpoint remain served by the Next.js app per the surviving half of DV-23 and are NOT in scope for the Go server's DV-20 mount.
+`GET /api/vehicles` (§7.0) is mounted by the Go server as of MYR-91 (2026-05-10). `GET /api/vehicles/{vehicleId}/snapshot` (§7.1) and `GET /api/vehicles/{vehicleId}/drives` (§7.2) are mounted as of MYR-133 (2026-06-03). `GET /api/drives/{driveId}/route` (§7.4) is mounted as of PR #260 (DV-20), and `GET /api/drives/{driveId}` (§7.3) as of MYR-130 (2026-07-02) — DV-20 is fully RESOLVED (see §10). The §7.5 vehicle-sharing endpoints are mounted on the Go server as of MYR-184 (2026-07-29), which SUPERSEDES the §7.5 half of DV-23. `DELETE /api/users/me` (§7.6) is mounted on the Go server as of **MYR-355** (2026-07-30), which SUPERSEDES the remaining half of DV-23 — DV-23 is now superseded in full. `GET /api/users/me/export` (§7.7) is the one path still assigned to the Next.js app.
 
 ---
 
@@ -1344,25 +1344,15 @@ The code space is only 36^6 (~2.2 billion), so this endpoint is rate-limited **p
 
 ### 7.6 `DELETE /api/users/me`
 
-> **Anchored:** FR-10.1, FR-10.2, NFR-3.29; GDPR Art. 17 recent-auth corollary.
+> **Anchored:** FR-10.1, FR-10.2, NFR-3.29; App Store Review Guideline 5.1.1(v) (an app offering account creation MUST offer in-app account deletion).
+>
+> **REWRITTEN BY [MYR-355](https://linear.app/myrobotaxi/issue/MYR-355) (2026-07-30).** The previous version of this section assigned the endpoint to the **Next.js app** (per §10 DV-23) and specified a `200 OK` body plus a NextAuth-specific recent-auth gate. All three parts are superseded. See "What changed and why" at the end of this section — the old text is not merely restated here, because a contract that describes a process no client reaches is worse than no contract.
 
 #### Purpose
 
-Deletes the authenticated user and all associated data per the cascade defined in [`data-lifecycle.md`](data-lifecycle.md) §3. This is the SDK's single entry point for user-initiated data deletion per FR-10.1. The endpoint writes an immutable audit log entry before the destructive operation per FR-10.2 and the data-lifecycle contract, and the audit log entry is retained indefinitely per NFR-3.29.
+Deletes the authenticated user and every piece of data the platform holds about them, per the sequence defined normatively in [`data-lifecycle.md`](data-lifecycle.md) §3. This is the SDK's single entry point for user-initiated data deletion (FR-10.1), and it is what makes the iOS app shippable: Apple rejects any app that creates accounts and offers no way to delete one.
 
-#### Re-auth precondition (MYR-76)
-
-In addition to the standard Bearer-token check (§3), this endpoint requires that the caller's most recent **fresh OAuth sign-in** occurred within the recent-auth window. The default window is 300 s (5 minutes); operators MAY override via the `REAUTH_MAX_AGE_SEC` environment variable on the Next.js handler.
-
-The precondition is checked before the deletion transaction is entered. Sessions whose `auth_time` (Unix-seconds, mirroring the OIDC `auth_time` claim and surfaced as `session.user.authTime` in NextAuth) is older than the window — or sessions that lack the claim entirely (legacy sessions predating the rollout) — are rejected with `401 auth_failed` carrying `subCode: reauth_required`.
-
-Rationale: v1's Bearer token alone is sufficient to permanently destroy the account and cascade-delete every owned vehicle, drive, invite, and setting per [`data-lifecycle.md`](data-lifecycle.md) §3. A long-lived stolen token would therefore let an attacker erase the user's data before they notice. The recent-auth corollary of GDPR Art. 17 — the right to erasure does not license unauthorized erasure — motivates a fresh-OAuth-step requirement on the destructive path. The same precondition applies symmetrically to §7.7 `GET /api/users/me/export`.
-
-**Behavior on rejection:**
-
-1. The handler returns `401 auth_failed` with `subCode: reauth_required` and message `"recent re-authentication required"`.
-2. The SDK MUST NOT swallow this with a silent `getToken()` retry (see the §4.1.1 row for `auth_failed`); it MUST surface the typed `subCode` so the consumer's auth layer can trigger an interactive sign-in (e.g., NextAuth `signIn()` redirect).
-3. After the user completes a fresh sign-in, the JWT `authTime` claim advances and the next `DELETE /api/users/me` call passes the gate.
+**The Go telemetry server serves this endpoint.** The native iOS client (P9) is the only consumer, it never talks to the Next.js app, and most of what must be deleted now lives in Go-owned tables no Prisma cascade reaches (`go_ride_requests`, `go_vehicle_shares`, `go_push_devices`, `go_refresh_tokens`, `go_users`, `go_identity_apple`, `go_removed_vehicles`). The `account_deleted` AuditLog row (FR-10.2) moves with the endpoint and is written by `store.AccountDeleter.DeleteIdentity` inside the same transaction as the identity delete (CG-DL-3).
 
 #### Request
 
@@ -1372,50 +1362,92 @@ Host: api.myrobotaxi.com
 Authorization: Bearer <token>
 ```
 
-No request body.
+**No request body.** The endpoint takes none and reads none. There is nothing to scope: a caller may delete exactly one account, their own, in full.
 
-#### Response -- 200 OK
+#### Response — 204 No Content
 
-The deletion is executed as a **single database transaction** per [`data-lifecycle.md`](data-lifecycle.md) §3.1, with the audit log INSERT as step 1 before the cascading DELETE. v1 returns a synchronous `200 OK` response after the transaction commits:
+Empty body. There is no account left to describe, and a body would only tempt a client to render something to a user it is already signing out. Clients MUST NOT attempt to decode the response.
 
-```json
-{
-  "deleted": true,
-  "auditLogId": "claud0g123456789deletion"
-}
-```
+The previous `{ "deleted": true, "auditLogId": … }` body is withdrawn: `auditLogId` existed so the web test bench could cross-reference the audit row, a surface the iOS client has no access to and no use for, and returning an internal row id to a caller whose account has just ceased to exist is not a capability worth keeping.
 
-| Field | Type | Classification | Notes |
-|-------|------|----------------|-------|
-| `deleted` | boolean | P0 | Always `true` on a successful 200 response. |
-| `auditLogId` | string (cuid) | P0 | Opaque ID of the AuditLog row written per FR-10.2 / NFR-3.29 / `data-lifecycle.md` §3.1 / §4. The SDK (and the web test bench) can cross-reference this ID against the audit log store to verify the write. The row itself is P0 (`data-lifecycle.md` §4.4). |
+#### Response — error
 
-**Why synchronous (not async with a `202 Accepted` + polling).** The cascade defined in `data-lifecycle.md` §3 is a single database transaction, not a long-running background job. Returning `200 OK` after the transaction commits is simpler and avoids the complexity of a polling endpoint for a workflow that is already atomic. This decision is recorded in §7.6 of this doc and is the canonical v1 behavior; any future move to an async pipeline (e.g., to support deferred external cleanup of reverse-geocoded cache entries) would require an additive change that falls back to 200 for existing clients.
+| HTTP | `error.code` | When |
+|------|--------------|------|
+| 401 | `auth_failed` | Missing/malformed/expired token, or a token whose user no longer resolves. Also the expected response on a call made *after* a successful deletion once the server's user-existence cache has evicted. |
+| 405 | `invalid_request` | Any method other than DELETE. |
+| 429 | `rate_limited` | REST rate limit breached. |
+| 500 | `internal_error` | A step of the sequence failed. **Partial deletion is possible and expected** — see Idempotency. |
 
-#### Response -- error
+There is no 403: the endpoint operates on `/users/me`, so the caller is always the owner of the account in question. There is no cross-user deletion in v1.
 
-| HTTP | `error.code` | `subCode` | When |
-|------|--------------|-----------|------|
-| 401 | `auth_failed` | `null` | Missing/malformed/invalid token. Also the expected response on a second DELETE attempt after a successful first call -- the token has been invalidated. |
-| 401 | `auth_failed` | `reauth_required` | Recent-login re-auth gate failed: the session is valid but the `auth_time` claim is older than `REAUTH_MAX_AGE_SEC` (default 300 s), or the claim is absent (legacy session). The SDK MUST trigger interactive re-authentication; see Re-auth precondition above. |
-| 429 | `rate_limited` | `null` | REST rate limit breached |
-| 500 | `internal_error` | `null` | Transaction rolled back (the cascade failed and no data was deleted per `data-lifecycle.md` §3.4) |
+#### Idempotency and the re-run contract
 
-**Note on 403:** This endpoint has no 403 path because it operates on `/users/me` -- the authenticated user is always "owner" of their own account. There is no cross-user deletion in v1.
+This is the part clients must implement against, and it differs from every other destructive endpoint in this document.
 
-#### Idempotency
+The deletion is **NOT one transaction**, and cannot be. The per-vehicle teardown it composes (§7.12, `store.OwnerTeardown`) is already its own transaction — it takes `FOR UPDATE` locks over the owner's vehicle set and fires the `vehicle_deleted` NOTIFY, whose consumers must not observe uncommitted work — and the ride-cancellation step publishes push notifications. Wrapping N of those in an outer transaction would deadlock against the locks or notify people about work a rollback then undid.
 
-Idempotent in the "equivalent final state" sense (§4.5). A second call after success returns `401 auth_failed` because the token no longer resolves to a valid user. The final state is "account deleted" in both cases.
+What is guaranteed instead:
 
-#### Cascade reference
+1. **Every step is idempotent.** Re-running affects zero rows for work already done.
+2. **The whole sequence is RE-RUNNABLE.** A `500` means the deletion stopped part-way; calling `DELETE /api/users/me` again resumes it.
+3. **The identity rows are deleted LAST**, so a mid-sequence failure never leaves an account that cannot authenticate to finish its own deletion. This ordering is the contract, not an implementation detail.
+4. **Exactly one `account_deleted` audit row** is ever written, however many times the endpoint is called: the final transaction writes it only when it finds identity rows still present.
+5. **A second call after success is `204`**, not an error, until the caller's access token stops validating.
 
-The full deletion cascade (User -> Account, Vehicle, Invite, Settings; Vehicle -> Drive, TripStop, Invite) and the transactional guarantees are defined normatively in [`data-lifecycle.md`](data-lifecycle.md) §3. This section does NOT re-specify them; the data-lifecycle contract is the single source of truth for the cascade and the audit log row shape.
+Clients SHOULD therefore offer a plain "try again" on failure, and MUST NOT sign the user out on a `500` — they need their token to retry.
 
-#### Implementation notes
+#### What is deleted, and in what order
 
-- The audit log row is written BEFORE the cascading DELETE, in the same transaction, per `data-lifecycle.md` §3.1.
-- **The Next.js app serves this endpoint** per §10 DV-23 (RESOLVED 2026-05-08, MYR-69). The Go telemetry server has no User repository and no `DELETE /api/users/me` handler; the public API hostname proxies this path to the Next.js app, which executes the Prisma `$transaction` defined in `data-lifecycle.md` §3.1. The SDK is unaware of which process handles the request.
-- WebSocket session cleanup (`data-lifecycle.md` §3.5): after the transaction commits, the telemetry server detects the vehicle deletion on its next DB read cycle and terminates any active WebSocket connections for those vehicles. The SDK observes this as a close code 1008 or 1001 on the WS, and the next `getToken()` call will fail.
+Normative in [`data-lifecycle.md`](data-lifecycle.md) §3.1. Summary:
+
+| # | Step | Notes |
+|---|------|-------|
+| 1 | Count the user's drives | Audit metadata only; a failure here is logged and ignored — a missing statistic never blocks erasure |
+| 2 | Tear down every owned vehicle | One existing §7.12 `owner_teardown` transaction per car: `Vehicle` + cascade, that car's `go_ride_requests`, every sharing grant ON the car revoked, the VIN tombstoned, and on the last car the Tesla `Account` tokens cleared + `Settings` reset |
+| 3 | Revoke shares RECEIVED | Every accepted grant the user redeemed → `revoked` tombstone |
+| 4 | Cancel open rides as RIDER | Through the guarded §7.8 transition, publishing `ride_status_changed` so affected owners get the standard lifecycle push |
+| 5 | Delete push devices | Whole `go_push_devices` address book for the user |
+| 6 | Revoke refresh tokens | `go_refresh_tokens` marked revoked with `reason='account_deleted'` |
+| 7 | Delete identity + write audit | ONE transaction: the `account_deleted` row, then `go_identity_apple`, `go_users`, and the Prisma `"User"` row **if one exists** |
+| 8 | Invalidate auth caches | The caller's unexpired access token stops validating immediately rather than at the cache TTL |
+
+**Dual-source identity.** Step 7 handles both account shapes with the same statements: an Apple-native user has no `"User"` row (that DELETE affects zero rows) and a legacy web user has no `go_users` row. Neither case is special-cased and neither is an error.
+
+**A ride physically in progress (`enroute` / `arrived`) is NOT cancelled.** Those states are not rider-cancellable under §7.8, and cancelling a car mid-trip from under its owner is a worse outcome than letting the ride reach its own terminal state. It closes on its own, and afterwards renders as former-rider history like any other completed ride.
+
+#### Data retention — ride history is NOT deleted
+
+Terminal ride rows (`completed` / `declined` / `cancelled`) in which the deleted user was the **rider** are **kept**. They are the *owner's* record of their own car, and erasing them would delete a second person's data to satisfy the first person's request.
+
+The rows are kept **whole and unmodified** — `rider_id` still holds the deleted user's cuid. No column was added and no row was rewritten. The mechanism is the identity resolution that already exists: `requesterIdentitySelect` (MYR-229/MYR-264) probes all three identity sources with `requester_exists`, finds none, and the projection **OMITS `requesterName`** rather than degrading it to the `"Rider"` literal (which means "a rider with no name on file", a different fact). An omitted `requesterName` on the live path therefore means precisely *"this account was deleted"*, and the iOS client renders it as **"Former rider"**.
+
+This is pinned by `TestAccountDeletion_RideHistorySurvivesAsFormerRider`, which asserts a real first name before the deletion and an omitted one after.
+
+**One asymmetry, stated rather than hidden:** an OWNER's deletion runs the §7.12 teardown per car, and that teardown deletes the car's `go_ride_requests` rows outright — so riders lose their history of rides in that owner's car. That is pre-existing MYR-258 behaviour (those rows carry P1 encrypted pickup/dropoff GPS for a vehicle that is leaving the platform) and MYR-355 deliberately did not change it. The retention rule above is therefore precise: **a rider's deletion preserves the owner's history; an owner's deletion does not preserve the rider's.**
+
+#### What is NOT deleted
+
+| Record | Reason |
+|--------|--------|
+| `AuditLog` rows | Retained indefinitely per NFR-3.29. No FK to `User` — the orphaned `userId` is intentional |
+| Terminal ride rows where the user was the rider | Counterparty records — see Data retention above |
+| Revoked share tombstones | The owner's audit trail of who could see their car outlives the viewer's account |
+| Revoked refresh-token rows | Rotation lineage is reuse-detection evidence (hash-only; the raw token was never stored) |
+| The Tesla-side grant and virtual key | Revoking our access does not revoke the owner's consent at Tesla — that is the owner-confirmed consent page (§7.12) |
+
+#### Audit row (FR-10.2)
+
+`action='account_deleted'`, `targetType='user'`, `targetId`=the caller's own cuid, `initiator='user'`. `metadata` is **P0 counts only** per CG-DL-5: `{vehicleCount, driveCount, ridesCancelled, sharesRevoked, pushDevicesDeleted, refreshTokensRevoked, hadPrismaUser}`. No name, no email, no VIN, no coordinate, no token.
+
+#### What changed and why
+
+| Was (pre-MYR-355) | Now | Why |
+|---|---|---|
+| Served by the Next.js app (§10 DV-23) | Served by the Go telemetry server | The only client is the native iOS app, which never reaches the Next.js app; and the Prisma cascade cannot reach the Go-owned tables that hold most of the data |
+| `200 OK` + `{deleted, auditLogId}` | `204 No Content`, no body | Nothing left to describe; `auditLogId` served a web test bench the iOS client cannot use |
+| One Prisma `$transaction` | A sequence of independently-atomic, idempotent, re-runnable steps | The composed per-vehicle teardown is already a transaction with locks and a NOTIFY; see Idempotency above |
+| Recent-auth gate (`auth_time` ≤ `REAUTH_MAX_AGE_SEC`, `subCode: reauth_required`) | **Not implemented in this round** | The gate was specified against the NextAuth `auth_time` claim. The Go identity module's ES256 access token (§7.10) carries no `auth_time` claim, so there is nothing to check — implementing it requires minting the claim in `identity.TokenMinter` and threading it through the refresh rotation, which is its own change. The client-side control that DOES ship is a **two-step explicit confirmation** in the iOS app. **This is a deliberate, recorded gap, not an oversight**: the GDPR Art. 17 recent-auth rationale in the previous text still stands, and re-instating the gate on the Go token is tracked as follow-up work |
 
 ---
 
@@ -1427,7 +1459,7 @@ The full deletion cascade (User -> Account, Vehicle, Invite, Settings; Vehicle -
 
 Returns a JSON archive of every Prisma row owned by the authenticated user — the SDK's single entry point for GDPR Art. 15 / Art. 20 portability exports. The endpoint is the export companion to `DELETE /api/users/me` (§7.6); together they implement the data-export-then-delete flow GDPR requires before erasure. Phase A implementation: [myrobotaxi/react-frontend#259](https://github.com/myrobotaxi/react-frontend/pull/259) (Next.js handler).
 
-The handler runs in the Next.js app per the surviving half of the DV-23 routing decision, which places `DELETE /api/users/me` there. (The §7.5 half of DV-23 was SUPERSEDED by MYR-184 — sharing moved to the Go server — but that does not disturb this path.) the public API hostname (`https://api.myrobotaxi.com/api/...`) proxies `/api/users/me/*` paths to the Next.js app. The Go telemetry server has no User repository and no export handler. The SDK is unaware of which process serves the request.
+The handler runs in the Next.js app. It is the last path DV-23 still assigns there: the §7.5 half was SUPERSEDED by MYR-184 (sharing moved to the Go server) and the §7.6 half by MYR-355 (deletion moved with it), neither of which disturbs this one. Note the asymmetry that leaves: **deletion is served by Go and export by Next.js**, so the export companion this section describes is not reachable from the iOS client at all. The public API hostname (`https://api.myrobotaxi.com/api/...`) proxies `/api/users/me/*` paths to the Next.js app. The Go telemetry server has no User repository and no export handler. The SDK is unaware of which process serves the request.
 
 #### Re-auth precondition (MYR-76)
 
@@ -3119,10 +3151,10 @@ See [`websocket-protocol.md`](websocket-protocol.md) §10 status legend -- same 
 | ID | Status | Topic | Current behavior | Target behavior | Anchor | Proposed Linear issue title |
 |----|--------|-------|------------------|-----------------|--------|------------------------------|
 | **DV-19** | **New** | REST auth middleware | [`internal/server/server.go`](../../internal/server/server.go) wires a `requestLogger` middleware across the client mux but has NO authentication middleware for REST endpoints. The existing `/api/vehicle-status/{vin}` and `/api/fleet-config/{vin}` handlers perform their own ad-hoc validation. The SDK's REST surface needs a shared middleware that parses `Authorization: Bearer <token>`, calls the same `Authenticator` used by the WS handler, resolves the user's vehicle ownership set, and emits observability signals. | Add a `restAuthMiddleware(Authenticator)` in `internal/server/middleware.go` (or a new file) that: (1) parses the header, (2) validates via `Authenticator.ValidateToken`, (3) loads the user's vehicles via `GetUserVehicles`, (4) puts `userId` and `vehicleIDs` in the request context, (5) returns `401 auth_failed` / `401 auth_timeout` on failure with the error envelope from §4.1, (6) strips the Authorization header from the slog `http request` line. Wire this middleware in front of every `/api/...` handler except the existing Tesla-owned endpoints. | FR-6.1, FR-6.2, NFR-3.21, §3 | `MYR-XX Add REST auth middleware + error envelope to internal/server` |
-| **DV-20** | **RESOLVED** | SDK-surface REST endpoints not yet mounted on the Go server | **RESOLVED — all four Go-server-owned §7 endpoints are mounted.** `GET /api/vehicles` (§7.0) landed in MYR-91 (2026-05-10); `GET /api/vehicles/{vehicleId}/snapshot` (§7.1) and `GET /api/vehicles/{vehicleId}/drives` (§7.2) landed in MYR-133 (2026-06-03); `GET /api/drives/{driveId}/route` (§7.4) landed in PR #260 (`DriveRouteHandler`, existing routePoints column + decryption); `GET /api/drives/{driveId}` (§7.3) landed in MYR-130 (2026-07-02) via `internal/telemetry/drive_detail_handler.go` backed by `DriveRepo.GetByID`. (§7.6 `DELETE /api/users/me` is NOT in DV-20's scope -- per the surviving half of DV-23 it is served by the Next.js app and is tracked under MYR-71 / MYR-72. The §7.5 endpoints WERE outside DV-20's scope for the same reason until **MYR-184 superseded that half of DV-23** and mounted all five on the Go server; the "terminal 404" statement that stood here is no longer true for §7.5.) | (Resolved.) All handlers enforce bearer auth + ownership + role-based `internal/mask` projection at the handler layer per §5.1; the shared-enum slice (REST-only `not_found` + `invalid_request` on `ErrorPayload.code`, plus `reauth_required` on `subCode`) was completed by MYR-98 on 2026-05-15. A route-surface regression test (`cmd/telemetry-server/wiring_routes_test.go`) guards against a contract route silently losing its mount. | FR-3.3, FR-3.4, NFR-3.5, §6, §7 | (Resolved — see MYR-91 / MYR-133 / PR #260 / MYR-130.) |
+| **DV-20** | **RESOLVED** | SDK-surface REST endpoints not yet mounted on the Go server | **RESOLVED — all four Go-server-owned §7 endpoints are mounted.** `GET /api/vehicles` (§7.0) landed in MYR-91 (2026-05-10); `GET /api/vehicles/{vehicleId}/snapshot` (§7.1) and `GET /api/vehicles/{vehicleId}/drives` (§7.2) landed in MYR-133 (2026-06-03); `GET /api/drives/{driveId}/route` (§7.4) landed in PR #260 (`DriveRouteHandler`, existing routePoints column + decryption); `GET /api/drives/{driveId}` (§7.3) landed in MYR-130 (2026-07-02) via `internal/telemetry/drive_detail_handler.go` backed by `DriveRepo.GetByID`. (§7.6 `DELETE /api/users/me` was outside DV-20's scope until **MYR-355 superseded the last half of DV-23** on 2026-07-30 and mounted it on the Go server; `cmd/telemetry-server/wiring_account_deletion.go`. The §7.5 endpoints WERE outside DV-20's scope for the same reason until **MYR-184 superseded that half of DV-23** and mounted all five on the Go server; the "terminal 404" statement that stood here is no longer true for §7.5.) | (Resolved.) All handlers enforce bearer auth + ownership + role-based `internal/mask` projection at the handler layer per §5.1; the shared-enum slice (REST-only `not_found` + `invalid_request` on `ErrorPayload.code`, plus `reauth_required` on `subCode`) was completed by MYR-98 on 2026-05-15. A route-surface regression test (`cmd/telemetry-server/wiring_routes_test.go`) guards against a contract route silently losing its mount. | FR-3.3, FR-3.4, NFR-3.5, §6, §7 | (Resolved — see MYR-91 / MYR-133 / PR #260 / MYR-130.) |
 | **DV-21** | **New** | `service_unavailable` code reserved but not emitted | v1 does not emit `503 service_unavailable`. The code is reserved in this contract for forward-compat. | Server begins emitting `503 service_unavailable` during maintenance windows and graceful-shutdown states, with a `Retry-After` header. SDK error catalog already recognizes the code from day one. | NFR-3.10, §4.1.1 | `MYR-XX Emit 503 service_unavailable during graceful shutdown + maintenance` |
 | **DV-22** | **New** | REST rate limit not enforced | No per-user REST rate limit is configured in [`internal/config/defaults.go`](../../internal/config/defaults.go) or wired through the server. The 120 req/min target in §4.1.2 is a PLANNED default, not an enforced value. | Add `WebSocketConfig.RestRateLimitPerMinutePerUser` (default 120) in `internal/config/defaults.go`. Implement a token-bucket rate limiter in the REST middleware keyed by `userId`. Breach returns `429 rate_limited` with a `Retry-After` header. Independent of `MaxConnectionsPerUser` (which governs concurrent WS sessions, not REST rps). | NFR-3.6, §4.1.2 | `MYR-XX Implement per-user REST rate limit (120 req/min default)` |
-| **DV-23** | **SUPERSEDED** | Invite endpoints + `DELETE /api/users/me` handler location | Resolved 2026-05-08 (MYR-69) in favour of **Option 2**: the Next.js app owns `DELETE /api/users/me` and the §7.5 invite endpoints, against its Prisma-owned email-keyed `Invite` table, with the public API hostname proxying invite paths to it. | **SUPERSEDED 2026-07-29 (MYR-184) for the §7.5 half.** The premise expired: `react-frontend` is **deprecated**, so "serve it from the Next.js app" no longer names a running process, and the Prisma `Invite` table is **retired unused** — no invite row was ever written against it. Sharing is now **Go-owned end to end**: table `go_vehicle_shares` (migration 0020, no FKs to the sibling schema per CG-DL-9), five endpoints on the Go telemetry server (§7.5.1–§7.5.5), and the MYR-91 viewer merge that makes the `viewer` role real. The contract shape changed with it — **codes, not emails** (there is no email infrastructure and riders are Apple-native), so `email` / `senderId` / `sentDate` / `isOnline` are gone and `label` / `permission` / `code` / `expiresAt` take their place, per contracts v0.19.0 `vehicle-sharing.schema.json`. The `DELETE /api/users/me` (§7.6) half of DV-23 is **NOT** superseded and its resolution stands. Implementation follow-ups MYR-70 (Next.js invite handler) and MYR-73 (edge routing for invite paths) are **obsolete**; MYR-71 / MYR-72 are unaffected. | FR-5.1, FR-5.2, FR-5.3, FR-10.1, FR-10.2, NFR-3.29, §7.5, §7.6 | (§7.5 superseded — see MYR-184. §7.6 resolved — see MYR-71 / MYR-72.) |
+| **DV-23** | **SUPERSEDED (in full)** | Invite endpoints + `DELETE /api/users/me` handler location | Resolved 2026-05-08 (MYR-69) in favour of **Option 2**: the Next.js app owns `DELETE /api/users/me` and the §7.5 invite endpoints, against its Prisma-owned email-keyed `Invite` table, with the public API hostname proxying invite paths to it. | **SUPERSEDED 2026-07-29 (MYR-184) for the §7.5 half.** The premise expired: `react-frontend` is **deprecated**, so "serve it from the Next.js app" no longer names a running process, and the Prisma `Invite` table is **retired unused** — no invite row was ever written against it. Sharing is now **Go-owned end to end**: table `go_vehicle_shares` (migration 0020, no FKs to the sibling schema per CG-DL-9), five endpoints on the Go telemetry server (§7.5.1–§7.5.5), and the MYR-91 viewer merge that makes the `viewer` role real. The contract shape changed with it — **codes, not emails** (there is no email infrastructure and riders are Apple-native), so `email` / `senderId` / `sentDate` / `isOnline` are gone and `label` / `permission` / `code` / `expiresAt` take their place, per contracts v0.19.0 `vehicle-sharing.schema.json`. **The §7.6 half was SUPERSEDED in turn on 2026-07-30 by MYR-355**, for the same expired premise plus a second one: account deletion is an App Store review requirement for the native iOS client, and that client never reaches the Next.js app. Most of what a deletion must remove now lives in Go-owned tables (`go_ride_requests`, `go_vehicle_shares`, `go_push_devices`, `go_refresh_tokens`, `go_users`, `go_identity_apple`) that no Prisma cascade reaches, so the `$transaction` DV-23 assumed was the deletion is now only its last step. `DELETE /api/users/me` is served by the Go telemetry server, answers `204`, and is re-runnable rather than atomic (§7.6). **DV-23 is therefore superseded in full**; the only `/users/me` path still on the Next.js app is §7.7 export. Implementation follow-ups MYR-70 (Next.js invite handler) and MYR-73 (edge routing for invite paths) are **obsolete**; MYR-71 / MYR-72 are **obsolete for the deletion handler**. | FR-5.1, FR-5.2, FR-5.3, FR-10.1, FR-10.2, NFR-3.29, §7.5, §7.6 | (§7.5 superseded — see MYR-184. §7.6 superseded — see MYR-355.) |
 
 ### Divergence management rules
 
