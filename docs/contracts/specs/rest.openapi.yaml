@@ -673,60 +673,83 @@ paths:
       tags: [account]
       summary: Delete the authenticated user's account and all associated data.
       description: |
-        Deletes the authenticated user and all associated data per the
-        cascade in data-lifecycle.md §3. The audit log entry is written
-        BEFORE the destructive operation per FR-10.2 / NFR-3.29 /
-        data-lifecycle.md §3.1. The cascade runs as a single database
-        transaction and v1 returns synchronous 200 OK on commit.
+        Deletes the authenticated user and everything the platform
+        holds about them, per the sequence in data-lifecycle.md §3.
+        Takes NO request body. Answers 204 No Content.
+
+        REWRITTEN BY MYR-355 (2026-07-30). This operation previously
+        declared a 200 + DeleteUserResponse body, a Next.js handler,
+        and a NextAuth recent-auth gate. All three are superseded —
+        see rest-api.md §7.6 "What changed and why".
+
+        Handler location: the GO TELEMETRY SERVER serves this
+        endpoint (cmd/telemetry-server/wiring_account_deletion.go).
+        The native iOS client is the only consumer and never reaches
+        the Next.js app, and most of what must be deleted lives in
+        Go-owned tables (go_ride_requests, go_vehicle_shares,
+        go_push_devices, go_refresh_tokens, go_users,
+        go_identity_apple, go_removed_vehicles) that carry no FK to
+        User and that no Prisma cascade reaches. This SUPERSEDES the
+        remaining half of DV-23; DV-23 is now superseded in full.
+
+        NOT one transaction. The per-vehicle teardown it composes is
+        already a transaction with FOR UPDATE locks and a NOTIFY, and
+        the ride-cancellation step sends push notifications, which
+        cannot be rolled back. The contract guarantees RE-RUNNABILITY
+        instead: every step is idempotent, and the identity rows the
+        caller authenticates with are deleted LAST, so a 500 leaves a
+        partially-deleted account that the SAME call finishes.
+
+        CLIENTS MUST NOT sign the user out on a 500 — the token is
+        what authenticates the retry. A second call after success is
+        204, not an error, until the access token stops validating.
+
+        Exactly one account_deleted AuditLog row is written per
+        account however many times this is called (FR-10.2 /
+        NFR-3.29): the final transaction probes the identity sources
+        first and the already-gone arm writes nothing.
+
+        Ride history is NOT deleted. Terminal rides where the caller
+        was the rider are the OWNER's counterparty record and are
+        kept whole; requesterName is then OMITTED from the wire
+        (requester_exists false), which clients render as
+        "Former rider". See data-lifecycle.md §3.3.1.
 
         No cross-user deletion: this endpoint operates on /users/me
         only. There is no 403 path.
 
-        Idempotent in the "equivalent final state" sense: a second
-        DELETE returns 401 auth_failed because the token has been
-        invalidated.
-
-        Handler location: per rest-api.md §10 DV-23 (RESOLVED
-        2026-05-08, MYR-69), the Next.js app serves this endpoint
-        directly against its Prisma-owned schema; the Go telemetry
-        server has no User repository and no DELETE /users/me
-        handler. The public API hostname proxies this path to the
-        Next.js app. The SDK is unaware of the handler location.
-
-        Re-auth precondition (MYR-76, rest-api.md §7.6): in addition
-        to the Bearer-token check, this endpoint requires that the
-        caller's most recent fresh OAuth sign-in is within
-        REAUTH_MAX_AGE_SEC (default 300 s). Sessions whose
-        auth_time claim is older than the window — or sessions that
-        lack the claim entirely — are rejected with 401 auth_failed
-        carrying subCode reauth_required. The SDK MUST surface this
-        subCode to the consumer's auth layer for an interactive
-        sign-in flow; a silent getToken() refresh does NOT satisfy
-        the precondition because the auth_time claim only advances
-        on a fresh OAuth round-trip.
+        NOT IMPLEMENTED in this round: the MYR-76 recent-auth gate
+        (auth_time <= REAUTH_MAX_AGE_SEC, subCode reauth_required).
+        It was specified against the NextAuth auth_time claim, and
+        the Go identity module's ES256 access token carries no such
+        claim, so there is nothing to check. This is a deliberate,
+        recorded gap — the GDPR Art. 17 rationale still stands. The
+        control that ships is a two-step explicit confirmation in the
+        iOS client.
       x-anchored-requirements:
         - FR-10.1
         - FR-10.2
         - NFR-3.29
-      x-divergence: DV-23
       responses:
-        '200':
-          description: Account deleted, audit log written.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/DeleteUserResponse'
-              examples:
-                happy-path:
-                  value:
-                    deleted: true
-                    auditLogId: claud0g123456789deletion
+        '204':
+          description: |
+            Account deleted (or already deleted — the re-run arm).
+            Empty body: there is no account left to describe.
+            Clients MUST NOT attempt to decode the response.
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '405':
+          $ref: '#/components/responses/InvalidRequest'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
-          $ref: '#/components/responses/InternalError'
+          description: |
+            A step of the sequence failed. PARTIAL DELETION IS
+            POSSIBLE AND EXPECTED — retry the same call to resume.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
       x-role-masks:
         owner: self-only
         viewer: self-only
@@ -820,7 +843,7 @@ components:
         terminal and surfaces as a typed auth_failed error.
 
         Special case: 401 auth_failed with subCode=reauth_required is
-        emitted by /users/me (DELETE) and /users/me/export (GET) when
+        emitted by /users/me/export (GET) when
         the bearer token is valid but the caller's auth_time claim is
         outside the recent-auth window (rest-api.md §7.6 / §7.7,
         MYR-76). This subCode is carved out from the getToken() retry
@@ -1052,8 +1075,8 @@ components:
                   with the SDK's CoreError union — REST v1 does not
                   emit this value.
                 - reauth_required (REST-only): the recent-login
-                  re-auth gate on DELETE /users/me and GET
-                  /users/me/export rejected the request because the
+                  re-auth gate on GET /users/me/export rejected the
+                  request because the
                   caller's auth_time claim is missing or older than
                   REAUTH_MAX_AGE_SEC (default 300 s). The SDK MUST
                   surface this subCode to the consumer's auth layer
@@ -1772,11 +1795,24 @@ components:
 
     DeleteUserResponse:
       type: object
+      deprecated: true
       description: |
-        Synchronous response from DELETE /users/me. Returned after the
-        cascading DELETE transaction commits per data-lifecycle.md §3.1.
-        Contains the AuditLog row ID written in step 1 of the
-        transaction per FR-10.2 / NFR-3.29.
+        WITHDRAWN BY MYR-355 (2026-07-30) — DELETE /users/me now
+        answers 204 No Content and this schema is referenced by no
+        operation. Retained only so a generated client pinned to an
+        older spec still resolves the name; do not add fields, and do
+        not reintroduce it as a response body.
+
+        auditLogId existed so the web test bench could cross-reference
+        the audit row — a surface the iOS client (the only consumer)
+        has no access to. Returning an internal row id to a caller
+        whose account has just ceased to exist is not a capability
+        worth keeping.
+
+        Previously: synchronous response from DELETE /users/me,
+        returned after the cascading DELETE transaction committed per
+        data-lifecycle.md §3.1, carrying the AuditLog row ID written
+        in step 1 per FR-10.2 / NFR-3.29.
       required: [deleted, auditLogId]
       additionalProperties: false
       properties:
