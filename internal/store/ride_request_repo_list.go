@@ -46,20 +46,53 @@ func (r *RideRequestRepo) ListByOwner(ctx context.Context, ownerID string, statu
 	return recs, nil
 }
 
-// ListOpenByRider returns every OPEN ride request the rider holds — instant
-// and scheduled alike, oldest first — for the account-deletion sweep
-// (MYR-355). "Open" is the non-terminal lifecycle set: a deleted account must
-// not leave an owner holding a request from someone who no longer exists.
+// OpenRideRef is the two fields the account-deletion sweep needs about an open
+// ride: which one, and whether the transition it wants is legal from there. It
+// is deliberately NOT a RideRequestRecord — a partially-populated record is a
+// footgun, and a fully-populated one would mean decrypting P1 coordinates the
+// sweep has no use for (see queryOpenRideRequestsByRider).
+type OpenRideRef struct {
+	ID     string
+	Status RideRequestStatus
+}
+
+// ListOpenByRider returns every OPEN ride the rider holds — instant and
+// scheduled alike, oldest first — for the account-deletion sweep (MYR-355).
+// "Open" is the non-terminal lifecycle set: a deleted account must not leave an
+// owner holding a request from someone who no longer exists.
 //
 // Oldest first, deliberately: the sweep cancels them one at a time through the
-// guarded transition, and resolving the queue in arrival order is the same
-// order the owner saw them in.
-func (r *RideRequestRepo) ListOpenByRider(ctx context.Context, riderID string) ([]RideRequestRecord, error) {
-	recs, err := r.list(ctx, "ride_request.list_open_by_rider", queryOpenRideRequestsByRider, riderID)
+// guarded transition, and resolving the queue in arrival order is the order the
+// owner saw them in.
+func (r *RideRequestRepo) ListOpenByRider(ctx context.Context, riderID string) ([]OpenRideRef, error) {
+	const op = "ride_request.list_open_by_rider"
+	start := time.Now()
+	rows, err := r.pool.Query(ctx, queryOpenRideRequestsByRider, riderID)
 	if err != nil {
-		return nil, fmt.Errorf("RideRequestRepo.ListOpenByRider(%s): %w", riderID, err)
+		r.metrics.ObserveQueryDuration(op, time.Since(start).Seconds())
+		r.metrics.IncQueryError(op)
+		return nil, fmt.Errorf("RideRequestRepo.ListOpenByRider(%s): query: %w", riderID, err)
 	}
-	return recs, nil
+	defer rows.Close()
+
+	refs := make([]OpenRideRef, 0)
+	for rows.Next() {
+		var ref OpenRideRef
+		var status string
+		if err := rows.Scan(&ref.ID, &status); err != nil {
+			r.metrics.ObserveQueryDuration(op, time.Since(start).Seconds())
+			r.metrics.IncQueryError(op)
+			return nil, fmt.Errorf("RideRequestRepo.ListOpenByRider(%s): scan: %w", riderID, err)
+		}
+		ref.Status = RideRequestStatus(status)
+		refs = append(refs, ref)
+	}
+	r.metrics.ObserveQueryDuration(op, time.Since(start).Seconds())
+	if err := rows.Err(); err != nil {
+		r.metrics.IncQueryError(op)
+		return nil, fmt.Errorf("RideRequestRepo.ListOpenByRider(%s): rows: %w", riderID, err)
+	}
+	return refs, nil
 }
 
 func normalizeLimit(limit int) int {

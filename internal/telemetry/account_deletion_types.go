@@ -21,8 +21,18 @@ type AccountOwnedVehicleLister interface {
 // stays legal, the race with an owner accept/decline still resolves in the
 // database, and the winning write is the one that publishes.
 type AccountRideCanceller interface {
-	ListOpenRidesByRider(ctx context.Context, riderID string) ([]RideRequestData, error)
+	ListOpenRidesByRider(ctx context.Context, riderID string) ([]OpenRideRef, error)
 	UpdateStatusFrom(ctx context.Context, id string, from []string, to string) (RideRequestData, error)
+}
+
+// OpenRideRef is the two facts the sweep needs about an open ride: which one,
+// and whether the cancel transition is legal from where it currently is.
+// Deliberately not a whole RideRequestData — the list path has no use for the
+// P1 pickup/dropoff coordinates a full record would decrypt, and the guarded
+// UPDATE's own return already carries everything the published event needs.
+type OpenRideRef struct {
+	ID     string
+	Status string
 }
 
 // AccountDataDeleter is the store-side half of the deletion — the steps that

@@ -28,23 +28,23 @@ import (
 // atomicity the endpoint guarantees that every step is idempotent and the
 // whole sequence is RE-RUNNABLE:
 //
-//	1. Count drives (audit metadata only; a failure here is not fatal).
-//	2. Tear down every owned vehicle, one existing owner_teardown transaction
-//	   per car. Each removes the Vehicle + cascade, deletes that car's
-//	   go_ride_requests, revokes every sharing grant ON the car (MYR-184),
-//	   tombstones the VIN (MYR-261) and, on the last car, clears the Tesla
-//	   Account tokens + resets Settings. Idempotent: AlreadyGone is success.
-//	3. Revoke the grants the caller RECEIVED (shares-received → tombstones).
-//	4. Cancel the caller's OPEN rides as RIDER, through the guarded status
-//	   transition, publishing ride_status_changed so the affected owners are
-//	   notified by the standard lifecycle pushes.
-//	5. Delete the caller's push devices.
-//	6. Revoke the caller's refresh tokens.
-//	7. Delete the identity rows (go_identity_apple, go_users) and the Prisma
-//	   "User" row if one exists — ONE transaction, with the account_deleted
-//	   audit row written first (CG-DL-3).
-//	8. Invalidate the auth caches so the caller's unexpired access token stops
-//	   validating immediately.
+//  1. Count drives (audit metadata only; a failure here is not fatal).
+//  2. Tear down every owned vehicle, one existing owner_teardown transaction
+//     per car. Each removes the Vehicle + cascade, deletes that car's
+//     go_ride_requests, revokes every sharing grant ON the car (MYR-184),
+//     tombstones the VIN (MYR-261) and, on the last car, clears the Tesla
+//     Account tokens + resets Settings. Idempotent: AlreadyGone is success.
+//  3. Revoke the grants the caller RECEIVED (shares-received → tombstones).
+//  4. Cancel the caller's OPEN rides as RIDER, through the guarded status
+//     transition, publishing ride_status_changed so the affected owners are
+//     notified by the standard lifecycle pushes.
+//  5. Delete the caller's push devices.
+//  6. Revoke the caller's refresh tokens.
+//  7. Delete the identity rows (go_identity_apple, go_users) and the Prisma
+//     "User" row if one exists — ONE transaction, with the account_deleted
+//     audit row written first (CG-DL-3).
+//  8. Invalidate the auth caches so the caller's unexpired access token stops
+//     validating immediately.
 //
 // The order is load-bearing in one specific way: the identity rows the caller
 // authenticates WITH are deleted LAST. A failure at any earlier step therefore

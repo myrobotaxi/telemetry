@@ -57,7 +57,7 @@ func (f *fakeAccountTeardown) RemoveVehicle(_ context.Context, _, vehicleID stri
 }
 
 type fakeRideCanceller struct {
-	open       []RideRequestData
+	open       []OpenRideRef
 	listErr    error
 	updateErr  map[string]error
 	updated    []string
@@ -65,7 +65,7 @@ type fakeRideCanceller struct {
 	fromPassed [][]string
 }
 
-func (f *fakeRideCanceller) ListOpenRidesByRider(_ context.Context, _ string) ([]RideRequestData, error) {
+func (f *fakeRideCanceller) ListOpenRidesByRider(_ context.Context, _ string) ([]OpenRideRef, error) {
 	return f.open, f.listErr
 }
 
@@ -78,13 +78,15 @@ func (f *fakeRideCanceller) UpdateStatusFrom(_ context.Context, id string, from 
 		return RideRequestData{}, err
 	}
 	f.updated = append(f.updated, id)
-	for _, r := range f.open {
-		if r.ID == id {
-			r.Status = to
-			return r, nil
-		}
-	}
-	return RideRequestData{ID: id, Status: to}, nil
+	// The guarded UPDATE's own RETURNING is what carries the full record —
+	// which is exactly why the LIST does not have to.
+	return RideRequestData{
+		ID:        id,
+		RiderID:   deletionUserID,
+		OwnerID:   "cowner_1",
+		VehicleID: "cveh_1",
+		Status:    to,
+	}, nil
 }
 
 // fakeAccountData is the store seam. Each counter both records the call and
@@ -173,8 +175,10 @@ type fakeSessionInvalidator struct {
 	vehicles []string
 }
 
-func (f *fakeSessionInvalidator) InvalidateUser(userID string)     { f.users = append(f.users, userID) }
-func (f *fakeSessionInvalidator) InvalidateVehicles(userID string) { f.vehicles = append(f.vehicles, userID) }
+func (f *fakeSessionInvalidator) InvalidateUser(userID string) { f.users = append(f.users, userID) }
+func (f *fakeSessionInvalidator) InvalidateVehicles(userID string) {
+	f.vehicles = append(f.vehicles, userID)
+}
 
 // --- helpers ---------------------------------------------------------------
 
@@ -198,14 +202,8 @@ func callDelete(h *AccountDeletionHandler) *httptest.ResponseRecorder {
 	return w
 }
 
-func openRide(id, status string) RideRequestData {
-	return RideRequestData{
-		ID:        id,
-		RiderID:   deletionUserID,
-		OwnerID:   "cowner_1",
-		VehicleID: "cveh_1",
-		Status:    status,
-	}
+func openRide(id, status string) OpenRideRef {
+	return OpenRideRef{ID: id, Status: status}
 }
 
 // --- tests -----------------------------------------------------------------
@@ -355,7 +353,7 @@ func TestAccountDeletion_AppleNativeOnlyUserDeletesCleanly(t *testing.T) {
 // event so the owner is told.
 func TestAccountDeletion_RiderWithOpenRideCancelsThroughTheGuardAndNotifies(t *testing.T) {
 	rides := &fakeRideCanceller{
-		open: []RideRequestData{
+		open: []OpenRideRef{
 			openRide("cride_1", rideStatusRequested),
 			openRide("cride_2", rideStatusAccepted),
 		},
@@ -406,7 +404,7 @@ func TestAccountDeletion_RiderWithOpenRideCancelsThroughTheGuardAndNotifies(t *t
 // under its owner is worse than letting it terminate on its own.
 func TestAccountDeletion_RideInProgressIsLeftToFinish(t *testing.T) {
 	rides := &fakeRideCanceller{
-		open: []RideRequestData{
+		open: []OpenRideRef{
 			openRide("cride_enroute", rideStatusEnroute),
 			openRide("cride_arrived", rideStatusArrived),
 			openRide("cride_open", rideStatusRequested),
@@ -431,7 +429,7 @@ func TestAccountDeletion_RideInProgressIsLeftToFinish(t *testing.T) {
 // first, which is the outcome this step wanted anyway.
 func TestAccountDeletion_RideClosedByTheOwnerFirstIsNotAnError(t *testing.T) {
 	rides := &fakeRideCanceller{
-		open: []RideRequestData{
+		open: []OpenRideRef{
 			openRide("cride_raced", rideStatusRequested),
 			openRide("cride_gone", rideStatusRequested),
 			openRide("cride_ok", rideStatusRequested),
@@ -588,7 +586,7 @@ func TestAccountDeletion_PublishFailureDoesNotFailTheDeletion(t *testing.T) {
 	h := newDeletionHandler(t, AccountDeletionDeps{
 		Vehicles: &fakeOwnedVehicleLister{},
 		Teardown: newFakeAccountTeardown(),
-		Rides:    &fakeRideCanceller{open: []RideRequestData{openRide("cride_1", rideStatusRequested)}},
+		Rides:    &fakeRideCanceller{open: []OpenRideRef{openRide("cride_1", rideStatusRequested)}},
 		Events:   &fakeRidePublisher{err: errors.New("bus down")},
 		Data:     data,
 	})

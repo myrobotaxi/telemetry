@@ -3,9 +3,9 @@ package store_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/store"
 )
@@ -440,6 +440,7 @@ func TestRideRequestRepo_ListOpenByRider(t *testing.T) {
 	}
 
 	wantOpen := map[string]bool{}
+	createdOrder := make([]string, 0, len(openStates)+len(terminal))
 	for _, status := range append(append([]store.RideRequestStatus{}, openStates...), terminal...) {
 		rec := scheduledRideRequest() // scheduled: exempt from the one-active-instant guard
 		rec.RiderID = delUserApple
@@ -453,6 +454,7 @@ func TestRideRequestRepo_ListOpenByRider(t *testing.T) {
 				t.Fatalf("UpdateStatus(%s): %v", status, err)
 			}
 		}
+		createdOrder = append(createdOrder, created.ID)
 		for _, s := range openStates {
 			if s == status {
 				wantOpen[created.ID] = true
@@ -475,15 +477,24 @@ func TestRideRequestRepo_ListOpenByRider(t *testing.T) {
 	if len(got) != len(wantOpen) {
 		t.Fatalf("got %d open rides, want %d", len(got), len(wantOpen))
 	}
-	var last time.Time
-	for _, rec := range got {
-		if !wantOpen[rec.ID] {
-			t.Fatalf("terminal or foreign ride %s (%s) came back", rec.ID, rec.Status)
+	// Ordering is oldest-first — the order the owner saw the requests in. The
+	// ids were minted in creation order, so the returned sequence must match
+	// the order they were created in.
+	seen := make([]string, 0, len(got))
+	for _, ref := range got {
+		if !wantOpen[ref.ID] {
+			t.Fatalf("terminal or foreign ride %s (%s) came back", ref.ID, ref.Status)
 		}
-		if rec.CreatedAt.Before(last) {
-			t.Fatal("ordering must be oldest-first, the order the owner saw them in")
+		seen = append(seen, ref.ID)
+	}
+	wantSeq := make([]string, 0, len(wantOpen))
+	for _, id := range createdOrder {
+		if wantOpen[id] {
+			wantSeq = append(wantSeq, id)
 		}
-		last = rec.CreatedAt
+	}
+	if strings.Join(seen, ",") != strings.Join(wantSeq, ",") {
+		t.Fatalf("order = %v, want oldest-first %v", seen, wantSeq)
 	}
 }
 

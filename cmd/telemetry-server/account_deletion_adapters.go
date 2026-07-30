@@ -39,14 +39,14 @@ type accountRideCancellerAdapter struct {
 	rides *rideRequestStoreAdapter
 }
 
-func (a *accountRideCancellerAdapter) ListOpenRidesByRider(ctx context.Context, riderID string) ([]telemetry.RideRequestData, error) {
-	recs, err := a.repo.ListOpenByRider(ctx, riderID)
+func (a *accountRideCancellerAdapter) ListOpenRidesByRider(ctx context.Context, riderID string) ([]telemetry.OpenRideRef, error) {
+	refs, err := a.repo.ListOpenByRider(ctx, riderID)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]telemetry.RideRequestData, 0, len(recs))
-	for i := range recs {
-		out = append(out, fromStoreRideRequest(recs[i]))
+	out := make([]telemetry.OpenRideRef, 0, len(refs))
+	for _, ref := range refs {
+		out = append(out, telemetry.OpenRideRef{ID: ref.ID, Status: string(ref.Status)})
 	}
 	return out, nil
 }

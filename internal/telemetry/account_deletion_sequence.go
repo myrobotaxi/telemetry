@@ -140,10 +140,7 @@ func (h *AccountDeletionHandler) cancelOpenRides(ctx context.Context, userID str
 		return 0, fmt.Errorf("list open rides: %w", err)
 	}
 	cancelled := 0
-	// Indexed rather than ranged by value: RideRequestData is a wide struct
-	// and the loop only needs two of its fields.
-	for i := range rides {
-		ride := &rides[i]
+	for _, ride := range rides {
 		if !cancellableFrom(ride.Status) {
 			continue
 		}

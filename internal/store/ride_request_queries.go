@@ -134,7 +134,14 @@ LIMIT $3`
 // Unbounded on purpose: this is not a user-facing page, and leaving even one
 // open request behind would strand an owner with a request from a person who
 // no longer exists.
-const queryOpenRideRequestsByRider = `SELECT ` + rideRequestColumns + `
+//
+// LEAN PROJECTION, deliberately: `id, status` and nothing else. The full
+// rideRequestColumns set would drag four AES-256-GCM decryptions of P1
+// pickup/dropoff coordinates through a sweep that only needs to know which
+// rides to transition — and the guarded UPDATE's own RETURNING already
+// resolves the whole record for the rides that actually change. Decrypting
+// location data with no use for it is a cost paid in the wrong currency.
+const queryOpenRideRequestsByRider = `SELECT id, status
 FROM go_ride_requests
 WHERE rider_id = $1
   AND status IN ('requested', 'accepted', 'enroute', 'arrived')
