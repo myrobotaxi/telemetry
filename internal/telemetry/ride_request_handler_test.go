@@ -64,6 +64,23 @@ type fakeRideStore struct {
 		cursor RideRequestListCursor
 		limit  int
 	}
+
+	// Upcoming-reservations slice of the owner feed (MYR-360).
+	// upcomingPage/upcomingErr steer ListUpcomingByOwnerVehiclePage;
+	// upcomingCall records what the handler passed so a test can pin the
+	// owner scoping (JWT sub, never a client value) and the ASCENDING
+	// (scheduledFor, id) cursor. The anchor is captured as plain fields so
+	// the assertions read the same whichever cursor type carries it.
+	upcomingPage  RideRequestListPage
+	upcomingErr   error
+	upcomingCalls int
+	upcomingCall  struct {
+		ownerID            string
+		vehicleID          string
+		cursorScheduledFor time.Time
+		cursorID           string
+		limit              int
+	}
 }
 
 func (f *fakeRideStore) Create(_ context.Context, in RideRequestCreateInput) (RideRequestData, error) {
