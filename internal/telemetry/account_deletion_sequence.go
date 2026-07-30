@@ -73,22 +73,36 @@ func (h *AccountDeletionHandler) run(ctx context.Context, userID string) (accoun
 	}
 	counts.PushDevicesDeleted = devices
 
-	// (6) Refresh tokens — revoked so no stored session can mint a new access
-	// token. The CURRENT access token deliberately keeps working until step 8,
-	// because it is what authenticates a re-run if step 7 fails.
+	// (6) Saved places — the person's Home and Work rows (MYR-321). Slotted
+	// here, next to the push devices and BEFORE the identity delete, because
+	// both are personal effects with no counterparty: rows that belong to this
+	// account alone, that no other person has a claim on, and that nothing
+	// later in the sequence reads. Deleting them cannot be deferred past step 7
+	// — the identity rows go there, and a saved place that outlived its owner
+	// would be AES-256-GCM ciphertext of where a deleted person lives, keyed by
+	// a cuid nobody can resolve and reachable by nothing but a table scan.
+	places, err := h.deps.Data.DeleteSavedPlaces(ctx, userID)
+	if err != nil {
+		return accountDeletionResult{}, &accountDeletionError{step: "delete_saved_places", cause: err}
+	}
+	counts.SavedPlacesDeleted = places
+
+	// (7) Refresh tokens — revoked so no stored session can mint a new access
+	// token. The CURRENT access token deliberately keeps working until step 9,
+	// because it is what authenticates a re-run if step 8 fails.
 	tokens, err := h.deps.Data.RevokeRefreshTokens(ctx, userID)
 	if err != nil {
 		return accountDeletionResult{}, &accountDeletionError{step: "revoke_refresh_tokens", cause: err}
 	}
 	counts.RefreshTokensRevoked = tokens
 
-	// (7) Identity + audit, one transaction, LAST.
+	// (8) Identity + audit, one transaction, LAST.
 	outcome, err := h.deps.Data.DeleteIdentity(ctx, userID, counts)
 	if err != nil {
 		return accountDeletionResult{}, &accountDeletionError{step: "delete_identity", cause: err}
 	}
 
-	// (8) Close the token window immediately rather than waiting for the
+	// (9) Close the token window immediately rather than waiting for the
 	// existence/access caches to expire on their own.
 	h.invalidateSessions(userID)
 

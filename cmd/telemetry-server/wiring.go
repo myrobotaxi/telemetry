@@ -306,6 +306,7 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 	setupVehicleCommandEndpoint(deps, snapshotAdapter)
 	setupPushDeviceEndpoints(deps)
 	setupPushPrefsEndpoints(deps)
+	setupSavedPlacesEndpoints(deps)
 	setupVehicleSharingEndpoints(deps, snapshotAdapter)
 	setupAccountDeletionEndpoint(deps)
 	setupDebugFieldsEndpoint(deps)

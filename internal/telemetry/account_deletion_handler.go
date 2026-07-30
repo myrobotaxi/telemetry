@@ -39,11 +39,14 @@ import (
 //     transition, publishing ride_status_changed so the affected owners are
 //     notified by the standard lifecycle pushes.
 //  5. Delete the caller's push devices.
-//  6. Revoke the caller's refresh tokens.
-//  7. Delete the identity rows (go_identity_apple, go_users) and the Prisma
+//  6. Delete the caller's saved Home/Work places (MYR-321) — personal effects
+//     with no counterparty, and the one step whose rows are encrypted GPS of
+//     where the person lives, so they must not outlive the account.
+//  7. Revoke the caller's refresh tokens.
+//  8. Delete the identity rows (go_identity_apple, go_users) and the Prisma
 //     "User" row if one exists — ONE transaction, with the account_deleted
 //     audit row written first (CG-DL-3).
-//  8. Invalidate the auth caches so the caller's unexpired access token stops
+//  9. Invalidate the auth caches so the caller's unexpired access token stops
 //     validating immediately.
 //
 // The order is load-bearing in one specific way: the identity rows the caller
@@ -120,6 +123,9 @@ func (h *AccountDeletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		slog.Int("rides_cancelled", result.Counts.RidesCancelled),
 		slog.Int("shares_revoked", result.Counts.SharesRevoked),
 		slog.Int("push_devices_deleted", result.Counts.PushDevicesDeleted),
+		// A COUNT only. The places themselves are P1 (a home address) and
+		// never reach a log line, here or anywhere else.
+		slog.Int("saved_places_deleted", result.Counts.SavedPlacesDeleted),
 		slog.Int("refresh_tokens_revoked", result.Counts.RefreshTokensRevoked),
 	)
 

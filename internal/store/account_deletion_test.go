@@ -183,7 +183,8 @@ func TestAccountDeleter_DeleteIdentity_WritesTheAuditRow(t *testing.T) {
 
 	counts := store.AccountDeletionCounts{
 		VehicleCount: 2, DriveCount: 9, RidesCancelled: 1,
-		SharesRevoked: 3, PushDevicesDeleted: 1, RefreshTokensRevoked: 4,
+		SharesRevoked: 3, PushDevicesDeleted: 1, SavedPlacesDeleted: 2,
+		RefreshTokensRevoked: 4,
 	}
 	res, err := newAccountDeleter(t).DeleteIdentity(context.Background(), delUserApple, counts)
 	if err != nil {
@@ -214,6 +215,11 @@ func TestAccountDeleter_DeleteIdentity_WritesTheAuditRow(t *testing.T) {
 	allowed := map[string]bool{
 		"vehicleCount": true, "driveCount": true, "ridesCancelled": true,
 		"sharesRevoked": true, "pushDevicesDeleted": true,
+		// MYR-321. A COUNT of the saved Home/Work rows removed — never the
+		// places themselves. The coordinates are P1 and this row is P0-only,
+		// so what the audit trail records is that two rows went, never where
+		// they pointed.
+		"savedPlacesDeleted":   true,
 		"refreshTokensRevoked": true, "hadPrismaUser": true,
 	}
 	for k, v := range got {
@@ -221,8 +227,17 @@ func TestAccountDeleter_DeleteIdentity_WritesTheAuditRow(t *testing.T) {
 			t.Fatalf("audit metadata carries an undeclared key %q = %v", k, v)
 		}
 	}
-	if got["vehicleCount"] != float64(2) || got["sharesRevoked"] != float64(3) {
+	if got["vehicleCount"] != float64(2) || got["sharesRevoked"] != float64(3) ||
+		got["savedPlacesDeleted"] != float64(2) {
 		t.Fatalf("audit metadata counts = %v", got)
+	}
+
+	// The audit row must not have grown a coordinate or a label alongside the
+	// count. Asserted on the RAW JSON so a nested object could not hide one.
+	for _, leak := range []string{"latitude", "longitude", "lat", "lng", "label", "places\":["} {
+		if strings.Contains(string(metadata), leak) {
+			t.Errorf("audit metadata leaked %q (CG-DL-5, P0-only): %s", leak, metadata)
+		}
 	}
 }
 

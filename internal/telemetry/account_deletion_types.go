@@ -42,6 +42,7 @@ type AccountDataDeleter interface {
 	CountUserDrives(ctx context.Context, userID string) (int, error)
 	RevokeSharesReceived(ctx context.Context, userID string) (int, error)
 	DeletePushDevices(ctx context.Context, userID string) (int, error)
+	DeleteSavedPlaces(ctx context.Context, userID string) (int, error)
 	RevokeRefreshTokens(ctx context.Context, userID string) (int, error)
 	DeleteIdentity(ctx context.Context, userID string, counts AccountDeletionCounts) (AccountIdentityOutcome, error)
 }
@@ -54,6 +55,7 @@ type AccountDeletionCounts struct {
 	RidesCancelled       int
 	SharesRevoked        int
 	PushDevicesDeleted   int
+	SavedPlacesDeleted   int
 	RefreshTokensRevoked int
 }
 
