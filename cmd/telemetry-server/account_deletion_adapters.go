@@ -73,6 +73,10 @@ func (a *accountDataDeleterAdapter) DeletePushDevices(ctx context.Context, userI
 	return a.deleter.DeletePushDevices(ctx, userID)
 }
 
+func (a *accountDataDeleterAdapter) DeleteSavedPlaces(ctx context.Context, userID string) (int, error) {
+	return a.deleter.DeleteSavedPlaces(ctx, userID)
+}
+
 func (a *accountDataDeleterAdapter) RevokeRefreshTokens(ctx context.Context, userID string) (int, error) {
 	return a.deleter.RevokeRefreshTokens(ctx, userID)
 }
@@ -84,6 +88,7 @@ func (a *accountDataDeleterAdapter) DeleteIdentity(ctx context.Context, userID s
 		RidesCancelled:       counts.RidesCancelled,
 		SharesRevoked:        counts.SharesRevoked,
 		PushDevicesDeleted:   counts.PushDevicesDeleted,
+		SavedPlacesDeleted:   counts.SavedPlacesDeleted,
 		RefreshTokensRevoked: counts.RefreshTokensRevoked,
 	})
 	if err != nil {

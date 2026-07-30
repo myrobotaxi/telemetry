@@ -70,6 +70,11 @@ type AccountDeletionCounts struct {
 	SharesRevoked int `json:"sharesRevoked"`
 	// PushDevicesDeleted is the number of APNs registrations removed.
 	PushDevicesDeleted int `json:"pushDevicesDeleted"`
+	// SavedPlacesDeleted is the number of saved Home/Work rows removed —
+	// 0, 1 or 2. A COUNT, never the places themselves: the coordinates are P1
+	// and the audit row is P0-only (CG-DL-5), so what is recorded is that two
+	// rows went, never where they pointed.
+	SavedPlacesDeleted int `json:"savedPlacesDeleted"`
 	// RefreshTokensRevoked is the number of live refresh tokens revoked.
 	RefreshTokensRevoked int `json:"refreshTokensRevoked"`
 	// HadPrismaUser records whether a sibling-schema "User" row existed —
@@ -107,6 +112,20 @@ func (a *AccountDeleter) RevokeSharesReceived(ctx context.Context, userID string
 // Returns the number of rows deleted. Idempotent.
 func (a *AccountDeleter) DeletePushDevices(ctx context.Context, userID string) (int, error) {
 	return a.execCount(ctx, "DeletePushDevices", queryDeletePushDevicesForUser, userID)
+}
+
+// DeleteSavedPlaces removes both of the user's saved-place slots (MYR-321), so
+// the ciphertext of where they live does not outlive the account that saved it.
+// Returns the number of rows deleted (0, 1 or 2). Idempotent.
+//
+// Ordering note: this runs BEFORE the identity delete like every other
+// destructive step, and its position is otherwise unconstrained — the rows are
+// keyed only by user_id, nothing else in the sequence reads them, and no
+// teardown, cascade or event depends on them. It is slotted next to the push
+// devices because both are "personal effects with no counterparty": rows that
+// belong to this person alone and that nobody else has a claim on.
+func (a *AccountDeleter) DeleteSavedPlaces(ctx context.Context, userID string) (int, error) {
+	return a.execCount(ctx, "DeleteSavedPlaces", queryDeleteSavedPlacesForUser, userID)
 }
 
 // RevokeRefreshTokens revokes every live refresh token in the user's name, so
