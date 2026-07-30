@@ -80,6 +80,7 @@ Every FR/NFR listed here is anchored in at least one section of this doc. The ta
    16. `PUT /api/tesla/vehicles/{vehicleId}/service-window` (owner expected-back entry — MYR-316)
    17. Push notification device registry (2 operations — MYR-186)
    18. `PUT /api/tesla/vehicles/{vehicleId}/ride-share` (owner ride-share pause toggle — MYR-342)
+   19. Notification preferences (2 operations — MYR-349)
 8. Resource schemas
 9. Observability
 10. Code <-> spec divergences
@@ -584,6 +585,8 @@ No contract changes are required for the new role's wire shape (the REST respons
 | `PUT` | `/api/tesla/vehicles/{vehicleId}/ride-share` | Owner's ride-sharing switch: pause or resume ride requests for one car (§7.18) | Bearer + owner of vehicleId | FR-9.3, NFR-3.21 |
 | `PUT` | `/api/push/devices` | Register or refresh this installation's APNs device token (§7.17.1) | Bearer (self only) | FR-9.3, NFR-3.21, MYR-186 |
 | `DELETE` | `/api/push/devices` | Unregister an APNs device token on sign-out (§7.17.2) | Bearer (self only) | FR-9.3, NFR-3.21, MYR-186 |
+| `GET` | `/api/users/me/push-prefs` | Read the caller's five notification-category switches (§7.19.1) | Bearer (self only) | FR-9.3, NFR-3.21, MYR-349 |
+| `PUT` | `/api/users/me/push-prefs` | Change some of them — partial body, echoes the whole set (§7.19.2) | Bearer (self only) | FR-9.3, NFR-3.21, MYR-349 |
 | `POST` | `/api/auth/apple` | Native Sign in with Apple → ES256 access + refresh pair | None (pre-auth; per-IP rate-limited) | FR-6.1, MYR-193 |
 | `POST` | `/api/auth/refresh` | Single-use refresh-token rotation | Refresh token in body (pre-auth; per-IP rate-limited) | FR-6.2, MYR-193 |
 | `POST` | `/api/auth/revoke` | Revoke a refresh-token family (sign-out) | Refresh token in body (pre-auth; per-IP rate-limited) | MYR-193 |
@@ -3095,6 +3098,242 @@ gate helper `internal/telemetry/ride_share_gate.go`; wiring
 
 ---
 
+### 7.19 Notification preferences (MYR-349)
+
+Two user-scoped operations on one path, letting a signed-in person say which
+categories of notification may wake their phones — and, for the first time,
+making the app's Settings switches mean something.
+
+**Why this exists: the switches were a LIE.** Both Settings screens have shipped
+a Notifications card since MYR-170. Every switch on it was backed by a private
+client-side struct: it moved, it animated, it persisted nowhere and it gated
+nothing. MYR-186 then built the whole delivery pipeline — §7.17's registry, the
+APNs sender, the ride-lifecycle notifier — with **no preference layer at all**,
+so on the day push became real an owner who had switched "Charging complete" off
+kept receiving it and a rider who had switched "Pick-up & arrival alerts" off
+kept being woken at pickup. This endpoint is the storage those switches always
+implied, and `internal/push` consults it before every send.
+
+**Both operations are user-scoped and there is no vehicle in the path**, so —
+like §7.6 / §7.7 / §7.17 — there is no ownership check to perform: the JWT
+subject *is* the resource. There is deliberately **no `userId` anywhere** in the
+request or the response; a body carrying one is rejected by the strict decode
+rather than ignored.
+
+**Always mounted**, for the same reason §7.17 is: a person must be able to
+silence a category whether or not this deployment carries APNs credentials, and
+the answer has to be stored before the notifier that honours it is wired.
+
+**These are DELIVERY preferences, not authorization.** A category that is off is
+a silence, not a denial: it stops this service waking a phone and changes
+nothing about what the account may read over REST or the telemetry socket. Do
+not use it as an access control.
+
+#### 7.19.0 The five categories
+
+| Wire key | Column | Covers |
+|----------|--------|--------|
+| `rideLifecycle` | `ride_lifecycle` | The **whole** ride status class — a new request reaching an OWNER, and `accepted` / `declined` / `arrived` / `enroute` / `completed` / `expired` reaching a RIDER. |
+| `driveStarted` | `drive_started` | The owner's car began a drive. |
+| `driveCompleted` | `drive_completed` | The owner's car finished a drive. |
+| `chargingComplete` | `charging_complete` | The owner's car finished charging. |
+| `viewerJoined` | `viewer_joined` | Somebody redeemed an invite to the owner's car (§7.5.5). |
+
+**Owner-only and rider concepts share ONE row.** A person is not an owner or a
+rider — MYR-343 established that an account can be both at once, and the mode
+switch lets one person be either within a session. Keying preferences by
+`(user, role)` would give the same human two answers to "should this phone
+ring", and the phone is the same phone. **The notifier decides** which column
+applies to a given send, because only it knows which side of a ride the
+recipient is standing on.
+
+**`rideLifecycle` is ONE category on purpose**, and this is the open design
+question worth naming. The rider's Settings screen renders TWO switches over it
+("Request accepted / declined", "Pick-up & arrival alerts"), because **no send
+site distinguishes them**: `arrived` and `accepted` travel the same handler, the
+same alert builder and the same fan-out. Minting a second column would create a
+preference the server could store and would never honour differently — the exact
+class of lie this issue exists to remove. The two rows therefore move together
+on the client. If they must become independent, the send sites have to split
+first, not the column.
+
+**Four of the five categories have no sender yet.** `internal/push` has exactly
+three fan-out sites and **all three are `rideLifecycle`** — there is no
+drive-started, drive-completed, charging-complete or viewer-joined notifier in
+this service at all (see the audit in the MYR-349 PR). Those four columns are
+created now anyway, because their switches are already on the owner's screen:
+storing the answer is what stops the toggle being a lie a second time, and it
+means whichever notifier eventually sends them is born gated rather than
+retrofitted.
+
+**Storage.** Go-owned `go_push_prefs` (migration 0022), primary key `user_id`,
+five `BOOLEAN NOT NULL DEFAULT TRUE` columns, no Prisma FK (CG-DL-9).
+
+**Classification: P0 throughout.** `user_id` is an opaque cuid and the five
+values are booleans about delivery — not identifying, no location, no ride
+detail, no capability. Unlike §7.17's `deviceToken` there is nothing here to
+redact, so the values appear in full in the success log line. See
+`data-classification.md` §1.16.
+
+#### 7.19.1 `GET /api/users/me/push-prefs`
+
+**Request.**
+
+```
+GET /api/users/me/push-prefs
+Authorization: Bearer <app session JWT>
+```
+
+**Response `200`** (`application/json`):
+
+```json
+{
+  "rideLifecycle": true,
+  "driveStarted": true,
+  "driveCompleted": true,
+  "chargingComplete": true,
+  "viewerJoined": true
+}
+```
+
+**ALL FIVE KEYS ARE ALWAYS PRESENT.** No field is optional and none carries
+`omitempty`. `omitempty` on a boolean drops `false` — which is the *interesting*
+half of every one of these values — and a client reading an absent key as its
+own default would render a switch in the opposite position to the one the person
+just chose. Clients SHOULD declare these as non-optional booleans so that a
+renamed or missing key fails the decode loudly; an optional property would
+decode a wrong key to `nil` silently, which is exactly how MYR-362 shipped.
+
+**An account with no stored row is not an error and not an unknown** — it reads
+as every category `true`. That is the state every account is in until somebody
+moves a switch, so the missing row is the COMMON path, and "no row", "row whose
+column was defaulted" and "explicitly enabled" are indistinguishable by design.
+
+| Field | Type | Classification | Notes |
+|-------|------|----------------|-------|
+| `rideLifecycle` | `boolean` | P0 | Required, never omitted. |
+| `driveStarted` | `boolean` | P0 | Required, never omitted. |
+| `driveCompleted` | `boolean` | P0 | Required, never omitted. |
+| `chargingComplete` | `boolean` | P0 | Required, never omitted. |
+| `viewerJoined` | `boolean` | P0 | Required, never omitted. |
+
+**Errors:**
+
+| HTTP | `error.code` | When |
+|------|--------------|------|
+| 401 | `auth_failed` | Missing/malformed/invalid bearer. |
+| 405 | `invalid_request` | Non-`GET` method on this handler. |
+| 500 | `internal_error` | Store-layer failure. **Deliberately NOT a fabricated all-true default** — answering "everything on" after a database failure would tell somebody their switches had been reset. Retryable. |
+
+#### 7.19.2 `PUT /api/users/me/push-prefs`
+
+**Request.** A **PARTIAL** object: only the categories the client is changing.
+
+```
+PUT /api/users/me/push-prefs
+Authorization: Bearer <app session JWT>
+Content-Type: application/json
+
+{ "chargingComplete": false }
+```
+
+**Partial is the contract, not a convenience.** A settings screen changes one
+switch at a time. A whole-object PUT would let a second phone — or a stale
+screen — write back four values its user never touched, which for this surface
+is the difference between a stale toggle and a notification somebody explicitly
+silenced arriving anyway. **An omitted key means LEAVE ALONE**, never "set to
+`false`".
+
+`{}` is legal and is a plain read-after-write.
+
+**Behavior / sequence:**
+
+1. Validate the bearer → `userId`. Missing/invalid → `401 auth_failed`.
+   Non-`PUT` method → `405 invalid_request`.
+2. Strict-decode the body — **unknown keys are a `400`**, matching §7.14 / §7.17.
+   This matters more here than anywhere else on the surface: on a body where
+   every key is optional, a typo'd or renamed category would otherwise return
+   `200` having changed **nothing**, the client would show the switch in its new
+   position, and the notification would keep arriving. That is the MYR-349 lie
+   again, one layer down.
+3. Upsert on `user_id`, assigning `COALESCE($n, existing)` per column. On the
+   INSERT arm an omitted category takes the same all-on default a missing row
+   would have produced; on the UPDATE arm it keeps whatever the person last
+   chose.
+
+**Idempotent (§4.5).** Re-sending the same body is a no-op producing the same
+response.
+
+**Response `200`** — the **WHOLE set as stored, read back after the write**:
+
+```json
+{
+  "rideLifecycle": true,
+  "driveStarted": false,
+  "driveCompleted": true,
+  "chargingComplete": false,
+  "viewerJoined": true
+}
+```
+
+**Clients MUST adopt this echo rather than the booleans they sent.** The echo is
+produced by the same statement that performed the write (`RETURNING`), so it
+carries the four categories the request never mentioned — including any changed
+on another device in the meantime. A client that flipped its switch optimistically
+and then kept its own value would resurrect a preference somebody switched off
+elsewhere. On failure the client MUST roll the optimistic flip back **and say
+so**: leaving it up manufactures the exact false belief this endpoint exists to
+prevent — an owner walking away believing charging alerts are off while they are
+still firing.
+
+**Errors:**
+
+| HTTP | `error.code` | When |
+|------|--------------|------|
+| 400 | `invalid_request` | Malformed JSON; **any unknown key**, including a snake_case spelling of a real category or a `userId`. |
+| 401 | `auth_failed` | Missing/malformed/invalid bearer. |
+| 405 | `invalid_request` | Non-`PUT` method. |
+| 500 | `internal_error` | Store-layer failure. Nothing written; retryable. |
+
+#### 7.19.3 Enforcement, and which way it fails
+
+The gate lives in exactly ONE place — `Notifier.allowed`, called by the single
+fan-out that every send site reaches. Each site names its category at the call
+site; there is no unset value meaning "always send".
+
+**IT FAILS OPEN, in all four of the ways it can fail**: no preference store
+wired, a lookup error, an account with no row, and a category the model has no
+column for. All four resolve to every-category-on, i.e. the exact pre-MYR-349
+behaviour.
+
+That direction is the product decision, not a shortcut. This package's standing
+rule (§7.17) is that a duplicate notification is a minor annoyance to a human
+whereas a missed one is a rider standing on a sidewalk — and because nothing
+about a ride waits on push, a gate that failed CLOSED would convert a transient
+database hiccup into platform-wide silence with no error surfacing anywhere. The
+cost of failing open is bounded and visible: somebody who silenced a category
+might occasionally receive it.
+
+**The gate reads the RECIPIENT's row, never the other party's.** A ride has two
+people and they can disagree: `ride.request.created` wakes the OWNER while
+`ride.status.changed` and `ride.due` wake the RIDER.
+
+**A silenced category never reaches the device lookup.** The check runs first, so
+a suppressed notification logs `push suppressed by preference` rather than
+`push sent … delivered=0`, which in production reads like a delivery failure.
+
+**Observability.** `push suppressed by preference` carries `topic`, `category`
+and the P0 `user_id`; a failed lookup logs at ERROR and says it is sending
+anyway. The write line carries the resulting five booleans in full (P0, nothing
+to redact). Handler:
+[`internal/push/prefs_handler.go`](../../internal/push/prefs_handler.go);
+categories + gate model `internal/push/prefs.go`; enforcement
+`internal/push/notifier_send.go`; store
+[`internal/store/push_prefs_repo.go`](../../internal/store/push_prefs_repo.go);
+wiring `cmd/telemetry-server/wiring_push.go`.
+
+---
+
 ## 8. Resource schemas
 
 The canonical v1 `VehicleState` schema is [`schemas/vehicle-state.schema.json`](schemas/vehicle-state.schema.json). The REST snapshot endpoint returns that shape directly via `$ref` in the OpenAPI spec -- it is NOT re-declared.
@@ -3165,6 +3404,7 @@ Same as [`websocket-protocol.md`](websocket-protocol.md) §10 divergence managem
 ## 11. Change log
 
 | Date | Change | Author |
+| 2026-07-30 | **Notification preferences become real — §7.19 `GET`/`PUT /api/users/me/push-prefs`, `go_push_prefs` (migration 0022), and a per-category gate in the push notifier ([MYR-349](https://linear.app/myrobotaxi/issue/MYR-349)).** Fixes a LIE rather than a missing feature: both Settings screens have rendered a Notifications card since MYR-170 whose switches were backed by a private client-side struct — they moved, persisted nowhere and gated nothing — and MYR-186 then shipped the entire delivery pipeline with no preference layer, so an owner who had switched "Charging complete" off kept receiving it. Five categories (`rideLifecycle`, `driveStarted`, `driveCompleted`, `chargingComplete`, `viewerJoined`) on ONE row per person, because an account can be both owner and rider at once and the phone is the same phone; the NOTIFIER decides which column a given send answers to. `rideLifecycle` deliberately covers the whole ride status class — the rider's two switches both resolve to it, since no send site distinguishes `arrived` from `accepted`, and minting a column the server would never honour differently would be the same lie one layer down. The `GET` and the `PUT` echo ALL FIVE keys with no `omitempty` (dropping `false` would erase the interesting half of every value); the `PUT` body is PARTIAL, so an omitted key means LEAVE ALONE and two phones on two switches cannot clobber each other, and unknown keys are a `400` rather than a silent `200` that changes nothing. Enforcement is ONE gate on the single fan-out and it **fails OPEN** in all four failure modes — unwired store, lookup error, absent row, unknown category — because nothing about a ride waits on push, so failing closed would turn a database hiccup into platform-wide silence with no error anywhere. **Audit: only ONE of the five categories has a sender today.** `internal/push` has exactly three fan-out sites and all three are `rideLifecycle`; there is no drive-started, drive-completed, charging-complete or viewer-joined notifier in this service at all. The other four columns are created anyway because their switches are already on the owner's screen, so whichever notifier eventually sends them is born gated. P0 throughout. | go-engineer |
 | 2026-07-30 | **Warn an owner before a ride-share pause breaks a confirmed reservation — `?upcomingForVehicle` on the owner feed, and `accepted → declined` for scheduled rides ([MYR-360](https://linear.app/myrobotaxi/issue/MYR-360)).** Today an owner who pauses ride sharing (§7.18) with an ACCEPTED FUTURE RESERVATION on that car breaks it silently: the sweeper **holds** at due time (its MYR-342 pause check runs before the claim), retries, and the ride resolves `reservation_expired` at the 30-minute lateness ceiling — so the rider learns nobody is coming **half an hour after their pickup time**. The hold-then-expire backstop **stays** (it covers crash and offline pauses); this makes the common path humane by letting the client warn the owner and offer an immediate decline. **Two additions, no new endpoint and no new route.** (1) **ONE optional query param on the EXISTING feed**, `GET /api/ride-requests/incoming?upcomingForVehicle={vehicleId}` — the same owner-scoped feed sliced differently: `owner_id` = JWT sub (**unchanged**, so no cross-owner read is expressible), plus `vehicle_id`, `status = 'accepted'`, and `scheduled_for IS NOT NULL AND scheduled_for > now()` (STRICT — a reservation already due belongs to the sweeper). The existing feed could not answer this: it is hardcoded to `requested` and has no vehicle filter, and `GET /api/ride-requests` is the *rider's* list. Ordered **`scheduledFor ASC, id ASC` — soonest first**, a deliberate departure from `createdAt DESC` that is **load-bearing**: the dialog names "the NEXT reservation", and under `createdAt DESC` a paginated cut could omit the soonest row. Cursor anchors on `(scheduledFor, id)` with the ascending row-value keyset `(scheduled_for, id) > (:cursorScheduledFor, :cursorId)`; **the opaque wire cursor format is unchanged** — still one base64 `{timestamp, id}` pair, two typed views of it (§4.2.2). Envelope, `limit` bounds and the in-statement `requesterName` resolution are all unchanged. **An unknown/unowned `vehicleId` is an EMPTY `200` page, never `403`/`404`** — the filter runs on the owner's own feed so it is already safe, and answering `404` would turn the param into an **existence oracle** for other people's cars; only a MALFORMED value is `400 invalid_request`. **Absent the param the endpoint is byte-identical**, pinned by a golden-body test. (2) **The §7.8 matrix's `accepted` → `declined` cell changes from `409` to the `decline` endpoint** — the first new legal edge since MYR-270 — narrowed to **SCHEDULED rides**; an accepted INSTANT ride still `409`s, because a car already dispatched to a rider on a sidewalk is a different situation. The narrowing rests on a row property immutable for a ride's lifetime (`scheduled_for IS NOT NULL` — reschedule moves the *instant*, never its existence), so the guarded `UpdateStatusFrom` write receives the ride's full **legal** from-set and the database still arbitrates every race (two concurrent declines → exactly one winner). Declining a reservation already PAST its `scheduledFor` is allowed on purpose — an explicit decline beats a silent `reservation_expired`, and the sweeper's claim re-checks `status = 'accepted'` so it simply matches no row. Accept, owner-only, and decline's freedom from every capability gate are unchanged. **MIGRATION-INDEX AUDIT: no migration and no index change required.** The change adds **no new status value** (`declined` has been in `go_ride_requests_status_check` since 0002) — only a legal EDGE into an existing **terminal** state, which appears in **neither** partial index (0004 covers `requested`/`accepted`/`enroute`/`arrived`; 0013 covers `accepted`/`enroute`/`arrived`), so the transition can only move rows OUT of a predicate, never in. Independently, the edge is scheduled-only and both indexes are partial on `scheduled_for IS NULL`, so every row it can touch is outside both entirely. Both arguments are individually sufficient. **Rider push copy fixed for the new edge:** `ride.status.changed` → rider fires as always, but a declined **reservation** now reads "*&lt;Vehicle&gt; can't make your scheduled ride*" instead of "*…can't take this ride*", which read as a reply to a request the rider had just made; per the standing rule it still **omits the time** (the server holds UTC and knows no client zone). `RideStatusChangedEvent` gains an internal `ScheduledFor` to carry that fact — **not** projected onto the summary `ride_status_changed` WS frame, which is unchanged. No schema change, no wire-shape change, no new error code. §4.2.2, §4.1.1.b, §6 and §7.8 updated. Implementation: `internal/telemetry/ride_request_{upcoming_handler,owner_decision,cursor}.go`, `internal/store/ride_request_upcoming.go`, `internal/push/copy.go`. | Claude (go-engineer) |
 | 2026-07-29 | **The owner ride-share pause toggle — `rideShareEnabled` on `VehicleSummary` + `VehicleState`, a new §7.18 owner write, and a three-layer ride-request gate ([MYR-342](https://linear.app/myrobotaxi/issue/MYR-342)).** Contracts **v0.20.0**. Adds ONE optional P0 boolean to both read surfaces and one endpoint that writes it. Before this an owner had no way to say *"the car is fine, I am simply not lending it out right now"* — only to mark it `in_service` (a lie, and one MYR-313 lets scheduled rides through anyway) or to decline every request by hand, forever. Storage is `ride_share_enabled BOOLEAN NOT NULL DEFAULT true` on the Go-owned `go_vehicle_control_state` side table (migration **0021**) — deliberately non-nullable, deliberately outside `ControlStateUpdate` (a slot there would let a telemetry frame re-enable a paused car), with dedicated read/write statements modelled on the MYR-316 service-window writer. Emitted on every §7.0 row and on §7.1, in BOTH role masks: **the viewer is the party the value is about**, and a rider who cannot see it learns the car is paused only from a `409` after composing a whole request. **ABSENT means ENABLED** — never paused. Enforced in THREE layers (§7.8): create → `409 vehicle_unavailable`, accept → the same `409` as a backstop, reservation sweeper → **hold** before the irreversible claim, with the 30-minute lateness ceiling expiring anything never re-enabled. **Deliberate deviation:** all three apply to SCHEDULED rides, which MYR-313 exempts from the availability gate — a service visit ends, an owner's pause does not. The MYR-313 fail-open shape on scheduled accepts is preserved, so an unknown pause state never blocks. | Claude (go-engineer) |
 | 2026-07-29 | **`command_failed` names the rejection reason ([MYR-329](https://linear.app/myrobotaxi/issue/MYR-329)).** A TestFlight owner's climate command was refused because his car was in service mode, but the app could only say "The car didn't accept that" — so he guessed at his battery. The reason was already in the building: `classifyResponse` has always parsed the proxy's `response.reason` (the car's own `ActionStatus.ResultReason.PlainText`, relayed by vehicle-command v0.4.1 `pkg/proxy/proxy.go:146`) into `TransportResult.Reason`, and the Executor put it on `CommandError.Detail` — a **server-log-only** field. The wire message stayed generic. §7.9 now documents that a `502 command_failed` whose reason matches a closed allow-list carries a canonical token in the free-text `error.message` (`vehicle command failed: vehicle_in_service`), with six tokens seeded: `vehicle_in_service`, `requires_user_acknowledgement`, `user_not_present`, `remote_access_disabled`, `low_battery`, `vehicle_busy`. **No schema, error-code, or field change** — `message` is free text per §4.1 and the code set is untouched; an unrecognized reason keeps the exact generic sentence, so every existing client is byte-identical. The car's firmware prose is never forwarded (it is unstable and untranslated): the message is assembled purely from server-side constants, so nothing upstream can reach a client, and the full sanitized reason is kept on the `vehicle command rejected` log line instead. Implementation: `internal/commands/reject_reason.go` (allow-list + message builder), `internal/commands/executor.go` (OutcomeFailed branch only — the other terminal outcomes keep their own precise copy), `internal/telemetry/vehicle_command_handler.go` (log the reason). | go-engineer |

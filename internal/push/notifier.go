@@ -27,6 +27,16 @@ type DeviceStore interface {
 	DeleteDeviceToken(ctx context.Context, deviceToken string) error
 }
 
+// notifierStores groups the two persistence seams the fan-out consults. They
+// are bundled rather than sitting side by side on Notifier because they are
+// asked the same question about the same person on the same code path — "may I
+// wake them, and where?" — and because the struct was already at the field
+// count this project's rules call a God struct.
+type notifierStores struct {
+	devices DeviceStore
+	prefs   PrefStore
+}
+
 // VehicleNamer resolves a vehicle cuid to its owner-chosen nickname. An empty
 // name (or an error) is not fatal — the copy falls back to a generic label.
 type VehicleNamer interface {
@@ -84,7 +94,7 @@ func (c Config) withDefaults() Config {
 // lifetime.
 type Notifier struct {
 	sender   Sender
-	devices  DeviceStore
+	stores   notifierStores
 	vehicles VehicleNamer
 	cfg      Config
 	logger   *slog.Logger
@@ -99,9 +109,16 @@ type Notifier struct {
 // NewNotifier builds a Notifier. sender may be nil — that is the KEYLESS mode
 // the service runs in before the APNs secrets are set, where every send is
 // logged as skipped and nothing is delivered. logger may be nil.
+//
+// prefs (MYR-349) may also be nil, and nil means EVERY CATEGORY IS ON — the
+// pre-MYR-349 behaviour. That is the same direction the gate fails in when a
+// lookup errors, and it is the only safe default: a notifier that silenced
+// itself because its preference store was unwired would leave riders standing
+// on sidewalks with no signal anywhere that anything was wrong.
 func NewNotifier(
 	sender Sender,
 	devices DeviceStore,
+	prefs PrefStore,
 	vehicles VehicleNamer,
 	cfg Config,
 	logger *slog.Logger,
@@ -112,7 +129,7 @@ func NewNotifier(
 	cfg = cfg.withDefaults()
 	return &Notifier{
 		sender:   sender,
-		devices:  devices,
+		stores:   notifierStores{devices: devices, prefs: prefs},
 		vehicles: vehicles,
 		cfg:      cfg,
 		logger:   logger,
@@ -192,7 +209,12 @@ func (n *Notifier) handleCreated(evt events.Event) {
 	}
 	a := createdAlert(ev)
 	n.async(func(ctx context.Context) {
-		n.fanOut(ctx, ev.OwnerID, ev.RideRequestID, string(evt.Topic), a)
+		n.fanOut(ctx, delivery{
+			userID:   ev.OwnerID,
+			rideID:   ev.RideRequestID,
+			topic:    string(evt.Topic),
+			category: CategoryRideLifecycle,
+		}, a)
 	})
 }
 
@@ -213,7 +235,12 @@ func (n *Notifier) handleStatusChanged(evt events.Event) {
 	}
 	n.async(func(ctx context.Context) {
 		a, _ := statusAlert(ev.Status, n.vehicleName(ctx, ev.VehicleID), scheduled)
-		n.fanOut(ctx, ev.RiderID, ev.RideRequestID, string(evt.Topic), a)
+		n.fanOut(ctx, delivery{
+			userID:   ev.RiderID,
+			rideID:   ev.RideRequestID,
+			topic:    string(evt.Topic),
+			category: CategoryRideLifecycle,
+		}, a)
 	})
 }
 
@@ -225,7 +252,12 @@ func (n *Notifier) handleDue(evt events.Event) {
 		return
 	}
 	n.async(func(ctx context.Context) {
-		n.fanOut(ctx, ev.RiderID, ev.RideRequestID, string(evt.Topic), dueAlert(n.vehicleName(ctx, ev.VehicleID)))
+		n.fanOut(ctx, delivery{
+			userID:   ev.RiderID,
+			rideID:   ev.RideRequestID,
+			topic:    string(evt.Topic),
+			category: CategoryRideLifecycle,
+		}, dueAlert(n.vehicleName(ctx, ev.VehicleID)))
 	})
 }
 

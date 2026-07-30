@@ -9,10 +9,27 @@ import (
 // Fan-out and delivery for the Notifier. Split from notifier.go to keep both
 // files inside the 300-line cap.
 
+// delivery is everything about ONE fan-out that is not the copy: who it is for,
+// what it is about, and — since MYR-349 — which switch in their Settings turns
+// it off. Grouped into a struct because four positional strings at a call site
+// is exactly how a topic ends up in the ride-id slot.
+type delivery struct {
+	// userID is the RECIPIENT — the owner for a new request, the rider for a
+	// status change or a due reservation. The preference consulted is theirs,
+	// never the other party's.
+	userID string
+	rideID string
+	topic  string
+	// category is the preference this notification answers to. Every fan-out
+	// site must name one; there is no unset value that means "always send".
+	category Category
+}
+
 // fanOut resolves one ride party's devices and sends the alert to each. Every
 // failure here is logged and swallowed: a notification is best-effort garnish
 // on a ride that has already happened.
-func (n *Notifier) fanOut(ctx context.Context, userID, rideID, topic string, a alert) {
+func (n *Notifier) fanOut(ctx context.Context, d delivery, a alert) {
+	userID, rideID, topic := d.userID, d.rideID, d.topic
 	if userID == "" {
 		return
 	}
@@ -31,7 +48,13 @@ func (n *Notifier) fanOut(ctx context.Context, userID, rideID, topic string, a a
 		return
 	}
 
-	devices, err := n.devices.DevicesForUser(ctx, userID)
+	// MYR-349 — the recipient's own switch, checked BEFORE the device lookup so
+	// a silenced category costs one point read instead of a fan-out.
+	if !n.allowed(ctx, userID, d.category, topic) {
+		return
+	}
+
+	devices, err := n.stores.devices.DevicesForUser(ctx, userID)
 	if err != nil {
 		n.logger.Error("push: device lookup failed",
 			slog.String("topic", topic),
@@ -65,6 +88,50 @@ func (n *Notifier) fanOut(ctx context.Context, userID, rideID, topic string, a a
 		slog.Int("devices", len(devices)),
 		slog.Int("delivered", delivered),
 	)
+}
+
+// allowed reports whether the recipient wants this category of notification
+// (MYR-349). It is the ONE gate; every send site reaches Apple through it.
+//
+// IT FAILS OPEN, in all three of the ways it can fail: no PrefStore wired, a
+// lookup error, and an account with no stored row. All three resolve to
+// DefaultPrefs — everything on, i.e. the exact pre-MYR-349 behaviour.
+//
+// That direction is not a shortcut, it is the product decision. This package's
+// standing rule is that a duplicate notification is a minor annoyance to a
+// human whereas a missed one is a rider standing on a sidewalk, and a
+// preference gate that failed CLOSED would convert every transient database
+// hiccup into platform-wide silence — with no error surfacing anywhere, because
+// nothing about a ride waits on push. The cost of failing open is bounded and
+// visible: somebody who switched a category off might occasionally receive it.
+func (n *Notifier) allowed(ctx context.Context, userID string, category Category, topic string) bool {
+	if n.stores.prefs == nil {
+		return true
+	}
+
+	prefs, err := n.stores.prefs.PrefsForUser(ctx, userID)
+	if err != nil {
+		n.logger.Error("push: prefs lookup failed; sending anyway",
+			slog.String("topic", topic),
+			slog.String("category", string(category)),
+			slog.String("user_id", userID),
+			slog.String("error", err.Error()),
+		)
+		return true
+	}
+	if prefs.Allows(category) {
+		return true
+	}
+
+	// P0 throughout: an opaque cuid and a category name. Logged at Info rather
+	// than Debug because "the notification you expected never arrived" is a
+	// support question, and this line is the whole answer to it.
+	n.logger.Info("push suppressed by preference",
+		slog.String("topic", topic),
+		slog.String("category", string(category)),
+		slog.String("user_id", userID),
+	)
+	return false
 }
 
 // send delivers to one device and applies the APNs feedback: a permanently
@@ -103,7 +170,7 @@ func (n *Notifier) dropDevice(ctx context.Context, deviceToken, topic string) {
 	delCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deleteTimeout)
 	defer cancel()
 
-	if err := n.devices.DeleteDeviceToken(delCtx, deviceToken); err != nil {
+	if err := n.stores.devices.DeleteDeviceToken(delCtx, deviceToken); err != nil {
 		n.logger.Error("push: failed to delete unregistered device",
 			slog.String("topic", topic),
 			slog.String("device_token_prefix", tokenPrefix(deviceToken)),

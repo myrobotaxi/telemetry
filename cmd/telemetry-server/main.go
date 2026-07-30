@@ -209,6 +209,9 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 	// MYR-186: APNs device registry + the lean vehicle-nickname read the push
 	// copy needs. Both are plain reads/writes with no encryption dependency.
 	pushRepo := store.NewPushDeviceRepo(db.Pool(), logger.With(slog.String("component", "push-device-repo")))
+	// MYR-349: the per-person notification preferences the §7.19 endpoints
+	// write and the notifier consults before every send.
+	pushPrefsRepo := store.NewPushPrefsRepo(db.Pool(), logger.With(slog.String("component", "push-prefs-repo")))
 	// MYR-184 vehicle sharing: the go_vehicle_shares repository behind the
 	// §7.5 invite/redeem endpoints and behind every viewer access check.
 	shareRepo := store.NewVehicleShareRepo(db.Pool(), logger.With(slog.String("component", "vehicle-share-repo")))
@@ -396,7 +399,7 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 	// alerts the relevant party's registered phones. Gated by PUSH_ENABLED;
 	// runs keyless (every send logged as skipped) until the APNs secrets are
 	// set. Drained after the bus closes so in-flight sends finish.
-	notifier, err := setupPushNotifier(cfg, bus, pushRepo, vehicleNameRepo, logger)
+	notifier, err := setupPushNotifier(cfg, bus, pushRepo, pushPrefsRepo, vehicleNameRepo, logger)
 	if err != nil {
 		return fmt.Errorf("setting up push notifier: %w", err)
 	}
@@ -418,6 +421,7 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 		rideRepo:      rideRepo,
 		accountRepo:   accountRepo,
 		pushRepo:      pushRepo,
+		pushPrefsRepo: pushPrefsRepo,
 		shareRepo:     shareRepo,
 		// The authenticator owns the access-set cache the sharing handlers
 		// bust on redeem and revoke.
