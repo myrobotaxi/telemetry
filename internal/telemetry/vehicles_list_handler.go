@@ -49,6 +49,15 @@ type VehicleCatalogRow struct {
 	// these plus Status and is never emitted raw.
 	ServiceETC           *time.Time
 	ServiceExpectedEndAt *time.Time
+
+	// RideShareEnabled is the owner's ride-sharing switch (MYR-342), LEFT
+	// JOINed from the same control-state row as the service window. Unlike the
+	// two above it is emitted RAW — there is nothing to resolve, no precedence
+	// and no status gate: the owner's answer is the wire value. The store's
+	// COALESCE makes a car with no side-table row read true, so the zero value
+	// this struct can hold on a hand-built row means PAUSED; every real
+	// construction site goes through the adapter and carries the joined value.
+	RideShareEnabled bool
 }
 
 // VehicleLister returns the catalog rows for vehicles owned by a
@@ -197,6 +206,11 @@ func newVehicleSummary(v *VehicleCatalogRow, role auth.Role, tier auth.SharePerm
 		// MYR-316: resolved here so the precedence and the in-service gate
 		// are applied exactly once per surface (service_window.go).
 		ServiceEstimatedEndAt: serviceEstimatedEndAtWire(v.Status, v.ServiceETC, v.ServiceExpectedEndAt),
+		// MYR-342: emitted verbatim on BOTH roles. The mask, not this
+		// assignment, is what decides who sees it — and both allow-lists carry
+		// it, because a rider who cannot see that a shared car is paused finds
+		// out from a 409 instead.
+		RideShareEnabled: v.RideShareEnabled,
 	}
 	if role == auth.RoleViewer {
 		summary.SharePermission = string(tier)

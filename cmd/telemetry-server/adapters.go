@@ -215,6 +215,8 @@ func (a *vehicleListerAdapter) ListByUser(ctx context.Context, userID string) ([
 			// the in-service gate.
 			ServiceETC:           v.ServiceETC,
 			ServiceExpectedEndAt: v.ServiceExpectedEndAt,
+			// MYR-342: emitted raw — no precedence, no status gate.
+			RideShareEnabled: v.RideShareEnabled,
 		})
 	}
 	return out, nil

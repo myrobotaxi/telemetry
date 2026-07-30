@@ -289,6 +289,14 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		-- 500s the snapshot and drives endpoints on a missing column.
 		"trim_label"              TEXT,
 		"fsd_version"             TEXT,
+		-- MYR-342 owner ride-sharing switch (migration 0021). Same trap as the
+		-- two blocks above -- the snapshot LEFT JOIN and BOTH catalog list
+		-- queries select it -- plus one of its own: it is the only column here
+		-- that is NOT NULL DEFAULT true rather than nullable, and that default
+		-- is load-bearing. A nullable copy would let the harness produce a NULL
+		-- the real schema cannot, which the readers COALESCE to enabled,
+		-- hiding a pause that production would honour.
+		"ride_share_enabled"      BOOLEAN NOT NULL DEFAULT true,
 		"updated_at"       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);
 
@@ -410,6 +418,11 @@ func (a *contractVehicleLister) ListByUser(ctx context.Context, userID string) (
 			ChargeLevel:    v.ChargeLevel,
 			EstimatedRange: v.EstimatedRange,
 			LastUpdated:    v.LastUpdated,
+			// MYR-342: copied explicitly, and it is the one field in this
+			// projection whose OMISSION is not merely lossy — the Go zero value
+			// false reads as PAUSED, so leaving it out would make the harness
+			// assert against a withdrawn vehicle the store never produced.
+			RideShareEnabled: v.RideShareEnabled,
 		})
 	}
 	return out, nil
@@ -456,6 +469,9 @@ func (a *contractVehicleSnapshotReader) GetByID(ctx context.Context, vehicleID s
 		TripDistRemaining:    v.TripDistRemaining,
 		NavRouteCoordinates:  v.NavRouteCoordinates,
 		LastUpdated:          v.LastUpdated,
+		// MYR-342: same trap as the catalog projection above — an omitted copy
+		// is not a missing field on the wire, it is a `false`, i.e. PAUSED.
+		RideShareEnabled: v.RideShareEnabled,
 	}, nil
 }
 

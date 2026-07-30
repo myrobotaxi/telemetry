@@ -63,10 +63,30 @@ const queryVehicleByID = `SELECT ` + vehicleSelectColumns + `,
 	gcs.media_now_playing_duration_ms, gcs.media_now_playing_elapsed_ms, gcs.media_volume_max,
 	gcs.seat_cooling_capable,
 	gcs.service_etc, gcs.service_expected_end_at,
-	gcs.trim_label, gcs.fsd_version
+	gcs.trim_label, gcs.fsd_version,
+	` + rideShareEnabledExpr + `
 FROM "Vehicle"
 LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"
 WHERE "Vehicle"."id" = $1`
+
+// rideShareEnabledExpr is the single definition of "does this car accept ride
+// requests right now?" for every read that already LEFT JOINs the control-state
+// side table as `gcs` (MYR-342): the snapshot read, the owner catalog list, and
+// the viewer catalog list.
+//
+// The COALESCE is LOAD-BEARING and is why this is a shared constant rather than
+// three inline copies. `ride_share_enabled` is NOT NULL (migration 0021), so the
+// only way it can arrive NULL is the LEFT JOIN finding no side-table row at all
+// — an ordinary state for a car that has never had a control write. That must be
+// indistinguishable from an explicitly-enabled car, because the wire contract
+// says an absent/unset switch means ENABLED. One reader spelling this
+// differently would emit `false` for a car nobody has ever paused, i.e. would
+// hide a perfectly available vehicle from its own owner.
+//
+// Costs nothing: the join is already there for the MYR-316 service window (list)
+// and the whole control-state block (snapshot), so this rides an existing probe
+// of the vehicle_id PRIMARY KEY and adds one fixed-width boolean.
+const rideShareEnabledExpr = `COALESCE(gcs.ride_share_enabled, TRUE) AS "rideShareEnabled"`
 
 const queryVehiclesByUser = `SELECT ` + vehicleSelectColumns + `
 FROM "Vehicle"
@@ -157,9 +177,14 @@ const activeInstantRidePredicate = `r.scheduled_for IS NULL
 // text column, which is what made the pre-MYR-122 wide read expensive. The
 // alternative, an N+1 per-vehicle lookup from the handler, would be strictly
 // worse on the very path MYR-122 exists to protect.
+// MYR-342: the owner ride-sharing switch rides the SAME LEFT JOIN, so it costs
+// nothing beyond one fixed-width boolean, and it IS emitted (as
+// VehicleSummary.rideShareEnabled) — the invariant this projection actually
+// enforces is "MUST NOT SELECT columns the response body doesn't emit".
 const queryVehiclesByUserList = `SELECT ` + vehicleListSummaryColumns + `,
 	` + vehicleListHasActiveRideExpr + `,
-	gcs.service_etc, gcs.service_expected_end_at
+	gcs.service_etc, gcs.service_expected_end_at,
+	` + rideShareEnabledExpr + `
 FROM "Vehicle"
 LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"
 WHERE "userId" = $1

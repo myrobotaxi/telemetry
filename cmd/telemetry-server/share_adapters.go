@@ -168,6 +168,10 @@ func toSharedVehicleRows(rows []store.SharedVehicleSummary) []telemetry.SharedVe
 				HasActiveRide:        row.HasActiveRide,
 				ServiceETC:           row.ServiceETC,
 				ServiceExpectedEndAt: row.ServiceExpectedEndAt,
+				// MYR-342: viewers see the pause too — the whole point is that a
+				// rider learns the shared car is not taking requests from the
+				// catalog, not from a 409.
+				RideShareEnabled: row.RideShareEnabled,
 			},
 			Permission: row.Permission,
 		})

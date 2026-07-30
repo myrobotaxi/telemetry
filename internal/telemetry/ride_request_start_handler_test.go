@@ -91,7 +91,7 @@ func TestRideRequestHandler_Start(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			store := &fakeRideStore{getRec: tt.rec, getErr: tt.getErr}
 			pub := &fakeRidePublisher{}
-			h := newRideHandler(store, &stubVehicleSnapshotReader{}, pub, tt.caller)
+			h := newRideHandler(store, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, pub, tt.caller)
 
 			rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/start", "", rideAuthOK)
 
@@ -137,7 +137,7 @@ func TestRideRequestHandler_Start_DropoffSeamPayload(t *testing.T) {
 	rideRec := fixtureRideData(rideUserID, rideStatusArrived)
 	store := &fakeRideStore{getRec: rideRec}
 	pub := &fakeRidePublisher{}
-	h := newRideHandler(store, &stubVehicleSnapshotReader{}, pub, rideUserID)
+	h := newRideHandler(store, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, pub, rideUserID)
 
 	rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/start", "", rideAuthOK)
 	if rec.Code != http.StatusOK {
@@ -171,7 +171,7 @@ func TestRideRequestHandler_Start_GuardWinsRace(t *testing.T) {
 	writeRec := fixtureRideData(rideUserID, rideStatusCancelled) // guard sees the concurrent cancel
 	store := &fakeRideStore{getRec: readRec, updated: writeRec}
 	pub := &fakeRidePublisher{}
-	h := newRideHandler(store, &stubVehicleSnapshotReader{}, pub, rideUserID)
+	h := newRideHandler(store, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, pub, rideUserID)
 
 	rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/start", "", rideAuthOK)
 

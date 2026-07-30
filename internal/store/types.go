@@ -144,6 +144,25 @@ type Vehicle struct {
 	// read — for FSDVersion emphatically NOT "this car has no FSD".
 	TrimLabel  *string
 	FSDVersion *string
+
+	// RideShareEnabled is the owner's ride-sharing switch (MYR-342), same side
+	// table. A plain bool, NOT a pointer, and the only field in this block that
+	// is not: migration 0021 declares the column NOT NULL DEFAULT true and the
+	// read wraps it in COALESCE(..., TRUE) (rideShareEnabledExpr), so "no
+	// side-table row" and "row with the column defaulted" both arrive here as
+	// true. There is no unknown state to represent — a car nobody has paused is
+	// accepting rides — and a pointer would have invented one that every reader
+	// collapsed back to true anyway.
+	//
+	// POPULATED ONLY BY GetByID, and unlike its nil-able neighbours the zero
+	// value POINTS THE WRONG WAY: a Vehicle from GetByVIN or the wide ListByUser
+	// (neither joins the side table) carries false, which reads as PAUSED. Do
+	// not surface or enforce this field off those paths. Nothing does today —
+	// the two request-time gates read it off the very GetByID row that
+	// established ownership (one statement, no TOCTOU between the two facts),
+	// and the reservation sweeper uses the dedicated VehicleRepo.RideShareEnabled
+	// statement instead of a vehicle read at all.
+	RideShareEnabled bool
 }
 
 // VehicleUpdate holds the subset of vehicle fields that can change from

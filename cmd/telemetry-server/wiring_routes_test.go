@@ -154,6 +154,10 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 	}{
 		{"vehicle license plate (MYR-286)", "/api/tesla/vehicles/clxyz1234567890abcdef/plate"},
 		{"vehicle service window (MYR-316, §7.16)", "/api/tesla/vehicles/clxyz1234567890abcdef/service-window"},
+		// MYR-342: ALWAYS mounted, like its §7.16 sibling — no Tesla token and no
+		// proxy, so no capability can gate it off and strand an owner unable to
+		// pause a car the catalog still shows as available.
+		{"vehicle ride share (MYR-342, §7.18)", "/api/tesla/vehicles/clxyz1234567890abcdef/ride-share"},
 		{"push device register (MYR-186, §7.17)", "/api/push/devices"},
 	}
 	for _, rt := range putRoutes {

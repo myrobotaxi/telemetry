@@ -516,7 +516,7 @@ func TestRideRequestHandler_Cancel(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			store := &fakeRideStore{getRec: tt.rec, getErr: tt.getErr}
 			pub := &fakeRidePublisher{}
-			h := newRideHandler(store, &stubVehicleSnapshotReader{}, pub, tt.caller)
+			h := newRideHandler(store, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, pub, tt.caller)
 			rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/cancel", "", rideAuthOK)
 
 			if rec.Code != tt.wantStatus {
@@ -557,7 +557,7 @@ func TestRideRequestHandler_Cancel_GuardWinsRace(t *testing.T) {
 	writeRec := fixtureRideData(rideUserID, rideStatusDeclined) // guard sees the concurrent decline
 	store := &fakeRideStore{getRec: readRec, updated: writeRec}
 	pub := &fakeRidePublisher{}
-	h := newRideHandler(store, &stubVehicleSnapshotReader{}, pub, rideUserID)
+	h := newRideHandler(store, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, pub, rideUserID)
 
 	rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/cancel", "", rideAuthOK)
 
@@ -591,7 +591,7 @@ func TestRideRequestHandler_Get(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := &fakeRideStore{getRec: tt.rec, getErr: tt.getErr}
-			h := newRideHandler(store, &stubVehicleSnapshotReader{}, &fakeRidePublisher{}, tt.caller)
+			h := newRideHandler(store, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, &fakeRidePublisher{}, tt.caller)
 			rec := doRequest(t, rideMux(h), http.MethodGet, "/api/ride-requests/"+rideID, "", rideAuthOK)
 			if rec.Code != tt.wantStatus {
 				t.Fatalf("status got %d want %d. body=%s", rec.Code, tt.wantStatus, rec.Body.String())
@@ -612,7 +612,7 @@ func TestRideRequestHandler_Get(t *testing.T) {
 func TestRideRequestHandler_List(t *testing.T) {
 	t.Run("empty list yields items [] not null", func(t *testing.T) {
 		store := &fakeRideStore{riderPage: RideRequestListPage{Items: nil, HasMore: false}}
-		h := newRideHandler(store, &stubVehicleSnapshotReader{}, &fakeRidePublisher{}, rideUserID)
+		h := newRideHandler(store, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, &fakeRidePublisher{}, rideUserID)
 		rec := doRequest(t, rideMux(h), http.MethodGet, "/api/ride-requests", "", rideAuthOK)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status %d", rec.Code)
@@ -628,7 +628,7 @@ func TestRideRequestHandler_List(t *testing.T) {
 	t.Run("hasMore emits a decodable nextCursor", func(t *testing.T) {
 		last := fixtureRideData(rideUserID, rideStatusRequested)
 		store := &fakeRideStore{riderPage: RideRequestListPage{Items: []RideRequestData{last}, HasMore: true}}
-		h := newRideHandler(store, &stubVehicleSnapshotReader{}, &fakeRidePublisher{}, rideUserID)
+		h := newRideHandler(store, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, &fakeRidePublisher{}, rideUserID)
 		rec := doRequest(t, rideMux(h), http.MethodGet, "/api/ride-requests", "", rideAuthOK)
 		var env struct {
 			Items      []map[string]any `json:"items"`
@@ -652,7 +652,7 @@ func TestRideRequestHandler_List(t *testing.T) {
 
 	t.Run("scopes to the authenticated rider", func(t *testing.T) {
 		store := &fakeRideStore{}
-		h := newRideHandler(store, &stubVehicleSnapshotReader{}, &fakeRidePublisher{}, rideUserID)
+		h := newRideHandler(store, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, &fakeRidePublisher{}, rideUserID)
 		_ = doRequest(t, rideMux(h), http.MethodGet, "/api/ride-requests?limit=5", "", rideAuthOK)
 		if store.riderCall.id != rideUserID || store.riderCall.limit != 5 {
 			t.Errorf("list call: id=%q limit=%d", store.riderCall.id, store.riderCall.limit)
@@ -671,7 +671,7 @@ func TestRideRequestHandler_List(t *testing.T) {
 	for _, tt := range badInputs {
 		t.Run("400 on "+tt.name, func(t *testing.T) {
 			store := &fakeRideStore{}
-			h := newRideHandler(store, &stubVehicleSnapshotReader{}, &fakeRidePublisher{}, rideUserID)
+			h := newRideHandler(store, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, &fakeRidePublisher{}, rideUserID)
 			rec := doRequest(t, rideMux(h), http.MethodGet, "/api/ride-requests"+tt.q, "", rideAuthOK)
 			assertErrEnvelope(t, rec, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest)
 		})

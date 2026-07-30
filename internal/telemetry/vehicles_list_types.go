@@ -45,6 +45,14 @@ type vehicleSummary struct {
 	// and null otherwise. ALWAYS emitted (as an explicit null when there is no
 	// estimate) so a consumer can tell "no estimate" from a pre-MYR-316 server.
 	ServiceEstimatedEndAt *string `json:"serviceEstimatedEndAt"`
+	// RideShareEnabled is the owner's ride-sharing switch (MYR-342,
+	// contracts v0.20.0). OPTIONAL on the wire contract but ALWAYS emitted by
+	// this server version (true or false), with NO omitempty — a `false` that
+	// omitempty swallowed would read to a consumer as "absent", which the
+	// contract defines as ENABLED, i.e. it would silently un-pause a paused car
+	// on every catalog fetch. Absence therefore only ever signals a server
+	// predating MYR-342, never a paused vehicle.
+	RideShareEnabled bool `json:"rideShareEnabled"`
 }
 
 // toMaskMap returns the row as a wire-name-keyed map suitable for
@@ -81,5 +89,9 @@ func (v vehicleSummary) baseMaskMap() map[string]any {
 		// MYR-316 — already resolved (precedence + in-service gate) by
 		// buildResponse; this is the emitted value, not a raw column.
 		"serviceEstimatedEndAt": v.ServiceEstimatedEndAt,
+		// MYR-342 — the owner's switch, emitted raw (nothing to resolve). In
+		// the BASE map, not the viewer-only branch below: both role
+		// allow-lists carry it.
+		"rideShareEnabled": v.RideShareEnabled,
 	}
 }

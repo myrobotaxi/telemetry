@@ -222,6 +222,12 @@
       "nullableInSteadyState": true,
       "comment": "Navigation group member. JSONB column persisted as a [lng, lat] array. Active-navigation scenario asserts non-null."
     },
+    "rideShareEnabled": {
+      "category": "derived",
+      "atomicGroup": "",
+      "nullableInSteadyState": true,
+      "comment": "MYR-342 owner ride-sharing switch. NOT a telemetry field and never will be: no Tesla proto, no vehicle_data field, no fieldMap entry — \"this owner is lending their car out\" is a MyRoboTaxi product fact, so the writer pipeline this harness exercises has no path to it BY CONSTRUCTION. Its only writer is the owner's PUT /api/tesla/vehicles/{vehicleId}/ride-share (rest-api.md §7.18). It lives as ride_share_enabled BOOLEAN NOT NULL DEFAULT true on the Go-owned go_vehicle_control_state SIDE table (migration 0021) and reaches the wire via COALESCE(gcs.ride_share_enabled, TRUE) on the GetByID snapshot join. This harness reads back through GetByVIN, which does NOT join the side table, so what it observes is the Go zero value rather than the column — and for this field that zero value is false, i.e. PAUSED, a state the real read path can never produce. nullableInSteadyState is therefore true to keep the harness honest about what it can observe, NOT because the field is ever absent on the wire: /snapshot and GET /api/vehicles both always emit it. The side-table round trip is covered directly by internal/store/vehicle_ride_share_test.go and the /snapshot projection by internal/telemetry/vehicle_snapshot_handler_test.go."
+    },
     "lastUpdated": {
       "category": "writer_metadata",
       "atomicGroup": "",

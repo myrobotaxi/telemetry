@@ -68,7 +68,7 @@ func decodeErrCode(t *testing.T, rec *httptest.ResponseRecorder) wserrors.ErrorC
 }
 
 func TestVehicleCommandHandler_MethodNotAllowed(t *testing.T) {
-	h := newCommandHandler(&fakeCommandExecutor{}, &stubVehicleSnapshotReader{}, &stubTokenValidator{userID: "u1"})
+	h := newCommandHandler(&fakeCommandExecutor{}, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, &stubTokenValidator{userID: "u1"})
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/vehicles/v1/command/door_lock", nil)
 	req.SetPathValue("vehicleId", "v1")
 	req.SetPathValue("name", "door_lock")
@@ -80,7 +80,7 @@ func TestVehicleCommandHandler_MethodNotAllowed(t *testing.T) {
 }
 
 func TestVehicleCommandHandler_MissingAuth(t *testing.T) {
-	h := newCommandHandler(&fakeCommandExecutor{}, &stubVehicleSnapshotReader{}, &stubTokenValidator{userID: "u1"})
+	h := newCommandHandler(&fakeCommandExecutor{}, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, &stubTokenValidator{userID: "u1"})
 	rec := postCommand(h, "v1", "door_lock", "", "")
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d want 401", rec.Code)
@@ -91,7 +91,7 @@ func TestVehicleCommandHandler_MissingAuth(t *testing.T) {
 }
 
 func TestVehicleCommandHandler_InvalidToken(t *testing.T) {
-	h := newCommandHandler(&fakeCommandExecutor{}, &stubVehicleSnapshotReader{}, &stubTokenValidator{err: errors.New("bad token")})
+	h := newCommandHandler(&fakeCommandExecutor{}, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, &stubTokenValidator{err: errors.New("bad token")})
 	rec := postCommand(h, "v1", "door_lock", "", "Bearer x")
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d want 401", rec.Code)
@@ -204,8 +204,8 @@ func (inServiceTransport) Command(_ context.Context, _ commands.TransportRequest
 	}, nil
 }
 func (inServiceTransport) Wake(_ context.Context, _, _ string) error { return nil }
-func (inServiceTransport) Enabled() bool                            { return true }
-func (inServiceTransport) RESTEnabled() bool                        { return true }
+func (inServiceTransport) Enabled() bool                             { return true }
+func (inServiceTransport) RESTEnabled() bool                         { return true }
 
 // TestVehicleCommandHandler_RejectionReasonReachesTheWire is MYR-329 end to
 // end, through the REAL commands.Executor rather than a scripted CommandError:

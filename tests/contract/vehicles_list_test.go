@@ -131,6 +131,25 @@ func TestContract_GETVehicles(t *testing.T) {
 					t.Errorf("hasActiveRide = %v, want false (vehicle has no rides)", busy)
 				}
 
+				// MYR-342: `rideShareEnabled` is OPTIONAL in the schema
+				// (absence = a pre-v0.20.0 server, which the contract
+				// says MUST read as ENABLED), but THIS server always
+				// emits it. The seeded vehicle has no control-state
+				// row at all, which is the ordinary state of most cars
+				// and the exact case the read's
+				// COALESCE(gcs.ride_share_enabled, TRUE) exists for —
+				// so it must be present AND true. Asserting presence
+				// catches an `omitempty` regression, which would be
+				// especially nasty here: an omitted `false` reads as
+				// absent, i.e. ENABLED, silently un-pausing a car its
+				// owner paused.
+				share, ok := row["rideShareEnabled"]
+				if !ok {
+					t.Errorf("missing `rideShareEnabled` in items[0]; row keys: %v", keysOf(row))
+				} else if share != true {
+					t.Errorf("rideShareEnabled = %v, want true (no control-state row = enabled)", share)
+				}
+
 				// Cross-check against the canonical schema so any
 				// future field rename / type change surfaces here.
 				// The file's root is the LIST ENVELOPE (VehicleListResponse);

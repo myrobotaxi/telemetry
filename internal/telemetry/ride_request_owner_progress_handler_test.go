@@ -138,7 +138,7 @@ func runOwnerProgress(t *testing.T, path string, tt ownerProgressCase) {
 	t.Run(tt.name, func(t *testing.T) {
 		store := &fakeRideStore{getRec: tt.rec, getErr: tt.getErr}
 		pub := &fakeRidePublisher{}
-		h := newRideHandler(store, &stubVehicleSnapshotReader{}, pub, tt.caller)
+		h := newRideHandler(store, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, pub, tt.caller)
 
 		rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+path, "", rideAuthOK)
 

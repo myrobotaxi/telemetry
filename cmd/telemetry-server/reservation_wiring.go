@@ -59,11 +59,12 @@ func startReservationSweeper(
 	bus events.Bus,
 	dispatcher *dispatch.Dispatcher,
 	rideRepo *store.RideRequestRepo,
+	vehicleRepo *store.VehicleRepo,
 	logger *slog.Logger,
 ) {
 	sweeper := dispatch.NewReservationSweeper(
 		dispatcher,
-		&reservationStoreAdapter{repo: rideRepo},
+		&reservationStoreAdapter{repo: rideRepo, vehicles: vehicleRepo},
 		bus,
 		dispatch.ReservationConfig{
 			Enabled:       cfg.ReservationDispatchEnabled(),
@@ -85,6 +86,10 @@ func startReservationSweeper(
 // accept path's RideAcceptedEvent carries them).
 type reservationStoreAdapter struct {
 	repo *store.RideRequestRepo
+	// vehicles serves the MYR-342 pause probe. The switch lives on the Go-owned
+	// control-state side table, not on any ride row, so the sweeper's store seam
+	// spans two repos — one question to each, both before the claim.
+	vehicles *store.VehicleRepo
 }
 
 func (a *reservationStoreAdapter) ListDueReservations(
@@ -126,6 +131,17 @@ func (a *reservationStoreAdapter) ListDueReservations(
 
 func (a *reservationStoreAdapter) VehicleHasActiveInstantRide(ctx context.Context, vehicleID string) (bool, error) {
 	return a.repo.VehicleHasActiveInstantRide(ctx, vehicleID)
+}
+
+// VehicleRideShareEnabled reads the owner's ride-sharing switch (MYR-342).
+//
+// It crosses to the VEHICLE repo rather than the ride-request one, because the
+// flag lives on the Go-owned go_vehicle_control_state side table next to the
+// service window, not on a ride row. That is why this adapter now holds two
+// repos: the sweeper asks one question of each, both immediately before the
+// irreversible claim.
+func (a *reservationStoreAdapter) VehicleRideShareEnabled(ctx context.Context, vehicleID string) (bool, error) {
+	return a.vehicles.RideShareEnabled(ctx, vehicleID)
 }
 
 func (a *reservationStoreAdapter) ClaimReservationDispatch(ctx context.Context, rideID string) (bool, error) {

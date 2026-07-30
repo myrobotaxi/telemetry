@@ -294,6 +294,7 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 	setupVehiclePlateEndpoint(deps)
 	setupVehicleRefreshEndpoint(deps)
 	setupVehicleServiceWindowEndpoint(deps)
+	setupVehicleRideShareEndpoint(deps)
 	setupVehicleCommandEndpoint(deps, snapshotAdapter)
 	setupPushDeviceEndpoints(deps)
 	setupVehicleSharingEndpoints(deps, snapshotAdapter)

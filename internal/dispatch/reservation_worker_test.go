@@ -531,3 +531,109 @@ func TestReservationExpiredCodeIsOpaque(t *testing.T) {
 			"and data-classification.md §1.9", codeReservationExpired)
 	}
 }
+
+// --- MYR-342: the owner's ride-sharing pause ------------------------------
+
+// TestSweep_PausedVehicleIsHeldNotClaimed is the third and last enforcement
+// layer. The first two (ride-request create, owner accept) refuse a paused car
+// at request time; this one covers the reservation that was already accepted
+// when its owner reached for the switch.
+//
+// HOLD, NOT EXPIRE, and the distinction is the whole design. The claim is
+// IRREVERSIBLE — the latch admits one winner for the row's lifetime — so
+// claiming a reservation we then decline to push would burn it permanently and
+// leave the rider with a resolved-looking ride that never happened. Holding
+// costs nothing: the row stays selectable and the next tick re-decides, so an
+// owner who un-pauses inside the lateness window gets the dispatch they meant
+// to allow. An owner who never un-pauses does not leave the row pending
+// forever either — the lateness ceiling expires it naturally
+// (TestSweep_LatenessCeilingAppliesToFreeVehicles covers that path), which is
+// why this layer needs no expiry logic of its own.
+func TestSweep_PausedVehicleIsHeldNotClaimed(t *testing.T) {
+	r := testReservation()
+	latch := newLatchStore()
+	resStore := &fakeReservationStore{
+		due:    []DueReservation{r},
+		busy:   map[string]bool{},
+		paused: map[string]bool{r.VehicleID: true},
+	}
+	s, exec := newSweeperHarness(t, latch, resStore, &fakeBus{}, func() time.Time { return testSweepNow }, true)
+
+	s.sweepOnce(context.Background())
+
+	if got := latch.order(); len(got) != 1 || !strings.HasPrefix(got[0], "busy:") {
+		t.Fatalf("a paused vehicle must be probed and then HELD — no claim, no record. call order = %v", got)
+	}
+	if len(exec.calls()) != 0 {
+		t.Errorf("a paused vehicle must receive no nav push, got %d", len(exec.calls()))
+	}
+}
+
+// TestSweep_PauseIsCheckedBeforeTheClaim pins the ORDER against the same
+// safety argument the busy probe rests on: both questions must be answered
+// BEFORE the irreversible claim, never after.
+func TestSweep_PauseIsCheckedBeforeTheClaim(t *testing.T) {
+	r := testReservation()
+	latch := newLatchStore()
+	resStore := &fakeReservationStore{
+		due:    []DueReservation{r},
+		busy:   map[string]bool{},
+		paused: map[string]bool{r.VehicleID: true},
+	}
+	s, _ := newSweeperHarness(t, latch, resStore, &fakeBus{}, func() time.Time { return testSweepNow }, true)
+
+	s.sweepOnce(context.Background())
+
+	if resStore.pauseCount() == 0 {
+		t.Fatal("the pause must be probed at all")
+	}
+	for _, call := range latch.order() {
+		if strings.HasPrefix(call, "claim:") {
+			t.Fatalf("the claim ran despite a paused vehicle: %v", latch.order())
+		}
+	}
+}
+
+// TestSweep_PauseProbeErrorHoldsRatherThanBurning mirrors the busy probe's
+// unknown-state rule. We cannot tell whether pushing would dial a car its owner
+// has withdrawn, and a held reservation is recoverable where a burnt claim is
+// not — so an unreadable pause state holds. It does NOT dispatch: this is the
+// one place in the feature that fails CLOSED, and it can afford to because the
+// lateness ceiling still resolves the row honestly. (Contrast the accept path,
+// which fails OPEN on an unreadable vehicle, because there a refusal strands a
+// human waiting on an answer.)
+func TestSweep_PauseProbeErrorHoldsRatherThanBurning(t *testing.T) {
+	latch := newLatchStore()
+	resStore := &fakeReservationStore{
+		due:      []DueReservation{testReservation()},
+		busy:     map[string]bool{},
+		pauseErr: errors.New("db down"),
+	}
+	s, exec := newSweeperHarness(t, latch, resStore, &fakeBus{}, func() time.Time { return testSweepNow }, true)
+
+	s.sweepOnce(context.Background())
+
+	for _, call := range latch.order() {
+		if strings.HasPrefix(call, "claim:") {
+			t.Fatalf("an unreadable pause state must not be claimed: %v", latch.order())
+		}
+	}
+	if len(exec.calls()) != 0 {
+		t.Errorf("an unreadable pause state must produce no push, got %d", len(exec.calls()))
+	}
+}
+
+// TestSweep_EnabledVehicleStillDispatches is the counter-assertion: the new
+// probe must not become a blanket hold.
+func TestSweep_EnabledVehicleStillDispatches(t *testing.T) {
+	r := testReservation()
+	latch := newLatchStore()
+	resStore := &fakeReservationStore{due: []DueReservation{r}, busy: map[string]bool{}}
+	s, exec := newSweeperHarness(t, latch, resStore, &fakeBus{}, func() time.Time { return testSweepNow }, true)
+
+	s.sweepOnce(context.Background())
+
+	if len(exec.calls()) != 1 {
+		t.Fatalf("an un-paused vehicle must still be dispatched, got %d pushes", len(exec.calls()))
+	}
+}

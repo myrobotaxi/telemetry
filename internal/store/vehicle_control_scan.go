@@ -83,6 +83,13 @@ type controlStateScan struct {
 	// emphatically NOT "this car has no FSD".
 	trimLabel  *string
 	fsdVersion *string
+
+	// MYR-342 owner ride-sharing switch. The ONLY non-pointer field in this
+	// bag: the column is NOT NULL (migration 0021) and the SELECT wraps it in
+	// COALESCE(..., TRUE) via rideShareEnabledExpr, so a missing side-table row
+	// scans as true rather than nil. There is no "never observed" state to
+	// carry — a car nobody has paused is accepting rides.
+	rideShareEnabled bool
 }
 
 // dests returns the scan destinations in queryVehicleByID's column order, for
@@ -103,6 +110,7 @@ func (c *controlStateScan) dests() []any {
 		&c.seatCoolingCapable,
 		&c.serviceETC, &c.serviceExpectedEndAt,
 		&c.trimLabel, &c.fsdVersion,
+		&c.rideShareEnabled,
 	}
 }
 
@@ -146,4 +154,5 @@ func (c *controlStateScan) applyTo(v *Vehicle) {
 	v.ServiceExpectedEndAt = c.serviceExpectedEndAt
 	v.TrimLabel = c.trimLabel
 	v.FSDVersion = c.fsdVersion
+	v.RideShareEnabled = c.rideShareEnabled
 }

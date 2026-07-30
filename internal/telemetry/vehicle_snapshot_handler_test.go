@@ -34,6 +34,20 @@ func (s *stubVehicleSnapshotReader) GetByID(_ context.Context, _ string) (Vehicl
 	return s.row, nil
 }
 
+// availableSnapshotRow is the MINIMAL row for a test that does not care about
+// the vehicle at all — every field zero EXCEPT the one whose zero value lies.
+//
+// MYR-342 made `VehicleSnapshotRow{}` an unsafe default in the ride tests:
+// RideShareEnabled false reads as "the owner has PAUSED this car", so a bare
+// zero row silently turned every accept/create test into a test of the pause
+// gate. The store can never produce that combination — its
+// COALESCE(gcs.ride_share_enabled, TRUE) makes a car with no control-state row
+// enabled — so the zero row was never a state the server sees. This helper is
+// the honest stand-in.
+func availableSnapshotRow() VehicleSnapshotRow {
+	return VehicleSnapshotRow{RideShareEnabled: true}
+}
+
 // fixtureSnapshotRowID is the canonical vehicleId used by every
 // snapshot-handler test fixture. Pinning it here keeps the unparam
 // linter from flagging fixtureSnapshotRow's vehicleID param as
@@ -48,7 +62,14 @@ func fixtureSnapshotRow(ownerID string) VehicleSnapshotRow {
 	gear := "P"
 	chargeState := "Disconnected"
 	return VehicleSnapshotRow{
-		ID:                 fixtureSnapshotRowID,
+		ID: fixtureSnapshotRowID,
+		// MYR-342: the fixture is an ORDINARY, un-paused car, matching what the
+		// store's COALESCE(gcs.ride_share_enabled, TRUE) produces for a vehicle
+		// nobody has touched. Spelled out rather than left to the zero value
+		// because for THIS field the Go default points the wrong way — a false
+		// here means PAUSED, and every ride test would silently start asserting
+		// against a withdrawn vehicle.
+		RideShareEnabled:   true,
 		UserID:             ownerID,
 		VIN:                "5YJ3E1EA1PF000001",
 		Name:               "Stumpy",

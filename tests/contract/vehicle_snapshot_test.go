@@ -96,6 +96,20 @@ func TestContract_GETVehicleSnapshot(t *testing.T) {
 					}
 				}
 
+				// MYR-342: the owner's ride-sharing switch is carried on
+				// the snapshot as well as the catalog row, because the
+				// owner's toggle lives on this surface and a control
+				// whose position can only be learned from a different
+				// endpoint renders wrong on a cold open. The seeded car
+				// has no control-state row, which the read COALESCEs to
+				// enabled — the ordinary state of most cars.
+				share, ok := resp["rideShareEnabled"]
+				if !ok {
+					t.Error("MYR-342 field `rideShareEnabled` missing from snapshot")
+				} else if share != true {
+					t.Errorf("rideShareEnabled = %v, want true (no control-state row = enabled)", share)
+				}
+
 				// Spot-check that values round-trip end-to-end (DB
 				// SELECT -> scan -> handler -> JSON encode) rather
 				// than just being present-but-zero.

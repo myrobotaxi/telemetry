@@ -61,6 +61,15 @@ type ReservationStore interface {
 	// VehicleHasActiveInstantRide reports whether the vehicle is mid-ride on
 	// an active INSTANT ride (the MYR-266 per-vehicle busy predicate).
 	VehicleHasActiveInstantRide(ctx context.Context, vehicleID string) (bool, error)
+	// VehicleRideShareEnabled reports whether the vehicle's OWNER currently
+	// accepts ride requests against it (MYR-342). False means the owner has
+	// PAUSED the car — nothing about the vehicle itself.
+	//
+	// An unknown vehicle id is NOT an error and answers true: the flag lives on
+	// the Go-owned control-state side table, which knows nothing about which
+	// vehicles exist, and a reservation could only have been accepted for a real
+	// car. Existence is not this method's question.
+	VehicleRideShareEnabled(ctx context.Context, vehicleID string) (bool, error)
 	// ClaimReservationDispatch wins the leg-1 latch for a reservation, but
 	// ONLY while the row is still `accepted` and still a reservation. false
 	// means the row was claimed by someone else or moved on — skip silently.

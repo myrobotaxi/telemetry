@@ -120,6 +120,19 @@ type VehicleSnapshotRow struct {
 	// — nil means never read.
 	TrimLabel  *string
 	FSDVersion *string
+
+	// MYR-342 owner ride-sharing switch, same side table, same LEFT JOIN. NOT a
+	// pointer: the column is NOT NULL and the store's COALESCE turns a missing
+	// side-table row into true, so there is no "never read" state — a car nobody
+	// has paused is accepting rides.
+	//
+	// This field is also the READ THE TWO REQUEST-TIME GATES USE. Both the
+	// ride-request create gate and the owner accept backstop already call
+	// GetByID to establish ownership / status, so taking the pause off the SAME
+	// row means the two facts cannot disagree — there is no window in which a
+	// caller is authorised against one snapshot of the vehicle and gated against
+	// another.
+	RideShareEnabled bool
 }
 
 // VehicleSnapshotReader returns the snapshot row for a Prisma cuid.
@@ -289,6 +302,24 @@ type vehicleSnapshotResponse struct {
 	// SNAPSHOT-ONLY: REST-derived, never streamed — a WS vehicle_update frame
 	// NEVER carries it.
 	ServiceEstimatedEndAt *string `json:"serviceEstimatedEndAt"`
+
+	// RideShareEnabled is the owner's ride-sharing switch (MYR-342,
+	// contracts v0.20.0) — the same value and the same semantics as
+	// VehicleSummary.rideShareEnabled on the catalog row.
+	//
+	// Carried HERE as well as on the list row on purpose: the owner's toggle
+	// lives on the vehicle detail surface, and a control whose current position
+	// can only be learned from a different endpoint is a control that renders
+	// wrong on a cold open. (Contrast `hasActiveRide`, which is list-only —
+	// nothing on the detail sheet reads it.)
+	//
+	// NOT a pointer and NO omitempty: `false` is a real, load-bearing value —
+	// the wire contract reads an ABSENT key as ENABLED, so an omitted false
+	// would un-pause a paused car on every read.
+	//
+	// SNAPSHOT-ONLY: owner intent, not telemetry — a WS vehicle_update frame
+	// NEVER carries it, and no Tesla field feeds it.
+	RideShareEnabled bool `json:"rideShareEnabled"`
 }
 
 // toMaskMap returns the response as a wire-name-keyed map suitable for
@@ -405,6 +436,9 @@ func addSnapshotMediaFields(m map[string]any, r vehicleSnapshotResponse) {
 	// MYR-316 — already resolved (precedence + in-service gate) by
 	// buildSnapshotResponse; this is the emitted value, not a raw column.
 	m["serviceEstimatedEndAt"] = derefOrNil(r.ServiceEstimatedEndAt)
+	// MYR-342 — the owner's switch, emitted raw (nothing to resolve). Keyed
+	// unconditionally, and permitted for BOTH roles by the mask tables.
+	m["rideShareEnabled"] = r.RideShareEnabled
 }
 
 // buildSnapshotResponse maps the store-layer row into the wire shape.
@@ -481,5 +515,8 @@ func buildSnapshotResponse(row VehicleSnapshotRow) vehicleSnapshotResponse {
 		// MYR-316: resolved here, so the precedence and the in-service gate are
 		// applied exactly once per surface (service_window.go).
 		ServiceEstimatedEndAt: serviceEstimatedEndAtWire(row.Status, row.ServiceETC, row.ServiceExpectedEndAt),
+		// MYR-342: passed straight through — the owner's answer IS the wire
+		// value, with no precedence to apply and no status to gate it on.
+		RideShareEnabled: row.RideShareEnabled,
 	}
 }

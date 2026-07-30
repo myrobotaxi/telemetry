@@ -109,7 +109,7 @@ func setupNavDispatcher(
 	// pickup at `scheduledFor` instead, claiming the SAME leg-1 latch. Started
 	// AFTER the reconciliation above so orphaned claims from the previous
 	// process are resolved before new ones are made.
-	startReservationSweeper(ctx, cfg, bus, d, rideRepo, logger)
+	startReservationSweeper(ctx, cfg, bus, d, rideRepo, vehicleRepo, logger)
 
 	logger.Info("nav-dispatch subscriber enabled",
 		slog.Bool("dispatch_enabled", cfg.DispatchEnabled()),
