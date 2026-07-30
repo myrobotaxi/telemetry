@@ -16,7 +16,7 @@ import (
 func TestRideRequestHandler_Incoming(t *testing.T) {
 	t.Run("scopes to owner and requested status", func(t *testing.T) {
 		store := &fakeRideStore{}
-		h := newRideHandler(store, &stubVehicleSnapshotReader{}, &fakeRidePublisher{}, rideOtherUsr)
+		h := newRideHandler(store, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, &fakeRidePublisher{}, rideOtherUsr)
 		rec := doRequest(t, rideMux(h), http.MethodGet, "/api/ride-requests/incoming?limit=7", "", rideAuthOK)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
@@ -31,7 +31,7 @@ func TestRideRequestHandler_Incoming(t *testing.T) {
 
 	t.Run("empty feed yields items [] and null cursor", func(t *testing.T) {
 		store := &fakeRideStore{}
-		h := newRideHandler(store, &stubVehicleSnapshotReader{}, &fakeRidePublisher{}, rideOtherUsr)
+		h := newRideHandler(store, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, &fakeRidePublisher{}, rideOtherUsr)
 		rec := doRequest(t, rideMux(h), http.MethodGet, "/api/ride-requests/incoming", "", rideAuthOK)
 		if !strings.Contains(rec.Body.String(), `"items":[]`) || !strings.Contains(rec.Body.String(), `"nextCursor":null`) {
 			t.Errorf("envelope: %s", rec.Body.String())
@@ -41,7 +41,7 @@ func TestRideRequestHandler_Incoming(t *testing.T) {
 	t.Run("hasMore emits decodable cursor over (createdAt,id)", func(t *testing.T) {
 		last := fixtureRideData(rideOtherUsr, rideStatusRequested)
 		store := &fakeRideStore{ownerPage: RideRequestListPage{Items: []RideRequestData{last}, HasMore: true}}
-		h := newRideHandler(store, &stubVehicleSnapshotReader{}, &fakeRidePublisher{}, rideOtherUsr)
+		h := newRideHandler(store, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, &fakeRidePublisher{}, rideOtherUsr)
 		rec := doRequest(t, rideMux(h), http.MethodGet, "/api/ride-requests/incoming", "", rideAuthOK)
 		var env struct {
 			NextCursor *string `json:"nextCursor"`
@@ -61,14 +61,14 @@ func TestRideRequestHandler_Incoming(t *testing.T) {
 
 	t.Run("400 on malformed cursor", func(t *testing.T) {
 		store := &fakeRideStore{}
-		h := newRideHandler(store, &stubVehicleSnapshotReader{}, &fakeRidePublisher{}, rideOtherUsr)
+		h := newRideHandler(store, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, &fakeRidePublisher{}, rideOtherUsr)
 		rec := doRequest(t, rideMux(h), http.MethodGet, "/api/ride-requests/incoming?cursor=@@", "", rideAuthOK)
 		assertErrEnvelope(t, rec, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest)
 	})
 
 	t.Run("401 without auth", func(t *testing.T) {
 		store := &fakeRideStore{}
-		h := newRideHandler(store, &stubVehicleSnapshotReader{}, &fakeRidePublisher{}, rideOtherUsr)
+		h := newRideHandler(store, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, &fakeRidePublisher{}, rideOtherUsr)
 		rec := doRequest(t, rideMux(h), http.MethodGet, "/api/ride-requests/incoming", "", "")
 		assertErrEnvelope(t, rec, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed)
 	})
@@ -105,7 +105,7 @@ func TestRideRequestHandler_AcceptDecline(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			store := &fakeRideStore{getRec: tt.rec, getErr: tt.getErr}
 			pub := &fakeRidePublisher{}
-			h := newRideHandler(store, &stubVehicleSnapshotReader{}, pub, tt.caller)
+			h := newRideHandler(store, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, pub, tt.caller)
 			rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/"+tt.action, "", rideAuthOK)
 
 			if rec.Code != tt.wantStatus {
@@ -334,7 +334,7 @@ func TestRideRequestHandler_Accept_DispatchExactlyOnce(t *testing.T) {
 	t.Run("winner publishes the seam exactly once", func(t *testing.T) {
 		store := &fakeRideStore{getRec: fixtureRideData(owner, rideStatusRequested)}
 		pub := &fakeRidePublisher{}
-		h := newRideHandler(store, &stubVehicleSnapshotReader{}, pub, owner)
+		h := newRideHandler(store, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, pub, owner)
 		rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/accept", "", rideAuthOK)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
@@ -361,7 +361,7 @@ func TestRideRequestHandler_Accept_DispatchExactlyOnce(t *testing.T) {
 			updated: fixtureRideData(owner, rideStatusAccepted),
 		}
 		pub := &fakeRidePublisher{}
-		h := newRideHandler(store, &stubVehicleSnapshotReader{}, pub, owner)
+		h := newRideHandler(store, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, pub, owner)
 		rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/accept", "", rideAuthOK)
 		assertErrEnvelope(t, rec, http.StatusConflict, wserrors.ErrCodeConflict)
 		if len(pub.events) != 0 {
@@ -386,7 +386,7 @@ func TestRideRequestHandler_Accept_VehicleAlreadyOnRide(t *testing.T) {
 		updateErr: ErrVehicleRideActive,
 	}
 	pub := &fakeRidePublisher{}
-	h := newRideHandler(store, &stubVehicleSnapshotReader{}, pub, owner)
+	h := newRideHandler(store, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, pub, owner)
 	rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/accept", "", rideAuthOK)
 
 	assertErrEnvelope(t, rec, http.StatusConflict, wserrors.ErrCodeVehicleUnavailable)
@@ -418,7 +418,7 @@ func TestRideRequestHandler_Accept_DispatchSeamPayload(t *testing.T) {
 
 	store := &fakeRideStore{getRec: ride, updated: updated}
 	pub := &fakeRidePublisher{}
-	h := newRideHandler(store, &stubVehicleSnapshotReader{}, pub, owner)
+	h := newRideHandler(store, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, pub, owner)
 	rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/accept", "", rideAuthOK)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
@@ -456,7 +456,7 @@ func TestRideRequestHandler_Accept_DispatchSeamPayload(t *testing.T) {
 // to the owner feed, not to ServeGet with id="incoming".
 func TestRideMux_IncomingLiteralWinsOverWildcard(t *testing.T) {
 	store := &fakeRideStore{getErr: fmtNotFound()} // ServeGet would 404
-	h := newRideHandler(store, &stubVehicleSnapshotReader{}, &fakeRidePublisher{}, rideOtherUsr)
+	h := newRideHandler(store, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, &fakeRidePublisher{}, rideOtherUsr)
 	rec := doRequest(t, rideMux(h), http.MethodGet, "/api/ride-requests/incoming", "", rideAuthOK)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected the incoming feed (200), got %d: %s", rec.Code, rec.Body.String())

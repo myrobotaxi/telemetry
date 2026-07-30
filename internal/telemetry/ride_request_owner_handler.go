@@ -221,6 +221,22 @@ func (h *RideRequestHandler) rejectIfVehicleUnavailable(ctx context.Context, w h
 		return true
 	}
 
+	// MYR-342 ride-sharing pause. Checked BEFORE the MYR-313 instant-only
+	// short-circuit below, because — unlike the in-service/offline gate — it
+	// applies to SCHEDULED accepts TOO. See ride_share_gate.go for the full
+	// argument; in short, the MYR-313 exemption rests on service visits ENDING,
+	// and an owner's pause has no such horizon. Accepting a reservation for a
+	// car its owner has withdrawn indefinitely leaves the request in the owner's
+	// queue and the rider expecting a car that is not coming.
+	//
+	// It rides the read ABOVE rather than adding one, which is also what keeps
+	// the MYR-313 fail-open shape intact: a lookup failure on a scheduled accept
+	// returns early up there, so an UNKNOWN pause state never blocks. Unknown is
+	// not paused.
+	if rejectIfRideSharePaused(w, h.logger, "ride-request accept", row, rec.OwnerID) {
+		return true
+	}
+
 	// MYR-313: the availability gate below is INSTANT-only.
 	if rec.ScheduledFor != nil {
 		return false

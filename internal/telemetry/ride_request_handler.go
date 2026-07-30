@@ -132,6 +132,21 @@ func (h *RideRequestHandler) ServeCreate(w http.ResponseWriter, r *http.Request)
 		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
 		return
 	}
+	// MYR-342: the vehicle's owner may have PAUSED ride requests for this car.
+	// Placed immediately after the access check and BEFORE anything is derived
+	// or written, so a caller with no access to the vehicle still gets the
+	// access denial rather than learning its pause state (ride_share_gate.go).
+	//
+	// Applies to INSTANT AND SCHEDULED creates alike — a deliberate deviation
+	// from the MYR-313 scheduled exemption below it. A service visit ends on its
+	// own, so a reservation booked across one is likely servable; an owner's
+	// pause is open-ended, so a reservation booked against a paused car is not.
+	// The flag is read off `row`, the very lookup that resolved the owner, so
+	// access and availability come from one statement and cannot disagree.
+	if rejectIfRideSharePaused(w, h.logger, "ride-request create", row, userID) {
+		return
+	}
+
 	in.RiderID = userID
 	// The ride's owner is the VEHICLE's owner, which for a shared rider is
 	// somebody other than the requester — that asymmetry is the point of the
