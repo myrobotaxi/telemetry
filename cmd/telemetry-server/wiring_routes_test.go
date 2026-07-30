@@ -181,6 +181,11 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 	}{
 		{"push device unregister (MYR-186, §7.17)", "/api/push/devices"},
 		{"share invite revoke (MYR-184, §7.5)", "/api/invites/csh0123456789abcdef0123456789abcd"},
+		// MYR-355: ALWAYS mounted. Every step is a local database operation, so
+		// no capability or deployment shape can gate it off — and an App Store
+		// review requirement that is contingent on configuration is a rejection
+		// waiting to happen.
+		{"account deletion (MYR-355, §7.6)", "/api/users/me"},
 	}
 	for _, rt := range deleteRoutes {
 		t.Run(rt.name, func(t *testing.T) {

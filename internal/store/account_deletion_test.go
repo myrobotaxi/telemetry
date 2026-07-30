@@ -26,34 +26,25 @@ func newAccountDeleter(t *testing.T) *store.AccountDeleter {
 	return store.NewAccountDeleter(testPool, testLogger())
 }
 
-// accountDeletionSchemaSQL adds the one Prisma-owned table the shared TestMain
-// fixture omits and this writer needs (AuditLog). Everything else it touches is
-// either in the shared fixture ("User", "Vehicle", "Drive") or created by the
-// real Go migrations, which the setup applies rather than mirroring by hand —
-// a hand-authored fixture is evidence only to the extent it is the schema.
-const accountDeletionSchemaSQL = `
-CREATE TABLE IF NOT EXISTS "AuditLog" (
-    "id"          TEXT PRIMARY KEY,
-    "userId"      TEXT NOT NULL,
-    "timestamp"   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    "action"      TEXT NOT NULL,
-    "targetType"  TEXT NOT NULL,
-    "targetId"    TEXT NOT NULL,
-    "initiator"   TEXT NOT NULL,
-    "metadata"    JSONB DEFAULT '{}',
-    "createdAt"   TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);`
-
 // setupAccountDeletion installs a clean slate for one test.
+//
+// The AuditLog table is created by audit_repo_test.go's `ensureAuditSchema`
+// rather than by a fixture of our own — deliberately. That constant carries the
+// append-only BEFORE UPDATE/DELETE triggers CG-DL-2 depends on, and a second,
+// trigger-less `CREATE TABLE IF NOT EXISTS` here would win the race (this file
+// sorts first) and silently disarm the guard for the whole package. Rows are
+// cleared with the same TRUNCATE those tests use, because a plain DELETE is
+// exactly what the trigger refuses.
 func setupAccountDeletion(t *testing.T) {
 	t.Helper()
-	mustApplyGoMigrations(t)
-	ctx := context.Background()
-	if _, err := testPool.Exec(ctx, accountDeletionSchemaSQL); err != nil {
-		t.Fatalf("apply account-deletion schema: %v", err)
+	if !dockerAvailable {
+		t.Skip("Docker not available -- skipping account-deletion integration test")
 	}
+	mustApplyGoMigrations(t)
+	ensureAuditSchema(t)
+	cleanAuditLog(t, testPool)
+	ctx := context.Background()
 	for _, stmt := range []string{
-		`DELETE FROM "AuditLog"`,
 		`DELETE FROM go_vehicle_shares`,
 		`DELETE FROM go_push_devices`,
 		`DELETE FROM go_refresh_tokens`,
