@@ -51,6 +51,7 @@ const sharedSummaryColumns = `"Vehicle"."id", "Vehicle"."userId", "Vehicle"."vin
 const queryVehiclesSharedWithUser = `SELECT ` + sharedSummaryColumns + `,
 	` + vehicleListHasActiveRideExpr + `,
 	gcs.service_etc, gcs.service_expected_end_at,
+	` + rideShareEnabledExpr + `,
 	s.permission
 FROM "Vehicle"` + sharedSummaryJoin + `
 LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"
@@ -141,6 +142,7 @@ func scanSharedVehicleSummaryRow(row rowScanner) (SharedVehicleSummary, error) {
 		&v.HasActiveRide,
 		&v.ServiceETC,
 		&v.ServiceExpectedEndAt,
+		&v.RideShareEnabled,
 		&v.Permission,
 	); err != nil {
 		return SharedVehicleSummary{}, fmt.Errorf("scan shared vehicle summary: %w", err)

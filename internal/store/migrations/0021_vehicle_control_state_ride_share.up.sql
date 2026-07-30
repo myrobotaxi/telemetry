@@ -1,0 +1,70 @@
+-- 0021_vehicle_control_state_ride_share.up.sql
+--
+-- MYR-342: extend the Go-owned go_vehicle_control_state side table (MYR-269,
+-- migration 0008; MYR-273, migration 0010; MYR-279, migration 0011; MYR-274,
+-- migration 0012; MYR-298, migration 0014; MYR-303/308, migration 0015;
+-- MYR-316, migration 0017; MYR-320, migration 0018) with the OWNER'S
+-- RIDE-SHARING SWITCH -- whether this car currently accepts ride requests at
+-- all.
+--
+-- The gap it closes: an owner had exactly two ways to stop riders booking their
+-- car, and neither was a switch. They could mark it `in_service` (a lie about
+-- where the car is, and one MYR-313 deliberately lets scheduled rides through),
+-- or they could decline every incoming request by hand, forever. Nothing
+-- expressed "this car is fine, I am simply not lending it out right now". This
+-- column is that expression, and it feeds one wire field on two surfaces,
+-- VehicleSummary.rideShareEnabled and VehicleState.rideShareEnabled
+-- (contracts v0.20.0).
+--
+-- Naming convention (CG-DL-9): Go-owned table, "go_" prefix, snake_case column,
+-- no foreign key to any table owned by the sibling app's ORM. It is added to
+-- the existing side table (keyed by vehicle_id) so the same idempotent per-car
+-- upsert and the same LEFT JOIN that already serve the snapshot and the catalog
+-- list carry it at no extra cost -- one probe of a primary key the reads
+-- already join on.
+--
+-- NOT NULLABLE, DEFAULT TRUE -- deliberately unlike every other column on this
+-- table. The others are "honest unknown" (NULL means the field was never
+-- observed, and the read path surfaces the absence rather than fabricating a
+-- value). This one has no unknown state to be honest about: a car whose owner
+-- has never touched the toggle IS accepting rides, which is exactly what TRUE
+-- means. A nullable column would have invented a third state that the product
+-- has no answer for, and every reader would have had to collapse it back to
+-- TRUE anyway.
+--
+-- The DEFAULT is therefore load-bearing in two places at once. On the column it
+-- backfills every existing row to the correct pre-MYR-342 behaviour (all cars
+-- were shareable, because there was no way not to be). On the read path the
+-- side table row may not exist AT ALL for a car that has never had a control
+-- write, so the LEFT JOIN yields SQL NULL and the readers wrap the column in
+-- COALESCE(gcs.ride_share_enabled, TRUE). Same default, expressed twice,
+-- because "no row" and "row with the column defaulted" must be indistinguishable
+-- to the wire.
+--
+-- WRITE PATH -- deliberately NOT the COALESCE upsert, for the same reason
+-- migration 0017's header gives and one more. The shared
+-- queryUpsertControlState writes `col = COALESCE(EXCLUDED.col, existing.col)`,
+-- in which a NULL means "leave alone". That form cannot express a CLEAR, and
+-- for a boolean whose whole purpose is to be toggled OFF it cannot express the
+-- interesting half of the field at all: `false` is not absence, it is the
+-- owner's decision. So this column gets DEDICATED statements that assign
+-- unconditionally (vehicle_ride_share.go, modelled on the MYR-316
+-- vehicle_service_window.go writer), and it is ABSENT FROM ControlStateUpdate
+-- entirely. Adding it there would be an access-control bug, not a style
+-- mistake: any telemetry frame flowing through the shared upsert could then
+-- silently re-enable a car its owner had paused.
+--
+-- Backfill note: this column has no Tesla source and never will. It is not fed
+-- by the MYR-260 REST /vehicle_data backfill, carries no fieldMap entry, and is
+-- not streamed -- Tesla has no proto and no REST field for "the owner is
+-- lending this car out", because it is a MyRoboTaxi product fact, not a vehicle
+-- fact. The MYR-300 stream-recency gate is therefore irrelevant to it and there
+-- is no stale-overwrite risk: the stream can never be its source.
+--
+-- Classification: P0 -- an owner's availability switch on their own car,
+-- operational state of the same tier as the sibling Vehicle.status. Not
+-- identifying, no GPS, no tokens, no PII. See data-classification.md
+-- section 1.13.
+
+ALTER TABLE go_vehicle_control_state
+    ADD COLUMN IF NOT EXISTS ride_share_enabled BOOLEAN NOT NULL DEFAULT true;

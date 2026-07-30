@@ -61,6 +61,14 @@ type VehicleSummary struct {
 	// has never been to service has no estimate to carry.
 	ServiceETC           *time.Time
 	ServiceExpectedEndAt *time.Time
+
+	// RideShareEnabled is the owner's ride-sharing switch (MYR-342), LEFT
+	// JOINed from the same go_vehicle_control_state row as the service window
+	// via rideShareEnabledExpr. A plain bool: the COALESCE in that expression
+	// makes "no side-table row" read as true, so an unpaused car and a car with
+	// no control history are the same thing here — which is what the wire
+	// contract requires (absent/unset means ENABLED).
+	RideShareEnabled bool
 }
 
 // ListSummariesByUser returns the catalog rows for every vehicle owned
@@ -159,6 +167,7 @@ func scanVehicleSummaryRow(row rowScanner) (VehicleSummary, error) {
 		&v.HasActiveRide,
 		&v.ServiceETC,
 		&v.ServiceExpectedEndAt,
+		&v.RideShareEnabled,
 	); err != nil {
 		return VehicleSummary{}, fmt.Errorf("scan vehicle summary: %w", err)
 	}
