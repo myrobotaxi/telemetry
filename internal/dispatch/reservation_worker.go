@@ -34,10 +34,13 @@ const codeReservationExpired = "reservation_expired"
 //     car whose rider gave up, which is strictly worse than an honest,
 //     alertable failure (the MYR-176 reconciler stance, applied to the
 //     sweeper's much larger lateness surface).
-//  2. Check busy BEFORE claiming. The claim is irreversible (the latch admits
-//     one winner for the row's lifetime), so claiming a reservation we then
-//     decline to push would burn it permanently. Holding costs nothing: the
-//     row stays selectable and the next tick re-decides.
+//  2. Check busy — and, since MYR-342, the owner's ride-sharing pause — BEFORE
+//     claiming. The claim is irreversible (the latch admits one winner for the
+//     row's lifetime), so claiming a reservation we then decline to push would
+//     burn it permanently. Holding costs nothing: the row stays selectable and
+//     the next tick re-decides. Both questions are "may this car be dispatched
+//     right now?", and both must be answered before anything irreversible
+//     happens.
 //  3. Claim, atomically, and only then. The claim re-validates status in SQL,
 //     so a rider cancel or an owner picked-up landing after the pass SELECTed
 //     the row loses the claim and we do nothing.
@@ -78,6 +81,10 @@ func (s *ReservationSweeper) handleDue(ctx context.Context, r *DueReservation) s
 		return decisionHeld
 	}
 
+	if held := s.holdIfRideSharePaused(ctx, r); held {
+		return decisionHeld
+	}
+
 	claimed, err := s.store.ClaimReservationDispatch(ctx, r.RideRequestID)
 	if err != nil {
 		s.logger.Error("reservation sweep: claim failed",
@@ -104,6 +111,55 @@ func (s *ReservationSweeper) handleDue(ctx context.Context, r *DueReservation) s
 		s.publishDue(ctx, r, now)
 	}
 	return decisionDispatched
+}
+
+// holdIfRideSharePaused is the MYR-342 pause probe: the THIRD and last
+// enforcement layer of the owner's ride-sharing switch, and the only one that
+// runs outside a request.
+//
+// The first two layers refuse a paused car at request time (ride-request create
+// and owner accept). This one exists for the reservation that was ALREADY
+// accepted when its owner reached for the switch — the request-time gates
+// cannot reach backwards, and without this layer a paused car would still be
+// dialled days later by the sweeper.
+//
+// It sits BESIDE the busy probe and BEFORE the claim for exactly the reason
+// step 2 of handleDue's ordering gives: the claim is irreversible, so a
+// reservation we claim and then decline to push is burnt permanently. HOLDING is
+// free — the row stays selectable and the next tick re-decides — so an owner who
+// un-pauses inside the lateness window still gets the dispatch they meant to
+// allow.
+//
+// There is deliberately NO expiry logic here. A reservation whose owner never
+// re-enables the car is not held forever: it crosses scheduledFor + MaxLateness
+// and expire() resolves it honestly as `reservation_expired`, which is the same
+// outcome a permanently-busy car produces and needs no new code path.
+//
+// An unreadable pause state HOLDS, matching the busy probe: we cannot tell
+// whether pushing would dial a car its owner has withdrawn, and a held
+// reservation is recoverable where a wrong push is not. Note this is the one
+// place in MYR-342 that fails CLOSED — the accept path fails OPEN on an
+// unreadable vehicle (MYR-313) because there a human is waiting on an answer.
+// Here nobody is: the row simply gets re-decided in 30 seconds.
+func (s *ReservationSweeper) holdIfRideSharePaused(ctx context.Context, r *DueReservation) bool {
+	enabled, err := s.store.VehicleRideShareEnabled(ctx, r.VehicleID)
+	if err != nil {
+		s.logger.Error("reservation sweep: ride-share pause check failed",
+			slog.String("ride_id", r.RideRequestID),
+			slog.String("vehicle_id", r.VehicleID),
+			slog.String("error", err.Error()),
+		)
+		return true
+	}
+	if !enabled {
+		s.logger.Info("reservation sweep: ride sharing paused for vehicle, holding",
+			slog.String("ride_id", r.RideRequestID),
+			slog.String("vehicle_id", r.VehicleID),
+			slog.Time("scheduled_for", r.ScheduledFor),
+		)
+		return true
+	}
+	return false
 }
 
 // pastDeadline reports whether a due reservation has passed its lateness

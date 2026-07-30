@@ -133,6 +133,14 @@ type fakeReservationStore struct {
 
 	// beforeBusy runs at the start of every busy check, with no lock held.
 	beforeBusy func(vehicleID string)
+
+	// MYR-342 ride-sharing pause. A vehicle ABSENT from the map is NOT paused,
+	// so every pre-existing test keeps its meaning without being touched —
+	// which is also the production default (the store COALESCEs a missing
+	// control-state row to enabled).
+	paused   map[string]bool
+	pauseErr error
+	pauseCnt int
 }
 
 func (f *fakeReservationStore) ListDueReservations(
@@ -168,6 +176,22 @@ func (f *fakeReservationStore) VehicleHasActiveInstantRide(_ context.Context, ve
 		return false, f.busyErr
 	}
 	return f.busy[vehicleID], nil
+}
+
+func (f *fakeReservationStore) VehicleRideShareEnabled(_ context.Context, vehicleID string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pauseCnt++
+	if f.pauseErr != nil {
+		return false, f.pauseErr
+	}
+	return !f.paused[vehicleID], nil
+}
+
+func (f *fakeReservationStore) pauseCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pauseCnt
 }
 
 func (f *fakeReservationStore) ClaimReservationDispatch(ctx context.Context, rideID string) (bool, error) {
