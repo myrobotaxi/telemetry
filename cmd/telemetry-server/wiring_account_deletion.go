@@ -25,21 +25,26 @@ func setupAccountDeletionEndpoint(deps httpRouteDeps) {
 
 	rides := &rideRequestStoreAdapter{repo: deps.rideRepo}
 
-	handler := telemetry.NewAccountDeletionHandler(
-		deps.authenticator,
-		telemetry.AccountDeletionDeps{
-			Vehicles: &ownedVehicleListerAdapter{repo: deps.vehicleRepo},
-			Teardown: &ownerTeardownAdapter{teardown: store.NewOwnerTeardown(deps.pool, logger)},
-			Rides:    &accountRideCancellerAdapter{repo: deps.rideRepo, rides: rides},
-			Events:   deps.bus,
-			Data:     &accountDataDeleterAdapter{deleter: store.NewAccountDeleter(deps.pool, logger)},
-			Sessions: deps.sessionInvalidator,
-		},
-		logger,
-	)
+	// MYR-366: revoke the Tesla grant before any step deletes the tokens.
+	// A typed nil would satisfy the interface and defeat the handler's nil
+	// check, so the assignment is guarded rather than passed straight through.
+	deletionDeps := telemetry.AccountDeletionDeps{
+		Vehicles: &ownedVehicleListerAdapter{repo: deps.vehicleRepo},
+		Teardown: &ownerTeardownAdapter{teardown: store.NewOwnerTeardown(deps.pool, logger)},
+		Rides:    &accountRideCancellerAdapter{repo: deps.rideRepo, rides: rides},
+		Events:   deps.bus,
+		Data:     &accountDataDeleterAdapter{deleter: store.NewAccountDeleter(deps.pool, logger)},
+		Sessions: deps.sessionInvalidator,
+	}
+	if revoker := newTeslaLinkRevoker(deps, logger); revoker != nil {
+		deletionDeps.TeslaLink = revoker
+	}
+
+	handler := telemetry.NewAccountDeletionHandler(deps.authenticator, deletionDeps, logger)
 
 	deps.srv.HandleFunc("DELETE /api/users/me", handler.ServeHTTP)
 	logger.Info("account deletion endpoint enabled (DELETE /api/users/me)",
 		slog.Bool("session_invalidation", deps.sessionInvalidator != nil),
+		slog.Bool("tesla_grant_revocation", deletionDeps.TeslaLink != nil),
 	)
 }
