@@ -122,5 +122,12 @@ func snapshotRowFromVehicle(v store.Vehicle) telemetry.VehicleSnapshotRow {
 		// the FSD designation next to SoftwareVersion (the firmware build).
 		TrimLabel:  v.TrimLabel,
 		FSDVersion: v.FSDVersion,
+
+		// MYR-342 owner ride-sharing switch. Copied like any other joined
+		// column, but note it is the ONE field here whose zero value is a
+		// meaningful (and wrong) answer: false reads as PAUSED. The source is
+		// GetByID, which joins the side table and COALESCEs a missing row to
+		// true, so the value is always the store's, never a Go default.
+		RideShareEnabled: v.RideShareEnabled,
 	}
 }

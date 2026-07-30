@@ -234,6 +234,14 @@ var vehicleStateOwnerFields = []string{
 	// needs it for exactly the same reason the owner does (it floors the
 	// scheduling picker). Snapshot-only; server-computed, never client-set.
 	"serviceEstimatedEndAt",
+	// MYR-342 — the owner's ride-sharing switch. P0 both roles: operational
+	// availability of the car, the same tier as `status` and `hasActiveRide`.
+	// EXPLICITLY not owner-private, and the reasoning is the inverse of the
+	// usual one — a viewer is the party the value is ABOUT. A rider who cannot
+	// see that the car shared with them is paused discovers it from a 409 after
+	// filling in a pickup and a dropoff, which is the feature failing. The
+	// viewer list below inherits it (it subtracts only `vin`).
+	"rideShareEnabled",
 	// Odometer / FSD.
 	"odometerMiles",
 	"fsdMilesSinceReset",
@@ -327,6 +335,14 @@ var vehicleSummaryOwnerFields = []string{
 	// instant, so a viewer who cannot see it cannot schedule correctly. The
 	// viewer list below inherits it (the viewer list subtracts nothing).
 	"serviceEstimatedEndAt",
+	// MYR-342 — the owner's ride-sharing switch. P0, and NOT owner-private for
+	// a stronger reason than any of the fields above: the viewer is the party
+	// this value is ABOUT. It tells a rider whether the car they were granted
+	// is taking requests at all, and withholding it would mean the only way to
+	// learn a car is paused is to be refused with 409 `vehicle_unavailable`
+	// after composing a whole request. The viewer list below inherits it (that
+	// list subtracts nothing).
+	"rideShareEnabled",
 }
 
 // vehicleSummaryViewerFields is the owner list PLUS `sharePermission`, with
