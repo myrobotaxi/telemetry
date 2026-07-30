@@ -106,6 +106,17 @@ func (a *rideRequestStoreAdapter) ListByOwnerPage(ctx context.Context, ownerID s
 	return fromStorePage(page), nil
 }
 
+// ListUpcomingByOwnerVehiclePage passes the MYR-360 upcoming-reservations
+// slice through, translating the ASCENDING (scheduledFor, id) cursor at the
+// boundary like every other cursor here.
+func (a *rideRequestStoreAdapter) ListUpcomingByOwnerVehiclePage(ctx context.Context, ownerID, vehicleID string, cursor telemetry.RideRequestUpcomingCursor, limit int) (telemetry.RideRequestListPage, error) {
+	page, err := a.repo.ListUpcomingByOwnerVehiclePage(ctx, ownerID, vehicleID, toStoreUpcomingCursor(cursor), limit)
+	if err != nil {
+		return telemetry.RideRequestListPage{}, fmt.Errorf("list upcoming ride reservations by owner vehicle: %w", err)
+	}
+	return fromStorePage(page), nil
+}
+
 // toStorePlace / toStoreCursor translate handler-layer inputs into store
 // shapes; fromStoreRideRequest / fromStorePage translate the other way.
 
@@ -120,6 +131,10 @@ func toStorePlace(p telemetry.RidePlaceData) store.RidePlace {
 
 func toStoreCursor(c telemetry.RideRequestListCursor) store.RideRequestListCursor {
 	return store.RideRequestListCursor{CreatedAt: c.CreatedAt, ID: c.ID}
+}
+
+func toStoreUpcomingCursor(c telemetry.RideRequestUpcomingCursor) store.RideRequestUpcomingCursor {
+	return store.RideRequestUpcomingCursor{ScheduledFor: c.ScheduledFor, ID: c.ID}
 }
 
 func fromStorePlace(p store.RidePlace) telemetry.RidePlaceData {

@@ -2,8 +2,6 @@ package telemetry
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"time"
 
@@ -73,13 +71,6 @@ type RideRequestData struct {
 	DispatchedAt   *time.Time
 }
 
-// RideRequestListCursor is the (createdAt, id) anchor the store resumes a
-// keyset scan from. Zero value = first page.
-type RideRequestListCursor struct {
-	CreatedAt time.Time
-	ID        string
-}
-
 // RideRequestListPage is one page of a keyset scan plus the has-more probe
 // result.
 type RideRequestListPage struct {
@@ -138,6 +129,12 @@ type RideRequestStore interface {
 	UpdateStatusFrom(ctx context.Context, id string, from []string, to string) (RideRequestData, error)
 	ListByRiderPage(ctx context.Context, riderID string, cursor RideRequestListCursor, limit int) (RideRequestListPage, error)
 	ListByOwnerPage(ctx context.Context, ownerID string, status *string, cursor RideRequestListCursor, limit int) (RideRequestListPage, error)
+	// ListUpcomingByOwnerVehiclePage returns the owner's ACCEPTED, still
+	// FUTURE reservations for ONE vehicle, SOONEST first (MYR-360). Owner
+	// scoping is the authorization model: a vehicle the caller does not own
+	// matches no rows, so an unknown/unowned id is an empty page, never an
+	// error the caller could read as "this vehicle exists".
+	ListUpcomingByOwnerVehiclePage(ctx context.Context, ownerID, vehicleID string, cursor RideRequestUpcomingCursor, limit int) (RideRequestListPage, error)
 }
 
 // RideEventPublisher publishes the ride-hailing domain events onto the event
@@ -240,49 +237,4 @@ type rideRequestCreateBody struct {
 	PassengerName  *string        `json:"passengerName"`
 	PassengerPhone *string        `json:"passengerPhone"`
 	ScheduledFor   *string        `json:"scheduledFor"`
-}
-
-// rideRequestCursor is the opaque base64(JSON) list cursor. Encodes
-// (createdAt, id) so pagination is stable across concurrent inserts. createdAt
-// travels as RFC3339Nano so it round-trips into the store's timestamptz keyset
-// comparison without precision loss.
-type rideRequestCursor struct {
-	CreatedAt string `json:"createdAt"`
-	ID        string `json:"id"`
-}
-
-// errMalformedRideCursor is the sentinel every recoverable cursor parse
-// failure maps to; the handler surfaces it as 400 invalid_request without
-// echoing the internal parse error.
-var errMalformedRideCursor = errors.New("malformed ride-request cursor")
-
-// encodeRideCursor serialises a (createdAt, id) anchor into the opaque wire
-// cursor. Marshaling two strings cannot fail.
-func encodeRideCursor(createdAt time.Time, id string) string {
-	raw, _ := json.Marshal(rideRequestCursor{
-		CreatedAt: createdAt.UTC().Format(time.RFC3339Nano),
-		ID:        id,
-	})
-	return base64.StdEncoding.EncodeToString(raw)
-}
-
-// decodeRideCursor parses an opaque cursor into a store-ready anchor. Returns
-// errMalformedRideCursor on any bad base64 / JSON / field.
-func decodeRideCursor(s string) (RideRequestListCursor, error) {
-	raw, err := base64.StdEncoding.DecodeString(s)
-	if err != nil {
-		return RideRequestListCursor{}, errMalformedRideCursor
-	}
-	var c rideRequestCursor
-	if err := json.Unmarshal(raw, &c); err != nil {
-		return RideRequestListCursor{}, errMalformedRideCursor
-	}
-	if c.CreatedAt == "" || c.ID == "" {
-		return RideRequestListCursor{}, errMalformedRideCursor
-	}
-	ts, err := time.Parse(time.RFC3339Nano, c.CreatedAt)
-	if err != nil {
-		return RideRequestListCursor{}, errMalformedRideCursor
-	}
-	return RideRequestListCursor{CreatedAt: ts, ID: c.ID}, nil
 }

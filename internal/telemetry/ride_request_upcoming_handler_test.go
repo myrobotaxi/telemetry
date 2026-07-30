@@ -26,10 +26,12 @@ const (
 	upcomingRideIDB = "crrbbb0123456789abcdef0123456789"
 )
 
-// upcomingRide builds an ACCEPTED, SCHEDULED ride on the fixture vehicle owned
-// by `owner` and due at `at` — the shape the slice is meant to return.
-func upcomingRide(owner, id string, at time.Time) RideRequestData {
-	rec := fixtureRideData(owner, rideStatusAccepted)
+// upcomingRide builds an ACCEPTED, SCHEDULED ride on the fixture vehicle, due
+// at `at` — the shape the slice is meant to return. The owner is pinned to the
+// authenticated caller in these tests (rideOtherUsr), which is the only owner
+// the slice can ever be scoped to.
+func upcomingRide(id string, at time.Time) RideRequestData {
+	rec := fixtureRideData(rideOtherUsr, rideStatusAccepted)
 	rec.ID = id
 	utc := at.UTC()
 	rec.ScheduledFor = &utc
@@ -49,8 +51,8 @@ func TestRideRequestHandler_IncomingUpcomingForVehicle(t *testing.T) {
 			// feed would return the wrong rows loudly rather than an empty page.
 			ownerPage: RideRequestListPage{Items: []RideRequestData{fixtureRideData(owner, rideStatusRequested)}},
 			upcomingPage: RideRequestListPage{Items: []RideRequestData{
-				upcomingRide(owner, upcomingRideIDA, soon),
-				upcomingRide(owner, upcomingRideIDB, later),
+				upcomingRide(upcomingRideIDA, soon),
+				upcomingRide(upcomingRideIDB, later),
 			}},
 		}
 	}
@@ -103,7 +105,7 @@ func TestRideRequestHandler_IncomingUpcomingForVehicle(t *testing.T) {
 
 	t.Run("resolves requesterName exactly as every other list item does", func(t *testing.T) {
 		name := "Maya"
-		row := upcomingRide(owner, upcomingRideIDA, soon)
+		row := upcomingRide(upcomingRideIDA, soon)
 		row.RequesterName = &name
 		st := &fakeRideStore{upcomingPage: RideRequestListPage{Items: []RideRequestData{row}}}
 		h := newRideHandler(st, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, &fakeRidePublisher{}, owner)
@@ -140,7 +142,7 @@ func TestRideRequestHandler_IncomingUpcomingForVehicle(t *testing.T) {
 	})
 
 	t.Run("nextCursor anchors on (scheduledFor, id), not (createdAt, id)", func(t *testing.T) {
-		last := upcomingRide(owner, upcomingRideIDB, later)
+		last := upcomingRide(upcomingRideIDB, later)
 		st := &fakeRideStore{upcomingPage: RideRequestListPage{Items: []RideRequestData{last}, HasMore: true}}
 		h := newRideHandler(st, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, &fakeRidePublisher{}, owner)
 		rec := doRequest(t, rideMux(h), http.MethodGet,
@@ -151,7 +153,7 @@ func TestRideRequestHandler_IncomingUpcomingForVehicle(t *testing.T) {
 
 		var env struct {
 			NextCursor *string `json:"nextCursor"`
-			HasMore     bool   `json:"hasMore"`
+			HasMore    bool    `json:"hasMore"`
 		}
 		if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
 			t.Fatalf("decode: %v", err)
@@ -266,7 +268,7 @@ func TestRideRequestHandler_IncomingDefaultFeedUnchanged(t *testing.T) {
 		// Seeded so a handler that took the new branch unconditionally would
 		// serve these instead and fail loudly.
 		upcomingPage: RideRequestListPage{Items: []RideRequestData{
-			upcomingRide(owner, upcomingRideIDA, time.Date(2026, 8, 1, 17, 0, 0, 0, time.UTC)),
+			upcomingRide(upcomingRideIDA, time.Date(2026, 8, 1, 17, 0, 0, 0, time.UTC)),
 		}},
 	}
 	h := newRideHandler(st, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, &fakeRidePublisher{}, owner)

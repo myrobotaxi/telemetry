@@ -38,9 +38,22 @@ import (
 // scheduledFor set, not a separate status), newest first, cursor-paginated
 // with the same RideRequestsListResponse envelope + (createdAt, id) cursor as
 // the rider list.
+//
+// ONE optional query param selects a different slice of this same owner-scoped
+// feed: `?upcomingForVehicle={vehicleId}` returns the owner's ACCEPTED, still
+// FUTURE reservations for that car, soonest first (MYR-360 — see
+// ride_request_upcoming_handler.go). ABSENT the param this endpoint is
+// byte-identical to what it has always served; a test pins that.
 func (h *RideRequestHandler) ServeIncoming(w http.ResponseWriter, r *http.Request) {
 	userID, ok := h.authUser(w, r)
 	if !ok {
+		return
+	}
+
+	// Presence, not emptiness: `?upcomingForVehicle=` is a malformed request
+	// for the slice (400), not a request for the default feed.
+	if r.URL.Query().Has(queryUpcomingForVehicle) {
+		h.serveUpcomingForVehicle(w, r, userID)
 		return
 	}
 

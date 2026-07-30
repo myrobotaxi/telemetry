@@ -181,6 +181,19 @@ func (f *fakeRideStore) ListByOwnerPage(_ context.Context, ownerID string, statu
 	return f.ownerPage, nil
 }
 
+func (f *fakeRideStore) ListUpcomingByOwnerVehiclePage(_ context.Context, ownerID, vehicleID string, cursor RideRequestUpcomingCursor, limit int) (RideRequestListPage, error) {
+	f.upcomingCalls++
+	f.upcomingCall.ownerID = ownerID
+	f.upcomingCall.vehicleID = vehicleID
+	f.upcomingCall.cursorScheduledFor = cursor.ScheduledFor
+	f.upcomingCall.cursorID = cursor.ID
+	f.upcomingCall.limit = limit
+	if f.upcomingErr != nil {
+		return RideRequestListPage{}, f.upcomingErr
+	}
+	return f.upcomingPage, nil
+}
+
 // fakeRidePublisher captures every published event so tests can assert the
 // WS/dispatch seam fired with the right payload.
 type fakeRidePublisher struct {

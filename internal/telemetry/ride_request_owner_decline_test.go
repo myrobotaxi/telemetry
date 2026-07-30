@@ -23,9 +23,10 @@ import (
 // An accepted INSTANT ride keeps returning 409: a car already dispatched to a
 // rider standing on a sidewalk is a different situation and out of scope.
 
-// scheduledRide returns a ride in `status` carrying a reservation instant.
-func scheduledRide(owner, status string, at time.Time) RideRequestData {
-	rec := fixtureRideData(owner, status)
+// scheduledRide returns a ride in `status` carrying a reservation instant,
+// owned by the authenticated caller in these tests (rideOtherUsr).
+func scheduledRide(status string, at time.Time) RideRequestData {
+	rec := fixtureRideData(rideOtherUsr, status)
 	utc := at.UTC()
 	rec.ScheduledFor = &utc
 	return rec
@@ -48,7 +49,7 @@ func TestRideRequestHandler_DeclineAcceptedScheduled(t *testing.T) {
 	}{
 		{
 			name:       "accepted scheduled reservation is declinable (MYR-360)",
-			rec:        scheduledRide(owner, rideStatusAccepted, future),
+			rec:        scheduledRide(rideStatusAccepted, future),
 			wantFrom:   []string{rideStatusRequested, rideStatusAccepted},
 			wantStatus: http.StatusOK,
 		},
@@ -57,7 +58,7 @@ func TestRideRequestHandler_DeclineAcceptedScheduled(t *testing.T) {
 			// Deliberate: the ride is still `accepted`, the owner is still the
 			// decider, and an explicit decline is strictly better for the rider
 			// than the silent `reservation_expired` at the lateness ceiling.
-			rec:        scheduledRide(owner, rideStatusAccepted, past),
+			rec:        scheduledRide(rideStatusAccepted, past),
 			wantFrom:   []string{rideStatusRequested, rideStatusAccepted},
 			wantStatus: http.StatusOK,
 		},
@@ -74,33 +75,33 @@ func TestRideRequestHandler_DeclineAcceptedScheduled(t *testing.T) {
 		},
 		{
 			name:       "requested scheduled ride is unchanged",
-			rec:        scheduledRide(owner, rideStatusRequested, future),
+			rec:        scheduledRide(rideStatusRequested, future),
 			wantFrom:   []string{rideStatusRequested, rideStatusAccepted},
 			wantStatus: http.StatusOK,
 		},
 		{
 			name:       "scheduled ride already arrived conflicts",
-			rec:        scheduledRide(owner, rideStatusArrived, future),
+			rec:        scheduledRide(rideStatusArrived, future),
 			wantStatus: http.StatusConflict,
 		},
 		{
 			name:       "scheduled ride enroute conflicts",
-			rec:        scheduledRide(owner, rideStatusEnroute, future),
+			rec:        scheduledRide(rideStatusEnroute, future),
 			wantStatus: http.StatusConflict,
 		},
 		{
 			name:       "already declined conflicts",
-			rec:        scheduledRide(owner, rideStatusDeclined, future),
+			rec:        scheduledRide(rideStatusDeclined, future),
 			wantStatus: http.StatusConflict,
 		},
 		{
 			name:       "completed conflicts",
-			rec:        scheduledRide(owner, rideStatusCompleted, future),
+			rec:        scheduledRide(rideStatusCompleted, future),
 			wantStatus: http.StatusConflict,
 		},
 		{
 			name:       "cancelled conflicts",
-			rec:        scheduledRide(owner, rideStatusCancelled, future),
+			rec:        scheduledRide(rideStatusCancelled, future),
 			wantStatus: http.StatusConflict,
 		},
 	}
@@ -163,7 +164,6 @@ func TestRideRequestHandler_DeclineAcceptedScheduled(t *testing.T) {
 // TestRideRequestHandler_DeclineRemainsOwnerOnly proves MYR-360 widened only
 // the LIFECYCLE legality — the authorization model is untouched.
 func TestRideRequestHandler_DeclineRemainsOwnerOnly(t *testing.T) {
-	const owner = rideOtherUsr
 	future := time.Date(2026, 8, 1, 17, 30, 0, 0, time.UTC)
 
 	tests := []struct {
@@ -178,7 +178,7 @@ func TestRideRequestHandler_DeclineRemainsOwnerOnly(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			st := &fakeRideStore{getRec: scheduledRide(owner, rideStatusAccepted, future)}
+			st := &fakeRideStore{getRec: scheduledRide(rideStatusAccepted, future)}
 			pub := &fakeRidePublisher{}
 			h := newRideHandler(st, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, pub, tt.caller)
 			rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/decline", "", rideAuthOK)
@@ -196,7 +196,7 @@ func TestRideRequestHandler_AcceptUnaffectedByDeclineWidening(t *testing.T) {
 	const owner = rideOtherUsr
 	future := time.Date(2026, 8, 1, 17, 30, 0, 0, time.UTC)
 
-	st := &fakeRideStore{getRec: scheduledRide(owner, rideStatusAccepted, future)}
+	st := &fakeRideStore{getRec: scheduledRide(rideStatusAccepted, future)}
 	pub := &fakeRidePublisher{}
 	h := newRideHandler(st, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, pub, owner)
 	rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/accept", "", rideAuthOK)
@@ -216,7 +216,7 @@ func TestRideRequestHandler_DeclineRace(t *testing.T) {
 	const owner = rideOtherUsr
 	future := time.Date(2026, 8, 1, 17, 30, 0, 0, time.UTC)
 
-	st := newRacingDeclineStore(scheduledRide(owner, rideStatusAccepted, future))
+	st := newRacingDeclineStore(scheduledRide(rideStatusAccepted, future))
 	pub := &syncRidePublisher{}
 	h := newRideHandler(st, &stubVehicleSnapshotReader{row: availableSnapshotRow()}, pub, owner)
 	mux := rideMux(h)
@@ -302,6 +302,10 @@ func (s *racingDeclineStore) ListByRiderPage(context.Context, string, RideReques
 }
 
 func (s *racingDeclineStore) ListByOwnerPage(context.Context, string, *string, RideRequestListCursor, int) (RideRequestListPage, error) {
+	return RideRequestListPage{}, errors.New("not used")
+}
+
+func (s *racingDeclineStore) ListUpcomingByOwnerVehiclePage(context.Context, string, string, RideRequestUpcomingCursor, int) (RideRequestListPage, error) {
 	return RideRequestListPage{}, errors.New("not used")
 }
 
