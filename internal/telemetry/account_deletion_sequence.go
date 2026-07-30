@@ -43,7 +43,16 @@ func (h *AccountDeletionHandler) run(ctx context.Context, userID string) (accoun
 		counts.DriveCount = n
 	}
 
-	// (2) Tear down every owned vehicle through the existing MYR-258
+	// (2) Revoke the Tesla OAuth grant at Tesla, while we still hold the
+	// refresh token. This MUST precede step 3: the last-vehicle arm of the
+	// teardown deletes the "Account" row, and step 8's "User" cascade takes
+	// any that survives — after either, the token needed to revoke is gone
+	// and only the owner can withdraw the grant by hand. Best-effort and
+	// deliberately unchecked: MYR-366 makes Tesla's availability unable to
+	// block a person's deletion of their own account.
+	h.revokeTeslaLink(ctx, userID)
+
+	// (3) Tear down every owned vehicle through the existing MYR-258
 	// transaction — one per car.
 	torndown, err := h.tearDownOwnedVehicles(ctx, userID)
 	if err != nil {
@@ -51,44 +60,44 @@ func (h *AccountDeletionHandler) run(ctx context.Context, userID string) (accoun
 	}
 	counts.VehicleCount = torndown
 
-	// (3) Revoke the grants this user REDEEMED. The grants ON their own cars
-	// went with step 2; these are the ones pointing the other way.
+	// (4) Revoke the grants this user REDEEMED. The grants ON their own cars
+	// went with step 3; these are the ones pointing the other way.
 	revoked, err := h.deps.Data.RevokeSharesReceived(ctx, userID)
 	if err != nil {
 		return accountDeletionResult{}, &accountDeletionError{step: "revoke_shares_received", cause: err}
 	}
 	counts.SharesRevoked = revoked
 
-	// (4) Cancel the open rides this user holds as RIDER, notifying owners.
+	// (5) Cancel the open rides this user holds as RIDER, notifying owners.
 	cancelled, err := h.cancelOpenRides(ctx, userID)
 	if err != nil {
 		return accountDeletionResult{}, &accountDeletionError{step: "cancel_open_rides", cause: err}
 	}
 	counts.RidesCancelled = cancelled
 
-	// (5) Push devices — the address book goes whole.
+	// (6) Push devices — the address book goes whole.
 	devices, err := h.deps.Data.DeletePushDevices(ctx, userID)
 	if err != nil {
 		return accountDeletionResult{}, &accountDeletionError{step: "delete_push_devices", cause: err}
 	}
 	counts.PushDevicesDeleted = devices
 
-	// (6) Refresh tokens — revoked so no stored session can mint a new access
-	// token. The CURRENT access token deliberately keeps working until step 8,
-	// because it is what authenticates a re-run if step 7 fails.
+	// (7) Refresh tokens — revoked so no stored session can mint a new access
+	// token. The CURRENT access token deliberately keeps working until step 9,
+	// because it is what authenticates a re-run if step 8 fails.
 	tokens, err := h.deps.Data.RevokeRefreshTokens(ctx, userID)
 	if err != nil {
 		return accountDeletionResult{}, &accountDeletionError{step: "revoke_refresh_tokens", cause: err}
 	}
 	counts.RefreshTokensRevoked = tokens
 
-	// (7) Identity + audit, one transaction, LAST.
+	// (8) Identity + audit, one transaction, LAST.
 	outcome, err := h.deps.Data.DeleteIdentity(ctx, userID, counts)
 	if err != nil {
 		return accountDeletionResult{}, &accountDeletionError{step: "delete_identity", cause: err}
 	}
 
-	// (8) Close the token window immediately rather than waiting for the
+	// (9) Close the token window immediately rather than waiting for the
 	// existence/access caches to expire on their own.
 	h.invalidateSessions(userID)
 
@@ -128,7 +137,7 @@ func (h *AccountDeletionHandler) tearDownOwnedVehicles(ctx context.Context, user
 // §7.8). A ride already ENROUTE or ARRIVED is a car physically carrying this
 // person right now; cancelling it from under the owner mid-drive would be a
 // worse outcome than letting it finish, and it reaches a terminal state on its
-// own within the trip. Those rides are LEFT, and after step 7 they render to
+// own within the trip. Those rides are LEFT, and after step 8 they render to
 // the owner as a former rider exactly as completed history does.
 //
 // A ride that loses the race (the owner declined or completed it between the
@@ -189,6 +198,22 @@ func (h *AccountDeletionHandler) publishRideCancelled(ctx context.Context, updat
 			slog.String("error", err.Error()),
 		)
 	}
+}
+
+// revokeTeslaLink actively revokes the user's Tesla OAuth grant at Tesla
+// before the deletion takes the tokens it needs (MYR-366). Nil deps.TeslaLink
+// — no Tesla OAuth client configured — is a skip, and so is a user with no
+// Tesla account row, which is both the rider case and the re-run case.
+//
+// It returns nothing on purpose. There is no failure mode of this step that a
+// caller should act on: the account is going either way, and the one thing a
+// revocation failure changes is that the grant remains listed on the owner's
+// tesla.com third-party-apps page, which they can remove themselves.
+func (h *AccountDeletionHandler) revokeTeslaLink(ctx context.Context, userID string) {
+	if h.deps.TeslaLink == nil {
+		return
+	}
+	h.deps.TeslaLink.RevokeTeslaLink(ctx, userID)
 }
 
 // invalidateSessions drops the auth caches for the deleted user.
