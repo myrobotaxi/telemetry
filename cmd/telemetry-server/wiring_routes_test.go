@@ -96,6 +96,10 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 		{"ride requests incoming feed (MYR-175)", "/api/ride-requests/incoming"},
 		// MYR-184 vehicle sharing (§7.5). The owner's invite list.
 		{"share invite list (MYR-184, §7.5)", "/api/vehicles/clxyz1234567890abcdef/invites"},
+		// MYR-349 notification preferences (§7.19). Mounted unconditionally,
+		// like its §7.17 sibling: a person must be able to switch a category
+		// off whether or not this deploy carries the APNs credentials.
+		{"push prefs read (MYR-349, §7.19)", "/api/users/me/push-prefs"},
 	}
 
 	for _, rt := range routes {
@@ -159,6 +163,9 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 		// pause a car the catalog still shows as available.
 		{"vehicle ride share (MYR-342, §7.18)", "/api/tesla/vehicles/clxyz1234567890abcdef/ride-share"},
 		{"push device register (MYR-186, §7.17)", "/api/push/devices"},
+		// MYR-349: the GET and the PUT share a path, so mounting only one of
+		// the two verbs is a live failure mode this catches — the other 404s.
+		{"push prefs write (MYR-349, §7.19)", "/api/users/me/push-prefs"},
 	}
 	for _, rt := range putRoutes {
 		t.Run(rt.name, func(t *testing.T) {

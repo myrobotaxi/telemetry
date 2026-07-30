@@ -192,6 +192,9 @@ type httpRouteDeps struct {
 	accountRepo   *store.AccountRepo
 	// pushRepo backs the MYR-186 device-registry endpoints.
 	pushRepo *store.PushDeviceRepo
+	// pushPrefsRepo backs the MYR-349 notification-preference endpoints, and
+	// is the same row the notifier's per-send gate reads.
+	pushPrefsRepo *store.PushPrefsRepo
 	// shareRepo backs the MYR-184 vehicle-sharing endpoints.
 	shareRepo *store.VehicleShareRepo
 	// accessInvalidator busts a user's cached vehicle access set when a
@@ -297,6 +300,7 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 	setupVehicleRideShareEndpoint(deps)
 	setupVehicleCommandEndpoint(deps, snapshotAdapter)
 	setupPushDeviceEndpoints(deps)
+	setupPushPrefsEndpoints(deps)
 	setupVehicleSharingEndpoints(deps, snapshotAdapter)
 	setupDebugFieldsEndpoint(deps)
 }

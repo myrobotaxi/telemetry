@@ -29,6 +29,7 @@ func setupPushNotifier(
 	cfg *config.Config,
 	bus events.Bus,
 	pushRepo *store.PushDeviceRepo,
+	prefsRepo *store.PushPrefsRepo,
 	vehicleNames *store.VehicleNameRepo,
 	logger *slog.Logger,
 ) (*push.Notifier, error) {
@@ -55,6 +56,7 @@ func setupPushNotifier(
 	notifier := push.NewNotifier(
 		sender,
 		&pushDeviceStoreAdapter{repo: pushRepo},
+		&pushPrefsAdapter{repo: prefsRepo},
 		vehicleNames,
 		push.Config{Enabled: pushCfg.Enabled},
 		log,
@@ -77,6 +79,86 @@ func setupPushDeviceEndpoints(deps httpRouteDeps) {
 	deps.srv.HandleFunc("PUT /api/push/devices", handler.ServeRegister)
 	deps.srv.HandleFunc("DELETE /api/push/devices", handler.ServeUnregister)
 	logger.Info("push device endpoints enabled (PUT|DELETE /api/push/devices)")
+}
+
+// setupPushPrefsEndpoints mounts the notification-preference surface
+// (rest-api.md §7.19, MYR-349). Always mounted, for the same reason the device
+// registry is: a person must be able to switch a category off whether or not
+// this deploy carries the APNs credentials, and the answer has to be stored
+// before the notifier that honours it is ever wired.
+func setupPushPrefsEndpoints(deps httpRouteDeps) {
+	logger := deps.logger.With(slog.String("component", "push-prefs"))
+
+	handler := push.NewPrefsHandler(deps.authenticator, &pushPrefsAdapter{repo: deps.pushPrefsRepo}, logger)
+
+	deps.srv.HandleFunc("GET /api/users/me/push-prefs", handler.ServeGet)
+	deps.srv.HandleFunc("PUT /api/users/me/push-prefs", handler.ServePut)
+	logger.Info("push preference endpoints enabled (GET|PUT /api/users/me/push-prefs)")
+}
+
+// pushPrefsAdapter adapts the store repo onto the two consumer-site interfaces
+// internal/push declares — push.PrefStore (the notifier's gate) and
+// push.PrefsRegistry (the endpoints) — so internal/push never imports
+// internal/store. One adapter serves both because the two interfaces are the
+// read half and the read+write half of the same row.
+type pushPrefsAdapter struct {
+	repo *store.PushPrefsRepo
+}
+
+func (a *pushPrefsAdapter) PrefsForUser(ctx context.Context, userID string) (push.Prefs, error) {
+	// A TYPED NIL is not a nil interface. The notifier's own `prefs == nil`
+	// guard cannot see through this adapter: it always receives a non-nil
+	// *pushPrefsAdapter, which may hold a nil repo. main.go builds the repo
+	// unconditionally today, so this is unreachable — but if it ever stops
+	// doing so, the failure without this line is a nil-pointer panic inside a
+	// detached fan-out goroutine, which takes the process down over a
+	// notification. Fail open, exactly as every other unresolvable preference
+	// does.
+	if a.repo == nil {
+		return push.DefaultPrefs(), nil
+	}
+
+	row, err := a.repo.PrefsForUser(ctx, userID)
+	if err != nil {
+		return push.Prefs{}, fmt.Errorf("push: read prefs: %w", err)
+	}
+	return pushPrefsFromRow(row), nil
+}
+
+func (a *pushPrefsAdapter) UpdatePrefs(ctx context.Context, userID string, update push.PrefsUpdate) (push.Prefs, error) {
+	// Same typed-nil guard as PrefsForUser — but the WRITE fails LOUDLY rather
+	// than open. A read that cannot resolve a preference falls back to the
+	// pre-MYR-349 behaviour and loses nothing; a write that silently discarded
+	// somebody's choice and answered 200 would be the original lie restored.
+	if a.repo == nil {
+		return push.Prefs{}, fmt.Errorf("push: write prefs: no preference store wired")
+	}
+
+	row, err := a.repo.UpdatePrefs(ctx, userID, store.PushPrefsUpdate{
+		RideLifecycle:    update.RideLifecycle,
+		DriveStarted:     update.DriveStarted,
+		DriveCompleted:   update.DriveCompleted,
+		ChargingComplete: update.ChargingComplete,
+		ViewerJoined:     update.ViewerJoined,
+	})
+	if err != nil {
+		return push.Prefs{}, fmt.Errorf("push: write prefs: %w", err)
+	}
+	return pushPrefsFromRow(row), nil
+}
+
+// pushPrefsFromRow converts the store row to the notifier's own shape. Written
+// out field by field rather than by a shared struct so that adding a sixth
+// category fails to compile here — the one place where a new column MUST be
+// taught to the gate — instead of silently defaulting to false.
+func pushPrefsFromRow(row store.PushPrefs) push.Prefs {
+	return push.Prefs{
+		RideLifecycle:    row.RideLifecycle,
+		DriveStarted:     row.DriveStarted,
+		DriveCompleted:   row.DriveCompleted,
+		ChargingComplete: row.ChargingComplete,
+		ViewerJoined:     row.ViewerJoined,
+	}
 }
 
 // pushDeviceStoreAdapter adapts the store repo to push.DeviceStore, converting

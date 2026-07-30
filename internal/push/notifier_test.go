@@ -19,6 +19,9 @@ type fakeDeviceStore struct {
 	byUser  map[string][]Device
 	listErr error
 	deleted []string
+	// listCalls counts DevicesForUser calls. MYR-349 asserts on it to prove a
+	// preference-silenced category never reaches the fan-out at all.
+	listCalls int
 }
 
 func newFakeDeviceStore() *fakeDeviceStore {
@@ -28,6 +31,7 @@ func newFakeDeviceStore() *fakeDeviceStore {
 func (f *fakeDeviceStore) DevicesForUser(_ context.Context, userID string) ([]Device, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.listCalls++
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -69,13 +73,20 @@ const (
 )
 
 // newTestNotifier wires a notifier whose owner and rider each have one device.
+//
+// The PrefStore is deliberately nil here (MYR-349): every test in this file
+// predates preferences and asserts the pre-MYR-349 behaviour, and nil is
+// exactly that — every category on. The gate's own coverage lives in
+// prefs_test.go, which wires a real store. Keeping these nil is also the
+// regression guard that matters most: if the gate ever started failing CLOSED
+// on an unwired store, every assertion in this file would go red at once.
 func newTestNotifier(t *testing.T, sender Sender, namer VehicleNamer) *Notifier {
 	t.Helper()
 	devices := newFakeDeviceStore()
 	devices.byUser[testOwnerID] = []Device{{Token: ownerDevice}}
 	devices.byUser[testRiderID] = []Device{{Token: riderDevice, Sandbox: true}}
 
-	return NewNotifier(sender, devices, namer, Config{Enabled: true}, discardLogger())
+	return NewNotifier(sender, devices, nil, namer, Config{Enabled: true}, discardLogger())
 }
 
 func strptr(s string) *string { return &s }
@@ -376,7 +387,7 @@ func TestNotifierFireAndForgetUnderSenderFailure(t *testing.T) {
 
 	devices := newFakeDeviceStore()
 	devices.byUser[testRiderID] = []Device{{Token: "tok-a"}, {Token: "tok-b"}}
-	n := NewNotifier(sender, devices, &fakeVehicleNamer{}, Config{Enabled: true}, discardLogger())
+	n := NewNotifier(sender, devices, nil, &fakeVehicleNamer{}, Config{Enabled: true}, discardLogger())
 
 	n.handleStatusChanged(statusEvent("accepted"))
 	n.Wait()
@@ -398,7 +409,7 @@ func TestNotifierUnregisteredDeletesDevice(t *testing.T) {
 
 	devices := newFakeDeviceStore()
 	devices.byUser[testRiderID] = []Device{{Token: "tok-dead"}, {Token: "tok-live"}}
-	n := NewNotifier(sender, devices, &fakeVehicleNamer{}, Config{Enabled: true}, discardLogger())
+	n := NewNotifier(sender, devices, nil, &fakeVehicleNamer{}, Config{Enabled: true}, discardLogger())
 
 	n.handleStatusChanged(statusEvent("arrived"))
 	n.Wait()
@@ -416,7 +427,7 @@ func TestNotifierThrottledDoesNotDelete(t *testing.T) {
 	sender.Err = ErrThrottled
 	devices := newFakeDeviceStore()
 	devices.byUser[testRiderID] = []Device{{Token: "tok-busy"}}
-	n := NewNotifier(sender, devices, &fakeVehicleNamer{}, Config{Enabled: true}, discardLogger())
+	n := NewNotifier(sender, devices, nil, &fakeVehicleNamer{}, Config{Enabled: true}, discardLogger())
 
 	n.handleDue(dueEvent())
 	n.Wait()
@@ -448,7 +459,7 @@ func TestNotifierSkipsWhenInactive(t *testing.T) {
 			}
 			devices := newFakeDeviceStore()
 			devices.byUser[testOwnerID] = []Device{{Token: ownerDevice}}
-			n := NewNotifier(s, devices, &fakeVehicleNamer{}, Config{Enabled: tt.enabled}, discardLogger())
+			n := NewNotifier(s, devices, nil, &fakeVehicleNamer{}, Config{Enabled: tt.enabled}, discardLogger())
 
 			// Must not panic on a nil sender, and must not deliver.
 			n.handleCreated(createdEvent(strptr("Ada"), nil))
@@ -467,7 +478,7 @@ func TestNotifierDeviceLookupFailureIsSwallowed(t *testing.T) {
 	sender := NewFakeSender()
 	devices := newFakeDeviceStore()
 	devices.listErr = errors.New("db down")
-	n := NewNotifier(sender, devices, &fakeVehicleNamer{}, Config{Enabled: true}, discardLogger())
+	n := NewNotifier(sender, devices, nil, &fakeVehicleNamer{}, Config{Enabled: true}, discardLogger())
 
 	n.handleDue(dueEvent())
 	n.Wait()
@@ -479,7 +490,7 @@ func TestNotifierDeviceLookupFailureIsSwallowed(t *testing.T) {
 
 func TestNotifierNoDevicesRegistered(t *testing.T) {
 	sender := NewFakeSender()
-	n := NewNotifier(sender, newFakeDeviceStore(), &fakeVehicleNamer{}, Config{Enabled: true}, discardLogger())
+	n := NewNotifier(sender, newFakeDeviceStore(), nil, &fakeVehicleNamer{}, Config{Enabled: true}, discardLogger())
 
 	n.handleCreated(createdEvent(strptr("Ada"), nil))
 	n.Wait()
