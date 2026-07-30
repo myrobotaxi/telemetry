@@ -331,7 +331,10 @@ func (h *RideRequestHandler) mutateStatus(ctx context.Context, w http.ResponseWr
 		Status:           updated.Status,
 		RequesterName:    updated.RequesterName,
 		RescheduleStatus: updated.RescheduleStatus,
-		UpdatedAt:        updated.UpdatedAt,
+		// Carried so the rider's push copy can tell a reservation from an
+		// instant request (MYR-360); not projected onto the WS frame.
+		ScheduledFor: updated.ScheduledFor,
+		UpdatedAt:    updated.UpdatedAt,
 	})
 
 	return updated, true

@@ -205,11 +205,14 @@ func (n *Notifier) handleStatusChanged(evt events.Event) {
 		return
 	}
 	// Cheap check before spending a worker slot: most transitions are silent.
-	if _, notify := statusAlert(ev.Status, ""); !notify {
+	// Which transitions speak does not depend on scheduling, so the probe can
+	// pass either value.
+	scheduled := ev.ScheduledFor != nil
+	if _, notify := statusAlert(ev.Status, "", scheduled); !notify {
 		return
 	}
 	n.async(func(ctx context.Context) {
-		a, _ := statusAlert(ev.Status, n.vehicleName(ctx, ev.VehicleID))
+		a, _ := statusAlert(ev.Status, n.vehicleName(ctx, ev.VehicleID), scheduled)
 		n.fanOut(ctx, ev.RiderID, ev.RideRequestID, string(evt.Topic), a)
 	})
 }
