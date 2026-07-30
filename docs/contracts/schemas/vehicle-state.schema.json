@@ -516,6 +516,12 @@
       "x-classification": "P0",
       "examples": ["FSD (Supervised) v14.3.5"]
     },
+    "rideShareEnabled": {
+      "type": "boolean",
+      "description": "Whether this vehicle's OWNER currently accepts ride requests against it (MYR-342) — the SAME value and the SAME semantics as VehicleSummary.rideShareEnabled, carried here so the owner's toggle can read its own current position from the detail surface it lives on. TRUE is the ordinary state and the state every vehicle starts in; FALSE means the owner has PAUSED ride requests for this vehicle, and the server refuses both new ride requests against it and accepts of outstanding ones with 409 `vehicle_unavailable` ('Ride sharing is paused for this vehicle'), for SCHEDULED rides as well as instant ones (a deliberate deviation from the in-service/offline reservation exemption — see the VehicleSummary sibling and rest-api.md §7.8). Set and cleared ONLY by the owner via `PUT /api/tesla/vehicles/{vehicleId}/ride-share`; no vehicle state and no timer ever changes it. OPTIONAL AND TOLERANT: ABSENT means the server predates contracts v0.20.0 and MUST be read as ENABLED (true) — absence NEVER means paused. Visible to BOTH roles: viewers see it in the snapshot exactly as they see it in the catalog row, because a rider needs to know the shared car is not taking requests. Delivery: NOT STREAMED — a `vehicle_update` frame NEVER carries rideShareEnabled, so it is snapshot/list-read-only and refreshes on the next REST read or from the echo the PUT returns. Classified P0: an owner's availability switch on their own car, the same tier as the sibling `status`.",
+      "x-classification": "P0",
+      "examples": [false]
+    },
     "lastUpdated": {
       "type": "string",
       "format": "date-time",
