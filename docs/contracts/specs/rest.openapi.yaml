@@ -1224,6 +1224,35 @@ components:
             NEVER carries it; it refreshes on the next list fetch.
           example: '2026-07-29T18:00:00Z'
           x-classification: P0
+        rideShareEnabled:
+          type: boolean
+          description: |
+            Whether this vehicle's OWNER currently accepts ride requests
+            against it (MYR-342) — same value and semantics as
+            VehicleState.rideShareEnabled. TRUE is the ordinary state and
+            the state every vehicle starts in. FALSE means the owner has
+            PAUSED ride requests: the car may be online, parked and idle,
+            but the server refuses new ride requests against it and
+            refuses to accept outstanding ones, with 409
+            `vehicle_unavailable` ("Ride sharing is paused for this
+            vehicle"). OWNER INTENT, NOT VEHICLE STATE: nothing the car
+            does sets or clears it and no timer expires it — it moves only
+            via `PUT /api/tesla/vehicles/{vehicleId}/ride-share`
+            (owner-only; a viewer at any share tier gets 403). That is why
+            the pause applies to SCHEDULED rides too, a deliberate
+            deviation from the MYR-313 in-service/offline reservation
+            exemption: a service visit ends, an owner's pause does not.
+            OPTIONAL AND TOLERANT: ABSENT means a server predating
+            contracts v0.20.0 and MUST read as ENABLED — absence NEVER
+            means paused, and consumers must not fail closed on a missing
+            key. Visible to BOTH roles (P0 operational availability, same
+            tier as `status` and `hasActiveRide`): a rider must learn a
+            shared car is paused from this row, not from a 409 after
+            composing a whole request. No WebSocket delta — a
+            `vehicle_update` NEVER carries it; it refreshes on the next
+            list/snapshot read or from the PUT's own echo.
+          example: false
+          x-classification: P0
 
     VehiclesListResponse:
       type: object

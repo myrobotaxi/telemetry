@@ -171,7 +171,7 @@ func (h *VehicleRideShareHandler) handle(w http.ResponseWriter, r *http.Request)
 // additionalProperties:false and the sibling §7.16 decoder. An EMPTY body is a
 // 400 here rather than the §7.16 "clear": there is no third state to fall back
 // to, so silence is ambiguous rather than expressive.
-func (h *VehicleRideShareHandler) decodeEnabled(w http.ResponseWriter, r *http.Request) (bool, bool) {
+func (h *VehicleRideShareHandler) decodeEnabled(w http.ResponseWriter, r *http.Request) (enabled, ok bool) {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 
