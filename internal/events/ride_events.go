@@ -69,7 +69,13 @@ type RideStatusChangedEvent struct {
 	// optional fields. P1 PII — never logged.
 	RequesterName    *string
 	RescheduleStatus *string
-	UpdatedAt        time.Time
+	// ScheduledFor is the ride's reservation instant, nil for an on-demand
+	// ("Now") ride — the same optional carried on RideRequestCreatedEvent, and
+	// carried here for the same reason: the rider's push copy must be able to
+	// tell a RESERVATION from an instant request (MYR-360). It is NOT projected
+	// onto the `ride_status_changed` WS frame, which stays summary-only.
+	ScheduledFor *time.Time
+	UpdatedAt    time.Time
 }
 
 // EventTopic returns TopicRideStatusChanged.

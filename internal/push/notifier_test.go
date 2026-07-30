@@ -102,6 +102,19 @@ func statusEvent(status string) events.Event {
 	})
 }
 
+// scheduledStatusEvent is statusEvent for a RESERVATION — the ride carries a
+// reservation instant, which is what MYR-360's declined copy forks on.
+func scheduledStatusEvent(status string, at time.Time) events.Event {
+	return events.NewEvent(events.RideStatusChangedEvent{
+		RideRequestID: testRideID,
+		VehicleID:     testVehicleID,
+		RiderID:       testRiderID,
+		OwnerID:       testOwnerID,
+		Status:        status,
+		ScheduledFor:  &at,
+	})
+}
+
 func dueEvent() events.Event {
 	return events.NewEvent(events.RideDueEvent{
 		RideRequestID: testRideID,
@@ -226,6 +239,50 @@ func TestNotifierStatusChangedNotifiesRider(t *testing.T) {
 			}
 			if sent[0].Title != tt.wantTitle {
 				t.Errorf("title = %q, want %q", sent[0].Title, tt.wantTitle)
+			}
+		})
+	}
+}
+
+// TestNotifierDeclinedReservationCopy is the MYR-360 end-to-end: an owner
+// declining an ACCEPTED reservation must reach the rider's lock screen saying
+// it is about their SCHEDULED ride, not as a reply to a request they just made
+// — and still without a time, since the server knows no client time zone.
+func TestNotifierDeclinedReservationCopy(t *testing.T) {
+	scheduled := time.Date(2026, 8, 1, 17, 30, 0, 0, time.UTC)
+
+	tests := []struct {
+		name      string
+		event     events.Event
+		wantTitle string
+	}{
+		{name: "instant decline keeps its copy", event: statusEvent("declined"), wantTitle: "Blue Whale can't take this ride"},
+		{name: "reservation decline names the scheduled ride", event: scheduledStatusEvent("declined", scheduled), wantTitle: "Blue Whale can't make your scheduled ride"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sender := NewFakeSender()
+			n := newTestNotifier(t, sender, &fakeVehicleNamer{name: "Blue Whale"})
+
+			n.handleStatusChanged(tt.event)
+			n.Wait()
+
+			sent := sender.Sent()
+			if len(sent) != 1 {
+				t.Fatalf("sent %d notifications, want 1", len(sent))
+			}
+			if sent[0].DeviceToken != riderDevice {
+				t.Errorf("device = %q, want the RIDER's device", sent[0].DeviceToken)
+			}
+			if sent[0].Title != tt.wantTitle {
+				t.Errorf("title = %q, want %q", sent[0].Title, tt.wantTitle)
+			}
+			copyText := sent[0].Title + " " + sent[0].Body
+			for _, forbidden := range []string{"17:30", "5:30", "UTC", "Aug", "August", "2026"} {
+				if strings.Contains(copyText, forbidden) {
+					t.Errorf("copy %q contains %q — scheduled pushes must not render a time", copyText, forbidden)
+				}
 			}
 		})
 	}

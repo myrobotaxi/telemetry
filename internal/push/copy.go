@@ -74,12 +74,33 @@ func createdAlert(ev events.RideRequestCreatedEvent) alert {
 }
 
 // statusAlert is the RIDER's copy for a lifecycle transition, or ok=false when
-// the transition is not worth a notification.
-func statusAlert(status, vehicleName string) (alert, bool) {
+// the transition is not worth a notification. `scheduled` reports whether the
+// ride is a RESERVATION (its `scheduledFor` is set).
+//
+// Only `declined` forks on `scheduled`, and MYR-360 is why. Until then an owner
+// could only decline a ride the rider had just asked for, so "can't take this
+// ride" always landed as a reply to a request still on the rider's screen. An
+// owner may now decline an ACCEPTED reservation — days after it was confirmed,
+// typically because they paused ride sharing — and that same sentence on a lock
+// screen gives the rider no way to tell it is about a booking they thought was
+// settled. The scheduled variant names the scheduled ride and nothing else.
+//
+// It deliberately does NOT name the TIME, the same standing rule createdAlert
+// follows: the server holds `scheduledFor` in UTC and knows no client time
+// zone, so an absolute rendering would be either wrong ("5:30 PM" in the wrong
+// zone) or unreadable ("Aug 1, 5:30 PM UTC"). Correct local rendering belongs
+// to the client, which refetches the ride anyway.
+func statusAlert(status, vehicleName string, scheduled bool) (alert, bool) {
 	switch status {
 	case statusAccepted:
 		return alert{title: "Your ride is confirmed", body: bodySeeDetails}, true
 	case statusDeclined:
+		if scheduled {
+			return alert{
+				title: vehicleLabel(vehicleName) + " can't make your scheduled ride",
+				body:  "Try booking another car.",
+			}, true
+		}
 		return alert{
 			title: vehicleLabel(vehicleName) + " can't take this ride",
 			body:  "Try booking another car.",

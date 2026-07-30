@@ -64,6 +64,23 @@ type fakeRideStore struct {
 		cursor RideRequestListCursor
 		limit  int
 	}
+
+	// Upcoming-reservations slice of the owner feed (MYR-360).
+	// upcomingPage/upcomingErr steer ListUpcomingByOwnerVehiclePage;
+	// upcomingCall records what the handler passed so a test can pin the
+	// owner scoping (JWT sub, never a client value) and the ASCENDING
+	// (scheduledFor, id) cursor. The anchor is captured as plain fields so
+	// the assertions read the same whichever cursor type carries it.
+	upcomingPage  RideRequestListPage
+	upcomingErr   error
+	upcomingCalls int
+	upcomingCall  struct {
+		ownerID            string
+		vehicleID          string
+		cursorScheduledFor time.Time
+		cursorID           string
+		limit              int
+	}
 }
 
 func (f *fakeRideStore) Create(_ context.Context, in RideRequestCreateInput) (RideRequestData, error) {
@@ -162,6 +179,19 @@ func (f *fakeRideStore) ListByOwnerPage(_ context.Context, ownerID string, statu
 		return RideRequestListPage{}, f.ownerErr
 	}
 	return f.ownerPage, nil
+}
+
+func (f *fakeRideStore) ListUpcomingByOwnerVehiclePage(_ context.Context, ownerID, vehicleID string, cursor RideRequestUpcomingCursor, limit int) (RideRequestListPage, error) {
+	f.upcomingCalls++
+	f.upcomingCall.ownerID = ownerID
+	f.upcomingCall.vehicleID = vehicleID
+	f.upcomingCall.cursorScheduledFor = cursor.ScheduledFor
+	f.upcomingCall.cursorID = cursor.ID
+	f.upcomingCall.limit = limit
+	if f.upcomingErr != nil {
+		return RideRequestListPage{}, f.upcomingErr
+	}
+	return f.upcomingPage, nil
 }
 
 // fakeRidePublisher captures every published event so tests can assert the

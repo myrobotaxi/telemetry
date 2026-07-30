@@ -1,6 +1,7 @@
 package push
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -32,11 +33,15 @@ func TestVehicleLabel(t *testing.T) {
 // produces nonsense on exactly the notifications that matter most.
 func TestVehicleLabelFallbackReadsNaturally(t *testing.T) {
 	label := vehicleLabel("")
-	declined, ok := statusAlert(statusDeclined, "")
+	declined, ok := statusAlert(statusDeclined, "", false)
 	if !ok {
 		t.Fatal("declined produced no alert")
 	}
-	for _, sentence := range []string{declined.title, dueAlert("").title} {
+	scheduledDeclined, ok := statusAlert(statusDeclined, "", true)
+	if !ok {
+		t.Fatal("scheduled declined produced no alert")
+	}
+	for _, sentence := range []string{declined.title, scheduledDeclined.title, dueAlert("").title} {
 		if !strings.HasPrefix(sentence, label) {
 			t.Errorf("sentence %q does not start with the fallback label %q", sentence, label)
 		}
@@ -86,17 +91,65 @@ func TestStatusAlertSelectsOnlyNotifiableTransitions(t *testing.T) {
 	all := []string{"requested", "accepted", "declined", "enroute", "arrived", "completed", "cancelled"}
 
 	for _, status := range all {
-		t.Run(status, func(t *testing.T) {
-			a, ok := statusAlert(status, "Blue Whale")
-			if ok != notifiable[status] {
-				t.Fatalf("statusAlert(%q) notifies = %v, want %v", status, ok, notifiable[status])
-			}
-			if !ok {
-				return
-			}
-			if a.title == "" || a.body == "" {
-				t.Errorf("statusAlert(%q) = %+v, want both a title and a body", status, a)
-			}
-		})
+		for _, scheduled := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/scheduled=%v", status, scheduled), func(t *testing.T) {
+				a, ok := statusAlert(status, "Blue Whale", scheduled)
+				if ok != notifiable[status] {
+					t.Fatalf("statusAlert(%q) notifies = %v, want %v", status, ok, notifiable[status])
+				}
+				if !ok {
+					return
+				}
+				if a.title == "" || a.body == "" {
+					t.Errorf("statusAlert(%q) = %+v, want both a title and a body", status, a)
+				}
+			})
+		}
+	}
+}
+
+// TestStatusAlertDeclinedNamesTheReservation is the MYR-360 copy fix. An owner
+// declining an ACCEPTED reservation is a new transition, and the pre-existing
+// declined copy — "can't take this ride" — reads as a reply to a request the
+// rider just made. A rider who booked a car for next Saturday and gets that on
+// a lock screen has no way to tell it is about their CONFIRMED reservation.
+//
+// The scheduled variant names the scheduled ride and nothing more. It does NOT
+// name the TIME: the server holds `scheduledFor` in UTC and knows no client
+// time zone, so an absolute rendering here would be either wrong or unreadable
+// — the same standing rule createdAlert follows.
+func TestStatusAlertDeclinedNamesTheReservation(t *testing.T) {
+	instant, ok := statusAlert(statusDeclined, "Blue Whale", false)
+	if !ok {
+		t.Fatal("instant declined produced no alert")
+	}
+	scheduled, ok := statusAlert(statusDeclined, "Blue Whale", true)
+	if !ok {
+		t.Fatal("scheduled declined produced no alert")
+	}
+
+	if instant.title == scheduled.title {
+		t.Errorf("a declined reservation must not reuse the instant copy: both are %q", instant.title)
+	}
+	if !strings.Contains(scheduled.title, "scheduled") {
+		t.Errorf("scheduled declined title %q does not tell the rider it is about their scheduled ride", scheduled.title)
+	}
+	if !strings.HasPrefix(scheduled.title, "Blue Whale") {
+		t.Errorf("scheduled declined title %q must lead with the vehicle label", scheduled.title)
+	}
+	// The standing no-time rule: no digits may leak into the copy.
+	for _, s := range []string{scheduled.title, scheduled.body} {
+		if strings.ContainsAny(s, "0123456789") {
+			t.Errorf("scheduled declined copy %q leaks a time/number; the server knows no client time zone", s)
+		}
+	}
+	// Only `declined` forks on scheduling — accepted/arrived read identically
+	// either way, so the fork stays as narrow as the defect it fixes.
+	for _, status := range []string{statusAccepted, statusArrived} {
+		a, _ := statusAlert(status, "Blue Whale", false)
+		b, _ := statusAlert(status, "Blue Whale", true)
+		if a != b {
+			t.Errorf("statusAlert(%q) must not fork on scheduling: %+v vs %+v", status, a, b)
+		}
 	}
 }

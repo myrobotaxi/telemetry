@@ -38,9 +38,22 @@ import (
 // scheduledFor set, not a separate status), newest first, cursor-paginated
 // with the same RideRequestsListResponse envelope + (createdAt, id) cursor as
 // the rider list.
+//
+// ONE optional query param selects a different slice of this same owner-scoped
+// feed: `?upcomingForVehicle={vehicleId}` returns the owner's ACCEPTED, still
+// FUTURE reservations for that car, soonest first (MYR-360 — see
+// ride_request_upcoming_handler.go). ABSENT the param this endpoint is
+// byte-identical to what it has always served; a test pins that.
 func (h *RideRequestHandler) ServeIncoming(w http.ResponseWriter, r *http.Request) {
 	userID, ok := h.authUser(w, r)
 	if !ok {
+		return
+	}
+
+	// Presence, not emptiness: `?upcomingForVehicle=` is a malformed request
+	// for the slice (400), not a request for the default feed.
+	if r.URL.Query().Has(queryUpcomingForVehicle) {
+		h.serveUpcomingForVehicle(w, r, userID)
 		return
 	}
 
@@ -86,7 +99,7 @@ func (h *RideRequestHandler) ServeAccept(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	updated, ok := h.mutateStatus(ctx, w, rec, rideDecidableFrom, rideStatusAccepted)
+	updated, ok := h.mutateStatus(ctx, w, rec, rideAcceptableFrom, rideStatusAccepted)
 	if !ok {
 		return
 	}
@@ -99,48 +112,21 @@ func (h *RideRequestHandler) ServeAccept(w http.ResponseWriter, r *http.Request)
 	h.writeJSON(w, http.StatusOK, toRideRequestWire(updated))
 }
 
-// ServeDecline handles POST /api/ride-requests/{id}/decline. Owner-only;
-// legal only from `requested` → `declined` (409 otherwise).
-func (h *RideRequestHandler) ServeDecline(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	userID, ok := h.authUser(w, r)
-	if !ok {
-		return
-	}
+// rideAcceptableFrom is the allowed-from set for an owner ACCEPT; must stay in
+// lockstep with the loadForOwnerDecision fast-path check and the rest-api.md
+// §7.8 matrix. The guarded UpdateStatusFrom write is what decides under
+// concurrency. (Decline has its own, wider set for scheduled rides — see
+// ride_request_owner_decision.go.)
+var rideAcceptableFrom = []string{rideStatusRequested}
 
-	rec, ok := h.loadForOwnerDecision(ctx, w, r, userID)
-	if !ok {
-		return
-	}
-
-	updated, ok := h.mutateStatus(ctx, w, rec, rideDecidableFrom, rideStatusDeclined)
-	if !ok {
-		return
-	}
-
-	h.writeJSON(w, http.StatusOK, toRideRequestWire(updated))
-}
-
-// rideDecidableFrom is the allowed-from set for an owner accept/decline;
-// must stay in lockstep with the loadForOwnerDecision fast-path check and
-// the rest-api.md §7.8 matrix. The guarded UpdateStatusFrom write is what
-// decides under concurrency.
-var rideDecidableFrom = []string{rideStatusRequested}
-
-// loadForOwnerDecision fetches the ride, enforces party membership (non-party
-// → 404, same no-existence-leak rule as loadForParty), then the owner-only
-// role (the rider is a party but cannot accept/decline → 403), then the
-// `requested`-only legality fast-path (→ 409 conflict; friendly message —
-// the guarded write in mutateStatus is what actually decides under
-// concurrency). On any failure the response has been written and ok=false.
+// loadForOwnerDecision fetches the ride for an ACCEPT: party + owner-only
+// checks (loadOwnerParty), then the `requested`-only legality fast-path (→ 409
+// conflict; friendly message — the guarded write in mutateStatus is what
+// actually decides under concurrency). On any failure the response has been
+// written and ok=false.
 func (h *RideRequestHandler) loadForOwnerDecision(ctx context.Context, w http.ResponseWriter, r *http.Request, userID string) (RideRequestData, bool) {
-	rec, ok := h.loadForParty(ctx, w, r, userID)
+	rec, ok := h.loadOwnerParty(ctx, w, r, userID)
 	if !ok {
-		return RideRequestData{}, false
-	}
-
-	if userID != rec.OwnerID {
-		h.writeError(w, http.StatusForbidden, wserrors.ErrCodePermissionDenied, "only the vehicle owner may decide this request")
 		return RideRequestData{}, false
 	}
 

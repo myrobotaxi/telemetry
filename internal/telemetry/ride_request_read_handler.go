@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
 )
@@ -56,14 +57,9 @@ func (h *RideRequestHandler) ServeList(w http.ResponseWriter, r *http.Request) {
 // parseListQuery validates the shared `limit` and `cursor` query params
 // (rest-api.md §4.2.1). Returns ok=false after writing a 400 on bad input.
 func (h *RideRequestHandler) parseListQuery(w http.ResponseWriter, r *http.Request) (int, RideRequestListCursor, bool) {
-	limit := rideListDefaultLimit
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		n, err := strconv.Atoi(raw)
-		if err != nil || n < rideListMinLimit || n > rideListMaxLimit {
-			h.writeError(w, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest, "limit must be an integer in [1, 100]")
-			return 0, RideRequestListCursor{}, false
-		}
-		limit = n
+	limit, ok := h.parseListLimit(w, r)
+	if !ok {
+		return 0, RideRequestListCursor{}, false
 	}
 
 	var cursor RideRequestListCursor
@@ -79,10 +75,44 @@ func (h *RideRequestHandler) parseListQuery(w http.ResponseWriter, r *http.Reque
 	return limit, cursor, true
 }
 
+// parseListLimit validates the shared `limit` param. Split out of
+// parseListQuery so the upcoming-reservations slice (MYR-360), whose cursor is
+// a different typed anchor, reuses the identical bounds and identical 400.
+func (h *RideRequestHandler) parseListLimit(w http.ResponseWriter, r *http.Request) (int, bool) {
+	raw := r.URL.Query().Get("limit")
+	if raw == "" {
+		return rideListDefaultLimit, true
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < rideListMinLimit || n > rideListMaxLimit {
+		h.writeError(w, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest, "limit must be an integer in [1, 100]")
+		return 0, false
+	}
+	return n, true
+}
+
+// cursorAnchor is the (timestamp, id) pair a page's nextCursor is built from.
+// Which timestamp it names depends on the view's ordering — see
+// ride_request_cursor.go.
+type cursorAnchor struct {
+	At time.Time
+	ID string
+}
+
 // buildRidePage projects a store page into the wire envelope, computing
-// nextCursor from the last item when more pages remain. Items is always a
-// non-nil slice so it marshals to `[]`, never `null`.
+// nextCursor from the last item's (createdAt, id) when more pages remain —
+// the default `createdAt DESC` ordering of the rider list and the owner
+// incoming feed.
 func buildRidePage(page RideRequestListPage) rideRequestsPageResponse {
+	return buildRidePageAnchoredBy(page, func(rec RideRequestData) cursorAnchor {
+		return cursorAnchor{At: rec.CreatedAt, ID: rec.ID}
+	})
+}
+
+// buildRidePageAnchoredBy projects a store page into the wire envelope,
+// deriving nextCursor from the last item via `anchorOf`. Items is always a
+// non-nil slice so it marshals to `[]`, never `null`.
+func buildRidePageAnchoredBy(page RideRequestListPage, anchorOf func(RideRequestData) cursorAnchor) rideRequestsPageResponse {
 	items := make([]rideRequestWire, 0, len(page.Items))
 	for i := range page.Items {
 		items = append(items, toRideRequestWire(page.Items[i]))
@@ -90,8 +120,8 @@ func buildRidePage(page RideRequestListPage) rideRequestsPageResponse {
 
 	var nextCursor *string
 	if page.HasMore && len(page.Items) > 0 {
-		last := page.Items[len(page.Items)-1]
-		encoded := encodeRideCursor(last.CreatedAt, last.ID)
+		anchor := anchorOf(page.Items[len(page.Items)-1])
+		encoded := encodeRideCursor(anchor.At, anchor.ID)
 		nextCursor = &encoded
 	}
 
