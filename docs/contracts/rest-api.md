@@ -3,7 +3,7 @@
 **Status:** Draft -- v1
 **Target artifact:** OpenAPI 3.1 specification at [`specs/rest.openapi.yaml`](specs/rest.openapi.yaml)
 **Owner:** `sdk-architect` agent
-**Last updated:** 2026-04-14
+**Last updated:** 2026-07-30
 
 ## Purpose
 
@@ -81,6 +81,7 @@ Every FR/NFR listed here is anchored in at least one section of this doc. The ta
    17. Push notification device registry (2 operations — MYR-186)
    18. `PUT /api/tesla/vehicles/{vehicleId}/ride-share` (owner ride-share pause toggle — MYR-342)
    19. Notification preferences (2 operations — MYR-349)
+   20. Saved places (3 operations — MYR-321)
 8. Resource schemas
 9. Observability
 10. Code <-> spec divergences
@@ -587,6 +588,9 @@ No contract changes are required for the new role's wire shape (the REST respons
 | `DELETE` | `/api/push/devices` | Unregister an APNs device token on sign-out (§7.17.2) | Bearer (self only) | FR-9.3, NFR-3.21, MYR-186 |
 | `GET` | `/api/users/me/push-prefs` | Read the caller's five notification-category switches (§7.19.1) | Bearer (self only) | FR-9.3, NFR-3.21, MYR-349 |
 | `PUT` | `/api/users/me/push-prefs` | Change some of them — partial body, echoes the whole set (§7.19.2) | Bearer (self only) | FR-9.3, NFR-3.21, MYR-349 |
+| `GET` | `/api/users/me/places` | Read the caller's saved Home/Work places — 0–2 rows, `[]` when none (§7.20.1) | Bearer (self only) | FR-9.3, NFR-3.21, NFR-3.23, MYR-321 |
+| `PUT` | `/api/users/me/places/{kind}` | Set or replace one saved place — whole-object upsert, echoes the stored row (§7.20.2) | Bearer (self only) | FR-9.3, NFR-3.21, NFR-3.23, MYR-321 |
+| `DELETE` | `/api/users/me/places/{kind}` | Forget one saved place — 204, idempotent (§7.20.3) | Bearer (self only) | FR-9.3, NFR-3.21, MYR-321 |
 | `POST` | `/api/auth/apple` | Native Sign in with Apple → ES256 access + refresh pair | None (pre-auth; per-IP rate-limited) | FR-6.1, MYR-193 |
 | `POST` | `/api/auth/refresh` | Single-use refresh-token rotation | Refresh token in body (pre-auth; per-IP rate-limited) | FR-6.2, MYR-193 |
 | `POST` | `/api/auth/revoke` | Revoke a refresh-token family (sign-out) | Refresh token in body (pre-auth; per-IP rate-limited) | MYR-193 |
@@ -1412,11 +1416,12 @@ Normative in [`data-lifecycle.md`](data-lifecycle.md) §3.1. Summary:
 | 4 | Revoke shares RECEIVED | Every accepted grant the user redeemed → `revoked` tombstone |
 | 5 | Cancel open rides as RIDER | Through the guarded §7.8 transition, publishing `ride_status_changed` so affected owners get the standard lifecycle push |
 | 6 | Delete push devices | Whole `go_push_devices` address book for the user |
-| 7 | Revoke refresh tokens | `go_refresh_tokens` marked revoked with `reason='account_deleted'` |
-| 8 | Delete identity + write audit | ONE transaction: the `account_deleted` row, then `go_identity_apple`, `go_users`, and the Prisma `"User"` row **if one exists** |
-| 9 | Invalidate auth caches | The caller's unexpired access token stops validating immediately rather than at the cache TTL |
+| 7 | Delete saved places | The person's `go_saved_places` Home/Work rows (MYR-321, §7.20) — personal effects with no counterparty |
+| 8 | Revoke refresh tokens | `go_refresh_tokens` marked revoked with `reason='account_deleted'` |
+| 9 | Delete identity + write audit | ONE transaction: the `account_deleted` row, then `go_identity_apple`, `go_users`, and the Prisma `"User"` row **if one exists** |
+| 10 | Invalidate auth caches | The caller's unexpired access token stops validating immediately rather than at the cache TTL |
 
-**Dual-source identity.** Step 8 handles both account shapes with the same statements: an Apple-native user has no `"User"` row (that DELETE affects zero rows) and a legacy web user has no `go_users` row. Neither case is special-cased and neither is an error.
+**Dual-source identity.** Step 9 handles both account shapes with the same statements: an Apple-native user has no `"User"` row (that DELETE affects zero rows) and a legacy web user has no `go_users` row. Neither case is special-cased and neither is an error.
 
 **A ride physically in progress (`enroute` / `arrived`) is NOT cancelled.** Those states are not rider-cancellable under §7.8, and cancelling a car mid-trip from under its owner is a worse outcome than letting the ride reach its own terminal state. It closes on its own, and afterwards renders as former-rider history like any other completed ride.
 
@@ -1428,7 +1433,7 @@ Step 2 now actively revokes the grant: a form-encoded `POST` to Tesla's OAuth2 r
 
 Three properties are contractual:
 
-1. **It runs BEFORE anything deletes the tokens.** Step 3's last-vehicle arm deletes the `Account` row and step 8's `User` cascade takes any that survives; after either, the refresh token is gone and revocation is impossible. This ordering is normative — see [`data-lifecycle.md`](data-lifecycle.md) §3.1.
+1. **It runs BEFORE anything deletes the tokens.** Step 3's last-vehicle arm deletes the `Account` row and step 9's `User` cascade takes any that survives; after either, the refresh token is gone and revocation is impossible. This ordering is normative — see [`data-lifecycle.md`](data-lifecycle.md) §3.1.
 2. **It is best-effort and NEVER blocks the deletion.** A Tesla 5xx, a timeout, a network failure, an already-invalid token, or no Tesla account at all are each logged and stepped past. The response is unchanged: still `204`, still no body. **A client cannot observe whether revocation succeeded**, and deliberately so — the account is deleted either way, and a partial-success signal would be a state no client could act on.
 3. **A re-run skips it cleanly.** The second call finds no stored token and makes no request to Tesla.
 
@@ -3348,6 +3353,204 @@ wiring `cmd/telemetry-server/wiring_push.go`.
 
 ---
 
+### 7.20 Saved places (MYR-321)
+
+> **Anchored:** FR-9.3 (user-scoped resources), NFR-3.9 (data tiers), NFR-3.21 (self-scoped surfaces), NFR-3.23 (encryption at rest).
+
+The account's Home and Work places — the two shortcut chips the ride-request sheet offers instead of making somebody search for their own house.
+
+**Why this exists.** The same shape of gap §7.19 closed: a lie, not a missing feature. The chips have shipped since the ride sheet landed, backed by a private client-side `@State` struct. They rendered, they tapped, they persisted nowhere. "Home" meant one address on a person's iPhone and a different one on their iPad, and reinstalling the app forgot both. This is the missing storage.
+
+**Account-scoped, not vehicle-scoped, and not device-scoped.** A saved place belongs to a PERSON, so it follows them across every car they own, every car they are a viewer of, and every device they sign in on. Keying it by car would mean re-entering a home address per vehicle and would put it on a surface a co-owner can read; keying it by device is exactly the bug being fixed.
+
+**Self-scoped like §7.6 / §7.7 / §7.19.** There is no vehicle in the path, so there is no ownership check to make: the JWT subject IS the resource. There is no `userId` in any path or body and there must never be one — a `userId` key in the `PUT` body is rejected `400` as an unknown field rather than ignored.
+
+**Never visible to a counterparty.** Sharing a car grants access to the CAR, never to the other person's address book. These rows reach the account that saved them and nobody else — not a co-owner, not a viewer, not the owner of a car this person rides in. There is no viewer-masked projection of this resource because there is no non-self reader of it.
+
+**Two fixed slots, not a favourites list.** `kind` is a closed set of exactly `home` and `work`. They are PEERS, not tiers — unlike `SharePermission` there is no ordering and neither implies the other. A user-named collection would need ordering, renaming, a create endpoint and a per-person cap, none of which the two chips need. Adding a third slot later is an additive contract enum member plus a migration widening the `CHECK`.
+
+**No row means not set.** There is no tombstone and no null-coordinate placeholder: a kind never set and a kind deleted are indistinguishable, and both read as absent. This is why the list is a SPARSE array of 0–2 rows rather than a fixed pair with nullable members — a half-populated place is not a weaker place, it is not a place.
+
+**Storage.** Go-owned `go_saved_places` (migration 0023), `PRIMARY KEY (user_id, kind)`, no Prisma FK (CG-DL-9). Coordinates are stored ENCRYPT-ONLY as base64 AES-256-GCM ciphertext in `lat_enc` / `lng_enc`, following the `go_ride_requests` precedent exactly (NFR-3.23): the table is new, so there is no plaintext column, no dual-write window and no backfill. The repository requires an `Encryptor` at construction (panics on nil) and treats a decrypt failure as a hard read error — there is no fallback column to fall back to.
+
+**Classification: P1, and the highest-value location the platform holds.** See `data-classification.md` §1.17. A ride coordinate is where somebody went once; a saved home coordinate is where they SLEEP, it is durable, and it is re-read on every app launch. `label` is P1 log-redacted but not app-level encrypted — the same tier split `go_ride_requests` makes between `pickup_lat_enc` and `pickup_label`. **Nothing in this surface is ever logged:** no log line carries a coordinate or a label, on success or on failure, and no error envelope echoes the rejected input.
+
+**No §5.2 mask entry**, for the same reason §7.19 has none: the resource is self-scoped, the JWT subject is the only reader, and there is no role dimension to mask across (Rule CG-DC-5 satisfied by this statement).
+
+**Contract:** [`schemas/saved-places.schema.json`](schemas/saved-places.schema.json) (contracts v0.21.0) — `SavedPlaceKind`, `SavedPlace`, `SavedPlacesResponse`, `PutSavedPlaceRequest`.
+
+#### 7.20.0 The two kinds
+
+| Wire value | Column value | Meaning |
+|------------|--------------|---------|
+| `home` | `'home'` | Where the person lives. |
+| `work` | `'work'` | Where the person works. |
+
+Matched **case-sensitively** and lowercase. `Home` is a `400`, not a synonym: accepting variants would let two spellings of one slot reach an upsert whose conflict target is the exact bytes, and the person would end up with two homes, one of which they could no longer see.
+
+#### 7.20.1 `GET /api/users/me/places`
+
+**Request.**
+
+```
+GET /api/users/me/places
+Authorization: Bearer <app session JWT>
+```
+
+**Response `200`** (`application/json`):
+
+```json
+{
+  "places": [
+    {
+      "kind": "home",
+      "label": "1 Ferry Building · Embarcadero",
+      "latitude": 37.7955,
+      "longitude": -122.3937
+    },
+    {
+      "kind": "work",
+      "label": "3500 Deer Creek Rd · Palo Alto",
+      "latitude": 37.3947,
+      "longitude": -122.1503
+    }
+  ]
+}
+```
+
+**`places` is always present and is an ARRAY, never `null`.** An account that has saved neither kind gets `{"places": []}` — a `200`, never a `404`. That is the state every account is in until somebody saves something, so it is the COMMON path, not an edge case, and clients MUST render it as two empty affordances ("Set home", "Set work").
+
+**The array is SPARSE.** A kind that was never set, or was deleted, is simply absent, so the length is 0, 1 or 2. Clients MUST find a kind by SEARCHING for it, never by index — `places[0]` is not Home.
+
+**The envelope is keyed `places`, deliberately not `items`.** This is not the cursor-paginated envelope of §7.0 / §7.2 / §7.8: the set is bounded BY THE KIND ENUM at two rows, so there is no cursor, no `hasMore`, and nothing an SDK pagination helper could page. The envelope itself is part of the contract and MUST NOT be stripped silently.
+
+**Every field on every row is always present.** No `omitempty` anywhere: `omitempty` on a float drops `0`, and `0` is a real coordinate — the equator and the prime meridian both cross inhabited land — so a client reading an absent key as "unknown" would render a saved place with no pin.
+
+| Field | Type | Classification | Notes |
+|-------|------|----------------|-------|
+| `places` | `SavedPlace[]` | P1 | Required, never `null`. 0–2 rows, `maxItems: 2`. Server order is `home` then `work`; do not depend on it. |
+| `places[].kind` | `"home" \| "work"` | P0 | Required. Self-describing, so a row handed around alone keeps its identity. |
+| `places[].label` | `string` | P1 | Required, 1–200 characters. Log-redacted, not encrypted. |
+| `places[].latitude` | `number` | P1 | Required, `[-90, 90]`. **Encrypted at rest.** |
+| `places[].longitude` | `number` | P1 | Required, `[-180, 180]`. **Encrypted at rest.** |
+
+**Errors:**
+
+| HTTP | `error.code` | When |
+|------|--------------|------|
+| 401 | `auth_failed` | Missing/malformed/invalid bearer. |
+| 405 | `invalid_request` | Non-`GET` method on this handler. |
+| 500 | `internal_error` | Store-layer failure, including a coordinate that will not decrypt. Retryable. |
+
+#### 7.20.2 `PUT /api/users/me/places/{kind}`
+
+**Request.** The WHOLE place. The `{kind}` path segment names the slot.
+
+```
+PUT /api/users/me/places/home
+Authorization: Bearer <app session JWT>
+Content-Type: application/json
+
+{
+  "label": "1 Ferry Building · Embarcadero",
+  "latitude": 37.7955,
+  "longitude": -122.3937
+}
+```
+
+**This is an UPSERT, not a PATCH — the deliberate opposite of §7.19.2.** Push preferences are partial because five notification switches are genuinely independent, and two phones changing two categories must not clobber each other. A label and the coordinate it describes are ONE fact: a partial write there would let a client move the pin while keeping a label that no longer describes it, storing "1 Ferry Building" at an address three miles away. Every write therefore replaces the whole slot, and an omitted field is a `400` rather than "keep the stored value".
+
+**One kind per call.** Setting both Home and Work is two requests.
+
+**Behavior / sequence:**
+
+1. Validate the bearer → `userId`. Missing/invalid → `401 auth_failed`.
+2. Validate the `{kind}` path segment against the closed set, case-sensitively. Unknown → `400 invalid_request`. The rejected value is NOT echoed back.
+3. Strict-decode the body — **unknown keys are a `400`**, matching §7.14 / §7.17 / §7.19.
+4. If the body carries `kind`, it MUST equal the path segment; a mismatch is `400`. It is never honoured over the path — a body that could redirect the write would let a stale client overwrite Home while its URL said Work.
+5. Validate `label` (required, trimmed, non-blank, ≤ 200 **runes**) and both coordinates (required, finite, in range).
+6. Upsert on `(user_id, kind)`, encrypting both coordinates in one statement. `created_at` is preserved on replace; `updated_at` moves.
+7. Return the stored row, scanned back OUT of the database through the decrypt path.
+
+**`kind` in the body is OPTIONAL and REDUNDANT.** It exists only so a client holding a whole `SavedPlace` can post it back without stripping a field. Omitting it is the ordinary case and is exactly equivalent to sending the path value.
+
+**Idempotent (§4.5).** Re-sending an identical body is a no-op producing the same response, so a retry after a dropped response is safe.
+
+**Response `200`** — the stored place, echoed:
+
+```json
+{
+  "kind": "home",
+  "label": "1 Ferry Building · Embarcadero",
+  "latitude": 37.7955,
+  "longitude": -122.3937
+}
+```
+
+**`200` on first write as well as on replace — never `201`.** The resource is the SLOT, which always exists in the URL space whether or not a row backs it, so a create and an update are indistinguishable to the caller and neither mints a new address. The echo is read back from the database rather than reflected from the request, so what the client adopts is provably what was persisted.
+
+| Field | Type | Classification | Notes |
+|-------|------|----------------|-------|
+| `kind` | `"home" \| "work"` | P0 | Optional in the request (must match the path when present); always present in the response. |
+| `label` | `string` | P1 | **Required.** 1–200 runes after trimming. Rejected, never truncated. |
+| `latitude` | `number` | P1 | **Required.** Finite, `[-90, 90]`. Encrypted before it reaches the database. |
+| `longitude` | `number` | P1 | **Required.** Finite, `[-180, 180]`. Encrypted before it reaches the database. |
+
+**Errors:**
+
+| HTTP | `error.code` | When |
+|------|--------------|------|
+| 400 | `invalid_request` | Unknown `{kind}`; body `kind` disagreeing with the path; malformed JSON; unknown key; missing/blank/over-long `label`; missing, non-finite or out-of-range coordinate. |
+| 401 | `auth_failed` | Missing/malformed/invalid bearer. |
+| 405 | `invalid_request` | Non-`PUT` method on this handler. |
+| 500 | `internal_error` | Store-layer failure, including an encrypt failure. The write did NOT happen — there is no plaintext fallback column, so a coordinate that cannot be sealed is not stored at all. Retryable. |
+
+**Error bodies never echo the input.** A `400` names the offending FIELD and not its value: an out-of-range coordinate is still a location, a label is still an address, and error envelopes end up in crash reporters and log aggregators.
+
+#### 7.20.3 `DELETE /api/users/me/places/{kind}`
+
+**Request.** No body.
+
+```
+DELETE /api/users/me/places/work
+Authorization: Bearer <app session JWT>
+```
+
+**Response `204 No Content`** — always, whether or not a row was there.
+
+**Idempotent, and `404` is deliberately NOT in the table.** A client retrying a dropped `DELETE` must not be told its completed work failed, and "this slot is now empty" is true either way. A `404` would also be a small oracle: it would reveal whether the account had ever set that slot, which is a fact about a person's habits that this endpoint owes nobody.
+
+**A real delete, not a tombstone** — the opposite of the `go_vehicle_shares` revocation model (§7.5). A revoked share is evidence in the CAR OWNER's audit trail; a saved place is a person's own note to themselves, so nobody is owed a record that this account once knew where its owner lived.
+
+**Scoped to the named slot.** Deleting Home leaves Work untouched.
+
+**Errors:**
+
+| HTTP | `error.code` | When |
+|------|--------------|------|
+| 400 | `invalid_request` | Unknown `{kind}`. |
+| 401 | `auth_failed` | Missing/malformed/invalid bearer. |
+| 405 | `invalid_request` | Non-`DELETE` method on this handler. |
+| 500 | `internal_error` | Store-layer failure. Retryable. |
+
+#### 7.20.4 Account deletion
+
+Saved places are deleted as **step 6** of the §7.6 `DELETE /api/users/me` sequence, between the push devices and the refresh tokens and BEFORE the identity transaction.
+
+The position is load-bearing in one direction. `go_saved_places` has no foreign key (CG-DL-9), so nothing cascades: a row left behind after the identity rows go would be AES-256-GCM ciphertext of where a DELETED PERSON LIVES, keyed by a cuid that no longer resolves to anybody and reachable by nothing but a table scan. It would never be read, never be reported, and never go away.
+
+Everything else about the slot is unconstrained — the rows are keyed only by `user_id` and nothing later in the sequence reads them — so it sits next to the push devices because both are personal effects with no counterparty. The step is idempotent (a re-run deletes zero rows), which is what keeps the whole sequence re-runnable. The `account_deleted` audit row gains `savedPlacesDeleted`: a COUNT, never the places themselves (CG-DL-5).
+
+**Observability.** `saved place updated` and `saved place deleted` carry the P0 `user_id` and `kind` only — never a label, never a coordinate. `saved place deleted` also carries `row_removed`, which distinguishes a real delete from a no-op re-run in the log without changing the response. Handler:
+[`internal/telemetry/saved_places_handler.go`](../../internal/telemetry/saved_places_handler.go);
+validation `internal/telemetry/saved_places_validate.go`; store
+[`internal/store/saved_places_repo.go`](../../internal/store/saved_places_repo.go);
+coordinate crypto `internal/store/saved_places_scan.go` (reusing
+`internal/store/vehicle_gps_encryption.go`); wiring
+`cmd/telemetry-server/wiring_saved_places.go`.
+
+---
+
 ## 8. Resource schemas
 
 The canonical v1 `VehicleState` schema is [`schemas/vehicle-state.schema.json`](schemas/vehicle-state.schema.json). The REST snapshot endpoint returns that shape directly via `$ref` in the OpenAPI spec -- it is NOT re-declared.
@@ -3418,7 +3621,8 @@ Same as [`websocket-protocol.md`](websocket-protocol.md) §10 divergence managem
 ## 11. Change log
 
 | Date | Change | Author |
-| 2026-07-30 | **Severing a Tesla link now REVOKES the grant at Tesla, not just our copy of the tokens ([MYR-366](https://linear.app/myrobotaxi/issue/MYR-366)).** Both severing paths gain an active, server-side `POST https://auth.tesla.com/oauth2/v3/revoke` (RFC 7009; `token`=stored **refresh** token, `token_type_hint=refresh_token`, `client_id`, **no client secret**) issued BEFORE the local delete — because the delete destroys the very credential the revoke presents, and after it only the owner can withdraw the grant by hand. **§7.6 account deletion:** a new step 2 in the [`data-lifecycle.md`](data-lifecycle.md) §3.1 ordering (the old steps 2-8 renumber to 3-9), placed ahead of the vehicle teardown whose last-vehicle arm deletes the `Account` row and ahead of the identity transaction whose `User` cascade takes any that survives. **§7.12 per-vehicle teardown:** revokes on a **LAST-VEHICLE removal only** — the one removal that clears the tokens; a **mid-fleet** removal deliberately does NOT revoke, since the owner's remaining cars still need the link. The last-vehicle pre-check runs OUTSIDE the teardown's `FOR UPDATE` transaction (an HTTP call to Tesla must not be made while holding row locks over an owner's fleet); the store's locked count stays authoritative and a disagreement is logged, never fatal. **Best-effort throughout and NON-FATAL by construction** — no tokens on file, a DB read error, a network error, a Tesla 5xx and an already-invalid token are each a WARN and a continue; the revoker's signature returns a `bool`, not an `error`, so a failure cannot be propagated into a deletion. Tesla's availability MUST NOT be able to block a person's erasure of their own account. **Re-runnable:** a second run finds no stored token and makes no call. **No wire change on either endpoint** — §7.6 is still `204` with no body and §7.12's response is byte-identical, `revokeUrl` included and unchanged: revocation may have failed, so the honest client behaviour (offer the manual consent page) is the same either way and a `grantRevoked` field would only invite clients to hide a step still sometimes necessary. **Audit/logging:** no new `AuditLog` action; a P0 structured log line `event=tesla_tokens_revoked` carries the `user_id` and nothing else — never the token, its prefix, its length, or a VIN. Skipped entirely when no Tesla OAuth `client_id` is configured, so no unit test and no creds-less deployment can make an outbound revoke call. §7.6 gains a "Tesla grant revocation" subsection, its order table and "What is NOT deleted" rows are corrected, and §7.12's "OAuth revoke" note is rewritten (it previously stated there was no partner machine call). `data-lifecycle.md` §3.1 + §3.3 updated. Implementation: `internal/telemetry/{tesla_token_revoker,tesla_link_revocation,account_deletion_sequence,vehicle_teardown_handler}.go`, `cmd/telemetry-server/{wiring_vehicle_teardown,wiring_account_deletion}.go`. | go-engineer |
+| 2026-07-30 | **Severing a Tesla link now REVOKES the grant at Tesla, not just our copy of the tokens ([MYR-366](https://linear.app/myrobotaxi/issue/MYR-366)).** Both severing paths gain an active, server-side `POST https://auth.tesla.com/oauth2/v3/revoke` (RFC 7009; `token`=stored **refresh** token, `token_type_hint=refresh_token`, `client_id`, **no client secret**) issued BEFORE the local delete — because the delete destroys the very credential the revoke presents, and after it only the owner can withdraw the grant by hand. **§7.6 account deletion:** a new step 2 in the [`data-lifecycle.md`](data-lifecycle.md) §3.1 ordering (the following steps renumber; both order tables were also brought back in line with the MYR-321 saved-places step, which had been added to the code but not to the tables), placed ahead of the vehicle teardown whose last-vehicle arm deletes the `Account` row and ahead of the identity transaction whose `User` cascade takes any that survives. **§7.12 per-vehicle teardown:** revokes on a **LAST-VEHICLE removal only** — the one removal that clears the tokens; a **mid-fleet** removal deliberately does NOT revoke, since the owner's remaining cars still need the link. The last-vehicle pre-check runs OUTSIDE the teardown's `FOR UPDATE` transaction (an HTTP call to Tesla must not be made while holding row locks over an owner's fleet); the store's locked count stays authoritative and a disagreement is logged, never fatal. **Best-effort throughout and NON-FATAL by construction** — no tokens on file, a DB read error, a network error, a Tesla 5xx and an already-invalid token are each a WARN and a continue; the revoker's signature returns a `bool`, not an `error`, so a failure cannot be propagated into a deletion. Tesla's availability MUST NOT be able to block a person's erasure of their own account. **Re-runnable:** a second run finds no stored token and makes no call. **No wire change on either endpoint** — §7.6 is still `204` with no body and §7.12's response is byte-identical, `revokeUrl` included and unchanged: revocation may have failed, so the honest client behaviour (offer the manual consent page) is the same either way and a `grantRevoked` field would only invite clients to hide a step still sometimes necessary. **Audit/logging:** no new `AuditLog` action; a P0 structured log line `event=tesla_tokens_revoked` carries the `user_id` and nothing else — never the token, its prefix, its length, or a VIN. Skipped entirely when no Tesla OAuth `client_id` is configured, so no unit test and no creds-less deployment can make an outbound revoke call. §7.6 gains a "Tesla grant revocation" subsection, its order table and "What is NOT deleted" rows are corrected, and §7.12's "OAuth revoke" note is rewritten (it previously stated there was no partner machine call). `data-lifecycle.md` §3.1 + §3.3 updated. Implementation: `internal/telemetry/{tesla_token_revoker,tesla_link_revocation,account_deletion_sequence,vehicle_teardown_handler}.go`, `cmd/telemetry-server/{wiring_vehicle_teardown,wiring_account_deletion}.go`. | go-engineer |
+| 2026-07-30 | **Saved places become account state — §7.20 `GET /api/users/me/places`, `PUT`/`DELETE /api/users/me/places/{kind}`, and `go_saved_places` (migration 0023) ([MYR-321](https://linear.app/myrobotaxi/issue/MYR-321)).** Contracts **v0.21.0**. The same class of gap §7.19 closed, and the same kind of lie: the ride sheet's Home and Work shortcut chips have shipped since the sheet landed, backed by a private client-side `@State` struct — so "Home" meant one address on somebody's iPhone and a different one on their iPad, and a reinstall forgot both. **Account-scoped, not vehicle-scoped and not device-scoped:** a saved place belongs to a PERSON, so it follows them across every car they own, every car they are a viewer of, and every device they sign in on. Keying it by car would force a re-entry per vehicle AND put a home address on a surface a co-owner can read; **sharing a car grants access to the CAR, never to the other person's address book**, so these rows have no non-self reader and therefore no §5.2 mask entry (CG-DC-5 satisfied by statement, as §7.19 does). **TWO FIXED SLOTS, not a favourites list** — `home` and `work` are PEERS, not `SharePermission`-style cumulative tiers, and the enum IS the key space: it bounds the response at two rows, it is the `{kind}` path segment, and it is half the `(user_id, kind)` primary key. A user-named collection would need ordering, renaming, a create endpoint and a cap, none of which two chips need. Matched **case-sensitively** — `Home` is a `400`, not a synonym, because two spellings reaching an upsert whose conflict target is the exact bytes would give one person two homes, one of them invisible. **NO ROW MEANS NOT SET:** there is no tombstone and no null-coordinate placeholder, so a kind never set and a kind deleted are indistinguishable, and the list is a SPARSE array of 0–2 rows rather than a fixed pair with nullable members — a half-populated place is not a weaker place, it is not a place. The envelope is keyed `places` (not `items`), unpaginated for the same reason `ShareInviteListResponse` is and harder-bounded: `maxItems: 2`. An account that has saved nothing gets `{"places": []}`, a `200` and never a `404` — the state EVERY account is in on day one. **The `PUT` is a WHOLE-OBJECT UPSERT, the deliberate opposite of §7.19.2's partial body**, and the difference is the shape of the data rather than a style choice: five notification switches are genuinely independent, but a label and the coordinate it describes are ONE fact, and a partial write would let a client move the pin while keeping a label that no longer describes it. `200` on first write as well as replace, never `201` — the resource is the SLOT, which always exists in the URL space whether or not a row backs it — and the echo is scanned back OUT of the database through the decrypt path rather than reflected from the request. The body's `kind` is optional and redundant with the path, present only so a client holding a whole `SavedPlace` can post it back unstripped; a body disagreeing with the path is `400` and is **never** honoured over it, since a body that could redirect the write would let a stale client overwrite Home while its URL said Work. The `DELETE` is **always `204`, idempotent, and `404` is deliberately absent** — a retrying client must not be told its completed work failed, and a `404` would be an oracle for whether the account ever set that slot. It is a REAL delete, not a `go_vehicle_shares`-style tombstone: a revoked share is evidence in the CAR OWNER's audit trail, whereas a saved place is a person's own note to themselves. **ENCRYPTION FOLLOWS `go_ride_requests` EXACTLY (NFR-3.23):** `lat_enc`/`lng_enc` are TEXT holding base64 AES-256-GCM ciphertext, encrypt-only with no plaintext column, no dual-write window and no backfill; the repo panics on a nil `Encryptor` at construction and treats a decrypt failure as a hard read error, because there is no fallback column to fall back to. If anything on this platform justifies column encryption it is this table — a ride coordinate is where somebody went once, a saved home coordinate is where they SLEEP, and it is re-read on every launch. `label` stays P1 log-redacted but unencrypted, the same split 0002 makes between `pickup_lat_enc` and `pickup_label`. **Nothing here is ever logged** — no coordinate and no label on any path, and a `400` names the offending field without echoing its value, because error envelopes end up in crash reporters. Validation: `label` required/trimmed/non-blank/≤ 200 **runes** (not bytes, so a 200-character address in a non-Latin script is accepted), coordinates required, **finite** (`1e400` decodes to `+Inf` and would otherwise be sealed into ciphertext no reader can turn back into a place) and in range, decoded through POINTERS so an omitted key is distinguishable from an explicit `0` — `0` is a real coordinate and a plain `float64` would silently save a place off the coast of Ghana. **Account deletion (§7.6) gains a step 6**, before the identity transaction: `go_saved_places` has no FK so nothing cascades, and a row surviving the identity delete would be encrypted GPS of where a deleted person lives, keyed by a cuid nothing resolves and reachable only by a table scan. The audit row gains `savedPlacesDeleted` — a COUNT, never the places (CG-DL-5). No new error code: `invalid_request` and `auth_failed` cover the surface. P1 location throughout; `data-classification.md` §1.17. | Claude (go-engineer) |
 | 2026-07-30 | **Notification preferences become real — §7.19 `GET`/`PUT /api/users/me/push-prefs`, `go_push_prefs` (migration 0022), and a per-category gate in the push notifier ([MYR-349](https://linear.app/myrobotaxi/issue/MYR-349)).** Fixes a LIE rather than a missing feature: both Settings screens have rendered a Notifications card since MYR-170 whose switches were backed by a private client-side struct — they moved, persisted nowhere and gated nothing — and MYR-186 then shipped the entire delivery pipeline with no preference layer, so an owner who had switched "Charging complete" off kept receiving it. Five categories (`rideLifecycle`, `driveStarted`, `driveCompleted`, `chargingComplete`, `viewerJoined`) on ONE row per person, because an account can be both owner and rider at once and the phone is the same phone; the NOTIFIER decides which column a given send answers to. `rideLifecycle` deliberately covers the whole ride status class — the rider's two switches both resolve to it, since no send site distinguishes `arrived` from `accepted`, and minting a column the server would never honour differently would be the same lie one layer down. The `GET` and the `PUT` echo ALL FIVE keys with no `omitempty` (dropping `false` would erase the interesting half of every value); the `PUT` body is PARTIAL, so an omitted key means LEAVE ALONE and two phones on two switches cannot clobber each other, and unknown keys are a `400` rather than a silent `200` that changes nothing. Enforcement is ONE gate on the single fan-out and it **fails OPEN** in all four failure modes — unwired store, lookup error, absent row, unknown category — because nothing about a ride waits on push, so failing closed would turn a database hiccup into platform-wide silence with no error anywhere. **Audit: only ONE of the five categories has a sender today.** `internal/push` has exactly three fan-out sites and all three are `rideLifecycle`; there is no drive-started, drive-completed, charging-complete or viewer-joined notifier in this service at all. The other four columns are created anyway because their switches are already on the owner's screen, so whichever notifier eventually sends them is born gated. P0 throughout. | go-engineer |
 | 2026-07-30 | **Warn an owner before a ride-share pause breaks a confirmed reservation — `?upcomingForVehicle` on the owner feed, and `accepted → declined` for scheduled rides ([MYR-360](https://linear.app/myrobotaxi/issue/MYR-360)).** Today an owner who pauses ride sharing (§7.18) with an ACCEPTED FUTURE RESERVATION on that car breaks it silently: the sweeper **holds** at due time (its MYR-342 pause check runs before the claim), retries, and the ride resolves `reservation_expired` at the 30-minute lateness ceiling — so the rider learns nobody is coming **half an hour after their pickup time**. The hold-then-expire backstop **stays** (it covers crash and offline pauses); this makes the common path humane by letting the client warn the owner and offer an immediate decline. **Two additions, no new endpoint and no new route.** (1) **ONE optional query param on the EXISTING feed**, `GET /api/ride-requests/incoming?upcomingForVehicle={vehicleId}` — the same owner-scoped feed sliced differently: `owner_id` = JWT sub (**unchanged**, so no cross-owner read is expressible), plus `vehicle_id`, `status = 'accepted'`, and `scheduled_for IS NOT NULL AND scheduled_for > now()` (STRICT — a reservation already due belongs to the sweeper). The existing feed could not answer this: it is hardcoded to `requested` and has no vehicle filter, and `GET /api/ride-requests` is the *rider's* list. Ordered **`scheduledFor ASC, id ASC` — soonest first**, a deliberate departure from `createdAt DESC` that is **load-bearing**: the dialog names "the NEXT reservation", and under `createdAt DESC` a paginated cut could omit the soonest row. Cursor anchors on `(scheduledFor, id)` with the ascending row-value keyset `(scheduled_for, id) > (:cursorScheduledFor, :cursorId)`; **the opaque wire cursor format is unchanged** — still one base64 `{timestamp, id}` pair, two typed views of it (§4.2.2). Envelope, `limit` bounds and the in-statement `requesterName` resolution are all unchanged. **An unknown/unowned `vehicleId` is an EMPTY `200` page, never `403`/`404`** — the filter runs on the owner's own feed so it is already safe, and answering `404` would turn the param into an **existence oracle** for other people's cars; only a MALFORMED value is `400 invalid_request`. **Absent the param the endpoint is byte-identical**, pinned by a golden-body test. (2) **The §7.8 matrix's `accepted` → `declined` cell changes from `409` to the `decline` endpoint** — the first new legal edge since MYR-270 — narrowed to **SCHEDULED rides**; an accepted INSTANT ride still `409`s, because a car already dispatched to a rider on a sidewalk is a different situation. The narrowing rests on a row property immutable for a ride's lifetime (`scheduled_for IS NOT NULL` — reschedule moves the *instant*, never its existence), so the guarded `UpdateStatusFrom` write receives the ride's full **legal** from-set and the database still arbitrates every race (two concurrent declines → exactly one winner). Declining a reservation already PAST its `scheduledFor` is allowed on purpose — an explicit decline beats a silent `reservation_expired`, and the sweeper's claim re-checks `status = 'accepted'` so it simply matches no row. Accept, owner-only, and decline's freedom from every capability gate are unchanged. **MIGRATION-INDEX AUDIT: no migration and no index change required.** The change adds **no new status value** (`declined` has been in `go_ride_requests_status_check` since 0002) — only a legal EDGE into an existing **terminal** state, which appears in **neither** partial index (0004 covers `requested`/`accepted`/`enroute`/`arrived`; 0013 covers `accepted`/`enroute`/`arrived`), so the transition can only move rows OUT of a predicate, never in. Independently, the edge is scheduled-only and both indexes are partial on `scheduled_for IS NULL`, so every row it can touch is outside both entirely. Both arguments are individually sufficient. **Rider push copy fixed for the new edge:** `ride.status.changed` → rider fires as always, but a declined **reservation** now reads "*&lt;Vehicle&gt; can't make your scheduled ride*" instead of "*…can't take this ride*", which read as a reply to a request the rider had just made; per the standing rule it still **omits the time** (the server holds UTC and knows no client zone). `RideStatusChangedEvent` gains an internal `ScheduledFor` to carry that fact — **not** projected onto the summary `ride_status_changed` WS frame, which is unchanged. No schema change, no wire-shape change, no new error code. §4.2.2, §4.1.1.b, §6 and §7.8 updated. Implementation: `internal/telemetry/ride_request_{upcoming_handler,owner_decision,cursor}.go`, `internal/store/ride_request_upcoming.go`, `internal/push/copy.go`. | Claude (go-engineer) |
 | 2026-07-29 | **The owner ride-share pause toggle — `rideShareEnabled` on `VehicleSummary` + `VehicleState`, a new §7.18 owner write, and a three-layer ride-request gate ([MYR-342](https://linear.app/myrobotaxi/issue/MYR-342)).** Contracts **v0.20.0**. Adds ONE optional P0 boolean to both read surfaces and one endpoint that writes it. Before this an owner had no way to say *"the car is fine, I am simply not lending it out right now"* — only to mark it `in_service` (a lie, and one MYR-313 lets scheduled rides through anyway) or to decline every request by hand, forever. Storage is `ride_share_enabled BOOLEAN NOT NULL DEFAULT true` on the Go-owned `go_vehicle_control_state` side table (migration **0021**) — deliberately non-nullable, deliberately outside `ControlStateUpdate` (a slot there would let a telemetry frame re-enable a paused car), with dedicated read/write statements modelled on the MYR-316 service-window writer. Emitted on every §7.0 row and on §7.1, in BOTH role masks: **the viewer is the party the value is about**, and a rider who cannot see it learns the car is paused only from a `409` after composing a whole request. **ABSENT means ENABLED** — never paused. Enforced in THREE layers (§7.8): create → `409 vehicle_unavailable`, accept → the same `409` as a backstop, reservation sweeper → **hold** before the irreversible claim, with the 30-minute lateness ceiling expiring anything never re-enabled. **Deliberate deviation:** all three apply to SCHEDULED rides, which MYR-313 exempts from the availability gate — a service visit ends, an owner's pause does not. The MYR-313 fail-open shape on scheduled accepts is preserved, so an unknown pause state never blocks. | Claude (go-engineer) |

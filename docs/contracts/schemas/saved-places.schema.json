@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://myrobotaxi.com/schemas/saved-places.schema.json",
+  "title": "SavedPlacesResponse",
+  "description": "Envelope returned by GET /api/users/me/places — the calling account's saved Home and Work places (MYR-321). Wraps the rows under `places` (NOT the `items` key used by the cursor-paginated list envelopes VehicleListResponse / DrivesListResponse / RideRequestsListResponse): this surface is deliberately UNPAGINATED, for the same reason ShareInviteListResponse is, only more so — the set is not merely small and bounded, it is bounded BY THE ENUM at a hard maximum of two rows, one per SavedPlaceKind. There is no cursor and no `hasMore`, and naming the key `places` keeps it from being mistaken for a page of a cursor-paginated collection by an SDK pagination helper. The envelope itself is part of the wire contract: consumers MUST NOT strip it silently. ACCOUNT-SCOPED, NOT VEHICLE-SCOPED: a saved place belongs to a PERSON, so it follows them across every car they own, every car they are a viewer of, and every device they sign in on — which is the whole point of MYR-321, replacing the per-install SwiftUI @State that made 'Home' mean a different address on an iPhone than on an iPad. Backed by the Go-owned table `go_saved_places` (no FKs to Prisma tables, CG-DL-9). Coordinates are P1 GPS data encrypted at rest (NFR-3.23, telemetry data-classification.md) and NEVER logged — a person's home address is the most sensitive location the platform stores, strictly more so than a one-off ride pickup, because it is durable and it identifies where they sleep. Single-resource endpoints in this family: PUT /api/users/me/places/{kind} upserts ONE kind and echoes back the stored SavedPlace; DELETE /api/users/me/places/{kind} forgets one and returns no body.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["places"],
+  "properties": {
+    "places": {
+      "type": "array",
+      "description": "The saved places this account has set. Always present; an EMPTY ARRAY (never null) means the person has saved neither Home nor Work, which is the state every account starts in and the common case on day one — consumers MUST render that as two empty affordances ('Set home', 'Set work'), never as an error or a loading state. SPARSE BY CONSTRUCTION: a kind that has never been set, or that was deleted, is simply ABSENT from the array — there is no tombstone row and no null-coordinate placeholder, so the array length is 0, 1 or 2 and a client finds a kind by searching for it rather than by index. AT MOST ONE ROW PER `kind` (the table's primary key is (user_id, kind)), so a consumer may safely build a keyed lookup and a second row for the same kind would be a server bug, not a case to merge. Order is server-defined (currently ORDER BY kind, i.e. home before work) and consumers MUST NOT depend on it — render by looking up each kind, not by taking places[0] as Home.",
+      "x-classification": "P1",
+      "maxItems": 2,
+      "items": { "$ref": "#/$defs/SavedPlace" }
+    }
+  },
+  "$defs": {
+    "SavedPlaceKind": {
+      "type": "string",
+      "enum": ["home", "work"],
+      "description": "Which saved place this is. A CLOSED, NON-CUMULATIVE set of exactly two named slots — unlike SharePermission these are not tiers and carry no ordering; 'home' and 'work' are peer labels and neither implies the other. The enum IS the key space: it is what bounds SavedPlacesResponse.places at two rows, it is the `{kind}` path segment of the single-resource endpoints, and it is the second half of the `go_saved_places` primary key. NOT A FREE-FORM FAVOURITES LIST: v1 deliberately ships two fixed slots rather than user-named places, because the two slots are what the ride-request sheet's shortcut row needs and a named-collection surface would need ordering, renaming, a create endpoint and a cap — none of which exist here. Adding a third slot later is an additive enum member plus a CHECK-constraint migration; Swift consumers get the decode-tolerant unrecognized(String) catch-all via codegen (MYR-195), so appending a member never breaks installed clients, and a client that receives an unrecognized kind MUST skip that row rather than fail the whole decode. The path segment is matched CASE-SENSITIVELY and lowercase: 'Home' is a 400 invalid_request, not a synonym.",
+      "x-classification": "P0"
+    },
+    "SavedPlace": {
+      "title": "SavedPlace",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "label", "latitude", "longitude"],
+      "description": "One saved Home or Work place for the calling account — a named coordinate the rider can tap instead of searching. Backed by exactly one `go_saved_places` row keyed (user_id, kind), Go-owned (CG-DL-9). Every field is REQUIRED: a saved place with no coordinate is not a saved place, so the server never emits a partially-populated row and a client never has to reason about a half-set slot — 'not set' is expressed by the row's ABSENCE from SavedPlacesResponse.places, never by a present row with missing keys. SELF-DESCRIBING: the row carries its own `kind` even though GET returns it inside a keyed set and PUT returns it for a kind the caller named in the path, so a SavedPlace handed around on its own (persisted to a client cache, passed to a ride-request builder) never loses the identity of which slot it is. OWNER-FACING ONLY — this object is returned to the account that saved it and is NEVER visible to a viewer, a vehicle owner who shared a car with this person, or the counterparty of a ride: sharing a car grants access to the CAR, never to the other person's address book. P1 throughout, and the coordinates additionally encrypted at rest.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/SavedPlaceKind",
+          "description": "Which slot this row occupies (see SavedPlaceKind). Immutable for the life of the row: there is no rename and no move-Home-to-Work operation, because the pair (account, kind) IS the row's identity — 'changing' a kind means PUTting the new one and DELETEing the old. Always equal to the `{kind}` path segment on a PUT echo."
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "The human-readable line the client renders for this place — either the reverse-geocoded street address the person picked ('1 Ferry Building · Embarcadero') or a name they chose. Free-form and NOT validated as an address: the server never geocodes it, never resolves it, and never checks that it describes the coordinates, so a client that lets someone label their house 'Mom's' stores exactly that. Distinct from the SLOT NAME: the UI's 'Home' / 'Work' captions come from `kind`, and this string is the second line under them — a client MUST NOT fall back to rendering `label` as the slot name. Non-empty (a blank label is 400 invalid_request) and capped at 200 characters, which is generous for a formatted postal address and short enough that the column is not an unbounded write. Compare RidePlace.label, which is the same idea for a one-off ride point. P1 — reveals location: log-redacted, but NOT app-level encrypted, the same tier decision RidePlace.label and Drive.startLocation take (a reverse-geocoded string is meaningfully coarser than the coordinate pair it came from, and the pair beside it is what carries the precision).",
+          "x-classification": "P1",
+          "examples": ["1 Ferry Building · Embarcadero"]
+        },
+        "latitude": {
+          "type": "number",
+          "minimum": -90,
+          "maximum": 90,
+          "description": "WGS-84 latitude of the saved place. Named `latitude`/`longitude` rather than RidePlace's `lat`/`lng` to match VehicleState.latitude — both spellings exist on the platform and this surface follows the account/vehicle family, not the ride family. P1 — GPS coordinate (NFR-3.23): AES-256-GCM encrypted at rest in the Go store layer as an encrypt-only column (there is no plaintext mate, the same shape go_ride_requests uses), never logged, never emitted in an error message. HIGHEST-VALUE LOCATION THE PLATFORM HOLDS: a durable home coordinate is a person's residence, so a leak here is not a leaked trip, it is a leaked address.",
+          "x-classification": "P1",
+          "x-encrypted-at-rest": true,
+          "x-unit": "degrees",
+          "examples": [37.7955]
+        },
+        "longitude": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180,
+          "description": "WGS-84 longitude of the saved place. See `latitude` for the naming rationale. Persisted as the other half of an ATOMIC PAIR — the server writes both encrypt-only columns in one statement and a half-populated pair is corruption, not an absent value, so a read that cannot decrypt both halves fails the read rather than surfacing a coordinate with one axis missing. P1 — GPS coordinate (NFR-3.23): AES-256-GCM encrypted at rest, never logged.",
+          "x-classification": "P1",
+          "x-encrypted-at-rest": true,
+          "x-unit": "degrees",
+          "examples": [-122.3937]
+        }
+      }
+    },
+    "PutSavedPlaceRequest": {
+      "title": "PutSavedPlaceRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "latitude", "longitude"],
+      "description": "Request body for PUT /api/users/me/places/{kind} — set or replace ONE saved place. UPSERT, NOT PATCH: the body carries the WHOLE place and replaces whatever was in that slot, so there is no partial-write mode and no way to move a pin without re-sending its label. That is the opposite of the push-prefs PUT (§7.19), which is deliberately partial, and the difference is the shape of the data: five independent switches genuinely can be changed one at a time by two devices at once, whereas a label and the coordinate it describes are ONE fact — a partial write there would let a client keep the old label on a new pin and store a place that says 'Home' at an address that is not home. ONE KIND PER CALL: the `{kind}` path segment names the slot, and setting both Home and Work is two requests. IDEMPOTENT — re-sending an identical body is a no-op that returns the same 200 body, so a retry after a dropped response is safe. The server responds 200 with a single SavedPlace (the stored row, echoed) rather than 201, on both first write and replace: the resource is the SLOT, which always exists in the URL space whether or not a row backs it, so a create and an update are indistinguishable to the caller and neither mints a new address. Authenticated; the owning account is the JWT subject and is NEVER client-supplied — there is no userId in the path or the body and there must never be one, this being a /users/me surface.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/SavedPlaceKind",
+          "description": "OPTIONAL and REDUNDANT — the slot is named by the `{kind}` PATH SEGMENT, which is what actually routes the write; this key exists only so a client holding a whole SavedPlace can post it back without stripping a field. WHEN PRESENT IT MUST EQUAL THE PATH SEGMENT: a mismatch is rejected 400 `invalid_request` and is NEVER honoured in favour of the body, because a body that could redirect the write would let a stale client overwrite Home while its URL said Work. Omitting it is the ordinary case and is exactly equivalent to sending the path value."
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "Display line for the place — see SavedPlace.label. REQUIRED on every write, including a write that only moves the pin: this is an upsert, so an omitted label is 400 `invalid_request`, not 'keep the old one'. Rejected 400 when blank or whitespace-only, and when longer than 200 characters — the cap is enforced on the RUNE count, not the byte length, so a 200-character address in a non-Latin script is accepted rather than truncated. P1 — log-redacted.",
+          "x-classification": "P1",
+          "examples": ["1 Ferry Building · Embarcadero"]
+        },
+        "latitude": {
+          "type": "number",
+          "minimum": -90,
+          "maximum": 90,
+          "description": "WGS-84 latitude to save — see SavedPlace.latitude. REQUIRED, and range-validated server-side as well as by this schema: a value outside [-90, 90], or a non-finite one (NaN / ±Infinity, which JSON cannot carry but a lenient encoder may attempt), is 400 `invalid_request`. Encrypted before it reaches the database; an encrypt failure FAILS THE WRITE rather than storing a plaintext fallback, because the column has no plaintext mate to fall back to. P1 — never logged, and never echoed into the 400's error message.",
+          "x-classification": "P1",
+          "x-encrypted-at-rest": true,
+          "x-unit": "degrees",
+          "examples": [37.7955]
+        },
+        "longitude": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180,
+          "description": "WGS-84 longitude to save — see SavedPlace.longitude. REQUIRED; same range and finiteness validation as `latitude`, over [-180, 180]. The two coordinates are written as an atomic pair in one statement, so a request is either stored whole or rejected whole. P1 — never logged.",
+          "x-classification": "P1",
+          "x-encrypted-at-rest": true,
+          "x-unit": "degrees",
+          "examples": [-122.3937]
+        }
+      }
+    }
+  }
+}

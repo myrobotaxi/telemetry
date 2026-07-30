@@ -27,6 +27,24 @@ WHERE accepted_by_user_id = $1 AND status <> 'revoked'`
 const queryDeletePushDevicesForUser = `
 DELETE FROM go_push_devices WHERE user_id = $1`
 
+// queryDeleteSavedPlacesForUser drops both saved-place slots for one person
+// (MYR-321). Not scoped to a kind, unlike the §7.20 per-slot delete: the
+// account is going away, so every place it saved goes with it.
+//
+// A DELETE rather than a tombstone, and this is the one step in the sequence
+// where that choice is not merely conventional. The rows hold AES-256-GCM
+// ciphertext of where this person LIVES (data-classification.md §1.17) — a
+// durable home coordinate, not a one-off trip. A tombstone would keep exactly
+// that ciphertext around after somebody exercised their right to erasure, and
+// no counterparty is owed a record that this account once knew its owner's
+// address: unlike a revoked share, which is evidence in the CAR OWNER's audit
+// trail, a saved place is a person's own note to themselves. Nothing outlives
+// them here.
+//
+// Deleting zero rows on a re-run is a clean no-op.
+const queryDeleteSavedPlacesForUser = `
+DELETE FROM go_saved_places WHERE user_id = $1`
+
 // queryRevokeRefreshTokensForUser revokes every unrevoked refresh token in the
 // deleted user's name. Revoke rather than delete, matching the reuse-detection
 // model in migration 0003: the rotation lineage is evidence and stays. reason

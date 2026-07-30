@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	"github.com/myrobotaxi/telemetry/internal/events"
@@ -102,6 +103,9 @@ type fakeAccountData struct {
 	devicesDeleted int
 	devicesErr     error
 
+	placesDeleted int
+	placesErr     error
+
 	tokensRevoked int
 	tokensErr     error
 
@@ -143,6 +147,16 @@ func (f *fakeAccountData) DeletePushDevices(_ context.Context, _ string) (int, e
 	}
 	n := f.devicesDeleted
 	f.devicesDeleted = 0
+	return n, nil
+}
+
+func (f *fakeAccountData) DeleteSavedPlaces(_ context.Context, _ string) (int, error) {
+	f.note("delete_saved_places")
+	if f.placesErr != nil {
+		return 0, f.placesErr
+	}
+	n := f.placesDeleted
+	f.placesDeleted = 0 // idempotent: a re-run deletes nothing
 	return n, nil
 }
 
@@ -276,6 +290,7 @@ func TestAccountDeletion_OwnerWithSharesRunsEveryStepInOrder(t *testing.T) {
 		driveCount:     7,
 		sharesRevoked:  2,
 		devicesDeleted: 1,
+		placesDeleted:  2,
 		tokensRevoked:  3,
 		order:          &order,
 	}
@@ -299,6 +314,11 @@ func TestAccountDeletion_OwnerWithSharesRunsEveryStepInOrder(t *testing.T) {
 		"teardown:cveh_b",
 		"revoke_shares",
 		"delete_devices",
+		// MYR-321. Position is load-bearing in one direction only: it MUST
+		// precede delete_identity, because a saved place that outlived its
+		// owner would be encrypted GPS of where a deleted person lives, keyed
+		// by a cuid nothing can resolve.
+		"delete_saved_places",
 		"revoke_tokens",
 		"delete_identity",
 	}
@@ -309,7 +329,8 @@ func TestAccountDeletion_OwnerWithSharesRunsEveryStepInOrder(t *testing.T) {
 	// The audit metadata carries the P0 tally accumulated along the way.
 	got := data.identityCounts
 	if got.VehicleCount != 2 || got.DriveCount != 7 || got.SharesRevoked != 2 ||
-		got.PushDevicesDeleted != 1 || got.RefreshTokensRevoked != 3 {
+		got.PushDevicesDeleted != 1 || got.SavedPlacesDeleted != 2 ||
+		got.RefreshTokensRevoked != 3 {
 		t.Fatalf("audit counts = %+v", got)
 	}
 
@@ -489,6 +510,19 @@ func TestAccountDeletion_MidFailureIsReRunnable(t *testing.T) {
 			wantAudits: 1,
 		},
 		{
+			// MYR-321. A saved-place failure must abort like any other step
+			// rather than being swallowed: leaving the rows behind would leave
+			// encrypted GPS of a deleted person's home in the table.
+			name: "the saved-place deletion fails",
+			breakIt: func(_ *fakeAccountTeardown, d *fakeAccountData) {
+				d.placesErr = errors.New("db down")
+			},
+			healIt: func(_ *fakeAccountTeardown, d *fakeAccountData) {
+				d.placesErr = nil
+			},
+			wantAudits: 1,
+		},
+		{
 			name: "the identity transaction itself fails",
 			breakIt: func(_ *fakeAccountTeardown, d *fakeAccountData) {
 				d.identityErr = errors.New("rollback")
@@ -503,7 +537,7 @@ func TestAccountDeletion_MidFailureIsReRunnable(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			teardown := newFakeAccountTeardown()
-			data := &fakeAccountData{sharesRevoked: 1, devicesDeleted: 1, tokensRevoked: 1}
+			data := &fakeAccountData{sharesRevoked: 1, devicesDeleted: 1, placesDeleted: 2, tokensRevoked: 1}
 			h := newDeletionHandler(t, AccountDeletionDeps{
 				Vehicles: &fakeOwnedVehicleLister{ids: []string{"cveh_a", "cveh_b"}},
 				Teardown: teardown,
@@ -530,6 +564,53 @@ func TestAccountDeletion_MidFailureIsReRunnable(t *testing.T) {
 				t.Fatal("cveh_a should be gone after the retry")
 			}
 		})
+	}
+}
+
+// TestAccountDeletion_SavedPlacesGoBeforeTheIdentity pins the MYR-321 step's
+// two obligations: it must run, and it must run BEFORE the identity rows go.
+//
+// The ordering is not cosmetic. go_saved_places has no foreign key (CG-DL-9),
+// so nothing cascades: a row left behind after the identity delete is
+// AES-256-GCM ciphertext of where a deleted person LIVES, keyed by a cuid that
+// no longer resolves to anybody and reachable by nothing but a table scan. It
+// would never be read, never be reported, and never go away.
+func TestAccountDeletion_SavedPlacesGoBeforeTheIdentity(t *testing.T) {
+	var order []string
+	data := &fakeAccountData{placesDeleted: 2, order: &order}
+	teardown := newFakeAccountTeardown()
+	teardown.order = &order
+
+	h := newDeletionHandler(t, AccountDeletionDeps{
+		Vehicles: &fakeOwnedVehicleLister{},
+		Teardown: teardown,
+		Rides:    &fakeRideCanceller{},
+		Data:     data,
+	})
+
+	if got := callDelete(h).Code; got != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", got)
+	}
+
+	placesAt := slices.Index(order, "delete_saved_places")
+	identityAt := slices.Index(order, "delete_identity")
+	if placesAt < 0 {
+		t.Fatalf("delete_saved_places never ran; sequence = %v", order)
+	}
+	if placesAt > identityAt {
+		t.Fatalf("saved places must be deleted BEFORE the identity rows; sequence = %v", order)
+	}
+	if data.identityCounts.SavedPlacesDeleted != 2 {
+		t.Fatalf("audit tally savedPlacesDeleted = %d, want 2", data.identityCounts.SavedPlacesDeleted)
+	}
+
+	// A re-run deletes nothing and is still a 204 — the step is idempotent,
+	// which is what makes the whole sequence re-runnable.
+	if got := callDelete(h).Code; got != http.StatusNoContent {
+		t.Fatalf("re-run status = %d, want 204", got)
+	}
+	if data.identityCounts.SavedPlacesDeleted != 0 {
+		t.Fatalf("re-run tally savedPlacesDeleted = %d, want 0", data.identityCounts.SavedPlacesDeleted)
 	}
 }
 

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -9,11 +11,35 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/myrobotaxi/telemetry/internal/config"
+	"github.com/myrobotaxi/telemetry/internal/cryptox"
 	"github.com/myrobotaxi/telemetry/internal/events"
 	"github.com/myrobotaxi/telemetry/internal/server"
 	"github.com/myrobotaxi/telemetry/internal/telemetry"
 	"github.com/myrobotaxi/telemetry/internal/ws"
 )
+
+// routeTestEncryptor builds a throwaway AES-256-GCM Encryptor over a random
+// key, via the real production loader path. Wiring needs a non-nil one because
+// the MYR-321 saved-places repo refuses to construct without it; no request in
+// this test ever reaches a store call, so the key is never used to seal
+// anything.
+func routeTestEncryptor(t *testing.T) cryptox.Encryptor {
+	t.Helper()
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	t.Setenv("ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(raw))
+	ks, err := cryptox.LoadKeySetFromEnv()
+	if err != nil {
+		t.Fatalf("LoadKeySetFromEnv: %v", err)
+	}
+	enc, err := cryptox.NewEncryptor(ks)
+	if err != nil {
+		t.Fatalf("NewEncryptor: %v", err)
+	}
+	return enc
+}
 
 // alwaysReady is a server.ReadinessChecker that reports healthy. The
 // route-surface test never hits /readyz, but server.New requires a
@@ -68,7 +94,16 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 		// and only dereference it inside a request that has already
 		// passed auth. Every request below is unauthenticated, so no
 		// store call is ever made.
-		logger: logger,
+		//
+		// The ENCRYPTOR is the one exception and must be real (MYR-321).
+		// store.NewSavedPlacesRepo panics on a nil Encryptor by design —
+		// go_saved_places holds coordinates encrypt-only, so a deployment
+		// without a key must fail at wiring rather than write somebody's
+		// home address in the clear at the first request. Passing nil here
+		// would make this test assert that the panic does not happen, which
+		// is the opposite of the guarantee.
+		encryptor: routeTestEncryptor(t),
+		logger:    logger,
 	}
 
 	setupHTTPHandlers(deps)
@@ -100,6 +135,11 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 		// like its §7.17 sibling: a person must be able to switch a category
 		// off whether or not this deploy carries the APNs credentials.
 		{"push prefs read (MYR-349, §7.19)", "/api/users/me/push-prefs"},
+		// MYR-321 saved places (§7.20). The collection GET; the per-kind PUT
+		// and DELETE are asserted in their own blocks below. Mounted
+		// unconditionally like its /users/me siblings — every operation is a
+		// local database read or write with no proxy and no Tesla call.
+		{"saved places list (MYR-321, §7.20)", "/api/users/me/places"},
 	}
 
 	for _, rt := range routes {
@@ -166,6 +206,11 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 		// MYR-349: the GET and the PUT share a path, so mounting only one of
 		// the two verbs is a live failure mode this catches — the other 404s.
 		{"push prefs write (MYR-349, §7.19)", "/api/users/me/push-prefs"},
+		// MYR-321: the per-kind PUT. A DIFFERENT path from the collection GET
+		// above (it carries the {kind} segment), so mounting the list without
+		// the writer — or registering the pattern without the wildcard — 404s
+		// here rather than in production.
+		{"saved place upsert (MYR-321, §7.20)", "/api/users/me/places/home"},
 	}
 	for _, rt := range putRoutes {
 		t.Run(rt.name, func(t *testing.T) {
@@ -193,6 +238,9 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 		// review requirement that is contingent on configuration is a rejection
 		// waiting to happen.
 		{"account deletion (MYR-355, §7.6)", "/api/users/me"},
+		// MYR-321: the PUT and DELETE share the {kind} path, so mounting only
+		// one of the two verbs is a live failure mode this catches.
+		{"saved place delete (MYR-321, §7.20)", "/api/users/me/places/work"},
 	}
 	for _, rt := range deleteRoutes {
 		t.Run(rt.name, func(t *testing.T) {

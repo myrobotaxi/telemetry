@@ -45,7 +45,7 @@ func (h *AccountDeletionHandler) run(ctx context.Context, userID string) (accoun
 
 	// (2) Revoke the Tesla OAuth grant at Tesla, while we still hold the
 	// refresh token. This MUST precede step 3: the last-vehicle arm of the
-	// teardown deletes the "Account" row, and step 8's "User" cascade takes
+	// teardown deletes the "Account" row, and step 9's "User" cascade takes
 	// any that survives — after either, the token needed to revoke is gone
 	// and only the owner can withdraw the grant by hand. Best-effort and
 	// deliberately unchecked: MYR-366 makes Tesla's availability unable to
@@ -82,22 +82,36 @@ func (h *AccountDeletionHandler) run(ctx context.Context, userID string) (accoun
 	}
 	counts.PushDevicesDeleted = devices
 
-	// (7) Refresh tokens — revoked so no stored session can mint a new access
-	// token. The CURRENT access token deliberately keeps working until step 9,
-	// because it is what authenticates a re-run if step 8 fails.
+	// (7) Saved places — the person's Home and Work rows (MYR-321). Slotted
+	// here, next to the push devices and BEFORE the identity delete, because
+	// both are personal effects with no counterparty: rows that belong to this
+	// account alone, that no other person has a claim on, and that nothing
+	// later in the sequence reads. Deleting them cannot be deferred past step 9
+	// — the identity rows go there, and a saved place that outlived its owner
+	// would be AES-256-GCM ciphertext of where a deleted person lives, keyed by
+	// a cuid nobody can resolve and reachable by nothing but a table scan.
+	places, err := h.deps.Data.DeleteSavedPlaces(ctx, userID)
+	if err != nil {
+		return accountDeletionResult{}, &accountDeletionError{step: "delete_saved_places", cause: err}
+	}
+	counts.SavedPlacesDeleted = places
+
+	// (8) Refresh tokens — revoked so no stored session can mint a new access
+	// token. The CURRENT access token deliberately keeps working until step 10,
+	// because it is what authenticates a re-run if step 9 fails.
 	tokens, err := h.deps.Data.RevokeRefreshTokens(ctx, userID)
 	if err != nil {
 		return accountDeletionResult{}, &accountDeletionError{step: "revoke_refresh_tokens", cause: err}
 	}
 	counts.RefreshTokensRevoked = tokens
 
-	// (8) Identity + audit, one transaction, LAST.
+	// (9) Identity + audit, one transaction, LAST.
 	outcome, err := h.deps.Data.DeleteIdentity(ctx, userID, counts)
 	if err != nil {
 		return accountDeletionResult{}, &accountDeletionError{step: "delete_identity", cause: err}
 	}
 
-	// (9) Close the token window immediately rather than waiting for the
+	// (10) Close the token window immediately rather than waiting for the
 	// existence/access caches to expire on their own.
 	h.invalidateSessions(userID)
 
@@ -137,7 +151,7 @@ func (h *AccountDeletionHandler) tearDownOwnedVehicles(ctx context.Context, user
 // §7.8). A ride already ENROUTE or ARRIVED is a car physically carrying this
 // person right now; cancelling it from under the owner mid-drive would be a
 // worse outcome than letting it finish, and it reaches a terminal state on its
-// own within the trip. Those rides are LEFT, and after step 8 they render to
+// own within the trip. Those rides are LEFT, and after step 9 they render to
 // the owner as a former rider exactly as completed history does.
 //
 // A ride that loses the race (the owner declined or completed it between the
