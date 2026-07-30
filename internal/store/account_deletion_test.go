@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
@@ -483,5 +484,59 @@ func TestRideRequestRepo_ListOpenByRider(t *testing.T) {
 			t.Fatal("ordering must be oldest-first, the order the owner saw them in")
 		}
 		last = rec.CreatedAt
+	}
+}
+
+// TestAccountDeleter_DeleteIdentity_ConcurrentCallsWriteOneAuditRow is the
+// race the client's own retry affordance creates: a user who taps Delete twice,
+// or retries while the first request is still in flight, fires two deletions at
+// one account. Without the FOR UPDATE probes both transactions read "rows
+// exist" and both write an `account_deleted` row — two FR-10.2 entries for one
+// account, which is a false audit trail rather than a cosmetic duplicate.
+//
+// Only real Postgres can show this: the locking is the mechanism.
+func TestAccountDeleter_DeleteIdentity_ConcurrentCallsWriteOneAuditRow(t *testing.T) {
+	setupAccountDeletion(t)
+	seedGoUser(t, delUserApple, strPtr("Priya Patel"), strPtr("priya@icloud.com"))
+	seedAppleIdentity(t, "sub-"+delUserApple, delUserApple, strPtr("Priya Patel"), nil)
+	seedUser(t, delUserApple, strPtr("Priya Patel"), strPtr("priya@example.com"))
+
+	deleter := newAccountDeleter(t)
+	const callers = 4
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		deleted int
+		gone    int
+	)
+	start := make(chan struct{})
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start // release them together, so the probes genuinely overlap
+			res, err := deleter.DeleteIdentity(context.Background(), delUserApple, store.AccountDeletionCounts{})
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				t.Errorf("DeleteIdentity: %v", err)
+				return
+			}
+			switch {
+			case res.Deleted:
+				deleted++
+			case res.AlreadyGone:
+				gone++
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if deleted != 1 || gone != callers-1 {
+		t.Fatalf("outcomes = %d deleted / %d already-gone, want exactly 1 / %d", deleted, gone, callers-1)
+	}
+	if n := countQuery(t, `SELECT count(*) FROM "AuditLog" WHERE "userId" = $1`, delUserApple); n != 1 {
+		t.Fatalf("audit rows = %d across %d concurrent deletions, want exactly 1", n, callers)
 	}
 }

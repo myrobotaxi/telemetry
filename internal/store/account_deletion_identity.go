@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -109,14 +110,38 @@ func (a *AccountDeleter) DeleteIdentity(ctx context.Context, userID string, coun
 	}, nil
 }
 
-// probeAccountIdentity reports which of the three identity sources still hold
-// a row for userID, inside the open transaction.
+// probeAccountIdentity reports which of the three identity sources still hold a
+// row for userID and ROW-LOCKS every row it finds, inside the open transaction.
+// The locks are what serialize two concurrent deletions of the same account —
+// see the queries' doc comment; without them a double-tapped Delete could write
+// two audit rows for one account.
 func probeAccountIdentity(ctx context.Context, tx pgx.Tx, userID string) (prismaUser, goUser, appleIdentity bool, err error) {
-	if err := tx.QueryRow(ctx, queryLockAccountIdentity, userID).
-		Scan(&prismaUser, &goUser, &appleIdentity); err != nil {
-		return false, false, false, fmt.Errorf("store.DeleteIdentity(user=%s): probe identity: %w", userID, err)
+	if prismaUser, err = lockIdentityRow(ctx, tx, userID, `"User"`, queryLockPrismaUser); err != nil {
+		return false, false, false, err
+	}
+	if goUser, err = lockIdentityRow(ctx, tx, userID, "go_users", queryLockGoUser); err != nil {
+		return false, false, false, err
+	}
+	if appleIdentity, err = lockIdentityRow(ctx, tx, userID, "go_identity_apple", queryLockAppleIdentities); err != nil {
+		return false, false, false, err
 	}
 	return prismaUser, goUser, appleIdentity, nil
+}
+
+// lockIdentityRow runs one FOR UPDATE probe and reports whether it matched.
+// pgx.ErrNoRows is the "nothing here" answer, not a failure — it is the whole
+// Apple-native / legacy-web distinction, and on a re-run it is every table.
+func lockIdentityRow(ctx context.Context, tx pgx.Tx, userID, table, query string) (bool, error) {
+	var scratch string
+	err := tx.QueryRow(ctx, query, userID).Scan(&scratch)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, nil
+	default:
+		return false, fmt.Errorf("store.DeleteIdentity(user=%s): lock %s: %w", userID, table, err)
+	}
 }
 
 // deleteIdentityRows removes the Apple bindings, the Apple-native user row and

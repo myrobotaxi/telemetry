@@ -43,20 +43,39 @@ UPDATE go_refresh_tokens
 SET revoked = TRUE, revoked_at = NOW(), reason = 'account_deleted'
 WHERE user_id = $1 AND revoked = FALSE`
 
-// queryLockAccountIdentity reads AND row-locks the deleted user's identity
-// rows in the final transaction. Two facts come out of one statement: whether
-// ANYTHING is left to delete (which decides whether an audit row is written at
-// all, so a re-run cannot duplicate it) and whether a Prisma "User" row exists
-// (dual-source identity — an Apple-native user has none).
+// The three identity-existence probes, each taking a ROW LOCK.
 //
-// FOR UPDATE is scoped per-statement below rather than here because the three
-// tables have different shapes; this query is the existence probe and the locks
-// are taken by the DELETEs themselves inside the same transaction.
-const queryLockAccountIdentity = `
-SELECT
-	EXISTS (SELECT 1 FROM "User" u WHERE u."id" = $1)          AS prisma_user,
-	EXISTS (SELECT 1 FROM go_users g WHERE g.id = $1)          AS go_user,
-	EXISTS (SELECT 1 FROM go_identity_apple a WHERE a.user_id = $1) AS apple_identity`
+// They answer two questions at once: whether ANYTHING is left to delete (which
+// decides whether an audit row is written at all, so a re-run cannot duplicate
+// it) and whether a Prisma "User" row exists (dual-source identity — an
+// Apple-native user has none).
+//
+// FOR UPDATE is what makes the "write the audit row only if something was
+// there" decision race-safe rather than merely atomic, and it is load-bearing
+// precisely BECAUSE the client is told to retry: a user tapping Delete twice,
+// or retrying while the first request is still in flight, would otherwise have
+// both transactions read "rows exist" and both write an `account_deleted` row
+// for one account. With the locks, the second transaction blocks until the
+// first commits and then — at READ COMMITTED, where a locking read re-evaluates
+// after the lock is released — finds no row and takes the already-gone arm.
+// `TestAccountDeleter_DeleteIdentity_ConcurrentCallsWriteOneAuditRow` fails
+// with 4 deleted / 0 already-gone if these three clauses are dropped.
+//
+// Three statements rather than one `EXISTS(...)` projection because `FOR
+// UPDATE` cannot be applied to a subquery's rows: the locks have to be taken by
+// the selects that actually touch the rows. `go_identity_apple` is read as a
+// row set rather than a count for the same reason (an aggregate forbids FOR
+// UPDATE) — and correctly so, since one person may hold several bindings.
+const (
+	queryLockPrismaUser = `
+SELECT 1 FROM "User" WHERE "id" = $1 FOR UPDATE`
+
+	queryLockGoUser = `
+SELECT 1 FROM go_users WHERE id = $1 FOR UPDATE`
+
+	queryLockAppleIdentities = `
+SELECT apple_sub FROM go_identity_apple WHERE user_id = $1 FOR UPDATE`
+)
 
 // queryDeleteAppleIdentity removes every Apple sub bound to the user. Plural
 // by construction: the schema indexes user_id precisely because one person may
