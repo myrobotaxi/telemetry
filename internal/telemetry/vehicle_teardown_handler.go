@@ -26,6 +26,11 @@ import (
 //     teardown is authoritative and a stale config self-expires while our
 //     receiver rejects the stream regardless). Skipped for an empty VIN or when
 //     no config-deleter is wired (tests/CI, or no proxy configured).
+//  3a. ON A LAST-VEHICLE REMOVAL ONLY: best-effort POST to Tesla's OAuth
+//     revocation endpoint, killing the grant itself (MYR-366). It runs HERE,
+//     before step 4, because step 4 deletes the refresh token the call needs.
+//     A mid-fleet removal skips it — the owner's other cars still stream, and
+//     revoking would break every one of them.
 //  4. Authoritative local teardown transaction (deletes Vehicle + cascade;
 //     clears Account tokens + resets Settings on a last-vehicle removal; writes
 //     the vehicle_deleted audit row). The Vehicle delete fires the existing
@@ -45,7 +50,13 @@ type VehicleTeardownHandler struct {
 	fleet    FleetConfigDeleter // nil disables the Tesla-side config delete
 	teardown VehicleTeardownWriter
 	cfg      VehicleTeardownConfig
-	logger   *slog.Logger
+	// grant actively revokes the Tesla OAuth grant on a last-vehicle removal
+	// (MYR-366). Optional — nil when no Tesla OAuth client is configured, in
+	// which case the tokens are simply deleted without a revoke call, exactly
+	// as before MYR-366. Set via WithTeslaGrantRevocation rather than a
+	// constructor parameter so the existing eight call sites are untouched.
+	grant  teslaLinkRevoker
+	logger *slog.Logger
 }
 
 // VehicleTeardownConfig carries the non-dependency settings.
@@ -69,8 +80,9 @@ func NewVehicleTeardownHandler(
 	teardown VehicleTeardownWriter,
 	cfg VehicleTeardownConfig,
 	logger *slog.Logger,
+	opts ...VehicleTeardownOption,
 ) *VehicleTeardownHandler {
-	return &VehicleTeardownHandler{
+	h := &VehicleTeardownHandler{
 		auth:     auth,
 		vehicles: vehicles,
 		tokens:   tokens,
@@ -79,6 +91,10 @@ func NewVehicleTeardownHandler(
 		cfg:      cfg,
 		logger:   logger,
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 // ServeHTTP routes DELETE only.
@@ -123,6 +139,12 @@ func (h *VehicleTeardownHandler) handle(w http.ResponseWriter, r *http.Request) 
 	// cleared). Non-fatal — the local teardown is authoritative.
 	streamConfigDeleted := h.deleteStreamConfig(ctx, userID, vin)
 
+	// Best-effort active revocation of the Tesla OAuth grant, on a last-vehicle
+	// removal only. Also before the teardown, and for a sharper reason: the
+	// teardown DELETEs the "Account" row that holds the refresh token this call
+	// presents (MYR-366).
+	grantRevoked := h.revokeTeslaGrant(ctx, userID, vehicleID)
+
 	// Authoritative local teardown (ownership re-enforced at the SQL layer).
 	result, err := h.teardown.RemoveVehicle(ctx, userID, vehicleID)
 	if err != nil {
@@ -135,12 +157,25 @@ func (h *VehicleTeardownHandler) handle(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if result.WasLastVehicle && !grantRevoked {
+		// The store's locked count is authoritative; ours was a pre-check.
+		// They disagree only when the owner's fleet changed underneath this
+		// request, or when Tesla refused. Either way the tokens are now gone
+		// unrevoked, and the owner-confirmed revokeUrl in the response is the
+		// remaining path — worth a line, never worth a failure.
+		h.logger.Warn("vehicle teardown: tesla tokens cleared without an accepted revocation",
+			slog.String("vehicle_id", vehicleID),
+			slog.String("user_id", userID),
+		)
+	}
+
 	h.logger.Info("vehicle teardown complete",
 		slog.String("vehicle_id", vehicleID),
 		slog.String("user_id", userID),
 		slog.Bool("already_gone", result.AlreadyGone),
 		slog.Bool("was_last_vehicle", result.WasLastVehicle),
 		slog.Bool("stream_config_deleted", streamConfigDeleted),
+		slog.Bool("tesla_grant_revoked", grantRevoked),
 	)
 
 	h.writeJSON(w, http.StatusOK, h.buildResponse(result, streamConfigDeleted))
@@ -208,6 +243,18 @@ func (h *VehicleTeardownHandler) deleteStreamConfig(ctx context.Context, userID,
 		return false
 	}
 	return true
+}
+
+// revokeTeslaGrant best-effort revokes the owner's Tesla OAuth grant when this
+// removal takes their last car (MYR-366). Returns whether Tesla accepted it.
+// Never fails the request: an unwired revoker, a mid-fleet removal, a DB read
+// error, a network error and a Tesla 5xx all return false and the
+// authoritative local teardown proceeds unchanged.
+func (h *VehicleTeardownHandler) revokeTeslaGrant(ctx context.Context, userID, vehicleID string) bool {
+	if h.grant == nil {
+		return false
+	}
+	return h.grant.RevokeIfLastVehicle(ctx, userID, vehicleID)
 }
 
 // buildResponse assembles the honest post-teardown body.
