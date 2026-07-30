@@ -409,7 +409,24 @@ The vehicle-sharing grant table — one row per (owner → recipient → vehicle
 >
 > **Wire projection (Rule CG-DC-5):** `label`, `permission`, `status`, `code`, `created_at`, `expires_at` and `accepted_at` ARE projected, onto the owner-only `ShareInvite` object — see the `ResourceInvite` allow-list in `internal/mask/tables.go` and `rest-api.md` §5.2.5. The `viewer` role has **no entry** for that resource, so the fail-closed lookup yields deny-all. `owner_user_id`, `accepted_by_user_id` and `revoked_at` are projected nowhere. `permission` additionally reaches the invited party as `VehicleSummary.sharePermission` (P0, §5.2.0 viewer list); no other column in this table is ever visible to a non-owner.
 >
-> **No FKs (CG-DL-9).** Deleting a person or a car leaves rows behind. They are inert — the read paths resolve the target through the sibling schema and find nothing — and the owner-offboarding path revokes a vehicle's grants explicitly (`RevokeSharesForVehicle`).
+> **No FKs (CG-DL-9).** Deleting a person or a car leaves rows behind. They are inert — the read paths resolve the target through the sibling schema and find nothing — and the owner-offboarding path revokes a vehicle's grants explicitly (`RevokeSharesForVehicle`). **Since MYR-355 the mirror direction is covered too**: account deletion revokes every grant the departing person *redeemed* (`RevokeSharesReceived`), so neither end of a grant can outlive its parties as a live row.
+
+---
+
+### 1.16 Account deletion — classification note (MYR-355)
+
+`DELETE /api/users/me` ([`rest-api.md`](rest-api.md) §7.6, sequence in [`data-lifecycle.md`](data-lifecycle.md) §3) **adds no column and no table**, so it changes no tier and does not move the P0/P1 counts. It is recorded here because it is the one operation that reads across *every* classified table at once, and three classification rules bind it.
+
+**1. The audit metadata is P0 only (CG-DL-5), and the shape is closed.** The `account_deleted` row's `metadata` is exactly `{vehicleCount, driveCount, ridesCancelled, sharesRevoked, pushDevicesDeleted, refreshTokensRevoked, hadPrismaUser}` — six counts and one bool. The temptation this endpoint creates is real and specific: an operator triaging a failed deletion wants to know *which* account, and the P1 values (name, email, VIN, ride labels) are all sitting in the same function. None of them may enter the row. `hadPrismaUser` is the closest call and is P0 on the same reasoning as `sandbox` in §1.14 — it describes which *shape* of account this was, not who it belonged to. `TestAccountDeleter_DeleteIdentity_WritesTheAuditRow` asserts the key set exactly, so an added field is a deliberate decision rather than a drift.
+
+**2. The server log lines carry the user cuid and counts, and nothing else.** `account_deleted` (`store.AccountDeleter`) and `account_deletion_complete` (`telemetry.AccountDeletionHandler`) log the opaque cuid, the audit row id, and the same counts. The **P1 values the sequence necessarily handles in memory are never logged**: the `requesterName` resolved onto each cancelled ride (§1.9), the `label` on each revoked grant (§1.15), the `device_token` on each deleted registration (§1.14), the VIN of each torn-down car, and the deleted person's own name and email. The per-vehicle teardown's own log line is unchanged and already obeys this (MYR-258).
+
+**3. Deletion does not lower any surviving row's tier.** Two categories of P1 data survive the deletion by design (data-lifecycle.md §3.3) and keep their classification:
+
+- **Terminal ride rows where the deleted user was the rider.** The P1 encrypted pickup/dropoff coordinates (§3.1) and the P1 log-redaction-only labels, addresses and passenger fields (§3.2) are unchanged and stay P1 — they are the OWNER's data now, and the owner is still present to be protected. What changes is only the *resolution* of `requesterName`: with no identity row in any of the three sources, `requester_exists` is false and the field is **omitted from the wire** rather than degraded to the `"Rider"` literal. An omitted `requesterName` on the live path means precisely "this account was deleted", which the iOS client renders as "Former rider". **This is not an anonymization step and must not be described as one** — nothing was scrubbed, and the row remains keyed by the deleted person's cuid.
+- **Revoked share tombstones**, whose P1 `label` (a person's name) is retained. A revoked row is never serialized to any client (`status` has no `revoked` wire member), so the retained name reaches nobody; it stays P1 in the database and in logs.
+
+The one P1 value the deletion genuinely destroys everywhere is the departing person's own `name` / `email`, across all three identity sources (§1.10, §1.11, and the sibling `User` row).
 
 ### 1.16 go_push_prefs table (Go-owned, MYR-349)
 

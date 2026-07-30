@@ -202,7 +202,12 @@ type httpRouteDeps struct {
 	// authenticator; separate from it so the sharing handlers depend on the
 	// one-method interface rather than the whole authenticator.
 	accessInvalidator telemetry.AccessCacheInvalidator
-	pool              *pgxpool.Pool
+	// sessionInvalidator drops BOTH auth caches for a user whose account has
+	// just been deleted (MYR-355) — the user-existence cache as well as the
+	// access set, so an unexpired access token stops validating immediately
+	// rather than at the TTL. Same nil-in-dev-mode policy as accessInvalidator.
+	sessionInvalidator telemetry.AccountSessionInvalidator
+	pool               *pgxpool.Pool
 	encryptor         cryptox.Encryptor
 	auditEmitter      mask.AuditEmitter
 	auditMetrics      mask.AuditMetrics
@@ -302,6 +307,7 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 	setupPushDeviceEndpoints(deps)
 	setupPushPrefsEndpoints(deps)
 	setupVehicleSharingEndpoints(deps, snapshotAdapter)
+	setupAccountDeletionEndpoint(deps)
 	setupDebugFieldsEndpoint(deps)
 }
 

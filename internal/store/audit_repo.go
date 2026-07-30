@@ -64,22 +64,25 @@ import (
 // The full enum is defined by docs/contracts/data-lifecycle.md §4.2; the
 // constants below cover the actions emitted by the Go telemetry server.
 //
-// Most user-initiated actions (account_deleted, drive_deleted, invite_revoked)
-// are emitted by the Next.js app inside its Prisma $transaction and are
-// intentionally NOT exposed here. The ONE sanctioned exception is
-// vehicle_deleted (MYR-258): the Go server owns the per-vehicle owner-teardown
-// endpoint (DELETE /api/tesla/vehicles/{vehicleId}), so store.OwnerTeardown
-// writes that user-initiated row inside its own delete transaction — the exact
-// reverse of MYR-257's owner-provisioning carve-out. See
-// docs/contracts/data-lifecycle.md §1.4 / §4.2 and CG-DL-3.
+// The remaining user-initiated actions (drive_deleted, invite_revoked) are
+// emitted by the Next.js app inside its Prisma $transaction and are
+// intentionally NOT exposed here. TWO are owned by the Go server, and in both
+// cases for the same reason — the Go server owns the endpoint, so it owns the
+// row: vehicle_deleted (MYR-258, DELETE /api/tesla/vehicles/{vehicleId}),
+// written by store.OwnerTeardown, and account_deleted (MYR-355, DELETE
+// /api/users/me), written by store.AccountDeleter. Each lands inside the same
+// transaction as the destructive delete it records. See
+// docs/contracts/data-lifecycle.md §1.4 / §3 / §4.2 and CG-DL-3.
 type AuditAction string
 
 const (
 	// AuditActionAccountDeleted records a user-initiated account deletion
-	// per FR-10.1. Emitted by the Next.js app, NOT by the Go telemetry
-	// server. Defined here for symmetry with the contract enum and so
-	// downstream Go consumers (e.g., metric labels) can use the same
-	// constant set.
+	// per FR-10.1. SINCE MYR-355 THIS IS EMITTED BY THE GO TELEMETRY SERVER:
+	// the native iOS client never reaches the Next.js app, so the Go server
+	// serves DELETE /api/users/me (rest-api.md §7.6) and
+	// store.AccountDeleter.DeleteIdentity writes this row inside the same
+	// transaction as the identity delete (CG-DL-3). targetType='user',
+	// targetId=the caller's own cuid, initiator='user'.
 	AuditActionAccountDeleted AuditAction = "account_deleted"
 
 	// AuditActionVehicleDeleted records a user-initiated per-vehicle
@@ -109,6 +112,10 @@ const (
 const (
 	// auditTargetTypeVehicle marks a Vehicle record as the affected entity.
 	auditTargetTypeVehicle = "vehicle"
+	// auditTargetTypeUser marks a user account as the affected entity — used
+	// by the account_deleted row, whose targetId is the caller's own cuid
+	// (data-lifecycle.md §3.1, MYR-355).
+	auditTargetTypeUser = "user"
 	// auditInitiatorUser marks an action the end user triggered via UI/API.
 	auditInitiatorUser = "user"
 )

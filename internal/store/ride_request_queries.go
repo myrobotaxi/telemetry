@@ -124,6 +124,29 @@ WHERE owner_id = $1 AND status = $2
 ORDER BY created_at DESC, id DESC
 LIMIT $3`
 
+// queryOpenRideRequestsByRider selects every NON-TERMINAL ride the rider
+// holds, instant and scheduled alike, oldest first — the account-deletion
+// sweep (MYR-355). The status list is the same OPEN set the per-rider
+// active-instant index uses; it is spelled out rather than expressed as "NOT
+// IN (terminal)" so that adding a lifecycle state is a deliberate edit here
+// rather than a silent widening of what a deletion cancels.
+//
+// Unbounded on purpose: this is not a user-facing page, and leaving even one
+// open request behind would strand an owner with a request from a person who
+// no longer exists.
+//
+// LEAN PROJECTION, deliberately: `id, status` and nothing else. The full
+// rideRequestColumns set would drag four AES-256-GCM decryptions of P1
+// pickup/dropoff coordinates through a sweep that only needs to know which
+// rides to transition — and the guarded UPDATE's own RETURNING already
+// resolves the whole record for the rides that actually change. Decrypting
+// location data with no use for it is a cost paid in the wrong currency.
+const queryOpenRideRequestsByRider = `SELECT id, status
+FROM go_ride_requests
+WHERE rider_id = $1
+  AND status IN ('requested', 'accepted', 'enroute', 'arrived')
+ORDER BY created_at ASC, id ASC`
+
 // Cursor (keyset) variants for the paginated HTTP surface (MYR-174/175).
 // The (created_at, id) row-value comparison resumes strictly after the
 // prior page's last row under the same (created_at DESC, id DESC) ordering,
