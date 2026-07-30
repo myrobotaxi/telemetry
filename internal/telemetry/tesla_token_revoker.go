@@ -24,6 +24,10 @@ const teslaOAuthRevokeEndpoint = "https://auth.tesla.com/oauth2/v3/revoke"
 // must not add fifteen seconds to "Delete my account".
 const revokeTimeout = 5 * time.Second
 
+// maxRevokeErrorBody caps how much of a failed revoke's response body is quoted
+// into the returned error, and therefore into the caller's log line.
+const maxRevokeErrorBody = 1 << 10 // 1 KiB
+
 // TokenRevoker actively revokes a stored Tesla OAuth grant at Tesla's
 // authorization server (MYR-366). It is the machine-callable counterpart to
 // the owner-confirmed consent page (teslaConsentRevokeBase, car-offboarding.md
@@ -92,7 +96,13 @@ func (r *TokenRevoker) revokeWithEndpoint(ctx context.Context, endpoint, refresh
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+	// Deliberately a much tighter cap than the 64 KiB maxResponseBody the rest
+	// of this package reads with. This body is quoted verbatim into an error
+	// that a caller logs; RFC 6749 §5.2 says it carries only
+	// error/error_description/error_uri, but a 1 KiB ceiling means a
+	// misbehaving or compromised endpoint cannot echo an unbounded blob —
+	// including our own token — into the log through us.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRevokeErrorBody))
 	if err != nil {
 		return fmt.Errorf("TokenRevoker.Revoke: read response: %w", err)
 	}
