@@ -89,6 +89,13 @@ type prefsResponse struct {
 // names and types (tags are ignored), so adding a sixth category to Prefs and
 // forgetting the response fails to COMPILE here. A literal would have compiled
 // and quietly omitted the new key.
+//
+// The guard covers ADDITIONS and RENAMES but NOT REORDERINGS: field order is
+// part of struct identity, so the two declarations must stay in the same order
+// — and because all five fields are the same type, swapping two of them stays
+// compilable and silently mislabels both switches. Keep the field order in
+// Prefs, prefsResponse and prefsRequest identical; the per-category tests are
+// what would actually catch a swap.
 func newPrefsResponse(p Prefs) prefsResponse {
 	return prefsResponse(p)
 }

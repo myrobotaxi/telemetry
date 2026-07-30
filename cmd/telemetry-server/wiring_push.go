@@ -106,6 +106,18 @@ type pushPrefsAdapter struct {
 }
 
 func (a *pushPrefsAdapter) PrefsForUser(ctx context.Context, userID string) (push.Prefs, error) {
+	// A TYPED NIL is not a nil interface. The notifier's own `prefs == nil`
+	// guard cannot see through this adapter: it always receives a non-nil
+	// *pushPrefsAdapter, which may hold a nil repo. main.go builds the repo
+	// unconditionally today, so this is unreachable — but if it ever stops
+	// doing so, the failure without this line is a nil-pointer panic inside a
+	// detached fan-out goroutine, which takes the process down over a
+	// notification. Fail open, exactly as every other unresolvable preference
+	// does.
+	if a.repo == nil {
+		return push.DefaultPrefs(), nil
+	}
+
 	row, err := a.repo.PrefsForUser(ctx, userID)
 	if err != nil {
 		return push.Prefs{}, fmt.Errorf("push: read prefs: %w", err)
@@ -114,6 +126,14 @@ func (a *pushPrefsAdapter) PrefsForUser(ctx context.Context, userID string) (pus
 }
 
 func (a *pushPrefsAdapter) UpdatePrefs(ctx context.Context, userID string, update push.PrefsUpdate) (push.Prefs, error) {
+	// Same typed-nil guard as PrefsForUser — but the WRITE fails LOUDLY rather
+	// than open. A read that cannot resolve a preference falls back to the
+	// pre-MYR-349 behaviour and loses nothing; a write that silently discarded
+	// somebody's choice and answered 200 would be the original lie restored.
+	if a.repo == nil {
+		return push.Prefs{}, fmt.Errorf("push: write prefs: no preference store wired")
+	}
+
 	row, err := a.repo.UpdatePrefs(ctx, userID, store.PushPrefsUpdate{
 		RideLifecycle:    update.RideLifecycle,
 		DriveStarted:     update.DriveStarted,
