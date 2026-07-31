@@ -12,6 +12,7 @@ import (
 //	POST   /api/vehicles/{vehicleId}/invites
 //	GET    /api/vehicles/{vehicleId}/invites
 //	DELETE /api/invites/{inviteId}
+//	PATCH  /api/invites/{inviteId}
 //	POST   /api/invites/{inviteId}/resend
 //	POST   /api/invites/redeem
 //
@@ -24,9 +25,11 @@ import (
 // /api/ride-requests/incoming route relies on.
 //
 // The authenticator is passed as the cache invalidator: redeeming busts the
-// REDEEMER's cached access set so the car appears immediately, and revoking
-// busts the REVOKED VIEWER's so access ends immediately rather than at the next
-// TTL lapse. See auth.JWTAuthenticator.InvalidateVehicles for the
+// REDEEMER's cached access set so the car appears immediately, revoking busts
+// the REVOKED VIEWER's so access ends immediately rather than at the next TTL
+// lapse, and PATCH busts the GRANTEE's (MYR-369) — a suspension removes the
+// vehicle from that person's access set, so it is a revoke in every respect that
+// matters to the cache. See auth.JWTAuthenticator.InvalidateVehicles for the
 // single-instance caveat.
 func setupVehicleSharingEndpoints(deps httpRouteDeps, vehicles telemetry.VehicleSnapshotReader) {
 	logger := deps.logger.With(slog.String("component", "vehicle-sharing"))
@@ -42,6 +45,10 @@ func setupVehicleSharingEndpoints(deps httpRouteDeps, vehicles telemetry.Vehicle
 	deps.srv.HandleFunc("POST /api/vehicles/{vehicleId}/invites", inviteHandler.ServeCreate)
 	deps.srv.HandleFunc("GET /api/vehicles/{vehicleId}/invites", inviteHandler.ServeList)
 	deps.srv.HandleFunc("DELETE /api/invites/{inviteId}", inviteHandler.ServeRevoke)
+	// PATCH shares its pattern with DELETE and differs only in method, which
+	// ServeMux routes on — the same way DELETE and the POST routes already
+	// coexist under /api/invites/{inviteId}.
+	deps.srv.HandleFunc("PATCH /api/invites/{inviteId}", inviteHandler.ServePatch)
 	deps.srv.HandleFunc("POST /api/invites/{inviteId}/resend", inviteHandler.ServeResend)
 
 	redeemHandler := telemetry.NewShareRedeemHandler(

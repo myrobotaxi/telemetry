@@ -396,7 +396,7 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 	// Subscribes to the ride.accepted seam (published by the owner-accept
 	// handler) and pushes the rider's pickup into the vehicle's Tesla
 	// navigation via the command Executor. Gated by DISPATCH_ENABLED.
-	if err := setupNavDispatcher(ctx, cfg, bus, vehicleRepo, accountRepo, rideRepo, logger); err != nil {
+	if err := setupNavDispatcher(ctx, cfg, bus, vehicleRepo, accountRepo, rideRepo, shareRepo, logger); err != nil {
 		return fmt.Errorf("setting up nav dispatcher: %w", err)
 	}
 
@@ -437,13 +437,13 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 		// account-deletion endpoint must drop (MYR-355).
 		sessionInvalidator: sessionInvalidator,
 		pool:               db.Pool(),
-		encryptor:         encryptor,
-		auditEmitter:      auditEmitter,
-		auditMetrics:      auditMetrics,
-		debugGate:         gates.debugFields,
-		originPatterns:    originPatterns,
-		serviceStatus:     serviceStatusMonitor,
-		logger:            logger,
+		encryptor:          encryptor,
+		auditEmitter:       auditEmitter,
+		auditMetrics:       auditMetrics,
+		debugGate:          gates.debugFields,
+		originPatterns:     originPatterns,
+		serviceStatus:      serviceStatusMonitor,
+		logger:             logger,
 	})
 
 	// --- Identity module endpoints (MYR-193, ADR-001) ---

@@ -213,11 +213,11 @@ type httpRouteDeps struct {
 	// rather than at the TTL. Same nil-in-dev-mode policy as accessInvalidator.
 	sessionInvalidator telemetry.AccountSessionInvalidator
 	pool               *pgxpool.Pool
-	encryptor         cryptox.Encryptor
-	auditEmitter      mask.AuditEmitter
-	auditMetrics      mask.AuditMetrics
-	debugGate         debugFieldsGate
-	originPatterns    []string
+	encryptor          cryptox.Encryptor
+	auditEmitter       mask.AuditEmitter
+	auditMetrics       mask.AuditMetrics
+	debugGate          debugFieldsGate
+	originPatterns     []string
 	// serviceStatus is the running in-service monitor. It also owns the
 	// per-VIN stream-recency state (MYR-300) and the vehicle_data backfill
 	// mapping (MYR-260) that the MYR-315 refresh endpoint reuses.
@@ -288,7 +288,11 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 		&driveListerAdapter{repo: deps.driveRepo},
 		deps.logger.With(slog.String("component", "vehicle-drives")),
 		telemetry.WithDrivesRoleResolver(deps.authenticator),
-		telemetry.WithDrivesShareReader(&shareReaderAdapter{repo: deps.shareRepo}),
+		// MYR-369: NO share reader. The drives surfaces are owner-only
+		// again — the `live_history` capability was removed from the
+		// product — and the handler no longer has a seam to pass one
+		// through, so re-opening them is a deliberate change rather than
+		// one wiring line.
 		telemetry.WithDrivesMaskAudit(deps.auditEmitter, deps.auditMetrics, "/api/vehicles/{vehicleId}/drives"),
 	)
 	deps.srv.HandleFunc("GET /api/vehicles/{vehicleId}/drives", drivesHandler.ServeHTTP)

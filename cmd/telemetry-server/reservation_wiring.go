@@ -60,11 +60,12 @@ func startReservationSweeper(
 	dispatcher *dispatch.Dispatcher,
 	rideRepo *store.RideRequestRepo,
 	vehicleRepo *store.VehicleRepo,
+	shareRepo *store.VehicleShareRepo,
 	logger *slog.Logger,
 ) {
 	sweeper := dispatch.NewReservationSweeper(
 		dispatcher,
-		&reservationStoreAdapter{repo: rideRepo, vehicles: vehicleRepo},
+		&reservationStoreAdapter{repo: rideRepo, vehicles: vehicleRepo, shares: shareRepo},
 		bus,
 		dispatch.ReservationConfig{
 			Enabled:       cfg.ReservationDispatchEnabled(),
@@ -90,6 +91,10 @@ type reservationStoreAdapter struct {
 	// control-state side table, not on any ride row, so the sweeper's store seam
 	// spans two repos — one question to each, both before the claim.
 	vehicles *store.VehicleRepo
+	// shares serves the MYR-369 rider-grant probe. Neither repo above owns
+	// go_vehicle_shares, so the seam spans three — one question to each,
+	// all before the claim.
+	shares *store.VehicleShareRepo
 }
 
 func (a *reservationStoreAdapter) ListDueReservations(
@@ -142,6 +147,17 @@ func (a *reservationStoreAdapter) VehicleHasActiveInstantRide(ctx context.Contex
 // irreversible claim.
 func (a *reservationStoreAdapter) VehicleRideShareEnabled(ctx context.Context, vehicleID string) (bool, error) {
 	return a.vehicles.RideShareEnabled(ctx, vehicleID)
+}
+
+// RiderMayRequestRides reads the rider's ride capability over the vehicle
+// (MYR-369).
+//
+// A THIRD repo on this adapter, and for the same reason as the second: the fact
+// lives on go_vehicle_shares, which neither the ride-request repo nor the
+// vehicle repo owns. The sweeper now asks one question of each, all three
+// immediately before the irreversible claim.
+func (a *reservationStoreAdapter) RiderMayRequestRides(ctx context.Context, riderID, vehicleID string) (bool, error) {
+	return a.shares.RiderMayRequestRides(ctx, riderID, vehicleID)
 }
 
 func (a *reservationStoreAdapter) ClaimReservationDispatch(ctx context.Context, rideID string) (bool, error) {

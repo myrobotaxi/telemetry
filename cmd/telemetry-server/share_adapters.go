@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/myrobotaxi/telemetry/internal/auth"
 	"github.com/myrobotaxi/telemetry/internal/store"
@@ -61,6 +60,29 @@ func (a *shareInviteAdapter) RevokeInvite(ctx context.Context, inviteID, ownerUs
 	return viewerID, nil
 }
 
+// PatchInvite applies an owner edit to one accepted grant (MYR-369) and reports
+// the grantee whose access set changed, so the caller can bust their cache.
+//
+// The grantee id comes from the row the UPDATE returned, not from a second
+// lookup: it is whoever holds the grant that was just edited, read in the same
+// statement that edited it, so a concurrent revoke cannot make the two disagree.
+func (a *shareInviteAdapter) PatchInvite(
+	ctx context.Context,
+	inviteID, ownerUserID string,
+	patch telemetry.ShareInvitePatch,
+) (telemetry.ShareInviteRow, string, error) {
+	row, err := a.repo.PatchInvite(ctx, store.PatchShareInviteInput{
+		InviteID:    inviteID,
+		OwnerUserID: ownerUserID,
+		AllowRides:  patch.AllowRides,
+		Suspended:   patch.Suspended,
+	})
+	if err != nil {
+		return telemetry.ShareInviteRow{}, "", translateShareError(err)
+	}
+	return toShareInviteRow(&row), row.AcceptedByUserID, nil
+}
+
 // ResendInvite re-mints the code on a pending row.
 func (a *shareInviteAdapter) ResendInvite(ctx context.Context, inviteID, ownerUserID string) (telemetry.ShareInviteRow, error) {
 	row, err := a.repo.ResendInvite(ctx, inviteID, ownerUserID)
@@ -97,7 +119,7 @@ func (a *shareRedeemAdapter) RedeemCode(ctx context.Context, code, redeemerID st
 		out = append(out, telemetry.ShareGrantRow{
 			VehicleID:   g.VehicleID,
 			OwnerUserID: g.OwnerUserID,
-			Permission:  g.Permission,
+			AllowRides:  g.AllowRides,
 		})
 	}
 	return out, nil
@@ -115,23 +137,22 @@ type shareReaderAdapter struct {
 	repo *store.VehicleShareRepo
 }
 
-// SharePermissionFor resolves the caller's tier over one vehicle. The store's
-// ErrShareNotFound already wraps sdk.ErrNotFound, which is the "no grant"
-// signal the gate checks, so it passes through untranslated.
-func (a *shareReaderAdapter) SharePermissionFor(ctx context.Context, userID, vehicleID string) (auth.SharePermission, error) {
-	permission, err := a.repo.SharePermissionFor(ctx, userID, vehicleID)
+// ShareGrantFor resolves the caller's CAPABILITY SET over one vehicle
+// (MYR-369). The store's ErrShareNotFound already wraps sdk.ErrNotFound, which
+// is the "no grant" signal the gate checks, so it passes through untranslated —
+// and the store returns it for a SUSPENDED grant too, which is why a suspended
+// viewer is refused by every gate without any of them naming suspension.
+//
+// The returned grant is always Active: the store's statement excludes suspended
+// rows, so there is no paused grant for this adapter to hand a gate. No parse
+// step remains — the value crossing the boundary is a bool, not a string that
+// could carry a tier the enum has never heard of.
+func (a *shareReaderAdapter) ShareGrantFor(ctx context.Context, userID, vehicleID string) (auth.ShareGrant, error) {
+	allowRides, err := a.repo.ShareGrantFor(ctx, userID, vehicleID)
 	if err != nil {
-		return auth.SharePermission(""), err
+		return auth.ShareGrant{}, err
 	}
-	// Parse rather than cast: a tier the enum does not recognize must not
-	// reach a gate, where AtLeast would silently refuse it while the caller
-	// believed a grant existed. A parse failure is a real error (a row whose
-	// CHECK constraint has drifted), not a denial.
-	tier, err := auth.ParseSharePermission(permission)
-	if err != nil {
-		return auth.SharePermission(""), fmt.Errorf("shareReaderAdapter(vehicle=%s): %w", vehicleID, err)
-	}
-	return tier, nil
+	return auth.ShareGrant{AllowRides: allowRides}, nil
 }
 
 // sharedVehicleListerAdapter binds the viewer-side catalog reads to
@@ -184,7 +205,7 @@ func toSharedVehicleRows(rows []store.SharedVehicleSummary) []telemetry.SharedVe
 				// catalog, not from a 409.
 				RideShareEnabled: row.RideShareEnabled,
 			},
-			Permission: row.Permission,
+			AllowRides: row.AllowRides,
 		})
 	}
 	return out
@@ -198,6 +219,14 @@ func toShareInviteRow(row *store.VehicleShare) telemetry.ShareInviteRow {
 		VehicleID:  row.VehicleID,
 		Label:      row.Label,
 		Permission: row.Permission,
+		Grant: auth.ShareGrant{
+			AllowRides: row.AllowRides,
+			// The owner's own listing DOES show suspended grants — it is
+			// the only place they can be seen and lifted — so unlike every
+			// viewer-facing path this conversion must carry the flag
+			// rather than assume it clear.
+			Suspended: row.SuspendedAt != nil,
+		},
 		Code:       row.Code,
 		Status:     row.Status,
 		CreatedAt:  row.CreatedAt,
@@ -218,6 +247,8 @@ func translateShareError(err error) error {
 		return telemetry.ErrShareVehicleNotOwned
 	case errors.Is(err, store.ErrShareNotPending):
 		return telemetry.ErrShareNotPending
+	case errors.Is(err, store.ErrShareNotAccepted):
+		return telemetry.ErrShareNotAccepted
 	case errors.Is(err, store.ErrShareSelfRedeem):
 		return telemetry.ErrShareSelfRedeem
 	case errors.Is(err, store.ErrShareAlreadyGranted):
