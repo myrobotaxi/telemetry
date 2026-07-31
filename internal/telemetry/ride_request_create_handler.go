@@ -159,8 +159,14 @@ func (h *RideRequestHandler) rejectIfRideActive(ctx context.Context, w http.Resp
 // handleCreateError maps a failed store.Create onto a response. ErrRideActive
 // (the unique-index race backstop refusing a concurrent second instant
 // create) re-reads the winning ride so the client adopts it, exactly as the
-// pre-check would; every other error is a 500.
+// pre-check would; a window conflict (MYR-383) is the typed 409 below; every
+// other error is a 500.
 func (h *RideRequestHandler) handleCreateError(ctx context.Context, w http.ResponseWriter, in RideRequestCreateInput, err error) {
+	var conflict *RideWindowConflictError
+	if errors.As(err, &conflict) {
+		h.writeWindowConflict(w, conflict)
+		return
+	}
 	if errors.Is(err, ErrRideActive) {
 		if existing, gErr := h.store.GetActiveInstantByRider(ctx, in.RiderID); gErr == nil {
 			h.writeRideActive(w, existing)

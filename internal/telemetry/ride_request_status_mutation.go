@@ -54,6 +54,29 @@ func (h *RideRequestHandler) mutateStatusDispatched(ctx context.Context, w http.
 	return h.mutateStatusWith(ctx, w, rec, from, to, h.store.UpdateStatusFromDispatched)
 }
 
+// mutateStatusUnconflicted is mutateStatus over the store's BOOKING-LOCKED
+// write (MYR-383), and it backs exactly one caller: the owner ACCEPT transition
+// (requested → accepted).
+//
+// The extra precondition — the ride's target vehicle is not already promised to
+// another open ride inside the booking window — is evaluated inside the SAME
+// transaction as the status guard, under a per-vehicle advisory lock, so two
+// owners confirming conflicting reservations for one car are arbitrated by the
+// database rather than by whichever pre-check read happened to be stale. No
+// accept can commit against a window that is taken at the instant of the write.
+//
+// This is the BACKSTOP half of the two-layer gate — the create-time refusal is
+// the rider-facing half — following the MYR-316 service-window pattern exactly.
+// It is not redundant: reservations booked before the gate existed can still be
+// mutually conflicting, and a car that was idle at booking time may be mid-ride
+// by the time the owner taps accept.
+//
+// The refusal is a *RideWindowConflictError, mapped by writeTransitionError to the
+// same 409 `vehicle_unavailable` / `time_conflict` body the create path emits.
+func (h *RideRequestHandler) mutateStatusUnconflicted(ctx context.Context, w http.ResponseWriter, rec RideRequestData, from []string, to string) (RideRequestData, bool) {
+	return h.mutateStatusWith(ctx, w, rec, from, to, h.store.UpdateStatusFromUnconflicted)
+}
+
 // mutateStatusWith runs one guarded transition write and maps its outcome onto
 // the wire. Every refusal a client can see is decided by `write` — the
 // database — never by a read taken before it.
@@ -88,6 +111,15 @@ func (h *RideRequestHandler) mutateStatusWith(
 // dormant reservation — carry the SAME `conflict` code (MYR-376 deliberately
 // adds no new error code); only the message distinguishes them.
 func (h *RideRequestHandler) writeTransitionError(w http.ResponseWriter, id, to string, err error) {
+	var window *RideWindowConflictError
+	if errors.As(err, &window) {
+		// MYR-383: the transition is legal and the ride is fine — the target
+		// vehicle is already promised to another open ride within the booking
+		// window. Same capability class as ErrVehicleRideActive below, and the
+		// same body the create path emits (ride_window_conflict.go).
+		h.writeWindowConflict(w, window)
+		return
+	}
 	switch {
 	case errors.Is(err, ErrVehicleRideActive):
 		// Per-vehicle one-active-ride guard (MYR-266): the transition is

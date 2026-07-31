@@ -218,6 +218,19 @@ const (
 	// end its Activity and say the reservation expired rather than
 	// retrying the registration forever.
 	SubCodeReservationExpired SubCode = "reservation_expired"
+	// SubCodeTimeConflict qualifies vehicle_unavailable when the refusal is
+	// the MYR-383 per-vehicle WINDOW conflict — the car is already promised
+	// to another open ride within RideConflictWindow of the requested
+	// `scheduledFor` (rest-api.md §7.8). It exists because the three other
+	// carriers of vehicle_unavailable are all conditions of the car RIGHT
+	// NOW (in service, offline, ride-sharing paused, already on a ride),
+	// which a client answers by telling the rider to try again later. This
+	// one is a property of the TIME the rider picked: the car is fine, the
+	// slot is taken, and the action is to pick another slot — a different
+	// screen and a different sentence. Without the sub-code a client cannot
+	// tell the two apart, and the message is not something it may branch on
+	// (§4.1 rule 1).
+	SubCodeTimeConflict SubCode = "time_conflict"
 )
 
 // WriteErrorEnvelopeSub is WriteErrorEnvelope with a typed sub-code, for

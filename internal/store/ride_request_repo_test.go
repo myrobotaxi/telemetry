@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -44,9 +45,11 @@ func setupRideRequestRepo(t *testing.T) (*store.RideRequestRepo, cryptox.Encrypt
 }
 
 // fullRideRequest is a scheduled, booked-for-someone-else request — every
-// optional Create field populated.
+// optional Create field populated. Its instant comes from the shared
+// distinct-instant sequence for the MYR-383 reason described on
+// scheduledRideRequest.
 func fullRideRequest() store.RideRequestRecord {
-	sched := time.Date(2026, 6, 18, 16, 0, 0, 0, time.UTC)
+	sched := nextFixtureInstant()
 	return store.RideRequestRecord{
 		RiderID:   "clrider1234567890abcdef",
 		OwnerID:   "clowner1234567890abcdef",
@@ -80,16 +83,56 @@ func minimalRideRequest() store.RideRequestRecord {
 	}
 }
 
-// scheduledRideRequest is minimalRideRequest with a fixed future scheduledFor.
+// scheduledRideRequest is minimalRideRequest with a DISTINCT future
+// scheduledFor — every call returns an instant a day past the previous one.
 // Scheduled rides are EXEMPT from the one-active-INSTANT-ride guard (MYR-230,
 // migration 0004's partial unique index only covers scheduled_for IS NULL
 // rows), so tests that need several concurrently-open rides for a single rider
 // build them as scheduled to stay in a state the business rule permits.
+//
+// The instants must be DISTINCT as of MYR-383: reservations for one vehicle
+// closer together than store.RideConflictWindow now refuse each other, so a
+// fixed instant would make every one of these fixtures collide with its
+// siblings. A DAY apart is far enough that the window's exact value can change
+// without touching a single test, and the sequence is deterministic per process
+// so failures stay reproducible. Tests that care about a SPECIFIC instant (the
+// window boundary, the sweeper's due clock) set ScheduledFor themselves.
 func scheduledRideRequest() store.RideRequestRecord {
+	sched := nextFixtureInstant()
 	rec := minimalRideRequest()
-	sched := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	rec.ScheduledFor = &sched
 	return rec
+}
+
+// scheduledFixtureSeq spaces successive reservation fixtures. Atomic because
+// the guard tests build fixtures from parallel goroutines.
+var scheduledFixtureSeq atomic.Int64
+
+// nextFixtureInstant returns a reservation instant no other fixture in this
+// process will use: a day past the previous one, and far enough from `now` that
+// the window gate's ACTIVE-INSTANT arm can never fire against it either.
+func nextFixtureInstant() time.Time {
+	return time.Date(2027, 1, 1, 12, 0, 0, 0, time.UTC).
+		AddDate(0, 0, int(scheduledFixtureSeq.Add(1)))
+}
+
+// plantScheduledFor force-sets a seeded row's reservation instant with raw SQL,
+// AFTER Create has already run the MYR-383 booking gate against a spaced-apart
+// placeholder.
+//
+// READ-PATH fixtures routinely need rows the BOOKING rule refuses — several
+// reservations minutes apart on one car (the sweeper's due matrix), or two
+// sharing an instant to exercise a cursor tie-break — and such rows exist in
+// production too, booked in the era before the gate. Planting them directly
+// keeps the read-path tests testing the read path instead of encoding the
+// booking rule twice. The gate itself is tested against the real Create and the
+// real guarded accept in ride_request_conflict_test.go.
+func plantScheduledFor(t *testing.T, id string, at *time.Time) {
+	t.Helper()
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE go_ride_requests SET scheduled_for = $2 WHERE id = $1`, id, at); err != nil {
+		t.Fatalf("plant scheduled_for on %s: %v", id, err)
+	}
 }
 
 // TestRideRequestMigration_TableApplied proves migration 0002 lands the

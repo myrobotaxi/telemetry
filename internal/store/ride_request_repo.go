@@ -94,11 +94,28 @@ func newRideRequestID() string {
 	return "c" + hex.EncodeToString(b)
 }
 
+// ridePlaceCipher carries the four AES-256-GCM coordinate ciphertexts from
+// Create (the encrypt boundary) to whichever insert path runs. Grouped rather
+// than passed loose so the insert helper keeps a readable signature.
+type ridePlaceCipher struct {
+	pickupLat  string
+	pickupLng  string
+	dropoffLat string
+	dropoffLng string
+}
+
 // Create inserts a new ride request. Zero-value fields get their creation
 // defaults: an empty ID is generated, an empty Status becomes 'requested'.
 // AcceptedAt/CompletedAt/Reschedule* are ignored on insert — they only
 // come into existence through UpdateStatus / ProposeReschedule. Returns
 // the stored record with DB-assigned created_at/updated_at.
+//
+// A RESERVATION (ScheduledFor set) additionally runs the MYR-383 per-vehicle
+// window gate — lock, probe, insert, one transaction — and returns
+// *RideWindowConflictError when the car is already promised inside
+// RideConflictWindow of the requested instant. An INSTANT create takes the
+// plain single-statement path: at `requested` it occupies no window, and its
+// own guards (0004 per-rider, MYR-277 availability) are untouched.
 func (r *RideRequestRepo) Create(ctx context.Context, req RideRequestRecord) (RideRequestRecord, error) {
 	if req.ID == "" {
 		req.ID = newRideRequestID()
@@ -107,48 +124,68 @@ func (r *RideRequestRepo) Create(ctx context.Context, req RideRequestRecord) (Ri
 		req.Status = RideRequestStatusRequested
 	}
 
-	pickupLatEnc, pickupLngEnc, err := r.encryptPlace(req.Pickup)
+	var c ridePlaceCipher
+	var err error
+	c.pickupLat, c.pickupLng, err = r.encryptPlace(req.Pickup)
 	if err != nil {
 		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.Create(%s): pickup: %w", req.ID, err)
 	}
-	dropoffLatEnc, dropoffLngEnc, err := r.encryptPlace(req.Dropoff)
+	c.dropoffLat, c.dropoffLng, err = r.encryptPlace(req.Dropoff)
 	if err != nil {
 		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.Create(%s): dropoff: %w", req.ID, err)
 	}
 
 	start := time.Now()
-	// The INSERT ... RETURNING resolves RequesterName inline via
-	// requesterIdentitySelect (MYR-229) — the requester name rides the same
-	// statement as the write, so there is no separate lookup and no
-	// after-commit failure window. A NULL/absent identity never fails Create.
-	var requesterName *string
-	var requesterEmail *string
-	var requesterExists bool
-	row := r.pool.QueryRow(ctx, queryRideRequestInsert,
-		req.ID, req.RiderID, req.OwnerID, req.VehicleID,
-		pickupLatEnc, pickupLngEnc, req.Pickup.Label, req.Pickup.Address,
-		dropoffLatEnc, dropoffLngEnc, req.Dropoff.Label, req.Dropoff.Address,
-		string(req.Status), req.PassengerName, req.PassengerPhone, req.ScheduledFor,
-	)
-	err = row.Scan(&req.CreatedAt, &req.UpdatedAt, &requesterName, &requesterEmail, &requesterExists)
+	if req.ScheduledFor != nil {
+		err = r.createReservationGuarded(ctx, &req, c)
+	} else {
+		err = r.insertRideRequest(ctx, r.pool, &req, c)
+	}
 	r.metrics.ObserveQueryDuration("ride_request.create", time.Since(start).Seconds())
 	if err != nil {
-		// The one-active-instant-ride guard (0004) losing the race is an
-		// expected outcome, not a query fault — surface the typed sentinel
-		// without incrementing the error counter (mirrors the guarded
-		// UpdateStatusFrom conflict path).
-		if isRideActiveViolation(err) {
-			return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.Create(rider %s): %w", req.RiderID, ErrRideRequestActive)
+		// The one-active-instant-ride guard (0004) and the MYR-383 window gate
+		// losing their races are expected outcomes, not query faults — surface
+		// the typed sentinel without incrementing the error counter (mirrors
+		// the guarded UpdateStatusFrom conflict path).
+		if errors.Is(err, ErrRideRequestActive) || errors.Is(err, ErrRideWindowConflict) {
+			return RideRequestRecord{}, err
 		}
 		r.metrics.IncQueryError("ride_request.create")
-		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.Create(%s): %w", req.ID, err)
+		return RideRequestRecord{}, err
 	}
 	req.AcceptedAt, req.CompletedAt = nil, nil
 	req.RescheduleProposedFor, req.RescheduleStatus = nil, nil
+	return req, nil
+}
+
+// insertRideRequest runs the INSERT ... RETURNING on q — the pool for an
+// instant create, the open transaction for a guarded reservation create — and
+// folds the returned timestamps + requester identity onto req in place.
+//
+// The statement resolves RequesterName inline via requesterIdentitySelect
+// (MYR-229): the requester name rides the same statement as the write, so there
+// is no separate lookup and no after-commit failure window. A NULL/absent
+// identity never fails the insert.
+func (r *RideRequestRepo) insertRideRequest(ctx context.Context, q pgxQuerier, req *RideRequestRecord, c ridePlaceCipher) error {
+	var requesterName *string
+	var requesterEmail *string
+	var requesterExists bool
+	row := q.QueryRow(ctx, queryRideRequestInsert,
+		req.ID, req.RiderID, req.OwnerID, req.VehicleID,
+		c.pickupLat, c.pickupLng, req.Pickup.Label, req.Pickup.Address,
+		c.dropoffLat, c.dropoffLng, req.Dropoff.Label, req.Dropoff.Address,
+		string(req.Status), req.PassengerName, req.PassengerPhone, req.ScheduledFor,
+	)
+	if err := row.Scan(&req.CreatedAt, &req.UpdatedAt, &requesterName, &requesterEmail, &requesterExists); err != nil {
+		if isRideActiveViolation(err) {
+			return fmt.Errorf("RideRequestRepo.Create(rider %s): %w", req.RiderID, ErrRideRequestActive)
+		}
+		return fmt.Errorf("RideRequestRepo.Create(%s): %w", req.ID, err)
+	}
 	if requesterExists {
 		req.RequesterName = requesterDisplayName(requesterName, requesterEmail)
 	}
-	return req, nil
+	return nil
 }
 
 // GetByID returns a single ride request. Returns ErrRideRequestNotFound
