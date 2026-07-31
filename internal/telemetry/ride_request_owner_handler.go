@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/myrobotaxi/telemetry/internal/events"
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
 )
 
@@ -99,7 +98,14 @@ func (h *RideRequestHandler) ServeAccept(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	updated, ok := h.mutateStatus(ctx, w, rec, rideAcceptableFrom, rideStatusAccepted)
+	// MYR-383: the accept runs through the BOOKING-LOCKED guarded write — the
+	// backstop half of the per-vehicle window gate whose rider-facing half is
+	// the create-time refusal. A reservation whose window is already taken is
+	// refused 409 vehicle_unavailable / time_conflict from inside the same
+	// transaction as the status guard, so no accept can commit against a window
+	// that is taken at the instant of the write. Instant accepts are unaffected
+	// (they skip the probe) — see mutateStatusUnconflicted.
+	updated, ok := h.mutateStatusUnconflicted(ctx, w, rec, rideAcceptableFrom, rideStatusAccepted)
 	if !ok {
 		return
 	}
@@ -248,48 +254,4 @@ func (h *RideRequestHandler) rejectIfVehicleUnavailable(ctx context.Context, w h
 		return true
 	}
 	return false
-}
-
-// buildRideAcceptedEvent projects the accepted record onto the dispatch-seam
-// payload. Places travel plaintext on the internal bus (the repo already
-// decrypted them); PassengerName/Phone are flattened to empty strings when
-// absent so MYR-176 can branch on emptiness without nil checks.
-func buildRideAcceptedEvent(rec RideRequestData) events.RideAcceptedEvent {
-	ev := events.RideAcceptedEvent{
-		RideRequestID: rec.ID,
-		VehicleID:     rec.VehicleID,
-		RiderID:       rec.RiderID,
-		OwnerID:       rec.OwnerID,
-		Pickup:        toEventPlace(rec.Pickup),
-		Dropoff:       toEventPlace(rec.Dropoff),
-		ScheduledFor:  rec.ScheduledFor,
-	}
-	if rec.PassengerName != nil {
-		ev.PassengerName = *rec.PassengerName
-	}
-	if rec.PassengerPhone != nil {
-		ev.PassengerPhone = *rec.PassengerPhone
-	}
-	if rec.AcceptedAt != nil {
-		ev.AcceptedAt = *rec.AcceptedAt
-	} else {
-		// UpdateStatus stamps accepted_at on first entry; fall back to
-		// updated_at defensively so the event always carries an instant.
-		ev.AcceptedAt = rec.UpdatedAt
-	}
-	return ev
-}
-
-// toEventPlace converts the handler place shape to the events-bus shape
-// (Address flattened to "" when absent).
-func toEventPlace(p RidePlaceData) events.RidePlace {
-	out := events.RidePlace{
-		Latitude:  p.Latitude,
-		Longitude: p.Longitude,
-		Label:     p.Label,
-	}
-	if p.Address != nil {
-		out.Address = *p.Address
-	}
-	return out
 }

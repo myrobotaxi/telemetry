@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/events"
-	"github.com/myrobotaxi/telemetry/internal/wserrors"
 )
 
 // Ride-request HTTP surface types (P10 ride-hailing, MYR-174). The wire
@@ -134,6 +133,47 @@ var ErrRideActive = errors.New("ride request already active")
 // transition is legal, the vehicle is just busy.
 var ErrVehicleRideActive = errors.New("vehicle already on an active ride")
 
+// ErrRideWindowConflict is the sentinel every RideWindowConflictError unwraps to
+// (MYR-383): the target VEHICLE is already promised to another OPEN ride within
+// the booking window of the requested `scheduledFor`, so it cannot also serve
+// this one. Raised by RideRequestStore.Create (rider-facing) and by
+// UpdateStatusFromUnconflicted (the owner-accept backstop). The cmd adapter
+// translates store.ErrRideWindowConflict into it so the handler layer stays
+// decoupled from internal/store.
+//
+// Both handlers map it to 409 `vehicle_unavailable` with `subCode:
+// time_conflict` — a CAPABILITY refusal like the MYR-277 in-service/offline
+// gate, the MYR-342 pause and the MYR-266 busy guard, NOT the `conflict` that
+// means an illegal lifecycle transition (the ride is perfectly legal; the car
+// is spoken for at that hour).
+var ErrRideWindowConflict = errors.New("vehicle already booked in this window")
+
+// RideWindowConflictError carries the only details the refusal may disclose: WHEN
+// the vehicle is already spoken for, and whether that claim is merely PENDING.
+// ConflictAt is the conflicting ride's `scheduledFor`, or nil when the conflict
+// is an ACTIVE INSTANT ride (happening now, with no scheduled instant to name).
+// Pending is true when the conflicting reservation is still `requested` — it
+// decides only which sentence the refusal says, never whether it refuses.
+//
+// Nothing else about the conflicting ride crosses this boundary — not its id,
+// its rider, its requester name, its pickup or its dropoff. Those are P1 and
+// belong to the other party (data-classification.md §1.9); the caller is not a
+// party to that ride and asking about this car's availability must not become a
+// way to read somebody else's calendar. The INSTANT alone is P0 operational
+// timing — the same tier as `status` and as the MYR-316 service-window instant
+// the sibling refusal already echoes — so naming it is safe, and it is exactly
+// what the rider needs in order to pick a different time.
+type RideWindowConflictError struct {
+	ConflictAt *time.Time
+	Pending    bool
+}
+
+func (e *RideWindowConflictError) Error() string { return ErrRideWindowConflict.Error() }
+
+// Unwrap makes every RideWindowConflictError match errors.Is(err,
+// ErrRideWindowConflict).
+func (e *RideWindowConflictError) Unwrap() error { return ErrRideWindowConflict }
+
 // RideRequestStore is the persistence surface the ride-request handlers
 // need. Implemented by rideRequestStoreAdapter in cmd/telemetry-server over
 // store.RideRequestRepo. MYR-174 uses Create/GetByID/UpdateStatusFrom/
@@ -142,7 +182,12 @@ type RideRequestStore interface {
 	// Create inserts a new ride request. Returns ErrRideActive when the
 	// rider already holds an OPEN instant ride (the one-active-ride guard,
 	// MYR-230) — the partial unique index arbitrates the race, so two
-	// concurrent instant creates never both succeed.
+	// concurrent instant creates never both succeed. Returns a
+	// *RideWindowConflictError when the request is a RESERVATION whose target
+	// vehicle is already promised to another open ride inside the booking
+	// window (MYR-383) — arbitrated by a per-vehicle advisory lock held across
+	// the check and the insert, so two concurrent conflicting reservations
+	// never both succeed either.
 	Create(ctx context.Context, in RideRequestCreateInput) (RideRequestData, error)
 	GetByID(ctx context.Context, id string) (RideRequestData, error)
 	// GetActiveInstantByRider returns the rider's single OPEN instant ride,
@@ -166,6 +211,17 @@ type RideRequestStore interface {
 	// INSTANT rides are unaffected — they satisfy the predicate whatever their
 	// dispatch outcome — and so is any reservation past its due instant.
 	UpdateStatusFromDispatched(ctx context.Context, id string, from []string, to string) (RideRequestData, error)
+	// UpdateStatusFromUnconflicted is UpdateStatusFrom wrapped in the MYR-383
+	// per-vehicle BOOKING LOCK, and it backs the owner ACCEPT transition
+	// (requested → accepted) and nothing else. Inside one transaction it takes
+	// the lock, re-reads what the ride promises, refuses a RESERVATION whose
+	// window is already taken with a *RideWindowConflictError, and only then runs
+	// the same guarded UPDATE. INSTANT accepts skip the window check entirely
+	// (they still take the lock, so they serialize with reservation accepts on
+	// the same car) and behave exactly like UpdateStatusFrom. The other miss
+	// outcomes are UpdateStatusFrom's (ErrRideStatusConflict,
+	// ErrVehicleRideActive, sdk.ErrNotFound).
+	UpdateStatusFromUnconflicted(ctx context.Context, id string, from []string, to string) (RideRequestData, error)
 	ListByRiderPage(ctx context.Context, riderID string, cursor RideRequestListCursor, limit int) (RideRequestListPage, error)
 	ListByOwnerPage(ctx context.Context, ownerID string, status *string, cursor RideRequestListCursor, limit int) (RideRequestListPage, error)
 	// ListUpcomingByOwnerVehiclePage returns the owner's ACCEPTED, still
@@ -206,74 +262,3 @@ const (
 	rideListMaxLimit     = 100
 	rideListMinLimit     = 1
 )
-
-// ridePlaceWire is the wire RidePlace ($defs.RidePlace): lat/lng/label
-// required, address omitted when absent.
-type ridePlaceWire struct {
-	Lat     float64 `json:"lat"`
-	Lng     float64 `json:"lng"`
-	Label   string  `json:"label"`
-	Address *string `json:"address,omitempty"`
-}
-
-// rideRequestWire is the wire RideRequest object. Optional keys are omitted
-// (omitempty) when their source pointer is nil, matching the schema's
-// omit-when-absent convention.
-type rideRequestWire struct {
-	ID                    string        `json:"id"`
-	RiderID               string        `json:"riderId"`
-	OwnerID               string        `json:"ownerId"`
-	VehicleID             string        `json:"vehicleId"`
-	Pickup                ridePlaceWire `json:"pickup"`
-	Dropoff               ridePlaceWire `json:"dropoff"`
-	Status                string        `json:"status"`
-	RequesterName         *string       `json:"requesterName,omitempty"`
-	PassengerName         *string       `json:"passengerName,omitempty"`
-	PassengerPhone        *string       `json:"passengerPhone,omitempty"`
-	ScheduledFor          *string       `json:"scheduledFor,omitempty"`
-	RescheduleProposedFor *string       `json:"rescheduleProposedFor,omitempty"`
-	RescheduleStatus      *string       `json:"rescheduleStatus,omitempty"`
-	AcceptedAt            *string       `json:"acceptedAt,omitempty"`
-	CompletedAt           *string       `json:"completedAt,omitempty"`
-	CreatedAt             string        `json:"createdAt"`
-	UpdatedAt             string        `json:"updatedAt"`
-	// Dispatch outcome (MYR-176) — optional, additive. Omitted until the
-	// nav-dispatch push resolves (ride-request.schema.json $defs.RideRequest).
-	DispatchStatus *string `json:"dispatchStatus,omitempty"`
-	DispatchedAt   *string `json:"dispatchedAt,omitempty"`
-}
-
-// rideActiveErrorResponse is the 409 `ride_active` body (MYR-230). It carries
-// the standard REST error envelope PLUS the rider's existing OPEN instant
-// ride under `activeRideRequest` — the same RideRequest shape
-// GET /api/ride-requests/{id} returns — so the SDK can adopt it into the
-// pending/tracking UI instead of showing a decline or generic failure. The
-// nested `error` object stays byte-compatible with every other error
-// response (§4.1); `activeRideRequest` is an additive sibling emitted only
-// for this code. Coordinates in the adopted ride are P1 and returned only to
-// the ride's own rider (a party) — never logged (§4.1 rule 2).
-type rideActiveErrorResponse struct {
-	Error             wserrors.ErrorEnvelopeBody `json:"error"`
-	ActiveRideRequest rideRequestWire            `json:"activeRideRequest"`
-}
-
-// rideRequestsPageResponse is the RideRequestsListResponse envelope. Mirrors
-// drivesPageResponse: items always present (empty array, never null),
-// nextCursor null on the final page.
-type rideRequestsPageResponse struct {
-	Items      []rideRequestWire `json:"items"`
-	NextCursor *string           `json:"nextCursor"`
-	HasMore    bool              `json:"hasMore"`
-}
-
-// rideRequestCreateBody is the POST /api/ride-requests request body
-// (RideRequestCreateRequest). Pointers on pickup/dropoff so a missing key is
-// distinguishable from a zero-value place for validation.
-type rideRequestCreateBody struct {
-	VehicleID      string         `json:"vehicleId"`
-	Pickup         *ridePlaceWire `json:"pickup"`
-	Dropoff        *ridePlaceWire `json:"dropoff"`
-	PassengerName  *string        `json:"passengerName"`
-	PassengerPhone *string        `json:"passengerPhone"`
-	ScheduledFor   *string        `json:"scheduledFor"`
-}
