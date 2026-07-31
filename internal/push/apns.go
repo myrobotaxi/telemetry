@@ -58,6 +58,29 @@ func NewClient(keyPEM, keyID, teamID, topic string, logger *slog.Logger) (*Clien
 	}, nil
 }
 
+// apnsMessage is one addressed APNs delivery: the token to send to, the
+// headers that describe the push, and the rendered JSON body.
+//
+// It exists because MYR-172 gave the client a SECOND kind of push. An alert and
+// a Live Activity update differ in three headers (`apns-push-type`,
+// `apns-topic` and `apns-priority`) and in nothing else — same host selection,
+// same provider JWT, same retry policy, same status classification. Threading a
+// value through the transport rather than branching inside it keeps that shared
+// half honest: there is exactly one place that talks to Apple.
+type apnsMessage struct {
+	// deviceToken addresses the delivery — a device token for an alert, an
+	// ActivityKit update token for a Live Activity. P1 either way.
+	deviceToken string
+	sandbox     bool
+	pushType    string
+	topic       string
+	priority    string
+	// expiration is the apns-expiration header, omitted when empty. APNs stores
+	// and retries an undeliverable push until this instant.
+	expiration string
+	body       []byte
+}
+
 // Send delivers one notification, retrying once on a network error or 5xx.
 // It maps APNs rejections onto ErrUnregistered / ErrThrottled for the caller.
 func (c *Client) Send(ctx context.Context, n Notification) error {
@@ -66,16 +89,29 @@ func (c *Client) Send(ctx context.Context, n Notification) error {
 		return err
 	}
 
+	return c.deliver(ctx, apnsMessage{
+		deviceToken: n.DeviceToken,
+		sandbox:     n.Sandbox,
+		pushType:    pushTypeAlert,
+		topic:       c.topic,
+		priority:    priorityImmediate,
+		body:        body,
+	})
+}
+
+// deliver runs the retry loop for any message shape.
+func (c *Client) deliver(ctx context.Context, m apnsMessage) error {
 	const attempts = 2 // one try plus one retry
 	var lastErr error
 	for attempt := range attempts {
 		var retryable bool
-		retryable, lastErr = c.attempt(ctx, n, body)
+		retryable, lastErr = c.attempt(ctx, m)
 		if !retryable {
 			return lastErr
 		}
 		c.logger.Warn("apns send failed, retrying",
-			slog.String("device_token_prefix", tokenPrefix(n.DeviceToken)),
+			slog.String("device_token_prefix", tokenPrefix(m.deviceToken)),
+			slog.String("push_type", m.pushType),
 			slog.Int("attempt", attempt+1),
 			slog.String("error", lastErr.Error()),
 		)
@@ -85,8 +121,8 @@ func (c *Client) Send(ctx context.Context, n Notification) error {
 
 // attempt performs one HTTP round-trip. It reports whether the failure is worth
 // one retry (network error or 5xx).
-func (c *Client) attempt(ctx context.Context, n Notification, body []byte) (retryable bool, err error) {
-	req, err := c.newRequest(ctx, n, body)
+func (c *Client) attempt(ctx context.Context, m apnsMessage) (retryable bool, err error) {
+	req, err := c.newRequest(ctx, m)
 	if err != nil {
 		return false, err
 	}
@@ -166,10 +202,29 @@ func statusError(status int, reason string) error {
 	return fmt.Errorf("push: apns status %d (%s)", status, reason)
 }
 
+// APNs header values. The push type and the topic move together: a Live
+// Activity update is rejected with TopicDisallowed unless BOTH the
+// `.push-type.liveactivity` topic suffix and the matching apns-push-type are
+// present, which is why buildActivityMessage sets them as a pair.
+const (
+	pushTypeAlert           = "alert"
+	pushTypeLiveActivity    = "liveactivity"
+	liveActivityTopicSuffix = ".push-type.liveactivity"
+
+	// priorityImmediate (10) delivers now. Alerts and ride-lifecycle Activity
+	// updates use it: they are the user-visible events.
+	priorityImmediate = "10"
+	// priorityConserving (5) lets APNs coalesce and defer. The ETA ticker uses
+	// it, per MYR-194's "lifecycle events take priority over ETA ticks" — it is
+	// also the header Apple's throttling budget is kindest to, which matters
+	// for a push that fires every 60–90s for the length of a ride.
+	priorityConserving = "5"
+)
+
 // newRequest builds the POST /3/device/{token} request with the APNs headers.
-func (c *Client) newRequest(ctx context.Context, n Notification, body []byte) (*http.Request, error) {
-	url := fmt.Sprintf("%s/3/device/%s", c.host(n.Sandbox), n.DeviceToken)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+func (c *Client) newRequest(ctx context.Context, m apnsMessage) (*http.Request, error) {
+	url := fmt.Sprintf("%s/3/device/%s", c.host(m.sandbox), m.deviceToken)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(m.body))
 	if err != nil {
 		return nil, fmt.Errorf("push: build apns request: %w", err)
 	}
@@ -180,9 +235,12 @@ func (c *Client) newRequest(ctx context.Context, n Notification, body []byte) (*
 	}
 
 	req.Header.Set("authorization", "bearer "+providerToken)
-	req.Header.Set("apns-topic", c.topic)
-	req.Header.Set("apns-push-type", "alert")
-	req.Header.Set("apns-priority", "10")
+	req.Header.Set("apns-topic", m.topic)
+	req.Header.Set("apns-push-type", m.pushType)
+	req.Header.Set("apns-priority", m.priority)
+	if m.expiration != "" {
+		req.Header.Set("apns-expiration", m.expiration)
+	}
 	req.Header.Set("content-type", "application/json")
 	return req, nil
 }
