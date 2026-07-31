@@ -60,8 +60,10 @@ func (f *fakeSharedLister) ListSharedByIDs(_ context.Context, _ string, ids []st
 	return f.rows, f.err
 }
 
-// sharedCatalogRow is a viewer-shaped catalog row for the fixture vehicle.
-func sharedCatalogRow(tier string) SharedVehicleRow {
+// sharedCatalogRow is a viewer-shaped catalog row for the fixture vehicle,
+// carrying the grant's ride capability (MYR-369 — the row no longer carries a
+// tier, and the wire `sharePermission` is derived from this bool).
+func sharedCatalogRow(allowRides bool) SharedVehicleRow {
 	return SharedVehicleRow{
 		VehicleCatalogRow: VehicleCatalogRow{
 			ID:             fixtureSnapshotRowID,
@@ -76,7 +78,7 @@ func sharedCatalogRow(tier string) SharedVehicleRow {
 			EstimatedRange: 210,
 			LastUpdated:    time.Date(2026, 7, 29, 15, 4, 5, 0, time.UTC),
 		},
-		Permission: tier,
+		AllowRides: allowRides,
 	}
 }
 
@@ -92,10 +94,10 @@ const redeemPath = "/api/invites/redeem"
 
 func TestShareRedeemHandler_Success(t *testing.T) {
 	redeem := &fakeShareRedeemStore{
-		grants:    []ShareGrantRow{{VehicleID: fixtureSnapshotRowID, OwnerUserID: shareOwnerUser, Permission: "rides"}},
+		grants:    []ShareGrantRow{{VehicleID: fixtureSnapshotRowID, OwnerUserID: shareOwnerUser, AllowRides: true}},
 		ownerName: "Alex",
 	}
-	lister := &fakeSharedLister{rows: []SharedVehicleRow{sharedCatalogRow("rides")}}
+	lister := &fakeSharedLister{rows: []SharedVehicleRow{sharedCatalogRow(true)}}
 	invalidator := &fakeAccessInvalidator{}
 	mux := newRedeemMux(shareViewerUser, redeem, lister, invalidator)
 
@@ -184,9 +186,9 @@ func TestShareRedeemHandler_CodeNormalization(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			redeem := &fakeShareRedeemStore{
-				grants: []ShareGrantRow{{VehicleID: fixtureSnapshotRowID, OwnerUserID: shareOwnerUser, Permission: "live"}},
+				grants: []ShareGrantRow{{VehicleID: fixtureSnapshotRowID, OwnerUserID: shareOwnerUser, AllowRides: false}},
 			}
-			lister := &fakeSharedLister{rows: []SharedVehicleRow{sharedCatalogRow("live")}}
+			lister := &fakeSharedLister{rows: []SharedVehicleRow{sharedCatalogRow(false)}}
 			mux := newRedeemMux(shareViewerUser, redeem, lister, nil)
 
 			body, err := json.Marshal(map[string]string{"code": tt.submitted})

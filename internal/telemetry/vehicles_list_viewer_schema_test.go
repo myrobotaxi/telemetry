@@ -34,15 +34,17 @@ const vehicleSummarySchemaID = "https://myrobotaxi.com/schemas/vehicle-summary.s
 func TestViewerSummaryRowMatchesVehicleSummarySchema(t *testing.T) {
 	schema := compileContractSchema(t, vehicleSummarySchemaID)
 
-	tiers := []auth.SharePermission{
-		auth.PermissionLive,
-		auth.PermissionLiveHistory,
-		auth.PermissionRides,
+	// MYR-369: the two grant shapes the product now has. A SUSPENDED grant is
+	// deliberately absent — it produces no viewer row at all, so there is no
+	// projection of one to validate.
+	grants := map[string]auth.ShareGrant{
+		"base":  {},
+		"rides": {AllowRides: true},
 	}
-	for _, tier := range tiers {
-		t.Run(string(tier), func(t *testing.T) {
-			row := sharedCatalogRow(string(tier))
-			projected := viewerSummaryMap(row.VehicleCatalogRow, tier)
+	for name, grant := range grants {
+		t.Run(name, func(t *testing.T) {
+			row := sharedCatalogRow(grant.AllowRides)
+			projected := viewerSummaryMap(row.VehicleCatalogRow, grant)
 
 			// Serialize and re-parse through the schema library's decoder so
 			// what is validated is the BYTES a client receives, not the Go map.
@@ -74,8 +76,9 @@ func TestViewerMaskKeepsEverySchemaRequiredField(t *testing.T) {
 		t.Fatal("read zero required fields from vehicle-summary.schema.json — the walk is broken")
 	}
 
-	row := sharedCatalogRow(string(auth.PermissionRides))
-	projected := viewerSummaryMap(row.VehicleCatalogRow, auth.PermissionRides)
+	grant := auth.ShareGrant{AllowRides: true}
+	row := sharedCatalogRow(grant.AllowRides)
+	projected := viewerSummaryMap(row.VehicleCatalogRow, grant)
 
 	for _, field := range required {
 		if _, ok := projected[field]; !ok {

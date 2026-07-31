@@ -2,11 +2,13 @@ package telemetry
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/myrobotaxi/telemetry/internal/auth"
 	"github.com/myrobotaxi/telemetry/internal/events"
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
 )
@@ -464,4 +466,131 @@ func TestRideMux_IncomingLiteralWinsOverWildcard(t *testing.T) {
 	if store.ownerCall.id != rideOtherUsr {
 		t.Errorf("expected ListByOwnerPage to be hit, got ownerCall=%+v", store.ownerCall)
 	}
+}
+
+// --- MYR-369: the accept-time ride-capability backstop ---------------------
+
+// grantReaderFor builds a share reader granting one capability set to riderID
+// on the ride fixture's vehicle, and nothing to anybody else.
+func grantReaderFor(riderID string, grant auth.ShareGrant) *stubShareReader {
+	return &stubShareReader{
+		grants: map[string]auth.ShareGrant{riderID + "|" + rideVehicle: grant},
+	}
+}
+
+// newRideHandlerWithShares mounts the owner surface WITH sharing wired, which
+// is what production looks like once MYR-184 shipped.
+func newRideHandlerWithShares(store RideRequestStore, caller string, shares VehicleShareReader) *RideRequestHandler { //nolint:unparam // the accepting actor is spelled at every call site on purpose: these are authorization tests and an implicit caller would hide which actor each case exercises
+	return NewRideRequestHandler(
+		&stubTokenValidator{userID: caller},
+		&stubVehicleSnapshotReader{row: acceptBackstopVehicle()},
+		store,
+		&fakeRidePublisher{},
+		discardLogger(),
+		WithRideShareReader(shares),
+	)
+}
+
+// acceptBackstopVehicle is an available vehicle owned by rideOtherUsr — the
+// owner in the ride fixture — so the rider is genuinely a non-owner and the
+// backstop is actually reached.
+func acceptBackstopVehicle() VehicleSnapshotRow {
+	row := availableSnapshotRow()
+	row.ID = rideVehicle
+	row.UserID = rideOtherUsr
+	row.Status = "parked"
+	return row
+}
+
+// TestAccept_RiderRideCapabilityBackstop is the window MYR-369 opened and this
+// gate closes: an owner suspends a grant, or switches allowRides off, while a
+// request from that rider sits unanswered in their queue. Without the backstop,
+// tapping Accept would dispatch the car to somebody the owner had just decided
+// may not have it.
+func TestAccept_RiderRideCapabilityBackstop(t *testing.T) {
+	const owner = rideOtherUsr
+
+	tests := []struct {
+		name       string
+		grant      auth.ShareGrant
+		wantStatus int
+	}{
+		{
+			name:       "a live ride grant still accepts",
+			grant:      auth.ShareGrant{AllowRides: true},
+			wantStatus: http.StatusOK,
+		},
+		{
+			// The owner patched allowRides off after the request landed.
+			name:       "a grant whose ride capability was withdrawn is refused",
+			grant:      auth.ShareGrant{},
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			// Suspension gates everything — the stored ride flag does not
+			// survive it, which is why the gate reads GrantsRides and not
+			// the bare field.
+			name:       "a SUSPENDED grant is refused even carrying allowRides",
+			grant:      auth.ShareGrant{AllowRides: true, Suspended: true},
+			wantStatus: http.StatusForbidden,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &fakeRideStore{getRec: fixtureRideData(owner, rideStatusRequested)}
+			h := newRideHandlerWithShares(store, owner, grantReaderFor(rideUserID, tt.grant))
+
+			rec := doRequest(t, rideMux(h), http.MethodPost,
+				"/api/ride-requests/"+rideID+"/accept", "", rideAuthOK)
+
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status %d, want %d. body=%s", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+		})
+	}
+
+	t.Run("a revoked grant (no row at all) is refused", func(t *testing.T) {
+		store := &fakeRideStore{getRec: fixtureRideData(owner, rideStatusRequested)}
+		h := newRideHandlerWithShares(store, owner, &stubShareReader{})
+
+		rec := doRequest(t, rideMux(h), http.MethodPost,
+			"/api/ride-requests/"+rideID+"/accept", "", rideAuthOK)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status %d, want 403 — a revoked rider must not be accepted", rec.Code)
+		}
+	})
+
+	t.Run("an unreadable grant is 500, not a silent accept", func(t *testing.T) {
+		// FAIL-CLOSED, unlike the MYR-313 fail-open on an unreadable
+		// VEHICLE: dispatching a car to somebody who may have just been
+		// suspended is not recoverable the way a retried accept is.
+		store := &fakeRideStore{getRec: fixtureRideData(owner, rideStatusRequested)}
+		h := newRideHandlerWithShares(store, owner, &stubShareReader{err: errors.New("db down")})
+
+		rec := doRequest(t, rideMux(h), http.MethodPost,
+			"/api/ride-requests/"+rideID+"/accept", "", rideAuthOK)
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status %d, want 500", rec.Code)
+		}
+	})
+
+	t.Run("the OWNER accepting their own ride never consults a grant", func(t *testing.T) {
+		// The common case must not pay for the backstop, and an owner has
+		// no grant to find.
+		selfRide := fixtureRideData(owner, rideStatusRequested)
+		selfRide.RiderID = owner
+		store := &fakeRideStore{getRec: selfRide}
+		reader := &stubShareReader{}
+		h := newRideHandlerWithShares(store, owner, reader)
+
+		rec := doRequest(t, rideMux(h), http.MethodPost,
+			"/api/ride-requests/"+rideID+"/accept", "", rideAuthOK)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d, want 200. body=%s", rec.Code, rec.Body.String())
+		}
+		if reader.calls != 0 {
+			t.Errorf("the share store was consulted %d times for an owner's own ride", reader.calls)
+		}
+	})
 }

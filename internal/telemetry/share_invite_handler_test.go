@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/myrobotaxi/telemetry/internal/auth"
 	"github.com/myrobotaxi/telemetry/pkg/sdk"
 )
 
@@ -39,6 +40,17 @@ type fakeShareInviteStore struct {
 
 	resent    ShareInviteRow
 	resendErr error
+
+	// MYR-369 patch capture. patched is the row PatchInvite returns;
+	// patchedAs records exactly what the handler passed, which is how the
+	// partial semantics (nil vs pointer-to-false) are asserted.
+	patched   ShareInviteRow
+	patchee   string
+	patchErr  error
+	patchedAs struct {
+		inviteID, ownerID string
+		patch             ShareInvitePatch
+	}
 
 	// ownerName is what OwnerFirstName returns — the `from` half of the
 	// signed share link. Empty by default so the common cases exercise the
@@ -68,6 +80,14 @@ func (f *fakeShareInviteStore) RevokeInvite(_ context.Context, inviteID, ownerID
 
 func (f *fakeShareInviteStore) ResendInvite(_ context.Context, _, _ string) (ShareInviteRow, error) {
 	return f.resent, f.resendErr
+}
+
+func (f *fakeShareInviteStore) PatchInvite(_ context.Context, inviteID, ownerID string, patch ShareInvitePatch) (ShareInviteRow, string, error) {
+	f.patchedAs.inviteID, f.patchedAs.ownerID, f.patchedAs.patch = inviteID, ownerID, patch
+	if f.patchErr != nil {
+		return ShareInviteRow{}, "", f.patchErr
+	}
+	return f.patched, f.patchee, nil
 }
 
 func (f *fakeShareInviteStore) OwnerFirstName(_ context.Context, _ string) (string, error) {
@@ -137,10 +157,13 @@ func acceptedInviteRow() ShareInviteRow {
 	row.Code = ""
 	row.Status = shareStatusAccepted
 	row.AcceptedAt = &acceptedAt
+	// A grant redeemed from the legacy live_history preset: the flags say
+	// base-only, which is exactly what that preset now conveys.
+	row.Grant = auth.ShareGrant{}
 	return row
 }
 
-// newShareInviteMux mounts the four owner routes against a handler.
+// newShareInviteMux mounts the five owner routes against a handler.
 func newShareInviteMux(t *testing.T, caller string, store ShareInviteStore, owner string, invalidator AccessCacheInvalidator) *http.ServeMux { //nolint:unparam // caller-vs-owner is the variable under test; collapsing owner to a constant would hide which actor each case exercises
 	t.Helper()
 	h := NewShareInviteHandler(
@@ -156,6 +179,7 @@ func newShareInviteMux(t *testing.T, caller string, store ShareInviteStore, owne
 	mux.HandleFunc("GET /api/vehicles/{vehicleId}/invites", h.ServeList)
 	mux.HandleFunc("DELETE /api/invites/{inviteId}", h.ServeRevoke)
 	mux.HandleFunc("POST /api/invites/{inviteId}/resend", h.ServeResend)
+	mux.HandleFunc("PATCH /api/invites/{inviteId}", h.ServePatch)
 	return mux
 }
 
@@ -684,4 +708,336 @@ func TestShareInviteHandler_ShareURL(t *testing.T) {
 			t.Errorf("code = %v, want the fallback the client shares instead", body["code"])
 		}
 	})
+}
+
+// --- MYR-369: PATCH /api/invites/{inviteId} --------------------------------
+
+// patchedGrantRow is an accepted grant as the store returns it after an edit.
+func patchedGrantRow(allowRides, suspended bool) ShareInviteRow {
+	row := acceptedInviteRow()
+	row.Grant = auth.ShareGrant{AllowRides: allowRides, Suspended: suspended}
+	return row
+}
+
+const sharePatchPath = "/api/invites/" + shareInviteID
+
+// TestShareInviteHandler_PatchAppliesAndEchoes covers the happy path and the
+// two properties the response carries: the flags themselves, and the DERIVED
+// `permission` a pre-MYR-369 client reads instead of them.
+func TestShareInviteHandler_PatchAppliesAndEchoes(t *testing.T) {
+	t.Run("granting rides echoes the flag and derives permission=rides", func(t *testing.T) {
+		store := &fakeShareInviteStore{patched: patchedGrantRow(true, false), patchee: shareViewerUser}
+		inv := &fakeAccessInvalidator{}
+		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, inv)
+
+		rec := doShareRequest(t, mux, http.MethodPatch, sharePatchPath, `{"allowRides":true}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d, want 200. Body: %s", rec.Code, rec.Body.String())
+		}
+
+		body := decodeShareBody(t, rec)
+		if body["allowRides"] != true {
+			t.Errorf("allowRides = %v, want true", body["allowRides"])
+		}
+		if body["suspended"] != false {
+			t.Errorf("suspended = %v, want an explicit false (absent would read as 'server predates the field')", body["suspended"])
+		}
+		// DERIVED from the flag, not the stored preset — the row's preset is
+		// the legacy live_history, which must never reach the wire.
+		if body["permission"] != "rides" {
+			t.Errorf("permission = %v, want rides derived from allowRides", body["permission"])
+		}
+		// An accepted row carries no credential, patch or no patch.
+		if _, present := body["code"]; present {
+			t.Error("the patch response leaked a code onto an accepted row")
+		}
+		if _, present := body["shareUrl"]; present {
+			t.Error("the patch response leaked a shareUrl onto an accepted row")
+		}
+	})
+
+	t.Run("a base grant derives permission=live, never the retired tier", func(t *testing.T) {
+		store := &fakeShareInviteStore{patched: patchedGrantRow(false, false), patchee: shareViewerUser}
+		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
+
+		rec := doShareRequest(t, mux, http.MethodPatch, sharePatchPath, `{"allowRides":false}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d, want 200", rec.Code)
+		}
+		if got := decodeShareBody(t, rec)["permission"]; got != "live" {
+			t.Errorf("permission = %v, want live — live_history is retired and never emitted", got)
+		}
+	})
+
+	t.Run("a suspended grant still serializes to its OWNER", func(t *testing.T) {
+		// The owner has to be able to see a suspension to lift it. Only the
+		// VIEWER-facing surfaces make a suspended grant disappear.
+		store := &fakeShareInviteStore{patched: patchedGrantRow(true, true), patchee: shareViewerUser}
+		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
+
+		rec := doShareRequest(t, mux, http.MethodPatch, sharePatchPath, `{"suspended":true}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d, want 200", rec.Code)
+		}
+		body := decodeShareBody(t, rec)
+		if body["suspended"] != true {
+			t.Errorf("suspended = %v, want true", body["suspended"])
+		}
+		// The stored capability is reported as it stands, even though
+		// suspension means it currently conveys nothing — the owner's
+		// toggle must render in its real position.
+		if body["allowRides"] != true {
+			t.Errorf("allowRides = %v, want the stored true", body["allowRides"])
+		}
+	})
+}
+
+// TestShareInviteHandler_PatchIsPartial is the bug this endpoint most easily
+// has: a partial update that silently clears the field it did not mention.
+// Absent MUST reach the store as nil, and an explicit false as a pointer to
+// false — the two are different requests.
+func TestShareInviteHandler_PatchIsPartial(t *testing.T) {
+	tests := []struct {
+		name          string
+		body          string
+		wantRides     *bool
+		wantSuspended *bool
+	}{
+		{"only allowRides", `{"allowRides":true}`, ptrTo(true), nil},
+		{"only suspended", `{"suspended":true}`, nil, ptrTo(true)},
+		{"explicit false is a change, not an omission", `{"allowRides":false}`, ptrTo(false), nil},
+		{"both together", `{"allowRides":false,"suspended":false}`, ptrTo(false), ptrTo(false)},
+		{"unknown keys are ignored, not rejected", `{"allowRides":true,"whatever":1}`, ptrTo(true), nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &fakeShareInviteStore{patched: patchedGrantRow(true, false), patchee: shareViewerUser}
+			mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
+
+			rec := doShareRequest(t, mux, http.MethodPatch, sharePatchPath, tt.body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status %d, want 200. Body: %s", rec.Code, rec.Body.String())
+			}
+			assertBoolPtr(t, "allowRides", store.patchedAs.patch.AllowRides, tt.wantRides)
+			assertBoolPtr(t, "suspended", store.patchedAs.patch.Suspended, tt.wantSuspended)
+			// The OWNER is the JWT sub, never anything from the body.
+			if store.patchedAs.ownerID != shareOwnerUser {
+				t.Errorf("ownerID = %q, want the JWT sub %q", store.patchedAs.ownerID, shareOwnerUser)
+			}
+			if store.patchedAs.inviteID != shareInviteID {
+				t.Errorf("inviteID = %q, want the path id", store.patchedAs.inviteID)
+			}
+		})
+	}
+}
+
+func ptrTo(b bool) *bool { return &b }
+
+func assertBoolPtr(t *testing.T, field string, got, want *bool) {
+	t.Helper()
+	switch {
+	case want == nil && got != nil:
+		t.Errorf("%s: got a pointer to %v, want nil — an absent key must NOT be written", field, *got)
+	case want != nil && got == nil:
+		t.Errorf("%s: got nil, want a pointer to %v — a present key must be written", field, *want)
+	case want != nil && got != nil && *want != *got:
+		t.Errorf("%s: got %v, want %v", field, *got, *want)
+	}
+}
+
+// TestShareInviteHandler_PatchRejectsEmptyBody pins that a request asking for
+// nothing is 400, never a 200 echo. On an access-control surface, "I turned it
+// off and it said OK" is the worst available failure mode.
+func TestShareInviteHandler_PatchRejectsEmptyBody(t *testing.T) {
+	for _, body := range []string{`{}`, `{"whatever":true}`, `{"allowRides":null}`} {
+		t.Run(body, func(t *testing.T) {
+			store := &fakeShareInviteStore{patched: patchedGrantRow(true, false)}
+			mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
+
+			rec := doShareRequest(t, mux, http.MethodPatch, sharePatchPath, body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status %d, want 400. Body: %s", rec.Code, rec.Body.String())
+			}
+			if store.patchedAs.inviteID != "" {
+				t.Error("an empty patch reached the store")
+			}
+		})
+	}
+	t.Run("malformed JSON is 400", func(t *testing.T) {
+		store := &fakeShareInviteStore{}
+		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
+		rec := doShareRequest(t, mux, http.MethodPatch, sharePatchPath, `{"allowRides":`)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status %d, want 400", rec.Code)
+		}
+	})
+}
+
+// TestShareInviteHandler_PatchBustsTheGranteeCache pins the MYR-184
+// bust-on-mutation pattern applied to the new mutation. The bust targets the
+// GRANTEE — the person whose access changed — not the owner who made the change,
+// and for a suspension it is a security property: the cached access set is what
+// the WebSocket handshake consults, so a stale entry IS a live grant.
+func TestShareInviteHandler_PatchBustsTheGranteeCache(t *testing.T) {
+	t.Run("suspension busts the grantee", func(t *testing.T) {
+		store := &fakeShareInviteStore{patched: patchedGrantRow(true, true), patchee: shareViewerUser}
+		inv := &fakeAccessInvalidator{}
+		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, inv)
+
+		if rec := doShareRequest(t, mux, http.MethodPatch, sharePatchPath, `{"suspended":true}`); rec.Code != http.StatusOK {
+			t.Fatalf("status %d, want 200", rec.Code)
+		}
+		if len(inv.busted) != 1 || inv.busted[0] != shareViewerUser {
+			t.Fatalf("busted %v, want exactly the grantee %q — a stale access set is a live grant", inv.busted, shareViewerUser)
+		}
+	})
+
+	t.Run("a capability-only edit busts too", func(t *testing.T) {
+		// UNCONDITIONAL by design: a bust conditional on which field moved is
+		// a rule the next person to add a field can get wrong.
+		store := &fakeShareInviteStore{patched: patchedGrantRow(false, false), patchee: shareViewerUser}
+		inv := &fakeAccessInvalidator{}
+		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, inv)
+
+		if rec := doShareRequest(t, mux, http.MethodPatch, sharePatchPath, `{"allowRides":false}`); rec.Code != http.StatusOK {
+			t.Fatalf("status %d, want 200", rec.Code)
+		}
+		if len(inv.busted) != 1 || inv.busted[0] != shareViewerUser {
+			t.Errorf("busted %v, want the grantee on every successful patch", inv.busted)
+		}
+	})
+
+	t.Run("a failed patch busts nobody", func(t *testing.T) {
+		store := &fakeShareInviteStore{patchErr: fmt.Errorf("gone: %w", sdk.ErrNotFound)}
+		inv := &fakeAccessInvalidator{}
+		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, inv)
+
+		doShareRequest(t, mux, http.MethodPatch, sharePatchPath, `{"suspended":true}`)
+		if len(inv.busted) != 0 {
+			t.Errorf("busted %v after a failed patch", inv.busted)
+		}
+	})
+}
+
+// TestShareInviteHandler_PatchErrors pins the status mapping, and in particular
+// the 404-INDISTINGUISHABILITY this surface inherits: a missing invite, another
+// owner's invite, and a revoked tombstone must be one answer, or the endpoint
+// becomes an oracle for other people's invite ids.
+func TestShareInviteHandler_PatchErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		storeErr   error
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name:       "missing / foreign / revoked are one 404",
+			storeErr:   fmt.Errorf("no such row: %w", sdk.ErrNotFound),
+			wantStatus: http.StatusNotFound,
+			wantCode:   "not_found",
+		},
+		{
+			// The mirror image of resend's 409: a pending row has no grant
+			// to edit. Told plainly, because the caller demonstrably owns it.
+			name:       "a still-pending invite is 409",
+			storeErr:   ErrShareNotAccepted,
+			wantStatus: http.StatusConflict,
+			wantCode:   "conflict",
+		},
+		{
+			name:       "an unclassified failure is 500, not a denial",
+			storeErr:   errors.New("connection refused"),
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   "internal_error",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &fakeShareInviteStore{patchErr: tt.storeErr}
+			mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
+
+			rec := doShareRequest(t, mux, http.MethodPatch, sharePatchPath, `{"suspended":true}`)
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status %d, want %d. Body: %s", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+			var env struct {
+				Error struct {
+					Code    string `json:"code"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
+				t.Fatalf("decode error envelope: %v", err)
+			}
+			if env.Error.Code != tt.wantCode {
+				t.Errorf("error code = %q, want %q", env.Error.Code, tt.wantCode)
+			}
+			// Whatever went wrong, the reason must never name a label or a
+			// code — the two P1 fields on this table.
+			if strings.Contains(env.Error.Message, "Mira") || strings.Contains(env.Error.Message, "RBO246") {
+				t.Errorf("the error envelope leaked a P1 value: %q", env.Error.Message)
+			}
+		})
+	}
+}
+
+// TestShareInviteHandler_PatchIsOwnerScopedInTheStoreCall pins that the handler
+// does NOT pre-read the row to check ownership: it hands the JWT sub straight to
+// the store, whose statement carries `owner_user_id = $n` on the write itself.
+// A read-then-write here would add a window and a second thing to disagree.
+func TestShareInviteHandler_PatchIsOwnerScopedInTheStoreCall(t *testing.T) {
+	store := &fakeShareInviteStore{patchErr: fmt.Errorf("not yours: %w", sdk.ErrNotFound)}
+	// The CALLER is not the vehicle's owner. The handler must still forward
+	// the call — scoping is the store's predicate, and the answer must be an
+	// indistinguishable 404 rather than a 403 that confirms the row exists.
+	mux := newShareInviteMux(t, shareOtherUser, store, shareOwnerUser, nil)
+
+	rec := doShareRequest(t, mux, http.MethodPatch, sharePatchPath, `{"suspended":true}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status %d, want 404 — a foreign invite must not be distinguishable from a missing one", rec.Code)
+	}
+	if store.patchedAs.ownerID != shareOtherUser {
+		t.Errorf("ownerID = %q, want the caller's own sub %q", store.patchedAs.ownerID, shareOtherUser)
+	}
+}
+
+// TestShareInvitePendingRowOmitsTheFlags pins the pending/accepted asymmetry:
+// a pending invite has no grant, so it must carry NEITHER flag. A client
+// reading `suspended: false` on an unredeemed code would reasonably conclude it
+// is live access.
+func TestShareInvitePendingRowOmitsTheFlags(t *testing.T) {
+	store := &fakeShareInviteStore{listed: []ShareInviteRow{pendingInviteRow(), acceptedInviteRow()}}
+	mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
+
+	rec := doShareRequest(t, mux, http.MethodGet, "/api/vehicles/"+shareFixtureVeh+"/invites", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200", rec.Code)
+	}
+	var body struct {
+		Invites []map[string]any `json:"invites"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Invites) != 2 {
+		t.Fatalf("got %d invites, want 2", len(body.Invites))
+	}
+
+	pending, accepted := body.Invites[0], body.Invites[1]
+	if pending["status"] != "pending" || accepted["status"] != "accepted" {
+		t.Fatalf("fixture order changed: %v / %v", pending["status"], accepted["status"])
+	}
+	for _, key := range []string{"allowRides", "suspended"} {
+		if _, present := pending[key]; present {
+			t.Errorf("a PENDING row carried %q; there is no grant yet to describe", key)
+		}
+		if _, present := accepted[key]; !present {
+			t.Errorf("an ACCEPTED row omitted %q; absence means 'server predates MYR-369'", key)
+		}
+	}
+	// The pending row's stored preset is the retired live_history; it must be
+	// normalized on the way out rather than emitted.
+	if pending["permission"] != "live" {
+		t.Errorf("pending permission = %v, want live — the retired tier is never emitted", pending["permission"])
+	}
 }
