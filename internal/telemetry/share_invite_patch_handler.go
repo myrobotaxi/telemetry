@@ -82,8 +82,23 @@ func (h *ShareInviteHandler) ServePatch(w http.ResponseWriter, r *http.Request) 
 		slog.Bool("allow_rides", row.Grant.AllowRides),
 		slog.Bool("suspended", row.Grant.Suspended),
 	)
+	// NO LINK CONTEXT, AND DELIBERATELY NO DATABASE LOOKUP TO BUILD ONE.
+	// inviteLinkCtx exists to mint `shareUrl`, and toShareInviteWire consumes it
+	// inside the PENDING branch only — the branch that also emits `code`, since
+	// a share link is a wrapper around the credential. A patch cannot return a
+	// pending row: queryPatchShare carries `status = 'accepted'` in the UPDATE
+	// itself, so a pending id updates zero rows and leaves here as the 409
+	// above. The row this serializes is therefore always accepted, always
+	// codeless, and always link-less.
+	//
+	// Passing h.linkCtx(...) here cost an OwnerFirstName query on EVERY
+	// successful patch whose only possible destination was a branch that cannot
+	// execute — and worse, when that query failed it logged "owner name lookup
+	// failed, link omits from", warning an operator about a degraded link that
+	// was never going to be minted. A wasted round trip is cheap; a warning that
+	// sends somebody looking for a broken share link is not.
 	h.writeJSON(w, http.StatusOK,
-		toShareInviteMasked(&row, auth.RoleOwner, h.linkCtx(r.Context(), userID)))
+		toShareInviteMasked(&row, auth.RoleOwner, inviteLinkCtx{}))
 }
 
 // decodePatch reads the body and rejects one that asks for nothing.
