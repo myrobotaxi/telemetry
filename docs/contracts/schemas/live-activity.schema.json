@@ -85,7 +85,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["v", "status", "vehicleName", "destination"],
-      "description": "The payload delivered as `aps.content-state` on an ActivityKit remote update, and the exact shape the iOS Activity's Swift ContentState decodes (MYR-172, decisions in MYR-194). Deliberately four fields plus an optional ETA: Apple caps the whole push at 4KB and throttles high-frequency Activity updates by budget, so the bar for inclusion is 'the rider would misread the screen without it'. NOT a REST response — it never appears on any endpoint, and it reaches the device only over APNs, addressed by a token that identifies exactly one Activity on exactly one ride for exactly one rider.",
+      "description": "The payload delivered as `aps.content-state` on an ActivityKit remote update, and the exact shape the iOS Activity's Swift ContentState decodes (MYR-172, decisions in MYR-194; `progress` added by MYR-398). Four required fields plus two optional ones: Apple caps the whole push at 4KB and throttles high-frequency Activity updates by budget, so the bar for inclusion is 'the rider would misread the screen without it'. NOT a REST response — it never appears on any endpoint, and it reaches the device only over APNs, addressed by a token that identifies exactly one Activity on exactly one ride for exactly one rider. EVERY ADDITION HERE IS OPTIONAL AND THE EXISTING KEYS NEVER MOVE: the Swift ContentState is compiled into a build a rider may not update for months, and its property names ARE the wire keys, so an installed app must keep decoding a newer server's payload unchanged. The r16 redesign is the worked example — it wanted an ETA headline, a 'Meet at {pickup}' line and a progress track, and it cost exactly ONE new key, because the status already carries the leg, `eta` already carries the time, and the PICKUP LABEL IS DELIBERATELY NOT HERE (see `progress` and rest-api.md §7.21.3).",
       "properties": {
         "v": {
           "type": "integer",
@@ -118,6 +118,14 @@
           "description": "The dropoff's short label — the name the RIDER chose for the place when booking, e.g. 'Home'. P1, and the one field on this surface that the ride-lifecycle ALERT copy policy (internal/push/copy.go) does not permit on a lock screen. It is carried here deliberately and narrowly: a Live Activity is the rider's own ride on the rider's own device, addressed by a token scoped to that one Activity, and a ride card that cannot say where the car is taking you is not the feature. It is never sent to an owner's Activity and never appears in an alert body. See data-classification.md §1.18.",
           "x-classification": "P1",
           "examples": ["Home"]
+        },
+        "progress": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "How far along the CURRENT LEG the car is, 0..1 — what the redesigned card's progress track draws (MYR-398). WHICH leg is not carried: `status` already says it (`accepted` is the car coming to the rider, `enroute` is the car taking them onward), and one fact on the wire twice is one fact that can disagree with itself. OMITTED ENTIRELY when the server cannot say — never null, never 0 — because an absent progress renders a TRACKLESS card while a wrong one renders a lie, and 0 is a claim ('the car has covered none of it'), not an admission. Derived from the car's OWN navigation: `tripDistanceRemaining` against the value captured at the start of the leg, falling back to `minutesToArrival` when the car reports no distance, and holding the last delivered value when neither reading is fresher than the 3-minute stale-date horizon. It is MONOTONE PER LEG BY CONSTRUCTION — the server clamps to the highest fraction it has delivered to this Activity, so the track never runs backwards, while `eta` is deliberately NOT clamped and does move backwards when traffic does. A client MUST render both as given: most of the way there AND arriving later than it said is a coherent pair, not a contradiction. Exactly 1 is only ever sent on the ride record's authority (`arrived`, `completed`); an in-flight leg is capped just below it. P0 and NOT P1 like its neighbour `destination`: this is a unitless fraction of an unnamed journey, carrying no coordinate, no place name and no distance — '62% of the way' locates the car only for somebody who already knows both ends of the trip. Full derivation and honesty bounds: rest-api.md §7.21.3.",
+          "x-classification": "P0",
+          "examples": [0.62]
         }
       }
     }
