@@ -26,6 +26,10 @@ import (
 func (p *RidePositionPoller) run(ctx context.Context, vehicleID string, handle *activePoll) {
 	defer p.wg.Done()
 	defer p.release(vehicleID, handle)
+	// Release the child context on EVERY exit path. stopPoll already cancels on
+	// the ordinary route, but a shutdown cancels the PARENT instead and this
+	// child would otherwise never have its own cancel called.
+	defer handle.cancel()
 
 	p.pollOnce(ctx, vehicleID, handle)
 

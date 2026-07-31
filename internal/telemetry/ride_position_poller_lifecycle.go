@@ -125,6 +125,10 @@ func (p *RidePositionPoller) startPoll(vehicleID, rideRequestID, reason string) 
 		return
 	}
 
+	// The cancel func is not called here: it is the handle's STOP LEVER, held
+	// in the registry and invoked by stopPoll, and run defers it so the child
+	// is released on every exit path including a parent cancellation.
+	// #nosec G118 -- cancel is stored on the handle and invoked by stopPoll / run's defer, not dropped.
 	ctx, cancel := context.WithCancel(p.ctx)
 	handle := &activePoll{rideRequestID: rideRequestID, cancel: cancel}
 	p.active[vehicleID] = handle
