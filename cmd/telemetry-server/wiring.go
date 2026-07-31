@@ -403,6 +403,13 @@ func setupRideRequestEndpoints(deps httpRouteDeps, vehicles telemetry.VehicleSna
 	deps.srv.HandleFunc("POST /api/ride-requests/{id}/activity-token", rideHandler.ServeRegisterActivityToken)
 	deps.srv.HandleFunc("DELETE /api/ride-requests/{id}/activity-token", rideHandler.ServeEndActivityToken)
 
+	// MYR-385: the picker's read side of the MYR-383 booking gate
+	// (rest-api.md §7.22). A VEHICLE-scoped path with a RIDE-scoped
+	// permission, mounted on this handler precisely so its capability check
+	// IS ServeCreate's rather than a copy of it — the endpoint must answer
+	// for exactly the callers create would serve, and no others.
+	deps.srv.HandleFunc("GET /api/vehicles/{vehicleId}/booked-windows", rideHandler.ServeBookedWindows)
+
 	// MYR-175: owner-facing surface. The literal /incoming segment takes
 	// precedence over the {id} wildcard in Go's ServeMux, so both routes
 	// coexist. Accept additionally publishes the ride.accepted dispatch

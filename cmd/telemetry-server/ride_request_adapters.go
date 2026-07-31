@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/store"
 	"github.com/myrobotaxi/telemetry/internal/telemetry"
@@ -182,6 +183,28 @@ func (a *rideRequestStoreAdapter) ListUpcomingByOwnerVehiclePage(ctx context.Con
 		return telemetry.RideRequestListPage{}, fmt.Errorf("list upcoming ride reservations by owner vehicle: %w", err)
 	}
 	return fromStorePage(page), nil
+}
+
+// ListBookedWindows passes the MYR-385 picker read through. A one-for-one
+// field copy, deliberately: the store has ALREADY resolved each window's
+// endpoints against store.RideConflictWindow, and this boundary must not
+// re-centre, pad or round them — an adapter that did arithmetic here would be
+// the exact drift between picker and gate the surface exists to prevent.
+func (a *rideRequestStoreAdapter) ListBookedWindows(ctx context.Context, vehicleID, callerID string, from, to time.Time) ([]telemetry.BookedWindowData, error) {
+	windows, err := a.repo.ListBookedWindows(ctx, vehicleID, callerID, from, to)
+	if err != nil {
+		return nil, fmt.Errorf("list vehicle booked windows: %w", err)
+	}
+	out := make([]telemetry.BookedWindowData, 0, len(windows))
+	for _, w := range windows {
+		out = append(out, telemetry.BookedWindowData{
+			Start:   w.Start,
+			End:     w.End,
+			Pending: w.Pending,
+			Own:     w.Own,
+		})
+	}
+	return out, nil
 }
 
 // toStorePlace / toStoreCursor translate handler-layer inputs into store

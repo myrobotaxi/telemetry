@@ -82,6 +82,24 @@ type RideRequestData struct {
 	DispatchError *string
 }
 
+// BookedWindowData is one interval in which a vehicle cannot take a new
+// reservation, as the MYR-385 picker read surface returns it.
+//
+// Start/End are CONCRETE instants the store has already resolved against the
+// conflict half-width — the handler never adds or subtracts anything, and
+// neither does the client. That is deliberate: the half-width is a product
+// guess living in one place on the server, and emitting resolved endpoints is
+// what keeps every picker in step with the gate when it moves.
+//
+// The interval is OPEN at both ends, inherited from the gate's strict
+// comparison: a booking at exactly Start or exactly End is ALLOWED.
+type BookedWindowData struct {
+	Start   time.Time
+	End     time.Time
+	Pending bool
+	Own     bool
+}
+
 // RideRequestListPage is one page of a keyset scan plus the has-more probe
 // result.
 type RideRequestListPage struct {
@@ -230,6 +248,17 @@ type RideRequestStore interface {
 	// matches no rows, so an unknown/unowned id is an empty page, never an
 	// error the caller could read as "this vehicle exists".
 	ListUpcomingByOwnerVehiclePage(ctx context.Context, ownerID, vehicleID string, cursor RideRequestUpcomingCursor, limit int) (RideRequestListPage, error)
+	// ListBookedWindows returns the intervals in [from, to) in which the
+	// vehicle is already spoken for, ordered by start (MYR-385) — the READ
+	// side of the same rule Create enforces, derived from the same predicate
+	// and the same window constant so a picker and the gate cannot drift.
+	//
+	// callerID decides the Own flag and NOTHING else: unlike
+	// ListUpcomingByOwnerVehiclePage, ownership is NOT the authorization model
+	// here (the surface is open to rides-tier viewers too), so the handler
+	// runs the ride-CREATE capability check before calling this. An unknown or
+	// free vehicle is an empty slice, never an error.
+	ListBookedWindows(ctx context.Context, vehicleID, callerID string, from, to time.Time) ([]BookedWindowData, error)
 }
 
 // RideEventPublisher publishes the ride-hailing domain events onto the event
