@@ -462,6 +462,9 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 		pushPrefsRepo: pushPrefsRepo,
 		// MYR-172: backs the §7.21 Live Activity token endpoints.
 		liveActivityRepo: liveActivityRepo,
+		// The same notifier the bus subscription and the ticker share; the
+		// teardown endpoint uses it to end Activities before deleting rides.
+		activityNotifier: activityNotifier,
 		shareRepo:        shareRepo,
 		inviteLinks:      gates.inviteLinks,
 		// The authenticator owns the access-set cache the sharing handlers

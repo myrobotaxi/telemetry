@@ -58,6 +58,9 @@ type ActivityStore interface {
 	DeleteActivityToken(ctx context.Context, token string) error
 	// RideContextFor reads the content-state inputs for one ride.
 	RideContextFor(ctx context.Context, rideRequestID string) (RideContext, error)
+	// RideIDsWithActivitiesForVehicle lists the rides of one vehicle that
+	// still have a live Activity registered against them.
+	RideIDsWithActivitiesForVehicle(ctx context.Context, vehicleID string) ([]string, error)
 }
 
 // terminalStatuses maps a terminal ride status onto how long its Activity
@@ -202,6 +205,52 @@ func (a *ActivityNotifier) handleStatusChanged(evt events.Event) {
 // sweeper on a context it owns.
 func (a *ActivityNotifier) EndForReservationExpiry(ctx context.Context, rideRequestID string) {
 	a.endRide(ctx, rideRequestID, "reservation_expired", DismissPromptly)
+}
+
+// EndForVehicleTeardown ends every live Activity on a vehicle's rides, and is
+// called BEFORE the owner teardown deletes them.
+//
+// The order is the entire point. Teardown issues a bare
+// `DELETE FROM go_ride_requests WHERE vehicle_id = $1` and migration 0025's FK
+// cascades go_live_activities away with it. That delete publishes nothing, so
+// the lifecycle subscription never hears about it, and afterwards there is no
+// row left to tell anyone from: the token is gone, the ride is gone, and the
+// rider's lock screen is left frozen on "your car is on its way" until
+// ActivityKit's own multi-hour ceiling reaps it. A cascade cannot strand a
+// DATABASE ROW, which is what the migration header claimed; it strands the
+// thing the row was pointing at.
+//
+// Sent as `cancelled` because that is what it is from the rider's side — the
+// ride is not happening, and no one is coming — and with DismissPromptly, the
+// same linger as any other unhappy ending.
+//
+// Called synchronously on the caller's context and best-effort throughout: a
+// teardown must never fail because a push did.
+func (a *ActivityNotifier) EndForVehicleTeardown(ctx context.Context, vehicleID string) {
+	if !a.active() {
+		return
+	}
+
+	rideIDs, err := a.store.RideIDsWithActivitiesForVehicle(ctx, vehicleID)
+	if err != nil {
+		a.logger.Error("live activity: teardown ride lookup failed",
+			slog.String("vehicle_id", vehicleID),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	if len(rideIDs) == 0 {
+		return
+	}
+
+	for _, rideID := range rideIDs {
+		a.endRide(ctx, rideID, "cancelled", DismissPromptly)
+	}
+
+	a.logger.Info("live activities ended for vehicle teardown",
+		slog.String("vehicle_id", vehicleID),
+		slog.Int("rides", len(rideIDs)),
+	)
 }
 
 // async runs fn on a bounded worker with its own timeout, detached from the

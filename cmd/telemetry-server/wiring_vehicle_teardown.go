@@ -45,6 +45,15 @@ func setupVehicleTeardownEndpoint(deps httpRouteDeps) {
 		grantOpts = append(grantOpts, telemetry.WithTeslaGrantRevocation(revoker))
 	}
 
+	// MYR-172: end the riders' Live Activities before the teardown deletes the
+	// rides they hang off. Nil-checked rather than always wired because a test
+	// harness may build routes without the push stack; the handler tolerates a
+	// nil ender by skipping the step, exactly as it does for the Tesla config
+	// deleter.
+	if deps.activityNotifier != nil {
+		grantOpts = append(grantOpts, telemetry.WithVehicleTeardownLiveActivities(deps.activityNotifier))
+	}
+
 	handler := telemetry.NewVehicleTeardownHandler(
 		deps.authenticator,
 		&vehicleSnapshotAdapter{repo: deps.vehicleRepo},

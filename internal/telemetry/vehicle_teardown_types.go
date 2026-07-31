@@ -45,6 +45,26 @@ func WithTeslaGrantRevocation(revoker teslaLinkRevoker) VehicleTeardownOption {
 	return func(h *VehicleTeardownHandler) { h.grant = revoker }
 }
 
+// liveActivityEnder ends the Live Activities running on a vehicle's rides
+// (satisfied by *push.ActivityNotifier). Fire-and-forget by signature — it
+// returns nothing, because there is no failure a teardown should react to.
+type liveActivityEnder interface {
+	EndForVehicleTeardown(ctx context.Context, vehicleID string)
+}
+
+// WithVehicleTeardownLiveActivities makes the teardown end the rider-facing
+// Live Activities on this car's rides before it deletes those rides (MYR-172).
+//
+// Optional, and nil is the pre-MYR-172 behaviour, but "optional" understates
+// what it fixes: the teardown deletes go_ride_requests by vehicle with a bare
+// DELETE that publishes no event, and migration 0025's FK cascades the Activity
+// registrations away with them. Nothing is left to push from and nothing was
+// ever notified, so every rider with a Live Activity on one of those rides is
+// left with a lock screen frozen on "your car is on its way" for hours.
+func WithVehicleTeardownLiveActivities(ender liveActivityEnder) VehicleTeardownOption {
+	return func(h *VehicleTeardownHandler) { h.activities = ender }
+}
+
 // FleetConfigDeleter removes a vehicle's fleet-telemetry config at Tesla
 // (satisfied by *FleetAPIClient.DeleteTelemetryConfig). It is nil in tests/CI
 // and only wired when the tesla-http-proxy is configured at runtime, so no

@@ -22,19 +22,29 @@ type fakeActivityStore struct {
 	context map[string]RideContext
 	legs    []ActivityLeg
 
+	// ridesByVehicle backs RideIDsWithActivitiesForVehicle — the owner-teardown
+	// read (MYR-172).
+	ridesByVehicle map[string][]string
+
 	ended   map[string]int
 	deleted []string
 	swept   time.Duration
+	// pushed records every MarkPushed key in call order, which is what the
+	// anti-starvation test asserts the rotation against.
+	pushed []ActivityKey
 
 	contextErr error
 	listErr    error
+	vehicleErr error
+	markErr    error
 }
 
 func newFakeActivityStore() *fakeActivityStore {
 	return &fakeActivityStore{
-		byRide:  map[string][]Activity{},
-		context: map[string]RideContext{},
-		ended:   map[string]int{},
+		byRide:         map[string][]Activity{},
+		context:        map[string]RideContext{},
+		ridesByVehicle: map[string][]string{},
+		ended:          map[string]int{},
 	}
 }
 
@@ -86,6 +96,48 @@ func (f *fakeActivityStore) ActiveLegs(_ context.Context, limit int) ([]Activity
 		return append([]ActivityLeg(nil), f.legs[:limit]...), nil
 	}
 	return append([]ActivityLeg(nil), f.legs...), nil
+}
+
+func (f *fakeActivityStore) RideIDsWithActivitiesForVehicle(_ context.Context, vehicleID string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.vehicleErr != nil {
+		return nil, f.vehicleErr
+	}
+	return append([]string(nil), f.ridesByVehicle[vehicleID]...), nil
+}
+
+// MarkPushed mimics the real UPDATE: it stamps the delivered rows and REORDERS
+// the leg list so they sort last. Without the reorder the double would make the
+// starvation bug untestable — the fake would rotate for free.
+func (f *fakeActivityStore) MarkPushed(_ context.Context, keys []ActivityKey) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.markErr != nil {
+		return 0, f.markErr
+	}
+	f.pushed = append(f.pushed, keys...)
+
+	stamped := make(map[ActivityKey]bool, len(keys))
+	for _, k := range keys {
+		stamped[k] = true
+	}
+	var kept, moved []ActivityLeg
+	for _, leg := range f.legs {
+		if stamped[ActivityKey{RideRequestID: leg.RideRequestID, UserID: leg.UserID}] {
+			moved = append(moved, leg)
+			continue
+		}
+		kept = append(kept, leg)
+	}
+	f.legs = append(kept, moved...)
+	return int64(len(keys)), nil
+}
+
+func (f *fakeActivityStore) pushedKeys() []ActivityKey {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]ActivityKey(nil), f.pushed...)
 }
 
 func (f *fakeActivityStore) SweepStale(_ context.Context, olderThan time.Duration) (int64, error) {
