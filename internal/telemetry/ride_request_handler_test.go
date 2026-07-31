@@ -51,6 +51,15 @@ type fakeRideStore struct {
 	// DORMANCY-guarded variant, so a test can pin that the pickup path uses it
 	// (and that nothing else does).
 	dispatchGuardedCalls int
+	// windowGuardedCalls counts the writes that went through the MYR-383
+	// BOOKING-LOCKED variant, so a test can pin that ACCEPT uses it (and that
+	// nothing else does). windowConflictAt / windowConflictActive steer that
+	// write's window probe: the first stands in for a conflicting RESERVATION
+	// and names its instant, the second for an ACTIVE INSTANT ride, which has
+	// no instant to name.
+	windowGuardedCalls   int
+	windowConflictAt     *time.Time
+	windowConflictActive bool
 
 	riderPage RideRequestListPage
 	riderErr  error
@@ -192,6 +201,38 @@ func (f *fakeRideStore) UpdateStatusFromDispatched(ctx context.Context, id strin
 		f.updatedState = to
 		f.updatedFrom = from
 		return RideRequestData{}, fmt.Errorf("update ride request status: %w", ErrRideReservationDormant)
+	}
+	return f.UpdateStatusFrom(ctx, id, from, to)
+}
+
+// UpdateStatusFromUnconflicted models the MYR-383 booking-locked accept write
+// the way the real transaction behaves: the window probe runs as part of the
+// SAME write as the allowed-from guard, against the CURRENT row — never as a
+// pre-check the caller could have raced past. `windowConflictAt` (when the
+// fixture sets it) stands in for a probe that found the vehicle already
+// promised, and the ride never transitions; everything else defers to the plain
+// guard, so an INSTANT accept is unaffected whatever the fixture holds.
+//
+// A nil-instant conflict is spelled with `windowConflictActive`, the
+// active-instant arm, which the store reports with a NULL scheduled_for. The
+// store's own docker suite is what pins the SQL; this keeps the fake from
+// disagreeing with it.
+func (f *fakeRideStore) UpdateStatusFromUnconflicted(ctx context.Context, id string, from []string, to string) (RideRequestData, error) {
+	f.windowGuardedCalls++
+	current := f.getRec
+	if f.updated.ID != "" {
+		current = f.updated
+	}
+	if f.updateErr == nil && current.ScheduledFor != nil &&
+		(f.windowConflictAt != nil || f.windowConflictActive) {
+		// Count the attempt exactly as the real write would: the refusal comes
+		// from the write, not from a check that skipped it.
+		f.updateCalls++
+		f.updatedID = id
+		f.updatedState = to
+		f.updatedFrom = from
+		return RideRequestData{}, fmt.Errorf("update ride request status: %w",
+			&RideWindowConflictError{ConflictAt: f.windowConflictAt})
 	}
 	return f.UpdateStatusFrom(ctx, id, from, to)
 }

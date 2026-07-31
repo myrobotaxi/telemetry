@@ -296,6 +296,13 @@ func (s *racingDeclineStore) UpdateStatusFromDispatched(ctx context.Context, id 
 	return s.UpdateStatusFrom(ctx, id, from, to)
 }
 
+// UpdateStatusFromUnconflicted is likewise unused by the decline race (decline
+// is never window-gated — an owner may always decline) and delegates for the
+// same reason.
+func (s *racingDeclineStore) UpdateStatusFromUnconflicted(ctx context.Context, id string, from []string, to string) (RideRequestData, error) {
+	return s.UpdateStatusFrom(ctx, id, from, to)
+}
+
 func (s *racingDeclineStore) Create(context.Context, RideRequestCreateInput) (RideRequestData, error) {
 	return RideRequestData{}, errors.New("not used")
 }

@@ -36,6 +36,9 @@ func (a *rideRequestStoreAdapter) Create(ctx context.Context, in telemetry.RideR
 		if errors.Is(err, store.ErrRideRequestActive) {
 			return telemetry.RideRequestData{}, fmt.Errorf("create ride request: %w", telemetry.ErrRideActive)
 		}
+		if window := toWindowConflict(err); window != nil {
+			return telemetry.RideRequestData{}, fmt.Errorf("create ride request: %w", window)
+		}
 		return telemetry.RideRequestData{}, fmt.Errorf("create ride request: %w", err)
 	}
 	return fromStoreRideRequest(rec), nil
@@ -85,6 +88,30 @@ func (a *rideRequestStoreAdapter) UpdateStatusFromDispatched(ctx context.Context
 	return a.guardedUpdate(ctx, a.repo.UpdateStatusFromDispatched, id, from, to)
 }
 
+// UpdateStatusFromUnconflicted delegates to the repo's BOOKING-LOCKED variant
+// (MYR-383) — the same guarded UPDATE, run inside a transaction holding the
+// target vehicle's advisory booking lock after a window probe — and relies on
+// guardedUpdate to translate store.ErrRideWindowConflict into the handler
+// layer's *telemetry.RideWindowConflictError, instant and all. Backs the owner
+// accept transition only.
+func (a *rideRequestStoreAdapter) UpdateStatusFromUnconflicted(ctx context.Context, id string, from []string, to string) (telemetry.RideRequestData, error) {
+	return a.guardedUpdate(ctx, a.repo.UpdateStatusFromUnconflicted, id, from, to)
+}
+
+// toWindowConflict translates a store window-conflict refusal (MYR-383) into
+// the handler layer's typed error, CARRYING THE CONFLICTING INSTANT across the
+// boundary — the one detail the refusal is allowed to disclose (P0 operational
+// timing; see telemetry.RideWindowConflictError). Returns nil when err is not a
+// window conflict. Shared by the create path and the guarded accept so the two
+// cannot translate it differently.
+func toWindowConflict(err error) *telemetry.RideWindowConflictError {
+	var conflict *store.RideWindowConflictError
+	if !errors.As(err, &conflict) {
+		return nil
+	}
+	return &telemetry.RideWindowConflictError{ConflictAt: conflict.ConflictAt, Pending: conflict.Pending}
+}
+
 // guardedUpdate runs one guarded transition write and translates the store's
 // typed refusals into the handler layer's sentinels. Every sentinel is mapped
 // here for BOTH variants: the dormancy one simply never fires for the plain
@@ -98,6 +125,13 @@ func (a *rideRequestStoreAdapter) guardedUpdate(
 	}
 	rec, err := write(ctx, id, fromStatuses, store.RideRequestStatus(to))
 	if err != nil {
+		// Per-vehicle WINDOW conflict (MYR-383): the transition is legal, but
+		// the car is already promised to another open ride at that hour. Checked
+		// first because it is the only refusal carrying a payload — the
+		// conflicting instant — and errors.As must see the concrete type.
+		if window := toWindowConflict(err); window != nil {
+			return telemetry.RideRequestData{}, fmt.Errorf("update ride request status: %w", window)
+		}
 		if errors.Is(err, store.ErrRideRequestConflict) {
 			return telemetry.RideRequestData{}, fmt.Errorf("update ride request status: %w", telemetry.ErrRideStatusConflict)
 		}
