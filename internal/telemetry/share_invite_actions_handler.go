@@ -85,7 +85,11 @@ func (h *ShareInviteHandler) ServeResend(w http.ResponseWriter, r *http.Request)
 	}
 
 	h.logger.Info("share invite resent", slog.String("invite_id", inviteID))
-	h.writeJSON(w, http.StatusOK, toShareInviteMasked(&row, auth.RoleOwner))
+	// RE-SIGNED, not re-used: the row now carries a new code and a new
+	// expiry, and linkCtx re-reads the owner's name, so every signed field
+	// is current. The previous link stops redeeming with the code it embeds.
+	h.writeJSON(w, http.StatusOK,
+		toShareInviteMasked(&row, auth.RoleOwner, h.linkCtx(r.Context(), userID)))
 }
 
 // authInvite validates the bearer token and extracts the invite id. It does NOT

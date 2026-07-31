@@ -3,11 +3,16 @@ package telemetry
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,6 +39,12 @@ type fakeShareInviteStore struct {
 
 	resent    ShareInviteRow
 	resendErr error
+
+	// ownerName is what OwnerFirstName returns — the `from` half of the
+	// signed share link. Empty by default so the common cases exercise the
+	// omitted-name canonical form.
+	ownerName    string
+	ownerNameErr error
 }
 
 func (f *fakeShareInviteStore) CreateInvite(_ context.Context, in ShareInviteCreateInput) (ShareInviteRow, error) {
@@ -57,6 +68,37 @@ func (f *fakeShareInviteStore) RevokeInvite(_ context.Context, inviteID, ownerID
 
 func (f *fakeShareInviteStore) ResendInvite(_ context.Context, _, _ string) (ShareInviteRow, error) {
 	return f.resent, f.resendErr
+}
+
+func (f *fakeShareInviteStore) OwnerFirstName(_ context.Context, _ string) (string, error) {
+	return f.ownerName, f.ownerNameErr
+}
+
+// shareLinkTestSeed is a FIXED Ed25519 seed. It is not a secret and never
+// reaches a deploy: a constant seed makes every link in these tests
+// reproducible, and the public half is derived from it at assert time rather
+// than pasted in, so the pair can never drift.
+var shareLinkTestSeed = bytes.Repeat([]byte{0x42}, ed25519.SeedSize)
+
+// testShareLinkSigner is the signer every mounted test handler uses.
+func testShareLinkSigner(t *testing.T) *InviteLinkSigner {
+	t.Helper()
+	signer, err := NewInviteLinkSigner(shareLinkTestSeed)
+	if err != nil {
+		t.Fatalf("NewInviteLinkSigner: %v", err)
+	}
+	return signer
+}
+
+// testShareLinkPublicKey is the verifying half — what the web join shell would
+// hold.
+func testShareLinkPublicKey(t *testing.T) ed25519.PublicKey {
+	t.Helper()
+	pub, ok := ed25519.NewKeyFromSeed(shareLinkTestSeed).Public().(ed25519.PublicKey)
+	if !ok {
+		t.Fatal("unexpected public key type")
+	}
+	return pub
 }
 
 // fakeAccessInvalidator records which users had their access set busted.
@@ -99,12 +141,14 @@ func acceptedInviteRow() ShareInviteRow {
 }
 
 // newShareInviteMux mounts the four owner routes against a handler.
-func newShareInviteMux(caller string, store ShareInviteStore, owner string, invalidator AccessCacheInvalidator) *http.ServeMux { //nolint:unparam // caller-vs-owner is the variable under test; collapsing owner to a constant would hide which actor each case exercises
+func newShareInviteMux(t *testing.T, caller string, store ShareInviteStore, owner string, invalidator AccessCacheInvalidator) *http.ServeMux { //nolint:unparam // caller-vs-owner is the variable under test; collapsing owner to a constant would hide which actor each case exercises
+	t.Helper()
 	h := NewShareInviteHandler(
 		&stubTokenValidator{userID: caller},
 		&stubVehicleSnapshotReader{row: fixtureSnapshotRow(owner)},
 		store,
 		invalidator,
+		testShareLinkSigner(t),
 		discardLogger(),
 	)
 	mux := http.NewServeMux()
@@ -141,7 +185,7 @@ func TestShareInviteHandler_Create(t *testing.T) {
 
 	t.Run("owner mints an invite and gets the code back", func(t *testing.T) {
 		store := &fakeShareInviteStore{created: pendingInviteRow()}
-		mux := newShareInviteMux(shareOwnerUser, store, shareOwnerUser, nil)
+		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
 
 		rec := doShareRequest(t, mux, http.MethodPost, invitePath,
 			`{"label":"Mira Chen","permission":"live_history"}`)
@@ -177,7 +221,7 @@ func TestShareInviteHandler_Create(t *testing.T) {
 
 	t.Run("multi-vehicle set is passed through de-duplicated", func(t *testing.T) {
 		store := &fakeShareInviteStore{created: pendingInviteRow()}
-		mux := newShareInviteMux(shareOwnerUser, store, shareOwnerUser, nil)
+		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
 
 		rec := doShareRequest(t, mux, http.MethodPost, invitePath,
 			fmt.Sprintf(`{"label":"Mira","permission":"rides","vehicleIds":[%q,%q,"veh-2"]}`,
@@ -205,7 +249,7 @@ func TestShareInviteHandler_Create(t *testing.T) {
 		for name, body := range cases {
 			t.Run(name, func(t *testing.T) {
 				store := &fakeShareInviteStore{created: pendingInviteRow()}
-				mux := newShareInviteMux(shareOwnerUser, store, shareOwnerUser, nil)
+				mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
 
 				rec := doShareRequest(t, mux, http.MethodPost, invitePath, body)
 				if rec.Code != http.StatusBadRequest {
@@ -222,7 +266,7 @@ func TestShareInviteHandler_Create(t *testing.T) {
 		store := &fakeShareInviteStore{created: pendingInviteRow()}
 		// The caller is a viewer of the vehicle; sharing is owner-only, so
 		// even a `rides` grant must not let them re-share the car.
-		mux := newShareInviteMux(shareViewerUser, store, shareOwnerUser, nil)
+		mux := newShareInviteMux(t, shareViewerUser, store, shareOwnerUser, nil)
 
 		rec := doShareRequest(t, mux, http.MethodPost, invitePath,
 			`{"label":"Mira","permission":"live"}`)
@@ -239,7 +283,7 @@ func TestShareInviteHandler_Create(t *testing.T) {
 		h := NewShareInviteHandler(
 			&stubTokenValidator{userID: shareOwnerUser},
 			&stubVehicleSnapshotReader{err: fmt.Errorf("stub: %w", sdk.ErrNotFound)},
-			store, nil, discardLogger(),
+			store, nil, testShareLinkSigner(t), discardLogger(),
 		)
 		mux := http.NewServeMux()
 		mux.HandleFunc("POST /api/vehicles/{vehicleId}/invites", h.ServeCreate)
@@ -252,7 +296,7 @@ func TestShareInviteHandler_Create(t *testing.T) {
 
 	t.Run("an unowned vehicle in the set is 403", func(t *testing.T) {
 		store := &fakeShareInviteStore{createErr: ErrShareVehicleNotOwned}
-		mux := newShareInviteMux(shareOwnerUser, store, shareOwnerUser, nil)
+		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
 
 		rec := doShareRequest(t, mux, http.MethodPost, invitePath,
 			fmt.Sprintf(`{"label":"M","permission":"live","vehicleIds":[%q,"not-mine"]}`, shareFixtureVeh))
@@ -262,7 +306,7 @@ func TestShareInviteHandler_Create(t *testing.T) {
 	})
 
 	t.Run("missing bearer token is 401", func(t *testing.T) {
-		mux := newShareInviteMux(shareOwnerUser, &fakeShareInviteStore{}, shareOwnerUser, nil)
+		mux := newShareInviteMux(t, shareOwnerUser, &fakeShareInviteStore{}, shareOwnerUser, nil)
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, invitePath,
 			bytes.NewReader([]byte(`{"label":"M","permission":"live"}`)))
 		rec := httptest.NewRecorder()
@@ -278,7 +322,7 @@ func TestShareInviteHandler_List(t *testing.T) {
 
 	t.Run("returns the invites envelope with per-status field omission", func(t *testing.T) {
 		store := &fakeShareInviteStore{listed: []ShareInviteRow{pendingInviteRow(), acceptedInviteRow()}}
-		mux := newShareInviteMux(shareOwnerUser, store, shareOwnerUser, nil)
+		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
 
 		rec := doShareRequest(t, mux, http.MethodGet, invitePath, "")
 		if rec.Code != http.StatusOK {
@@ -321,7 +365,7 @@ func TestShareInviteHandler_List(t *testing.T) {
 
 	t.Run("an owner with no invites gets an empty array, not null", func(t *testing.T) {
 		store := &fakeShareInviteStore{listed: nil}
-		mux := newShareInviteMux(shareOwnerUser, store, shareOwnerUser, nil)
+		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
 
 		rec := doShareRequest(t, mux, http.MethodGet, invitePath, "")
 		if rec.Code != http.StatusOK {
@@ -334,7 +378,7 @@ func TestShareInviteHandler_List(t *testing.T) {
 
 	t.Run("a non-owner is refused", func(t *testing.T) {
 		store := &fakeShareInviteStore{listed: []ShareInviteRow{pendingInviteRow()}}
-		mux := newShareInviteMux(shareViewerUser, store, shareOwnerUser, nil)
+		mux := newShareInviteMux(t, shareViewerUser, store, shareOwnerUser, nil)
 
 		rec := doShareRequest(t, mux, http.MethodGet, invitePath, "")
 		if rec.Code != http.StatusForbidden {
@@ -353,7 +397,7 @@ func TestShareInviteHandler_RevokeAndResend(t *testing.T) {
 	t.Run("revoke is 204 and busts the revoked viewer's access cache", func(t *testing.T) {
 		invalidator := &fakeAccessInvalidator{}
 		store := &fakeShareInviteStore{revokedViewer: shareViewerUser}
-		mux := newShareInviteMux(shareOwnerUser, store, shareOwnerUser, invalidator)
+		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, invalidator)
 
 		rec := doShareRequest(t, mux, http.MethodDelete, revokePath, "")
 		if rec.Code != http.StatusNoContent {
@@ -375,7 +419,7 @@ func TestShareInviteHandler_RevokeAndResend(t *testing.T) {
 	t.Run("revoking a pending invite busts nobody", func(t *testing.T) {
 		invalidator := &fakeAccessInvalidator{}
 		store := &fakeShareInviteStore{revokedViewer: ""}
-		mux := newShareInviteMux(shareOwnerUser, store, shareOwnerUser, invalidator)
+		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, invalidator)
 
 		if rec := doShareRequest(t, mux, http.MethodDelete, revokePath, ""); rec.Code != http.StatusNoContent {
 			t.Fatalf("status %d, want 204", rec.Code)
@@ -387,7 +431,7 @@ func TestShareInviteHandler_RevokeAndResend(t *testing.T) {
 
 	t.Run("revoking an unknown or foreign invite is 404", func(t *testing.T) {
 		store := &fakeShareInviteStore{revokeErr: fmt.Errorf("stub: %w", sdk.ErrNotFound)}
-		mux := newShareInviteMux(shareOwnerUser, store, shareOwnerUser, nil)
+		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
 
 		rec := doShareRequest(t, mux, http.MethodDelete, revokePath, "")
 		if rec.Code != http.StatusNotFound {
@@ -400,7 +444,7 @@ func TestShareInviteHandler_RevokeAndResend(t *testing.T) {
 		resent.Code = "NEW123"
 		resent.ExpiresAt = resent.ExpiresAt.Add(24 * time.Hour)
 		store := &fakeShareInviteStore{resent: resent}
-		mux := newShareInviteMux(shareOwnerUser, store, shareOwnerUser, nil)
+		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
 
 		rec := doShareRequest(t, mux, http.MethodPost, resendPath, "")
 		if rec.Code != http.StatusOK {
@@ -417,7 +461,7 @@ func TestShareInviteHandler_RevokeAndResend(t *testing.T) {
 
 	t.Run("resending an accepted grant is 409", func(t *testing.T) {
 		store := &fakeShareInviteStore{resendErr: ErrShareNotPending}
-		mux := newShareInviteMux(shareOwnerUser, store, shareOwnerUser, nil)
+		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
 
 		rec := doShareRequest(t, mux, http.MethodPost, resendPath, "")
 		if rec.Code != http.StatusConflict {
@@ -433,7 +477,7 @@ func TestShareInviteHandler_RevokeAndResend(t *testing.T) {
 
 	t.Run("a store failure is 500, not a leaked error", func(t *testing.T) {
 		store := &fakeShareInviteStore{resendErr: errors.New("connection refused")}
-		mux := newShareInviteMux(shareOwnerUser, store, shareOwnerUser, nil)
+		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
 
 		rec := doShareRequest(t, mux, http.MethodPost, resendPath, "")
 		if rec.Code != http.StatusInternalServerError {
@@ -441,6 +485,203 @@ func TestShareInviteHandler_RevokeAndResend(t *testing.T) {
 		}
 		if bytes.Contains(rec.Body.Bytes(), []byte("connection refused")) {
 			t.Error("the underlying error text leaked into the response envelope")
+		}
+	})
+}
+
+// --- Signed share links (MYR-368) ---
+
+// verifyShareURL re-derives the canonical payload from a link exactly as the
+// web join shell must, and verifies it against the PUBLIC key. It reads the
+// query itself rather than trusting the signer's own helpers, so a change that
+// broke the agreement between the URL and the payload fails here.
+func verifyShareURL(t *testing.T, rawURL, wantCode, wantFrom, wantTo string, wantExpiry time.Time) {
+	t.Helper()
+
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parse shareUrl %q: %v", rawURL, err)
+	}
+	if got, want := u.Path, "/join/"+wantCode; got != want {
+		t.Errorf("path = %q, want %q", got, want)
+	}
+	q := u.Query()
+	if got := q.Get("from"); got != wantFrom {
+		t.Errorf("from = %q, want %q", got, wantFrom)
+	}
+	if got := q.Get("to"); got != wantTo {
+		t.Errorf("to = %q, want %q", got, wantTo)
+	}
+
+	parts := strings.Split(q.Get("k"), ".")
+	if len(parts) != 3 {
+		t.Fatalf("k = %q, want three parts", q.Get("k"))
+	}
+	if got, want := parts[1], strconv.FormatInt(wantExpiry.Unix(), 10); got != want {
+		t.Errorf("signed expiry = %s, want %s (the row's expires_at)", got, want)
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		t.Fatalf("decode signature: %v", err)
+	}
+	payload := "join:" + wantCode + ":" + parts[1] + ":" + q.Get("from") + ":" + q.Get("to")
+	if !ed25519.Verify(testShareLinkPublicKey(t), []byte(payload), sig) {
+		t.Fatalf("signature does not verify over %q", payload)
+	}
+}
+
+// shareURLOf pulls the shareUrl out of a response body, failing if absent.
+func shareURLOf(t *testing.T, body map[string]any) string {
+	t.Helper()
+	raw, ok := body["shareUrl"].(string)
+	if !ok || raw == "" {
+		t.Fatalf("no shareUrl in response: %v", body)
+	}
+	return raw
+}
+
+func TestShareInviteHandler_ShareURL(t *testing.T) {
+	invitePath := "/api/vehicles/" + shareFixtureVeh + "/invites"
+	row := pendingInviteRow()
+
+	t.Run("create emits a verifiable link carrying both names", func(t *testing.T) {
+		store := &fakeShareInviteStore{created: row, ownerName: "Alex Rivera"}
+		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
+
+		rec := doShareRequest(t, mux, http.MethodPost, invitePath,
+			`{"label":"Mira Chen","permission":"live_history"}`)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status %d, want 201. Body: %s", rec.Code, rec.Body.String())
+		}
+		body := decodeShareBody(t, rec)
+		// from is the OWNER's first name; to is the first token of the
+		// owner-typed label on the row.
+		verifyShareURL(t, shareURLOf(t, body), row.Code, "Alex", "Mira", row.ExpiresAt)
+	})
+
+	t.Run("the link's expiry is the row's expires_at, not a re-derived TTL", func(t *testing.T) {
+		odd := row
+		odd.ExpiresAt = time.Date(2027, 3, 14, 1, 59, 26, 0, time.UTC)
+		store := &fakeShareInviteStore{created: odd, ownerName: "Alex"}
+		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
+
+		body := decodeShareBody(t, doShareRequest(t, mux, http.MethodPost, invitePath,
+			`{"label":"Mira Chen","permission":"live"}`))
+		verifyShareURL(t, shareURLOf(t, body), odd.Code, "Alex", "Mira", odd.ExpiresAt)
+	})
+
+	t.Run("list signs every pending row and no accepted one", func(t *testing.T) {
+		store := &fakeShareInviteStore{
+			listed:    []ShareInviteRow{pendingInviteRow(), acceptedInviteRow()},
+			ownerName: "Alex Rivera",
+		}
+		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
+
+		rec := doShareRequest(t, mux, http.MethodGet, invitePath, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d, want 200", rec.Code)
+		}
+		var out struct {
+			Invites []map[string]any `json:"invites"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(out.Invites) != 2 {
+			t.Fatalf("got %d rows, want 2", len(out.Invites))
+		}
+		verifyShareURL(t, shareURLOf(t, out.Invites[0]), row.Code, "Alex", "Mira", row.ExpiresAt)
+		// The accepted row carries no code, so it must carry no link —
+		// a URL there would resurrect the very credential the code
+		// branch withheld.
+		if _, present := out.Invites[1]["shareUrl"]; present {
+			t.Errorf("accepted row carries a shareUrl: %v", out.Invites[1])
+		}
+	})
+
+	t.Run("resend RE-SIGNS with the new code and the new expiry", func(t *testing.T) {
+		resent := pendingInviteRow()
+		resent.Code = "NEW123"
+		resent.ExpiresAt = time.Date(2026, 8, 12, 15, 4, 5, 0, time.UTC)
+		store := &fakeShareInviteStore{resent: resent, ownerName: "Alex Rivera"}
+		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
+
+		rec := doShareRequest(t, mux, http.MethodPost, "/api/invites/"+shareInviteID+"/resend", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d, want 200. Body: %s", rec.Code, rec.Body.String())
+		}
+		body := decodeShareBody(t, rec)
+		newURL := shareURLOf(t, body)
+		verifyShareURL(t, newURL, "NEW123", "Alex", "Mira", resent.ExpiresAt)
+
+		// And it is genuinely a different link: the old code must not
+		// survive anywhere in it, or the owner would hand out a URL
+		// that redeems the credential they just invalidated.
+		if strings.Contains(newURL, row.Code) {
+			t.Errorf("resent link still carries the old code: %s", newURL)
+		}
+		createStore := &fakeShareInviteStore{created: row, ownerName: "Alex Rivera"}
+		createMux := newShareInviteMux(t, shareOwnerUser, createStore, shareOwnerUser, nil)
+		oldBody := decodeShareBody(t, doShareRequest(t, createMux, http.MethodPost, invitePath,
+			`{"label":"Mira Chen","permission":"live"}`))
+		if shareURLOf(t, oldBody) == newURL {
+			t.Error("resend produced an identical link")
+		}
+	})
+
+	t.Run("a label that sanitizes away omits `to` and still verifies", func(t *testing.T) {
+		odd := row
+		odd.Label = "🙂🙂"
+		store := &fakeShareInviteStore{created: odd, ownerName: "Alex"}
+		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
+
+		body := decodeShareBody(t, doShareRequest(t, mux, http.MethodPost, invitePath,
+			`{"label":"x","permission":"live"}`))
+		got := shareURLOf(t, body)
+		if strings.Contains(got, "to=") {
+			t.Errorf("expected no `to` parameter: %s", got)
+		}
+		verifyShareURL(t, got, odd.Code, "Alex", "", odd.ExpiresAt)
+	})
+
+	t.Run("an owner-name lookup failure degrades instead of failing the create", func(t *testing.T) {
+		store := &fakeShareInviteStore{created: row, ownerNameErr: errors.New("db down")}
+		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
+
+		rec := doShareRequest(t, mux, http.MethodPost, invitePath,
+			`{"label":"Mira Chen","permission":"live"}`)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status %d, want 201 — a display-name failure must not sink the invite", rec.Code)
+		}
+		body := decodeShareBody(t, rec)
+		got := shareURLOf(t, body)
+		if strings.Contains(got, "from=") {
+			t.Errorf("expected no `from` parameter: %s", got)
+		}
+		verifyShareURL(t, got, row.Code, "", "Mira", row.ExpiresAt)
+	})
+
+	t.Run("no signing key means no shareUrl, and the code still ships", func(t *testing.T) {
+		store := &fakeShareInviteStore{created: row, ownerName: "Alex"}
+		h := NewShareInviteHandler(
+			&stubTokenValidator{userID: shareOwnerUser},
+			&stubVehicleSnapshotReader{row: fixtureSnapshotRow(shareOwnerUser)},
+			store, nil, nil, discardLogger(),
+		)
+		mux := http.NewServeMux()
+		mux.HandleFunc("POST /api/vehicles/{vehicleId}/invites", h.ServeCreate)
+
+		rec := doShareRequest(t, mux, http.MethodPost, invitePath,
+			`{"label":"Mira Chen","permission":"live"}`)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status %d, want 201", rec.Code)
+		}
+		body := decodeShareBody(t, rec)
+		if _, present := body["shareUrl"]; present {
+			t.Error("emitted a shareUrl with no signing key")
+		}
+		if body["code"] != row.Code {
+			t.Errorf("code = %v, want the fallback the client shares instead", body["code"])
 		}
 	})
 }

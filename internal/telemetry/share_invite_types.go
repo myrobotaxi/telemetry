@@ -91,6 +91,12 @@ type ShareInviteStore interface {
 	RevokeInvite(ctx context.Context, inviteID, ownerUserID string) (string, error)
 	// ResendInvite re-mints the code and resets the expiry on a pending row.
 	ResendInvite(ctx context.Context, inviteID, ownerUserID string) (ShareInviteRow, error)
+	// OwnerFirstName resolves the calling owner's first name — the `from`
+	// half of the signed share link (MYR-368). Same method, same ladder, and
+	// same P1 first-names-only policy as the redeem side; it is listed on
+	// this interface too because the owner surface now needs it as well.
+	// Never returns an empty string.
+	OwnerFirstName(ctx context.Context, ownerUserID string) (string, error)
 }
 
 // ShareRedeemStore is the rider-side dependency.
@@ -135,10 +141,10 @@ type redeemShareInviteRequest struct {
 
 // shareInviteWire is the owner-facing ShareInvite object.
 //
-// Three fields are conditionally OMITTED, and the omission is contractual, not
-// cosmetic: `code` and `expiresAt` exist only while the row is pending (an
-// accepted grant's code is not re-readable and an accepted grant does not
-// expire), and `acceptedAt` exists only once it has been accepted.
+// Four fields are conditionally OMITTED, and the omission is contractual, not
+// cosmetic: `code`, `shareUrl` and `expiresAt` exist only while the row is
+// pending (an accepted grant's code is not re-readable and an accepted grant
+// does not expire), and `acceptedAt` exists only once it has been accepted.
 type shareInviteWire struct {
 	InviteID   string `json:"inviteId"`
 	VehicleID  string `json:"vehicleId"`
@@ -146,6 +152,11 @@ type shareInviteWire struct {
 	Permission string `json:"permission"`
 	Status     string `json:"status"`
 	Code       string `json:"code,omitempty"`
+	// ShareURL is the signed join link (MYR-368). It CONTAINS the code, so
+	// it is P1 and bearer exactly as Code is: never logged, never echoed
+	// into an error. Empty when no signing key is configured, in which case
+	// the key is omitted and a consumer falls back to sharing Code.
+	ShareURL   string `json:"shareUrl,omitempty"`
 	CreatedAt  string `json:"createdAt"`
 	ExpiresAt  string `json:"expiresAt,omitempty"`
 	AcceptedAt string `json:"acceptedAt,omitempty"`
@@ -167,13 +178,16 @@ type redeemShareInviteResponse struct {
 }
 
 // toShareInviteWire projects a row onto the wire shape, applying the
-// conditional omissions.
+// conditional omissions. signer may be nil, in which case shareUrl is omitted.
 //
 // The code is emitted ONLY for a pending row. The store already blanks it for
 // non-pending rows in SQL; this is the second, independent gate, because a
 // leaked accepted-grant code is a live credential handed to whoever can list
-// the invite.
-func toShareInviteWire(row *ShareInviteRow) shareInviteWire {
+// the invite. `shareUrl` is minted inside the SAME branch and from the SAME
+// two values, so the link cannot outlive the code it embeds — an accepted row
+// that somehow carried a URL would leak the credential the code branch just
+// withheld.
+func toShareInviteWire(row *ShareInviteRow, link inviteLinkCtx) shareInviteWire {
 	out := shareInviteWire{
 		InviteID:   row.ID,
 		VehicleID:  row.VehicleID,
@@ -187,6 +201,9 @@ func toShareInviteWire(row *ShareInviteRow) shareInviteWire {
 		if !row.ExpiresAt.IsZero() {
 			out.ExpiresAt = row.ExpiresAt.UTC().Format(time.RFC3339)
 		}
+		// Signed over the row's ACTUAL expires_at, so the instant in
+		// the link is the instant redemption enforces.
+		out.ShareURL = link.signer.ShareURL(row.Code, row.ExpiresAt, link.ownerName, row.Label)
 	}
 	if row.AcceptedAt != nil {
 		out.AcceptedAt = row.AcceptedAt.UTC().Format(time.RFC3339)
@@ -206,8 +223,8 @@ func toShareInviteWire(row *ShareInviteRow) shareInviteWire {
 // never served. The viewer role has no entry for this resource, so if a viewer
 // ever reached this code the same call would return an empty object rather than
 // an owner's labels and a live code.
-func toShareInviteMasked(row *ShareInviteRow, role auth.Role) map[string]any {
-	wire := toShareInviteWire(row)
+func toShareInviteMasked(row *ShareInviteRow, role auth.Role, link inviteLinkCtx) map[string]any {
+	wire := toShareInviteWire(row, link)
 	fields := map[string]any{
 		"inviteId":   wire.InviteID,
 		"vehicleId":  wire.VehicleID,
@@ -216,10 +233,13 @@ func toShareInviteMasked(row *ShareInviteRow, role auth.Role) map[string]any {
 		"status":     wire.Status,
 		"createdAt":  wire.CreatedAt,
 	}
-	// The three conditional keys are added only when they have a value, so
+	// The four conditional keys are added only when they have a value, so
 	// omission stays omission rather than becoming an empty string.
 	if wire.Code != "" {
 		fields["code"] = wire.Code
+	}
+	if wire.ShareURL != "" {
+		fields["shareUrl"] = wire.ShareURL
 	}
 	if wire.ExpiresAt != "" {
 		fields["expiresAt"] = wire.ExpiresAt
