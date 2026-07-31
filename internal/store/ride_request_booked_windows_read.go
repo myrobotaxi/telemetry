@@ -13,9 +13,9 @@
 // returned interval is exactly one the gate would allow. That is not maintained
 // by care; it is maintained by CONSTRUCTION. The query below is assembled from
 // the very fragments rideWindowConflictPredicate is assembled from —
-// rideWindowOccupiedPredicate for "which rides count", rideWindowStartExpr /
-// rideWindowEndExpr for "how wide" — so there is no second spelling of the rule
-// to drift, and RideConflictWindow reaches both through the same bind
+// rideWindowReservationOccupies / rideWindowInstantOccupies for "which rides
+// count", rideWindowOverlap for "how wide" — so there is no second spelling of
+// the rule to drift, and RideConflictWindow reaches both through the same bind
 // parameter. Widening or narrowing that const moves the gate and every client's
 // picker together, on the next response, with no client release.
 //
@@ -93,7 +93,7 @@ const MaxBookedWindowRange = 14 * 24 * time.Hour
 // TRUE because this surface answers for the CREATE path.
 //
 // The gate's two landing sites disagree about a merely `requested` reservation
-// on purpose (see rideWindowOccupiedPredicate): create counts it, accept does
+// on purpose (see rideWindowReservationOccupies): create counts it, accept does
 // not. A picker is a rider deciding what to create, so it must see exactly what
 // create would see. Showing the accept-side answer would hand a rider a slot
 // that create is going to refuse — reintroducing the late 409 this endpoint
@@ -114,23 +114,41 @@ const bookedWindowsCountPending = true
 // merely TOUCHES the requested range at a boundary blocks nothing inside it and
 // would be noise in the response.
 //
+// The WHERE clause spells that overlap through rideWindowOverlap, which moves
+// the half-width onto the BOUNDS so `r.scheduled_for` stands bare — `anchor >
+// $2 - W AND anchor < $3 + W` rather than the equivalent `start < $3 AND end >
+// $2`. The COALESCE'd rideWindowStartExpr / rideWindowEndExpr survive in the
+// SELECT list, where the picker actually needs two concrete instants and where
+// an expression costs nothing. Read rideWindowOverlap before touching either;
+// swapping the projection's spelling into the WHERE clause is the regression it
+// exists to prevent.
+//
 // The `id` tiebreak is for a DETERMINISTIC order only; the id itself is never
 // selected and never leaves the server.
 //
 // The index that serves it is idx_go_ride_requests_vehicle_window (migration
-// 0026): its predicate is the reservation arm's static conjuncts and it leads
-// on (vehicle_id, scheduled_for), which is exactly this statement's equality
-// plus range shape. No new migration — this is a read over existing columns.
-const queryVehicleBookedWindows = `SELECT
+// 0026), on the reservation arm, and it serves exactly three conjuncts:
+// `r.vehicle_id = $1` on the leading column and the two `r.scheduled_for`
+// bounds on the second — all three appear as Index Cond, so the scan touches
+// the requested range instead of every open reservation on the car. The arm's
+// `scheduled_for IS NOT NULL` and status conjuncts are the index's own partial
+// predicate. The active-instant arm is a separate bitmap branch over the
+// `scheduled_for IS NULL` partial indexes (0004/0013). No new migration — this
+// is a read over existing columns.
+var queryVehicleBookedWindows = `SELECT
 	` + rideWindowStartExpr + ` AS window_start,
 	` + rideWindowEndExpr + ` AS window_end,
 	r.status = 'requested' AS pending,
 	r.rider_id = $6 AS own
 FROM go_ride_requests r
 WHERE r.vehicle_id = $1
-  AND ` + rideWindowOccupiedPredicate + `
-  AND ` + rideWindowStartExpr + ` < $3::timestamptz
-  AND ` + rideWindowEndExpr + ` > $2::timestamptz
+  AND ((
+			` + rideWindowReservationOccupies + `
+			AND ` + rideWindowOverlap(`r.scheduled_for`, `$2`, `$3`) + `
+		) OR (
+			` + rideWindowInstantOccupies + `
+			AND ` + rideWindowOverlap(`NOW()`, `$2`, `$3`) + `
+		))
 ORDER BY window_start ASC, r.id ASC`
 
 // ListBookedWindows returns every interval in [from, to) in which vehicleID is

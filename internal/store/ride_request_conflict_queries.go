@@ -65,13 +65,20 @@ package store
 // MYR-385 FACTORED IT, DID NOT COPY IT. The picker read surface
 // (queryVehicleBookedWindows) has to answer the INVERSE question — "which
 // intervals would this predicate refuse?" — and a second spelling of the rule
-// would drift from this one within a release. So the rule is now assembled from
-// three fragments below, and the read surface is built from the SAME three:
-// occupancy (who counts), and the two window endpoints (how far). This
-// expression is unchanged in meaning — see rideWindowStartExpr for the algebra.
-const rideWindowConflictPredicate = rideWindowOccupiedPredicate + `
-			AND ` + rideWindowStartExpr + ` < $2::timestamptz
-			AND ` + rideWindowEndExpr + ` > $2::timestamptz`
+// would drift from this one within a release. So the rule is assembled from the
+// fragments below and the read surface is built from the SAME ones: per-arm
+// occupancy (who counts) and rideWindowOverlap (how far).
+//
+// The two arms carry their OWN range conjuncts rather than sharing one
+// COALESCE'd pair. That is not an oversight — see rideWindowOverlap; it is the
+// only spelling Postgres can match to idx_go_ride_requests_vehicle_window.
+var rideWindowConflictPredicate = `(
+			` + rideWindowReservationOccupies + `
+			AND ` + rideWindowOverlap(`r.scheduled_for`, `$2`, `$2`) + `
+		) OR (
+			` + rideWindowInstantOccupies + `
+			AND ` + rideWindowOverlap(`NOW()`, `$2`, `$2`) + `
+		)`
 
 // rideWindowCommittedStatuses is the COMMITTED lifecycle set — the statuses in
 // which a car has actually been promised to somebody, as opposed to merely
@@ -83,53 +90,107 @@ const rideWindowConflictPredicate = rideWindowOccupiedPredicate + `
 // and the window frees immediately.
 const rideWindowCommittedStatuses = `('accepted', 'arrived', 'enroute')`
 
-// rideWindowOccupiedPredicate is "ride r OCCUPIES a window at all" — the
-// membership half of the rule, with the geometry factored out. Two arms,
-// because a ride's instant has two spellings (see the narrative above):
-// a reservation counts on its `scheduled_for`, always when committed and
+// rideWindowReservationOccupies / rideWindowInstantOccupies are "ride r
+// OCCUPIES a window at all", per arm — the membership half of the rule, with
+// the geometry factored out. Two fragments rather than one OR'd pair because
+// the two arms anchor on different columns, so each has to sit next to its own
+// range conjuncts (see rideWindowOverlap).
+//
+// A reservation counts on its `scheduled_for`, always when committed and
 // additionally when merely `requested` if $5 says pending claims count; an
 // instant ride counts only when COMMITTED, because a `requested` instant ride
 // has not been promised to anybody yet and cannot promise the car away.
 //
-// POSITIONAL CONTRACT: this fragment binds $5 (count-pending). Every statement
-// that embeds it MUST put count-pending at $5 — queryRideWindowConflict and
-// queryVehicleBookedWindows both do. A mismatch is a type error at the first
-// execution rather than a wrong answer, but keep the positions aligned anyway.
-const rideWindowOccupiedPredicate = `(
-			(r.scheduled_for IS NOT NULL
-			 AND (r.status IN ` + rideWindowCommittedStatuses + `
-			      OR (r.status = 'requested' AND $5)))
-			OR (r.scheduled_for IS NULL
-			    AND r.status IN ` + rideWindowCommittedStatuses + `)
-		)`
+// POSITIONAL CONTRACT: the reservation fragment binds $5 (count-pending). Every
+// statement that embeds it MUST put count-pending at $5 —
+// queryRideWindowConflict and queryVehicleBookedWindows both do. A mismatch is
+// a type error at the first execution rather than a wrong answer, but keep the
+// positions aligned anyway.
+const rideWindowReservationOccupies = `r.scheduled_for IS NOT NULL
+			AND (r.status IN ` + rideWindowCommittedStatuses + `
+			     OR (r.status = 'requested' AND $5))`
+
+const rideWindowInstantOccupies = `r.scheduled_for IS NULL
+			AND r.status IN ` + rideWindowCommittedStatuses
+
+// rideWindowHalfWidthExpr is W — the half-width bound at $4, in seconds. Every
+// endpoint in this package is spelled through it, so RideConflictWindow reaches
+// the gate and the MYR-385 read surface through ONE bind and cannot be widened
+// for one and not the other.
+//
+// POSITIONAL CONTRACT: it binds $4.
+const rideWindowHalfWidthExpr = `make_interval(secs => $4::float8)`
+
+// rideWindowOverlap spells "the window ride r occupies overlaps [lower, upper]"
+// for ONE arm, against that arm's own anchor — `r.scheduled_for` for the
+// reservation arm, `NOW()` for the active-instant arm. The gate passes the same
+// placeholder for both bounds (a single proposed instant); the read passes the
+// caller's range.
+//
+// IT LOOKS REDUNDANT AND IS NOT. DO NOT "SIMPLIFY" IT.
+//
+// The natural spelling is the one this expression is algebraically equal to:
+//
+//	anchor - W < upper  AND  anchor + W > lower          -- window vs bounds
+//	anchor < upper + W  AND  anchor > lower - W          -- W moved across
+//
+// The second line is what this function emits, and the ONLY difference that
+// matters is which side W sits on. With W on the anchor's side the anchor is an
+// EXPRESSION, and Postgres cannot match an expression to a plain btree column:
+// the range stops being an index condition, and with it the only reason to use
+// idx_go_ride_requests_vehicle_window (vehicle_id, scheduled_for) at all — the
+// planner abandons the index and reads the table.
+//
+// EXPLAIN-VERIFIED, on a car with 1241 open reservations among 11169 rows
+// (ride_request_window_index_plan_test.go seeds exactly that):
+//
+//	W on the anchor:  Seq Scan, Rows Removed by Filter 11168, 251 buffers
+//	W on the bounds:  Bitmap Index Scan, Index Cond carries both scheduled_for
+//	                  bounds, 1 row, Heap Blocks 1, 9 buffers
+//
+// That is ~16x on the conflict probe, which runs on every create and every
+// accept INSIDE the per-vehicle advisory booking lock, and ~10x on the picker
+// read, which would otherwise scan a whole calendar to answer about two days of
+// it. With W on the CONSTANT side the anchor stands bare, the conjuncts are
+// SARGable, and the range rides the index.
+//
+// The inequalities are STRICT on both sides, which is the property the read
+// surface most needs to inherit from the gate: the endpoints are EXCLUSIVE, so
+// two rides exactly W apart are ALLOWED, and a picker that dimmed the endpoints
+// would refuse a slot the server would have taken.
+// `lower` happens to be $2 at both call sites today; it stays an explicit
+// parameter (//nolint:unparam) because the two bounds are what DISTINGUISHES the
+// gate from the read — the gate passes one instant as both, the read passes a
+// range — and collapsing the one that currently agrees would hide that.
+//
+//nolint:unparam // see above: naming both bounds is the point of the helper.
+func rideWindowOverlap(anchor, lower, upper string) string {
+	return anchor + ` > ` + lower + `::timestamptz - ` + rideWindowHalfWidthExpr + `
+			AND ` + anchor + ` < ` + upper + `::timestamptz + ` + rideWindowHalfWidthExpr
+}
 
 // rideWindowAnchorExpr is the INSTANT a ride occupies its window around:
 // `scheduled_for` for a reservation, NOW() for an instant ride, which has no
 // scheduled instant because it is happening now.
 //
-// The COALESCE is what let the two arms' geometry collapse into one expression.
-// It is exact, not an approximation: rideWindowOccupiedPredicate has already
-// split the arms on `scheduled_for IS NULL`, so within either arm the COALESCE
-// resolves to precisely the column that arm's original spelling used.
+// The COALESCE is exact, not an approximation: every statement that uses it has
+// already split the arms on `scheduled_for IS NULL`, so it resolves to precisely
+// the column the matching arm compared against. It is used ONLY where it costs
+// nothing — the gate's ORDER BY and the read's SELECT projection, neither of
+// which an index could serve anyway. It must NOT appear in a WHERE clause; see
+// rideWindowOverlap for why.
 const rideWindowAnchorExpr = `COALESCE(r.scheduled_for, NOW())`
 
-// rideWindowStartExpr / rideWindowEndExpr are the OPEN interval ride r occupies
-// — the anchor plus or minus the half-width bound at $4. They are the ONE
-// definition of the window's geometry, and the reason both the gate and the
-// MYR-385 read surface can be trusted to describe the same intervals.
+// rideWindowStartExpr / rideWindowEndExpr are the OPEN interval ride r occupies,
+// as a SELECTABLE pair of instants — the anchor plus or minus the half-width.
+// They exist for the MYR-385 read surface's projection, which has to hand the
+// picker two concrete instants; the gate never needs them because it compares
+// rather than emits. Both are PROJECTION-ONLY for the reason on
+// rideWindowOverlap.
 //
-// THE ALGEBRA, so the factoring can be checked rather than believed. The gate
-// originally asked `anchor > $2 - W AND anchor < $2 + W`; it now asks
-// `anchor - W < $2 AND anchor + W > $2`. Those are the same two inequalities
-// with W moved across, so the gate's behaviour is byte-identical — including
-// its STRICTNESS, which is the property the read surface most needs to inherit:
-// the endpoints are EXCLUSIVE, so a booking at exactly `start` or exactly `end`
-// is ALLOWED, and a picker that dims the endpoints would refuse a slot the
-// server would have taken.
-//
-// POSITIONAL CONTRACT: both bind $4 (the half-width in seconds).
-const rideWindowStartExpr = rideWindowAnchorExpr + ` - make_interval(secs => $4::float8)`
-const rideWindowEndExpr = rideWindowAnchorExpr + ` + make_interval(secs => $4::float8)`
+// POSITIONAL CONTRACT: both bind $4.
+const rideWindowStartExpr = rideWindowAnchorExpr + ` - ` + rideWindowHalfWidthExpr
+const rideWindowEndExpr = rideWindowAnchorExpr + ` + ` + rideWindowHalfWidthExpr
 
 // queryRideWindowConflict finds the conflicting ride NEAREST to the proposed
 // instant, if any. $1 vehicle_id, $2 the proposed instant, $3 the ride id to
@@ -151,14 +212,21 @@ const rideWindowEndExpr = rideWindowAnchorExpr + ` + make_interval(secs => $4::f
 // the rest would leak the shape of somebody else's calendar.
 //
 // The index that serves it is idx_go_ride_requests_vehicle_window (migration
-// 0026) for the reservation arm and uq_go_ride_requests_active_instant_vehicle
-// (0013) for the instant arm.
-const queryRideWindowConflict = `SELECT r.scheduled_for, r.status = 'requested'
+// 0026), and specifically it serves THREE conjuncts of the reservation arm:
+// `r.vehicle_id = $1` (equality, leading column) plus the two `r.scheduled_for`
+// range bounds (second column) — the plan carries all three as Index Cond,
+// which is why the bare-column spelling in rideWindowOverlap is load-bearing.
+// The arm's status/NOT NULL conjuncts are the index's own partial predicate, so
+// they are proved rather than probed. The ACTIVE-INSTANT arm is a second bitmap
+// branch over the `scheduled_for IS NULL` partial indexes from 0004/0013; its
+// NOW() bounds are not index conditions and do not need to be — that arm holds
+// at most one row per vehicle.
+var queryRideWindowConflict = `SELECT r.scheduled_for, r.status = 'requested'
 FROM go_ride_requests r
 WHERE r.vehicle_id = $1
   AND r.id <> $3
   AND (` + rideWindowConflictPredicate + `)
-ORDER BY ABS(EXTRACT(EPOCH FROM (COALESCE(r.scheduled_for, NOW()) - $2::timestamptz))) ASC, r.id ASC
+ORDER BY ABS(EXTRACT(EPOCH FROM (` + rideWindowAnchorExpr + ` - $2::timestamptz))) ASC, r.id ASC
 LIMIT 1`
 
 // rideVehicleLockNamespace is the advisory-lock class id for the MYR-383

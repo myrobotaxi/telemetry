@@ -19,6 +19,15 @@
 -- (the probe's equality conjunct) and the second is scheduled_for, which serves
 -- the remaining range conjuncts (scheduled_for strictly inside the window).
 --
+-- THE QUERY HAS TO MEET IT HALFWAY. The range conjuncts must be written against
+-- the BARE column — `scheduled_for > $2 - W AND scheduled_for < $2 + W`, with
+-- the half-width on the constant side. The algebraically identical spelling
+-- with W on the anchor (`scheduled_for +/- W` compared against the bound) makes
+-- the indexed column an EXPRESSION, which no plain btree index can match: the
+-- range drops from Index Cond to a heap Filter and this index stops earning its
+-- keep. See rideWindowOverlap in internal/store/ride_request_conflict_queries.go
+-- and the EXPLAIN assertions in ride_request_window_index_plan_test.go.
+--
 -- The ACTIVE-INSTANT arm needs NO index of its own: its predicate is character
 -- for character uq_go_ride_requests_active_instant_vehicle (migration 0013),
 -- which is already exactly that arm and already leads on vehicle_id — the same
