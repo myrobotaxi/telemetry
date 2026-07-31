@@ -24,9 +24,6 @@ type DriveDetailHandler struct {
 	vehicles VehicleSnapshotReader // owner check via GetByID(vehicleId)
 	drives   DriveDetailFetcher
 	roles    roleResolver // optional: nil disables role-based mask plumbing
-	// shares admits VIEWERS holding an accepted share of at least
-	// `live_history` (MYR-184). Nil keeps the endpoint owner-only.
-	shares VehicleShareReader
 
 	// Mask-audit fields (MYR-71, rest-api.md §5.3). All optional —
 	// nil auditEmitter disables emit.
@@ -48,16 +45,6 @@ type DriveDetailOption func(*DriveDetailHandler)
 func WithDriveDetailRoleResolver(roles roleResolver) DriveDetailOption {
 	return func(h *DriveDetailHandler) {
 		h.roles = roles
-	}
-}
-
-// WithDriveDetailShareReader lets the handler admit VIEWERS holding an accepted
-// vehicle share of at least `live_history` (MYR-184). Without it the
-// handler is owner-only, which is the pre-MYR-184 behaviour and the
-// fail-closed default.
-func WithDriveDetailShareReader(shares VehicleShareReader) DriveDetailOption {
-	return func(h *DriveDetailHandler) {
-		h.shares = shares
 	}
 }
 
@@ -146,8 +133,8 @@ func (h *DriveDetailHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // verifyOwnership resolves the caller's access to the drive's vehicle: the
-// owner, or a viewer holding an accepted share of at least `live_history`
-// (MYR-184). Returns
+// OWNER, and nobody else (MYR-369 — no share of any shape opens the drives
+// surfaces). Returns
 // true on success; on failure writes an HTTP error and returns false.
 // A drive that points at a missing vehicle is a data-integrity fault
 // (500), distinct from an ownership mismatch (403, vehicle_not_owned).
@@ -172,12 +159,22 @@ func (h *DriveDetailHandler) verifyOwnership(ctx context.Context, w http.Respons
 		return false
 	}
 
-	// MYR-184: a viewer needs `live_history` or better here. The drives
-	// surfaces are exactly the increment that tier buys — the tier below it
-	// (`live`) grants the live map and nothing historical — so a bare
-	// `live` viewer is refused 403 while the owner and the two higher
-	// tiers pass. The comparison is cumulative (AtLeast), never equality.
-	if _, err := vehicleAccessFor(ctx, h.shares, userID, vehicleID, row.UserID, auth.PermissionLiveHistory); err != nil {
+	// MYR-369: THE DRIVES SURFACES ARE OWNER-ONLY AGAIN, unconditionally.
+	//
+	// MYR-184 opened them to a viewer holding `live_history` or better. That
+	// tier is RETIRED and the capability is removed from the product, so the
+	// gate is back to what it was before sharing shipped: owner or nobody.
+	// This is a DELIBERATE NARROWING — a legacy grant created at
+	// `live_history` can no longer read drives, and there is no flag that
+	// re-opens them. Suspension is irrelevant here for the same reason: no
+	// grant of any shape passes.
+	//
+	// Expressed as capBase-against-the-owner rather than a bare
+	// `row.UserID != userID` comparison so the denial still flows through the
+	// one access helper — same 403, same log shape, same non-oracle message
+	// as every other refusal — and so re-opening the surface later is a
+	// one-argument change rather than a re-derivation.
+	if _, err := vehicleAccessForOwnerOnly(ctx, userID, row.UserID); err != nil {
 		if errors.Is(err, errNoVehicleAccess) {
 			denyVehicleAccess(w, h.logger, "drive detail", vehicleID, userID)
 			return false

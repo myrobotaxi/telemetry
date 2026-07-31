@@ -21,12 +21,17 @@ import (
 //
 // MYR-184 OPENED THIS ENDPOINT TO VIEWERS. It previously 403'd every
 // non-owner, on the grounds that viewer access needed a table the Go server
-// did not read. It now reads go_vehicle_shares: a caller holding an ACCEPTED
-// share of at least the `live` tier — which is every tier, since the tiers are
-// cumulative and `live` is the floor — gets a 200 under the VIEWER mask.
+// did not read. It now reads go_vehicle_shares: a caller holding a LIVE
+// ACCEPTED share gets a 200 under the VIEWER mask.
+//
+// The gate is capBase (MYR-369) — the base capability every live grant carries,
+// which is now the only floor there is: the cumulative tiers are gone, so the
+// question is simply whether an unsuspended grant exists. A SUSPENDED grant is
+// refused here exactly as a missing one is, and is in any case already absent
+// from the caller's access set.
 //
 // P1 LOCATION IS VISIBLE TO VIEWERS, deliberately. Live location is the entire
-// product being shared ("Live location" is the lowest tier's own name), so the
+// product being shared ("Live location" is the base capability's own name), so the
 // viewer mask strips only the full `vin` (MYR-279). What stays owner-only is
 // everything that MUTATES the car — commands, plate, service window, teardown,
 // refresh — and those endpoints are untouched by this change.
@@ -175,7 +180,7 @@ func (h *VehicleSnapshotHandler) loadSnapshot(
 		return VehicleSnapshotRow{}, vehicleAccess{}, false
 	}
 
-	access, err := vehicleAccessFor(ctx, h.shares, userID, vehicleID, row.UserID, auth.PermissionLive)
+	access, err := vehicleAccessFor(ctx, h.shares, userID, vehicleID, row.UserID, capBase)
 	if err != nil {
 		if errors.Is(err, errNoVehicleAccess) {
 			denyVehicleAccess(w, h.logger, "vehicle snapshot", vehicleID, userID)
