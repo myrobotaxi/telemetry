@@ -31,6 +31,9 @@ type Config struct {
 	// MYR-320 periodic in-service re-poll knobs.
 	serviceRepollEnabled  bool
 	serviceRepollInterval time.Duration
+	// MYR-394 ride-scoped position poll knobs.
+	ridePollEnabled  bool
+	ridePollInterval time.Duration
 }
 
 // MonitoringConfig holds observability probe settings.
@@ -310,6 +313,19 @@ func (c *Config) ServiceRepollEnabled() bool { return c.serviceRepollEnabled }
 // resulting Fleet API request rate. Defaults to 15m; SERVICE_REPOLL_INTERVAL
 // takes a Go duration ("30m").
 func (c *Config) ServiceRepollInterval() time.Duration { return c.serviceRepollInterval }
+
+// RidePollEnabled is the MYR-394 ride-position poll kill-switch. False stops
+// the poller entirely: a non-streaming car on an active ride reverts to showing
+// its last STREAMED fix, which is the stale marker MYR-394 exists to fix, but
+// nothing else changes and re-enabling picks every open ride back up via the
+// startup reconcile. Defaults to true.
+func (c *Config) RidePollEnabled() bool { return c.ridePollEnabled }
+
+// RidePollInterval is the MYR-394 poll cadence — the only lever on the
+// resulting Fleet API request rate (one vehicle_data GET per active ride per
+// interval). Defaults to 25s; RIDE_POSITION_POLL_INTERVAL takes a Go duration
+// ("30s") and is range-checked at startup (10s to 5m).
+func (c *Config) RidePollInterval() time.Duration { return c.ridePollInterval }
 
 // Load reads configuration from the JSON file at configPath, overlays
 // environment variable overrides, applies defaults for missing optional

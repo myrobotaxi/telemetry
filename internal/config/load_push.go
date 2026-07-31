@@ -28,6 +28,7 @@ func applySubsystemEnvOverrides(fc *fileConfig) error {
 	loaders := []func(*fileConfig) error{
 		applyDispatchEnvOverrides,
 		applyServiceRepollEnvOverrides,
+		applyRidePollEnvOverrides,
 		applyPushEnvOverrides,
 	}
 	for _, load := range loaders {

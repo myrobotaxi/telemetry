@@ -46,7 +46,7 @@ func applyServiceRepollEnvOverrides(fc *fileConfig) error {
 	// it is the only lever on the resulting Fleet API request rate (4 GETs per
 	// in-service car per pass), so it is worth being able to widen without a
 	// deploy.
-	interval, err := parseDurationEnv("SERVICE_REPOLL_INTERVAL", defaultServiceRepollInterval)
+	interval, err := parseDurationEnv("SERVICE_REPOLL_INTERVAL", "SERVICE_REPOLL_ENABLED", defaultServiceRepollInterval)
 	if err != nil {
 		return err
 	}
@@ -61,7 +61,12 @@ func applyServiceRepollEnvOverrides(fc *fileConfig) error {
 // cadence is rejected rather than clamped: it means the operator intended
 // something the loop cannot express, and silently substituting a default would
 // hide that.
-func parseDurationEnv(name string, def time.Duration) (time.Duration, error) {
+//
+// killSwitch names the boolean that actually disables the loop, so the error
+// tells the operator who typed `0` what they should have typed instead. It is a
+// parameter rather than a hard-coded string because every periodic loop in this
+// service has its own switch (MYR-394 added the second caller).
+func parseDurationEnv(name, killSwitch string, def time.Duration) (time.Duration, error) {
 	v, ok := os.LookupEnv(name)
 	if !ok {
 		return def, nil
@@ -72,8 +77,8 @@ func parseDurationEnv(name string, def time.Duration) (time.Duration, error) {
 	}
 	if parsed <= 0 {
 		return 0, fmt.Errorf(
-			"config.Load: %w: %s=%q must be positive (set SERVICE_REPOLL_ENABLED=false to disable)",
-			ErrInvalidValue, name, v)
+			"config.Load: %w: %s=%q must be positive (set %s=false to disable)",
+			ErrInvalidValue, name, v, killSwitch)
 	}
 	return parsed, nil
 }
