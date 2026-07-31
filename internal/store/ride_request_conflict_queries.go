@@ -61,18 +61,75 @@ package store
 // exactly $4 seconds apart are ALLOWED (see RideConflictWindow). A new
 // committed lifecycle state must be added to BOTH arms here in the same PR that
 // introduces it.
-const rideWindowConflictPredicate = `(
-			r.scheduled_for IS NOT NULL
-			AND (r.status IN ('accepted', 'arrived', 'enroute')
-			     OR (r.status = 'requested' AND $5))
-			AND r.scheduled_for > $2::timestamptz - make_interval(secs => $4::float8)
-			AND r.scheduled_for < $2::timestamptz + make_interval(secs => $4::float8)
-		) OR (
-			r.scheduled_for IS NULL
-			AND r.status IN ('accepted', 'arrived', 'enroute')
-			AND NOW() > $2::timestamptz - make_interval(secs => $4::float8)
-			AND NOW() < $2::timestamptz + make_interval(secs => $4::float8)
+//
+// MYR-385 FACTORED IT, DID NOT COPY IT. The picker read surface
+// (queryVehicleBookedWindows) has to answer the INVERSE question — "which
+// intervals would this predicate refuse?" — and a second spelling of the rule
+// would drift from this one within a release. So the rule is now assembled from
+// three fragments below, and the read surface is built from the SAME three:
+// occupancy (who counts), and the two window endpoints (how far). This
+// expression is unchanged in meaning — see rideWindowStartExpr for the algebra.
+const rideWindowConflictPredicate = rideWindowOccupiedPredicate + `
+			AND ` + rideWindowStartExpr + ` < $2::timestamptz
+			AND ` + rideWindowEndExpr + ` > $2::timestamptz`
+
+// rideWindowCommittedStatuses is the COMMITTED lifecycle set — the statuses in
+// which a car has actually been promised to somebody, as opposed to merely
+// asked for. Character for character activeInstantRidePredicate's set
+// (queries.go) and the reason is the same one that motivates every const in
+// this file: a lifecycle state added to one list and not the other is a rule
+// that disagrees with itself. Terminal rows (completed/declined/cancelled) are
+// absent from it, which is what makes a refusal a DEFERRAL — decline the holder
+// and the window frees immediately.
+const rideWindowCommittedStatuses = `('accepted', 'arrived', 'enroute')`
+
+// rideWindowOccupiedPredicate is "ride r OCCUPIES a window at all" — the
+// membership half of the rule, with the geometry factored out. Two arms,
+// because a ride's instant has two spellings (see the narrative above):
+// a reservation counts on its `scheduled_for`, always when committed and
+// additionally when merely `requested` if $5 says pending claims count; an
+// instant ride counts only when COMMITTED, because a `requested` instant ride
+// has not been promised to anybody yet and cannot promise the car away.
+//
+// POSITIONAL CONTRACT: this fragment binds $5 (count-pending). Every statement
+// that embeds it MUST put count-pending at $5 — queryRideWindowConflict and
+// queryVehicleBookedWindows both do. A mismatch is a type error at the first
+// execution rather than a wrong answer, but keep the positions aligned anyway.
+const rideWindowOccupiedPredicate = `(
+			(r.scheduled_for IS NOT NULL
+			 AND (r.status IN ` + rideWindowCommittedStatuses + `
+			      OR (r.status = 'requested' AND $5)))
+			OR (r.scheduled_for IS NULL
+			    AND r.status IN ` + rideWindowCommittedStatuses + `)
 		)`
+
+// rideWindowAnchorExpr is the INSTANT a ride occupies its window around:
+// `scheduled_for` for a reservation, NOW() for an instant ride, which has no
+// scheduled instant because it is happening now.
+//
+// The COALESCE is what let the two arms' geometry collapse into one expression.
+// It is exact, not an approximation: rideWindowOccupiedPredicate has already
+// split the arms on `scheduled_for IS NULL`, so within either arm the COALESCE
+// resolves to precisely the column that arm's original spelling used.
+const rideWindowAnchorExpr = `COALESCE(r.scheduled_for, NOW())`
+
+// rideWindowStartExpr / rideWindowEndExpr are the OPEN interval ride r occupies
+// — the anchor plus or minus the half-width bound at $4. They are the ONE
+// definition of the window's geometry, and the reason both the gate and the
+// MYR-385 read surface can be trusted to describe the same intervals.
+//
+// THE ALGEBRA, so the factoring can be checked rather than believed. The gate
+// originally asked `anchor > $2 - W AND anchor < $2 + W`; it now asks
+// `anchor - W < $2 AND anchor + W > $2`. Those are the same two inequalities
+// with W moved across, so the gate's behaviour is byte-identical — including
+// its STRICTNESS, which is the property the read surface most needs to inherit:
+// the endpoints are EXCLUSIVE, so a booking at exactly `start` or exactly `end`
+// is ALLOWED, and a picker that dims the endpoints would refuse a slot the
+// server would have taken.
+//
+// POSITIONAL CONTRACT: both bind $4 (the half-width in seconds).
+const rideWindowStartExpr = rideWindowAnchorExpr + ` - make_interval(secs => $4::float8)`
+const rideWindowEndExpr = rideWindowAnchorExpr + ` + make_interval(secs => $4::float8)`
 
 // queryRideWindowConflict finds the conflicting ride NEAREST to the proposed
 // instant, if any. $1 vehicle_id, $2 the proposed instant, $3 the ride id to
