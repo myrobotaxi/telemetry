@@ -26,7 +26,7 @@ import (
 //     teardown is authoritative and a stale config self-expires while our
 //     receiver rejects the stream regardless). Skipped for an empty VIN or when
 //     no config-deleter is wired (tests/CI, or no proxy configured).
-//  3a. ON A LAST-VEHICLE REMOVAL ONLY: best-effort POST to Tesla's OAuth
+//     3a. ON A LAST-VEHICLE REMOVAL ONLY: best-effort POST to Tesla's OAuth
 //     revocation endpoint, killing the grant itself (MYR-366). It runs HERE,
 //     before step 4, because step 4 deletes the refresh token the call needs.
 //     A mid-fleet removal skips it — the owner's other cars still stream, and

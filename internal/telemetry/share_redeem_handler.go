@@ -239,7 +239,7 @@ func buildSharedSummaries(rows []SharedVehicleRow) []map[string]any {
 	out := make([]map[string]any, 0, len(rows))
 	for i := range rows {
 		row := &rows[i]
-		out = append(out, viewerSummaryMap(row.VehicleCatalogRow, auth.SharePermission(row.Permission)))
+		out = append(out, viewerSummaryMap(row.VehicleCatalogRow, auth.ShareGrant{AllowRides: row.AllowRides}))
 	}
 	return out
 }

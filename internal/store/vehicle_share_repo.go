@@ -68,12 +68,22 @@ func (r *VehicleShareRepo) CreateInvite(ctx context.Context, in CreateShareInvit
 		return VehicleShare{}, fmt.Errorf("store.CreateInvite(owner=%s): %w", in.OwnerUserID, err)
 	}
 
+	// NORMALIZE AT THE WRITE BOUNDARY (MYR-369). An un-updated client may
+	// still submit the retired live_history preset, which validation above
+	// deliberately accepts; it is collapsed to 'live' HERE, once, so the
+	// value never enters the database again and no read path has to remember
+	// to translate it. The row the caller gets back carries the normalized
+	// value, so a client that assumed its input round-trips learns otherwise
+	// from the response rather than from a later surprise.
+	permission := NormalizeSharePermission(in.Permission)
+	allowRides := grantAllowsRides(permission)
+
 	var pathRow VehicleShare
 	for _, vehicleID := range in.VehicleIDs {
 		id := newProvisionID()
 		var createdAt, expiresAt time.Time
 		if err := tx.QueryRow(ctx, queryInsertShare,
-			id, vehicleID, in.OwnerUserID, in.Label, in.Permission, code,
+			id, vehicleID, in.OwnerUserID, in.Label, permission, code, allowRides,
 		).Scan(&createdAt, &expiresAt); err != nil {
 			return VehicleShare{}, fmt.Errorf("store.CreateInvite(owner=%s, vehicle=%s): insert: %w",
 				in.OwnerUserID, vehicleID, err)
@@ -81,7 +91,7 @@ func (r *VehicleShareRepo) CreateInvite(ctx context.Context, in CreateShareInvit
 		if vehicleID == in.PathVehicleID {
 			pathRow = VehicleShare{
 				ID: id, VehicleID: vehicleID, OwnerUserID: in.OwnerUserID,
-				Label: in.Label, Permission: in.Permission, Code: code,
+				Label: in.Label, Permission: permission, AllowRides: allowRides, Code: code,
 				Status: ShareStatusPending, CreatedAt: createdAt, ExpiresAt: expiresAt,
 			}
 		}
@@ -240,6 +250,7 @@ func scanShare(row rowScanner) (VehicleShare, error) {
 	var s VehicleShare
 	err := row.Scan(
 		&s.ID, &s.VehicleID, &s.OwnerUserID, &s.Label, &s.Permission,
+		&s.AllowRides, &s.SuspendedAt,
 		&s.Code, &s.Status, &s.CreatedAt, &s.ExpiresAt, &s.AcceptedAt,
 		&s.AcceptedByUserID, &s.RevokedAt,
 	)

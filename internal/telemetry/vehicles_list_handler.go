@@ -166,7 +166,7 @@ func (h *VehiclesListHandler) buildResponse(rows []VehicleCatalogRow, role auth.
 	items := make([]map[string]any, 0, len(rows))
 	maskSpec := mask.For(mask.ResourceVehicleSummary, role)
 	for i := range rows {
-		summary := newVehicleSummary(&rows[i], role, "")
+		summary := newVehicleSummary(&rows[i], role, auth.ShareGrant{})
 		// `fieldsMasked` is intentionally discarded in v1: §7.0 reads
 		// are not audited per `data-lifecycle.md` §4.2, and the v1
 		// path only ever projects RoleOwner (which is the identity for
@@ -183,12 +183,12 @@ func (h *VehiclesListHandler) buildResponse(rows []VehicleCatalogRow, role auth.
 }
 
 // newVehicleSummary builds the per-row wire shape for a catalog row under a
-// given role. tier is the caller's share permission and is stamped ONLY on
-// viewer rows — pass the empty string for an owner.
+// given role. grant is the caller's share capability set and is read ONLY on
+// viewer rows — pass the zero ShareGrant for an owner, who holds no grant.
 //
 // Shared by the owner list, the viewer merge (vehicles_list_viewer.go), and the
 // redeem response, so all three emit byte-identical rows for the same vehicle.
-func newVehicleSummary(v *VehicleCatalogRow, role auth.Role, tier auth.SharePermission) vehicleSummary {
+func newVehicleSummary(v *VehicleCatalogRow, role auth.Role, grant auth.ShareGrant) vehicleSummary {
 	summary := vehicleSummary{
 		VehicleID:      v.ID,
 		Name:           v.Name,
@@ -213,7 +213,12 @@ func newVehicleSummary(v *VehicleCatalogRow, role auth.Role, tier auth.SharePerm
 		RideShareEnabled: v.RideShareEnabled,
 	}
 	if role == auth.RoleViewer {
-		summary.SharePermission = string(tier)
+		// DERIVED, not stored (MYR-369): the grant's flags decide the
+		// compatibility value a pre-MYR-369 client reads. A suspended grant
+		// never reaches here — the viewer's catalog query excludes it, so
+		// the vehicle is absent from the response entirely rather than
+		// present with some reduced value.
+		summary.SharePermission = grant.Permission().String()
 	}
 	return summary
 }

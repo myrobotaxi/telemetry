@@ -21,13 +21,14 @@ func TestVehicleRepo_ListSharedSummaries(t *testing.T) {
 	shares := newShareRepo(t)
 	vehicles := store.NewVehicleRepo(testPool, store.NoopMetrics{})
 
-	// Owner A shares only vehA1 with viewer 1, at live_history.
-	invite := mustCreateInvite(t, shares, shareOwnerA, vehA1, []string{vehA1}, store.SharePermissionLiveHistory)
+	// Owner A shares only vehA1 with viewer 1, at the rides preset — so the
+	// projected capability is a TRUE that a missing column could not fake.
+	invite := mustCreateInvite(t, shares, shareOwnerA, vehA1, []string{vehA1}, store.SharePermissionRides)
 	if _, err := shares.RedeemCode(ctx, invite.Code, shareViewer1); err != nil {
 		t.Fatalf("redeem: %v", err)
 	}
 
-	t.Run("returns only granted vehicles, carrying their tier", func(t *testing.T) {
+	t.Run("returns only granted vehicles, carrying their capability", func(t *testing.T) {
 		rows, err := vehicles.ListSharedSummariesByUser(ctx, shareViewer1)
 		if err != nil {
 			t.Fatalf("ListSharedSummariesByUser: %v", err)
@@ -38,8 +39,8 @@ func TestVehicleRepo_ListSharedSummaries(t *testing.T) {
 		if rows[0].ID != vehA1 {
 			t.Errorf("row is %s, want %s", rows[0].ID, vehA1)
 		}
-		if rows[0].Permission != store.SharePermissionLiveHistory {
-			t.Errorf("permission = %q, want live_history", rows[0].Permission)
+		if !rows[0].AllowRides {
+			t.Error("allowRides = false, want true — the rides preset must project onto the flag")
 		}
 		if rows[0].Name == "" || rows[0].VIN == "" {
 			t.Error("the shared projection dropped catalog columns the owner projection carries")

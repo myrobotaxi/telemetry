@@ -24,7 +24,11 @@ func setupDriveReadEndpoints(deps httpRouteDeps, snapshotAdapter telemetry.Vehic
 		&driveRouteAdapter{repo: deps.driveRepo},
 		deps.logger.With(slog.String("component", "drive-route")),
 		telemetry.WithDriveRouteRoleResolver(deps.authenticator),
-		telemetry.WithDriveRouteShareReader(&shareReaderAdapter{repo: deps.shareRepo}),
+		// MYR-369: NO share reader. The drives surfaces are owner-only
+		// again — the `live_history` capability was removed from the
+		// product — and the handler no longer has a seam to pass one
+		// through, so re-opening them is a deliberate change rather than
+		// one wiring line.
 		telemetry.WithDriveRouteMaskAudit(deps.auditEmitter, deps.auditMetrics, "/api/drives/{driveId}/route"),
 	)
 	deps.srv.HandleFunc("GET /api/drives/{driveId}/route", driveRouteHandler.ServeHTTP)
@@ -41,7 +45,11 @@ func setupDriveReadEndpoints(deps httpRouteDeps, snapshotAdapter telemetry.Vehic
 		&driveDetailAdapter{repo: deps.driveRepo},
 		deps.logger.With(slog.String("component", "drive-detail")),
 		telemetry.WithDriveDetailRoleResolver(deps.authenticator),
-		telemetry.WithDriveDetailShareReader(&shareReaderAdapter{repo: deps.shareRepo}),
+		// MYR-369: NO share reader. The drives surfaces are owner-only
+		// again — the `live_history` capability was removed from the
+		// product — and the handler no longer has a seam to pass one
+		// through, so re-opening them is a deliberate change rather than
+		// one wiring line.
 		telemetry.WithDriveDetailMaskAudit(deps.auditEmitter, deps.auditMetrics, "/api/drives/{driveId}"),
 	)
 	deps.srv.HandleFunc("GET /api/drives/{driveId}", driveDetailHandler.ServeHTTP)

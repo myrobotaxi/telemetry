@@ -3,11 +3,14 @@
 package contract_test
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
 // Contract conformance for the MYR-184 vehicle-sharing schema surface
-// (contracts v0.19.0, docs/contracts/schemas/vehicle-sharing.schema.json).
+// (contracts v0.23.0, docs/contracts/schemas/vehicle-sharing.schema.json).
 //
 // The file is picked up by the schemas/*.json glob every other test in this
 // package relies on, which means a broken $ref inside it would silently poison
@@ -28,6 +31,7 @@ func TestVehicleSharingSchema_Compiles(t *testing.T) {
 		"SharePermission",
 		"ShareInvite",
 		"CreateShareInviteRequest",
+		"PatchShareInviteRequest",
 		"RedeemShareInviteRequest",
 		"RedeemShareInviteResponse",
 	} {
@@ -231,4 +235,163 @@ func TestShareInviteSchema_ShareURL(t *testing.T) {
 			t.Errorf("format = %v, want uri", got)
 		}
 	})
+}
+
+// TestShareInviteSchema_GrantFlags covers the MYR-369 per-grant flags. What
+// matters here is that they are genuinely ADDITIVE (0.22.0 → 0.23.0 is a minor
+// bump): every 0.22.0-era payload must still validate, and neither flag may
+// have been made required.
+func TestShareInviteSchema_GrantFlags(t *testing.T) {
+	root := repoRoot(t)
+	c := newCompiler(t, root)
+	schema := compileSchema(t, c, sharingSchemaID+"#/$defs/ShareInvite")
+
+	accepted := map[string]any{
+		"inviteId":   "csh0123456789abcdef0123456789abcd",
+		"vehicleId":  "clxyz1234567890abcdef",
+		"label":      "Mira Chen",
+		"permission": "rides",
+		"status":     "accepted",
+		"createdAt":  "2026-07-29T15:04:05Z",
+		"acceptedAt": "2026-07-30T09:12:44Z",
+	}
+	with := func(extra map[string]any) map[string]any {
+		row := map[string]any{}
+		for k, v := range accepted {
+			row[k] = v
+		}
+		for k, v := range extra {
+			row[k] = v
+		}
+		return row
+	}
+
+	t.Run("an accepted row carrying both flags validates", func(t *testing.T) {
+		row := with(map[string]any{"allowRides": true, "suspended": false})
+		if err := schema.Validate(row); err != nil {
+			t.Fatalf("a MYR-369 accepted grant was rejected: %v", err)
+		}
+	})
+
+	t.Run("a suspended grant validates — the OWNER still sees it", func(t *testing.T) {
+		// Only the VIEWER-facing surfaces make a suspended grant disappear;
+		// the owner has to be able to see one to lift it.
+		row := with(map[string]any{"allowRides": true, "suspended": true})
+		if err := schema.Validate(row); err != nil {
+			t.Fatalf("a suspended grant was rejected: %v", err)
+		}
+	})
+
+	t.Run("a 0.22.0-era accepted row without the flags still validates", func(t *testing.T) {
+		// The additive guarantee. Absence means "the server predates
+		// MYR-369", which a consumer reads as not-suspended.
+		if err := schema.Validate(accepted); err != nil {
+			t.Fatalf("a pre-MYR-369 accepted row was rejected — a flag was made required: %v", err)
+		}
+	})
+
+	t.Run("the flags are not in the required list", func(t *testing.T) {
+		// Asserted against the raw schema as well as by the payload above,
+		// because "still validates without it" and "is not required" fail
+		// in the same direction only by luck.
+		for _, field := range shareInviteRequiredFields(t) {
+			if field == "allowRides" || field == "suspended" {
+				t.Errorf("%q is required; that would make 0.23.0 a BREAKING change", field)
+			}
+		}
+	})
+
+	t.Run("a non-boolean flag is rejected", func(t *testing.T) {
+		for _, bad := range []any{"true", 1, nil} {
+			row := with(map[string]any{"allowRides": bad})
+			if err := schema.Validate(row); err == nil {
+				t.Errorf("allowRides = %v (%T) was accepted; the field is a boolean", bad, bad)
+			}
+		}
+	})
+}
+
+// TestPatchShareInviteRequestSchema pins the partial-edit body: both fields
+// optional, at least one required, and nothing else accepted.
+func TestPatchShareInviteRequestSchema(t *testing.T) {
+	root := repoRoot(t)
+	c := newCompiler(t, root)
+	schema := compileSchema(t, c, sharingSchemaID+"#/$defs/PatchShareInviteRequest")
+
+	t.Run("each field alone is a valid patch", func(t *testing.T) {
+		for _, body := range []map[string]any{
+			{"allowRides": true},
+			{"allowRides": false},
+			{"suspended": true},
+			{"suspended": false},
+			{"allowRides": false, "suspended": true},
+		} {
+			if err := schema.Validate(body); err != nil {
+				t.Errorf("valid patch %v rejected: %v", body, err)
+			}
+		}
+	})
+
+	t.Run("an EMPTY body is rejected", func(t *testing.T) {
+		// minProperties: 1. A request that asks for nothing must not be
+		// able to look like an applied edit — on an access-control surface
+		// that is the worst available failure mode.
+		if err := schema.Validate(map[string]any{}); err == nil {
+			t.Fatal("an empty patch body was accepted")
+		}
+	})
+
+	t.Run("unknown properties are rejected", func(t *testing.T) {
+		// additionalProperties: false. `permission` in particular is NOT
+		// patchable — on an accepted row it is derived output, not state.
+		for _, key := range []string{"permission", "label", "status", "revoked"} {
+			if err := schema.Validate(map[string]any{key: "x"}); err == nil {
+				t.Errorf("property %q was accepted on a patch body", key)
+			}
+		}
+	})
+}
+
+// TestSharePermissionEnum_RetainsRetiredMember pins that live_history is still
+// DECODABLE. Removing it would break every installed client whose decoder lists
+// it and would make 0.23.0 a major bump; the member stays on the wire and is
+// simply never emitted.
+func TestSharePermissionEnum_RetainsRetiredMember(t *testing.T) {
+	root := repoRoot(t)
+	c := newCompiler(t, root)
+	schema := compileSchema(t, c, sharingSchemaID+"#/$defs/SharePermission")
+
+	for _, member := range []string{"live", "live_history", "rides"} {
+		if err := schema.Validate(member); err != nil {
+			t.Errorf("SharePermission %q was rejected: %v", member, err)
+		}
+	}
+	if err := schema.Validate("history"); err == nil {
+		t.Error("an invented member was accepted")
+	}
+}
+
+// shareInviteRequiredFields reads ShareInvite's `required` list straight out of
+// the schema file, so an additive-guarantee assertion cannot pass merely because
+// a fixture happened to omit the field.
+func shareInviteRequiredFields(t *testing.T) []string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), schemasDir, "vehicle-sharing.schema.json"))
+	if err != nil {
+		t.Fatalf("read vehicle-sharing.schema.json: %v", err)
+	}
+	var doc struct {
+		Defs struct {
+			ShareInvite struct {
+				Required []string `json:"required"`
+			} `json:"ShareInvite"`
+		} `json:"$defs"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("unmarshal vehicle-sharing.schema.json: %v", err)
+	}
+	if len(doc.Defs.ShareInvite.Required) == 0 {
+		t.Fatal("read zero required fields from ShareInvite — the walk is broken")
+	}
+	return doc.Defs.ShareInvite.Required
 }

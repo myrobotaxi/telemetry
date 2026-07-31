@@ -3,6 +3,11 @@ package telemetry
 import "github.com/myrobotaxi/telemetry/internal/mask"
 
 // Optional-dependency constructors for the GET /api/vehicles/{vehicleId}/drives handler.
+//
+// NOTE (MYR-369): there is deliberately NO share-reader option here any more.
+// The drives surfaces are owner-only again, so the handler has no seam a share
+// could be passed through — re-opening them has to be a real change, not one
+// wiring line.
 // Split out of the handler file so it stays inside the 300-line cap; each
 // option is inert unless the composition root passes it, and the handler
 // fails CLOSED without it.
@@ -17,16 +22,6 @@ type VehicleDrivesOption func(*VehicleDrivesHandler)
 func WithDrivesRoleResolver(roles roleResolver) VehicleDrivesOption {
 	return func(h *VehicleDrivesHandler) {
 		h.roles = roles
-	}
-}
-
-// WithDrivesShareReader lets the handler admit VIEWERS holding an accepted
-// vehicle share of at least `live_history` (MYR-184). Without it the
-// handler is owner-only, which is the pre-MYR-184 behaviour and the
-// fail-closed default.
-func WithDrivesShareReader(shares VehicleShareReader) VehicleDrivesOption {
-	return func(h *VehicleDrivesHandler) {
-		h.shares = shares
 	}
 }
 

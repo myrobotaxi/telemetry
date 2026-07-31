@@ -30,35 +30,44 @@ const (
 	shareOtherUser  = "user-unrelated"
 )
 
-// stubShareReader resolves tiers from a fixed map keyed "userID|vehicleID".
+// stubShareReader resolves GRANTS from a fixed map keyed "userID|vehicleID".
 // A missing key is "no grant", surfaced as sdk.ErrNotFound exactly as the
-// DB-backed reader does.
+// DB-backed reader does — which is also what it does for a SUSPENDED grant,
+// since the statement excludes those. A stub that CAN return a suspended grant
+// is therefore modelling a future implementation, and the second gate in
+// vehicleAccessFor is what must catch it.
 type stubShareReader struct {
-	tiers map[string]auth.SharePermission
-	err   error
-	calls int
+	grants map[string]auth.ShareGrant
+	err    error
+	calls  int
 }
 
-func (s *stubShareReader) SharePermissionFor(_ context.Context, userID, vehicleID string) (auth.SharePermission, error) {
+func (s *stubShareReader) ShareGrantFor(_ context.Context, userID, vehicleID string) (auth.ShareGrant, error) {
 	s.calls++
 	if s.err != nil {
-		return auth.SharePermission(""), s.err
+		return auth.ShareGrant{}, s.err
 	}
-	if tier, ok := s.tiers[userID+"|"+vehicleID]; ok {
-		return tier, nil
+	if g, ok := s.grants[userID+"|"+vehicleID]; ok {
+		return g, nil
 	}
-	return auth.SharePermission(""), fmt.Errorf("stub: %w", sdk.ErrNotFound)
+	return auth.ShareGrant{}, fmt.Errorf("stub: %w", sdk.ErrNotFound)
 }
 
-// grantingReader builds a reader that grants one tier to shareViewerUser on the
-// fixture vehicle and nothing to anybody else.
-func grantingReader(tier auth.SharePermission) *stubShareReader {
+// grantingReader builds a reader that grants one capability set to
+// shareViewerUser on the fixture vehicle and nothing to anybody else.
+func grantingReader(grant auth.ShareGrant) *stubShareReader {
 	return &stubShareReader{
-		tiers: map[string]auth.SharePermission{
-			shareViewerUser + "|" + fixtureSnapshotRowID: tier,
+		grants: map[string]auth.ShareGrant{
+			shareViewerUser + "|" + fixtureSnapshotRowID: grant,
 		},
 	}
 }
+
+// baseGrant / rideGrant name the two capability sets the product now has.
+var (
+	baseGrant = auth.ShareGrant{}
+	rideGrant = auth.ShareGrant{AllowRides: true}
+)
 
 // TestVehicleAccessFor is the unit-level truth table behind every gate below.
 func TestVehicleAccessFor(t *testing.T) {
@@ -69,64 +78,84 @@ func TestVehicleAccessFor(t *testing.T) {
 		caller     string
 		owner      string
 		reader     VehicleShareReader
-		minTier    auth.SharePermission
+		need       shareCapability
 		wantRole   auth.Role
-		wantTier   auth.SharePermission
+		wantGrant  auth.ShareGrant
 		wantDenied bool
 		wantErr    bool
 	}{
 		{
-			name: "owner passes every tier gate without a share lookup",
+			name: "owner passes every gate without a share lookup",
 			// The nil reader is the assertion: an owner must never need one.
 			caller: shareOwnerUser, owner: shareOwnerUser, reader: nil,
-			minTier: auth.PermissionRides, wantRole: auth.RoleOwner,
+			need: capRides, wantRole: auth.RoleOwner,
 		},
 		{
-			name:   "live viewer passes a live gate",
-			caller: shareViewerUser, owner: shareOwnerUser, reader: grantingReader(auth.PermissionLive),
-			minTier: auth.PermissionLive, wantRole: auth.RoleViewer, wantTier: auth.PermissionLive,
+			name:   "base grant passes a base gate",
+			caller: shareViewerUser, owner: shareOwnerUser, reader: grantingReader(baseGrant),
+			need: capBase, wantRole: auth.RoleViewer, wantGrant: baseGrant,
 		},
 		{
-			name:   "live viewer is refused a live_history gate",
-			caller: shareViewerUser, owner: shareOwnerUser, reader: grantingReader(auth.PermissionLive),
-			minTier: auth.PermissionLiveHistory, wantDenied: true,
+			name:   "base grant is refused a rides gate",
+			caller: shareViewerUser, owner: shareOwnerUser, reader: grantingReader(baseGrant),
+			need: capRides, wantDenied: true,
 		},
 		{
-			name:   "live_history viewer passes a live gate (cumulative)",
-			caller: shareViewerUser, owner: shareOwnerUser, reader: grantingReader(auth.PermissionLiveHistory),
-			minTier: auth.PermissionLive, wantRole: auth.RoleViewer, wantTier: auth.PermissionLiveHistory,
+			name:   "ride grant passes a base gate",
+			caller: shareViewerUser, owner: shareOwnerUser, reader: grantingReader(rideGrant),
+			need: capBase, wantRole: auth.RoleViewer, wantGrant: rideGrant,
 		},
 		{
-			name:   "live_history viewer is refused a rides gate",
-			caller: shareViewerUser, owner: shareOwnerUser, reader: grantingReader(auth.PermissionLiveHistory),
-			minTier: auth.PermissionRides, wantDenied: true,
+			name:   "ride grant passes a rides gate",
+			caller: shareViewerUser, owner: shareOwnerUser, reader: grantingReader(rideGrant),
+			need: capRides, wantRole: auth.RoleViewer, wantGrant: rideGrant,
 		},
 		{
-			name:   "rides viewer passes every gate",
-			caller: shareViewerUser, owner: shareOwnerUser, reader: grantingReader(auth.PermissionRides),
-			minTier: auth.PermissionRides, wantRole: auth.RoleViewer, wantTier: auth.PermissionRides,
+			// MYR-369 SUSPENSION INVARIANT at the gate. The DB statement
+			// already excludes suspended rows, so a reader that returns
+			// one models a stub or an edited WHERE clause — and it must
+			// still be denied, at EVERY gate including the floor.
+			name:   "a suspended grant is denied even at the base gate",
+			caller: shareViewerUser, owner: shareOwnerUser,
+			reader: grantingReader(auth.ShareGrant{Suspended: true}),
+			need:   capBase, wantDenied: true,
 		},
 		{
-			name:   "an unrelated caller is denied even at the floor tier",
-			caller: shareOtherUser, owner: shareOwnerUser, reader: grantingReader(auth.PermissionRides),
-			minTier: auth.PermissionLive, wantDenied: true,
+			// The ride flag does not survive suspension — the whole point
+			// of routing through GrantsRides rather than the bare field.
+			name:   "a suspended RIDE grant is denied a rides gate",
+			caller: shareViewerUser, owner: shareOwnerUser,
+			reader: grantingReader(auth.ShareGrant{AllowRides: true, Suspended: true}),
+			need:   capRides, wantDenied: true,
+		},
+		{
+			name:   "an unrelated caller is denied even at the base gate",
+			caller: shareOtherUser, owner: shareOwnerUser, reader: grantingReader(rideGrant),
+			need: capBase, wantDenied: true,
 		},
 		{
 			name:   "a nil share reader denies every non-owner",
 			caller: shareViewerUser, owner: shareOwnerUser, reader: nil,
-			minTier: auth.PermissionLive, wantDenied: true,
+			need: capBase, wantDenied: true,
 		},
 		{
 			name:   "a lookup outage is an error, not a denial",
 			caller: shareViewerUser, owner: shareOwnerUser,
-			reader:  &stubShareReader{err: errors.New("connection refused")},
-			minTier: auth.PermissionLive, wantErr: true,
+			reader: &stubShareReader{err: errors.New("connection refused")},
+			need:   capBase, wantErr: true,
+		},
+		{
+			// An unrecognized requirement satisfies nothing: a gate that
+			// cannot be evaluated must not open.
+			name:   "an unknown capability requirement denies",
+			caller: shareViewerUser, owner: shareOwnerUser, reader: grantingReader(rideGrant),
+			need: shareCapability(99), wantDenied: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			access, err := vehicleAccessFor(context.Background(), tt.reader, tt.caller, vehicleID, tt.owner, tt.minTier)
+			access, err := vehicleAccessFor(context.Background(), tt.reader, tt.caller, vehicleID, tt.owner, tt.need)
 
 			switch {
 			case tt.wantDenied:
@@ -149,10 +178,31 @@ func TestVehicleAccessFor(t *testing.T) {
 			if access.Role != tt.wantRole {
 				t.Errorf("role = %q, want %q", access.Role, tt.wantRole)
 			}
-			if access.Tier != tt.wantTier {
-				t.Errorf("tier = %q, want %q", access.Tier, tt.wantTier)
+			if access.Grant != tt.wantGrant {
+				t.Errorf("grant = %+v, want %+v", access.Grant, tt.wantGrant)
 			}
 		})
+	}
+}
+
+// TestVehicleAccessForOwnerOnly pins the drives gate (MYR-369): no grant of any
+// shape opens an owner-only surface, and the helper takes no reader at all so
+// there is nothing for a future edit to widen.
+func TestVehicleAccessForOwnerOnly(t *testing.T) {
+	ctx := context.Background()
+
+	access, err := vehicleAccessForOwnerOnly(ctx, shareOwnerUser, shareOwnerUser)
+	if err != nil {
+		t.Fatalf("the owner was refused their own vehicle: %v", err)
+	}
+	if access.Role != auth.RoleOwner {
+		t.Errorf("role = %q, want owner", access.Role)
+	}
+
+	for _, caller := range []string{shareViewerUser, shareOtherUser, ""} {
+		if _, err := vehicleAccessForOwnerOnly(ctx, caller, shareOwnerUser); !errors.Is(err, errNoVehicleAccess) {
+			t.Errorf("non-owner %q: err = %v, want errNoVehicleAccess", caller, err)
+		}
 	}
 }
 
@@ -163,50 +213,63 @@ type tieredCase struct {
 	endpoint string
 	// serve builds and runs the endpoint for one caller + reader.
 	serve func(t *testing.T, caller string, reader VehicleShareReader) int
-	// wantByTier is the status each tier must receive. "none" is a caller
-	// with no grant at all.
-	wantByTier map[string]int
+	// wantByGrant is the status each grant shape must receive. "none" is a
+	// caller with no grant at all.
+	wantByGrant map[string]int
 }
 
-// TestEndpointTierMatrix asserts the per-endpoint tier gates end to end.
+// TestEndpointGrantMatrix asserts the per-endpoint capability gates end to end.
 //
 // The `none` column is the regression guard that matters most: before MYR-184
 // every one of these endpoints answered 403 to every non-owner, and the change
 // that opened them must not have opened them to somebody with no grant.
-func TestEndpointTierMatrix(t *testing.T) {
+//
+// The `suspended` columns are the MYR-369 guard: a suspended grant must be
+// refused by EVERY endpoint, whatever capability it carries. In production it
+// never reaches these gates at all (it is absent from the access set and the
+// grant statement returns no row), so these rows exercise the second,
+// independent gate — the one that still holds if a WHERE clause is edited.
+func TestEndpointGrantMatrix(t *testing.T) {
 	ok, forbidden := http.StatusOK, http.StatusForbidden
 
 	cases := []tieredCase{
 		{
 			endpoint: "GET /api/vehicles/{vehicleId}/snapshot",
 			serve:    serveSnapshotFor,
-			// The snapshot IS the live-location surface, so the floor tier
+			// The snapshot IS the live-location surface, so the base grant
 			// opens it. P1 location visible to a viewer is the product.
-			wantByTier: map[string]int{
-				"none": forbidden, "live": ok, "live_history": ok, "rides": ok,
+			wantByGrant: map[string]int{
+				"none": forbidden, "base": ok, "rides": ok,
+				"suspended-base": forbidden, "suspended-rides": forbidden,
 			},
 		},
 		{
 			endpoint: "GET /api/vehicles/{vehicleId}/drives",
 			serve:    serveDrivesFor,
-			wantByTier: map[string]int{
-				"none": forbidden, "live": forbidden, "live_history": ok, "rides": ok,
+			// MYR-369: OWNER-ONLY AGAIN. No grant opens this, including a
+			// legacy live_history one — the capability was removed from
+			// the product, not merely renamed.
+			wantByGrant: map[string]int{
+				"none": forbidden, "base": forbidden, "rides": forbidden,
+				"suspended-base": forbidden, "suspended-rides": forbidden,
 			},
 		},
 		{
 			endpoint: "POST /api/ride-requests",
 			serve:    serveRideCreateFor,
-			wantByTier: map[string]int{
-				"none": forbidden, "live": forbidden, "live_history": forbidden, "rides": http.StatusCreated,
+			wantByGrant: map[string]int{
+				"none": forbidden, "base": forbidden, "rides": http.StatusCreated,
+				"suspended-base": forbidden, "suspended-rides": forbidden,
 			},
 		},
 	}
 
-	tiers := map[string]VehicleShareReader{
-		"none":         &stubShareReader{},
-		"live":         grantingReader(auth.PermissionLive),
-		"live_history": grantingReader(auth.PermissionLiveHistory),
-		"rides":        grantingReader(auth.PermissionRides),
+	readers := map[string]VehicleShareReader{
+		"none":            &stubShareReader{},
+		"base":            grantingReader(baseGrant),
+		"rides":           grantingReader(rideGrant),
+		"suspended-base":  grantingReader(auth.ShareGrant{Suspended: true}),
+		"suspended-rides": grantingReader(auth.ShareGrant{AllowRides: true, Suspended: true}),
 	}
 
 	for _, tc := range cases {
@@ -218,12 +281,12 @@ func TestEndpointTierMatrix(t *testing.T) {
 					t.Fatalf("the OWNER was refused %s (403) — the gate is inverted", tc.endpoint)
 				}
 			})
-			for tier, reader := range tiers {
-				want := tc.wantByTier[tier]
-				t.Run("viewer/"+tier, func(t *testing.T) {
+			for shape, reader := range readers {
+				want := tc.wantByGrant[shape]
+				t.Run("viewer/"+shape, func(t *testing.T) {
 					got := tc.serve(t, shareViewerUser, reader)
 					if got != want {
-						t.Errorf("%s with tier %q: status %d, want %d", tc.endpoint, tier, got, want)
+						t.Errorf("%s with grant %q: status %d, want %d", tc.endpoint, shape, got, want)
 					}
 				})
 			}
@@ -244,14 +307,18 @@ func serveSnapshotFor(t *testing.T, caller string, reader VehicleShareReader) in
 	return doTieredRequest(t, mux, http.MethodGet, "/api/vehicles/"+fixtureSnapshotRowID+"/snapshot", nil)
 }
 
-func serveDrivesFor(t *testing.T, caller string, reader VehicleShareReader) int {
+// serveDrivesFor deliberately DROPS the reader (MYR-369): the drives handler no
+// longer has a share-reader seam at all, which is the structural half of making
+// the surface owner-only — there is no wiring line to re-open it with. The
+// parameter stays so the matrix can drive every endpoint uniformly, and its
+// being ignored is precisely what the `forbidden` column proves.
+func serveDrivesFor(t *testing.T, caller string, _ VehicleShareReader) int {
 	t.Helper()
 	h := NewVehicleDrivesHandler(
 		&stubTokenValidator{userID: caller},
 		&stubVehicleSnapshotReader{row: fixtureSnapshotRow(shareOwnerUser)},
 		&stubDriveLister{},
 		discardLogger(),
-		WithDrivesShareReader(reader),
 	)
 	mux := http.NewServeMux()
 	mux.Handle("GET /api/vehicles/{vehicleId}/drives", h)

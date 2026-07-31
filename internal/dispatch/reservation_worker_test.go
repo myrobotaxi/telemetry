@@ -637,3 +637,105 @@ func TestSweep_EnabledVehicleStillDispatches(t *testing.T) {
 		t.Fatalf("an un-paused vehicle must still be dispatched, got %d pushes", len(exec.calls()))
 	}
 }
+
+// --- MYR-369: the rider's per-grant ride capability -----------------------
+
+// TestSweep_UngrantedRiderIsHeldNotClaimed is the third and last enforcement
+// layer of the per-grant ride flag, and it exists because MYR-369 made the
+// capability EDITABLE. Under the old fixed tier, a reservation that had been
+// accepted was accepted by somebody whose access could only end by revocation;
+// now an owner can suspend the grant, or switch `allowRides` off, at any point
+// in the days a reservation may sit. Neither request-time gate reaches forward
+// into that window — this one does.
+//
+// HOLD, NOT EXPIRE, for exactly the reason the pause probe holds: the claim is
+// irreversible, holding is free, and an owner who restores access inside the
+// lateness window still gets the dispatch. One that never restores it lets the
+// lateness ceiling resolve the row honestly as `reservation_expired`, so this
+// layer needs no resolution path of its own.
+func TestSweep_UngrantedRiderIsHeldNotClaimed(t *testing.T) {
+	r := testReservation()
+	latch := newLatchStore()
+	resStore := &fakeReservationStore{
+		due:       []DueReservation{r},
+		busy:      map[string]bool{},
+		ungranted: map[string]bool{r.RiderID + "|" + r.VehicleID: true},
+	}
+	s, exec := newSweeperHarness(t, latch, resStore, &fakeBus{}, func() time.Time { return testSweepNow }, true)
+
+	s.sweepOnce(context.Background())
+
+	for _, call := range latch.order() {
+		if strings.HasPrefix(call, "claim:") {
+			t.Fatalf("the claim ran despite a rider who may no longer ride: %v", latch.order())
+		}
+	}
+	if len(exec.calls()) != 0 {
+		t.Errorf("a suspended/ungranted rider must receive no nav push, got %d", len(exec.calls()))
+	}
+	if resStore.grantCount() == 0 {
+		t.Error("the rider's grant must be probed at all")
+	}
+}
+
+// TestSweep_GrantProbeErrorHoldsRatherThanBurning mirrors the busy and pause
+// probes: an unreadable grant HOLDS. Nobody is waiting on an answer here, so
+// the recoverable choice is the right one — we cannot tell whether pushing
+// would dial a car to somebody the owner has cut off, and a held reservation
+// can still be dispatched where a wrong push cannot be recalled.
+func TestSweep_GrantProbeErrorHoldsRatherThanBurning(t *testing.T) {
+	latch := newLatchStore()
+	resStore := &fakeReservationStore{
+		due:      []DueReservation{testReservation()},
+		busy:     map[string]bool{},
+		grantErr: errors.New("db down"),
+	}
+	s, exec := newSweeperHarness(t, latch, resStore, &fakeBus{}, func() time.Time { return testSweepNow }, true)
+
+	s.sweepOnce(context.Background())
+
+	for _, call := range latch.order() {
+		if strings.HasPrefix(call, "claim:") {
+			t.Fatalf("an unreadable grant must not be claimed: %v", latch.order())
+		}
+	}
+	if len(exec.calls()) != 0 {
+		t.Errorf("an unreadable grant must produce no push, got %d", len(exec.calls()))
+	}
+}
+
+// TestSweep_GrantIsCheckedBeforeTheClaim pins the ORDER, on the same safety
+// argument as the busy and pause probes: every question must be answered
+// BEFORE the irreversible claim, never after.
+func TestSweep_GrantIsCheckedBeforeTheClaim(t *testing.T) {
+	r := testReservation()
+	latch := newLatchStore()
+	resStore := &fakeReservationStore{
+		due:       []DueReservation{r},
+		busy:      map[string]bool{},
+		ungranted: map[string]bool{r.RiderID + "|" + r.VehicleID: true},
+	}
+	s, _ := newSweeperHarness(t, latch, resStore, &fakeBus{}, func() time.Time { return testSweepNow }, true)
+
+	s.sweepOnce(context.Background())
+
+	if got := latch.order(); len(got) != 1 || !strings.HasPrefix(got[0], "busy:") {
+		t.Fatalf("an ungranted rider must be probed and then HELD — no claim, no record. call order = %v", got)
+	}
+}
+
+// TestSweep_GrantedRiderStillDispatches is the counter-assertion: the new probe
+// must not become a blanket hold. Absence from the map means permitted, which
+// is also the production shape for the common case — the rider owns the car and
+// the grant table is never consulted.
+func TestSweep_GrantedRiderStillDispatches(t *testing.T) {
+	latch := newLatchStore()
+	resStore := &fakeReservationStore{due: []DueReservation{testReservation()}, busy: map[string]bool{}}
+	s, exec := newSweeperHarness(t, latch, resStore, &fakeBus{}, func() time.Time { return testSweepNow }, true)
+
+	s.sweepOnce(context.Background())
+
+	if len(exec.calls()) != 1 {
+		t.Fatalf("a permitted rider must still be dispatched, got %d pushes", len(exec.calls()))
+	}
+}

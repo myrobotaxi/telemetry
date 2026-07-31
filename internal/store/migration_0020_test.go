@@ -13,6 +13,12 @@ import (
 
 // migration0020Columns is the go_vehicle_shares shape MYR-184 installs, with
 // the information_schema data_type each column must report.
+//
+// It describes what 0020 ITSELF installs, not the table at head — later
+// migrations extend the table and document their own additions in their own
+// column maps (MYR-369 / 0024 adds allow_rides + suspended_at). The
+// undocumented-column guard below counts against the UNION of those maps, so a
+// column that belongs to no migration's map is still caught.
 var migration0020Columns = map[string]string{
 	"id":                  "text",
 	"vehicle_id":          "text",
@@ -91,9 +97,10 @@ func TestMigration0020_UpCreatesVehicleShares(t *testing.T) {
 			t.Errorf("column %s: data_type = %q, want %q", col, actual, wantType)
 		}
 	}
-	if len(got) != len(migration0020Columns) {
+	documented := len(migration0020Columns) + len(migration0024Columns)
+	if len(got) != documented {
 		t.Errorf("go_vehicle_shares has %d columns, want %d — an undocumented column is a classification gap",
-			len(got), len(migration0020Columns))
+			len(got), documented)
 	}
 }
 

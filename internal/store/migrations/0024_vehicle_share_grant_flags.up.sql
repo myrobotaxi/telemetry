@@ -1,0 +1,108 @@
+-- 0024_vehicle_share_grant_flags.up.sql
+--
+-- MYR-369: per-viewer share controls. The accepted grant stops being a FIXED
+-- CUMULATIVE TIER and becomes a set of OWNER-EDITABLE PER-GRANT FLAGS.
+--
+-- WHAT WAS WRONG WITH THE TIER. Migration 0020 gave each grant one `permission`
+-- value on a total order (live < live_history < rides) that every gate compared
+-- with >=, and the value was fixed for the life of the row: rest-api.md §7.5
+-- said in as many words that there was no edit-in-place endpoint, so an owner
+-- who wanted to stop one person requesting rides -- while leaving them the live
+-- map -- had exactly one move available, revoke the grant and send a fresh
+-- invite the person had to redeem again. The tier could also not express
+-- "paused": the only way to stop access at all was the permanent tombstone.
+-- Both of those are this migration.
+--
+-- TWO COLUMNS, and they are NOT peers:
+--
+--   allow_rides   -- a CAPABILITY. May this viewer request rides in the car?
+--   suspended_at  -- a GATE OVER EVERYTHING. When set, the grant conveys
+--                    NOTHING, whatever the capability flags say.
+--
+-- THE SUSPENSION INVARIANT, stated once here because it is the property the
+-- rest of the change is built on: a suspended grant is excluded from the
+-- VIEWER-MERGE ACCESS SET. Not "hidden in the catalog", not "refused at the
+-- ride gate" -- excluded from the set, which is the single thing the vehicle
+-- list, the REST snapshot, the WebSocket handshake, the drives surfaces and the
+-- rides surfaces all resolve through. One predicate, `suspended_at IS NULL`,
+-- added to the access-set statements, kills all of them together. A capability
+-- flag can never out-vote it, because by the time any capability is read the
+-- grant has already failed to appear.
+--
+-- WHY A TIMESTAMP AND NOT A BOOLEAN. `suspended_at` records WHEN, which a
+-- boolean cannot, and this is an access-control state change an owner may later
+-- need to reconstruct ("when did I cut them off?") in the same way `revoked_at`
+-- and `accepted_at` already serve. NULL is the ordinary state -- active -- so
+-- every pre-existing row is correct without being touched, and the read
+-- predicate is a bare IS NULL that any index can serve. It is deliberately NOT
+-- `is_suspended BOOLEAN NOT NULL DEFAULT false` plus a separate timestamp: two
+-- columns encoding one fact is two columns that can disagree.
+--
+-- WHY allow_rides IS NOT NULLABLE. Unlike the go_vehicle_control_state columns
+-- (where NULL means "never observed" and the read path surfaces the absence),
+-- there is no unknown state here: a grant either conveys the ride capability or
+-- it does not, and the backfill below determines which for every existing row.
+-- DEFAULT false is the fail-closed direction -- a row inserted by some future
+-- path that forgets to set it grants the smaller thing, not the larger.
+--
+-- THE `permission` COLUMN STAYS, with a NEW AND NARROWER JOB. It is no longer
+-- read by any enforcement gate. It survives as (a) the INVITE-TIME PRESET on a
+-- pending row, which redemption maps onto the flags, and (b) the source of
+-- truth for this backfill and for any future one. Dropping it would throw away
+-- the only record of what each grant was originally sold as, and would break
+-- redemption, which still has to decide a pending invite's flags from something.
+-- The wire's `permission` on an ACCEPTED row is now DERIVED from allow_rides
+-- (true -> 'rides', else 'live') rather than read from this column, so the two
+-- cannot drift into disagreement -- there is only one direction of dependence.
+--
+-- BACKFILL -- the tier-to-flag mapping, and the ONE capability that is lost.
+--
+--   permission = 'rides'         -> allow_rides = true
+--   permission = 'live'          -> allow_rides = false
+--   permission = 'live_history'  -> allow_rides = false
+--
+-- 'live_history' collapses onto the SAME flags as 'live', and that is not an
+-- approximation -- it is the product decision this migration lands. The
+-- "Live + history" capability (the drives / trip-history surfaces for a
+-- non-owner) is REMOVED: those endpoints are owner-only again, unconditionally.
+-- So a live_history grant loses the drives surfaces, and NOTHING ELSE -- it
+-- keeps the live map, the catalog row and the snapshot exactly as before. The
+-- tier itself is retired on the wire too: it stays in the SharePermission enum
+-- for decode compatibility with installed clients, is never emitted, and an old
+-- client that still sends it at CREATE time has it persisted as 'live'.
+--
+-- The CHECK constraint on `permission` is deliberately UNCHANGED and still
+-- admits 'live_history': existing rows carry it, and tightening a CHECK under
+-- rows that violate it fails the migration outright. The value is simply never
+-- written again.
+--
+-- NO NEW INDEX. The suspension predicate rides the partial-unique
+-- accepted-grant index from 0020 -- (accepted_by_user_id, vehicle_id) WHERE
+-- status = 'accepted' -- which already serves the access-set lookup; adding
+-- `AND suspended_at IS NULL` filters the handful of rows that index returns for
+-- one person, which is not worth a second index and would not be chosen over
+-- the first anyway. Suspension is rare by construction (it is a deliberate
+-- owner action on one person), so the filtered-out fraction is near zero.
+--
+-- Classification (data-classification.md §1.15): both columns are P0 --
+-- an authorization capability and an authorization state change, the same tier
+-- as the `permission` and `status` columns they sit beside. Neither is
+-- identifying, neither is a credential, and neither is log-redacted (unlike the
+-- `label` and `code` columns on this table, which remain P1).
+
+ALTER TABLE go_vehicle_shares
+    ADD COLUMN IF NOT EXISTS allow_rides  BOOLEAN NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS suspended_at TIMESTAMPTZ;
+
+-- Backfill from the tier every existing row was sold at. Scoped to the rows
+-- that need changing rather than rewriting the whole table: the DEFAULT false
+-- above has already produced the correct value for 'live' and 'live_history'.
+--
+-- Runs over EVERY status, not just 'accepted'. A pending row's flags are
+-- decided at redemption from `permission`, so its allow_rides is inert until
+-- then -- but seeding it correctly means a pending row and the grant it becomes
+-- never disagree, and a revoked tombstone keeps an accurate record of what it
+-- conveyed while it was live.
+UPDATE go_vehicle_shares
+SET allow_rides = true
+WHERE permission = 'rides';

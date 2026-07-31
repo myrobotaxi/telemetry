@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/auth"
-	"github.com/myrobotaxi/telemetry/internal/mask"
 )
 
 // Typed failures the sharing store surfaces to the handler layer. They are
@@ -25,6 +24,12 @@ var (
 	// ErrShareNotPending reports a resend against an already-accepted
 	// grant. → 409 conflict.
 	ErrShareNotPending = errors.New("share invite is not pending")
+
+	// ErrShareNotAccepted reports a PATCH against an invite that is still
+	// pending (MYR-369). → 409 conflict. The mirror image of
+	// ErrShareNotPending: a pending row has no grant to edit, because its
+	// access is decided at redemption from the invite's preset.
+	ErrShareNotAccepted = errors.New("share invite is not an accepted grant")
 
 	// ErrShareSelfRedeem reports that the redeeming caller owns one of the
 	// target vehicles. → 409 conflict, with nothing accepted.
@@ -55,10 +60,17 @@ var (
 // (accepted_by_user_id, revoked_at) the wire never carries — defined here so
 // internal/telemetry stays decoupled from internal/store.
 type ShareInviteRow struct {
-	ID         string
-	VehicleID  string
-	Label      string
+	ID        string
+	VehicleID string
+	Label     string
+	// Permission is the INVITE-TIME PRESET as stored (MYR-369). It is what
+	// a PENDING row serializes; an ACCEPTED row's wire `permission` is
+	// DERIVED from Grant instead, so this field is not read there.
 	Permission string
+	// Grant is the accepted grant's capability set. Meaningless on a pending
+	// row, where the wire omits both flags — the zero value is the
+	// fail-closed reading if anything looks anyway.
+	Grant auth.ShareGrant
 	// Code is empty for any row that is not pending. P1 bearer credential —
 	// never logged, never in an error envelope.
 	Code       string
@@ -68,11 +80,26 @@ type ShareInviteRow struct {
 	AcceptedAt *time.Time
 }
 
-// ShareGrantRow is what a redemption granted, per vehicle.
+// ShareGrantRow is what a redemption granted, per vehicle — the FLAGS it wrote,
+// not the preset that produced them (MYR-369).
 type ShareGrantRow struct {
 	VehicleID   string
 	OwnerUserID string
-	Permission  string
+	AllowRides  bool
+}
+
+// ShareInvitePatch is one owner edit of one accepted grant. Both fields are
+// POINTERS because absent and false are different requests: nil means "leave
+// this capability alone", non-nil false means "take it away". A bare bool would
+// make every partial patch silently clear the field it did not mention.
+type ShareInvitePatch struct {
+	AllowRides *bool
+	Suspended  *bool
+}
+
+// HasChange reports whether the patch asks for anything at all.
+func (p ShareInvitePatch) HasChange() bool {
+	return p.AllowRides != nil || p.Suspended != nil
 }
 
 // ShareInviteStore is the owner-side dependency: mint, list, revoke, resend.
@@ -91,6 +118,15 @@ type ShareInviteStore interface {
 	RevokeInvite(ctx context.Context, inviteID, ownerUserID string) (string, error)
 	// ResendInvite re-mints the code and resets the expiry on a pending row.
 	ResendInvite(ctx context.Context, inviteID, ownerUserID string) (ShareInviteRow, error)
+	// PatchInvite applies an owner edit to one ACCEPTED grant and returns
+	// the row as it now stands (MYR-369). The returned user id is the
+	// grantee whose access set changed, for cache invalidation — always
+	// populated on success, because an accepted grant always has one.
+	//
+	// Errors: sdk.ErrNotFound for a row that is missing, foreign or
+	// revoked (indistinguishably); ErrShareNotAccepted for one that is the
+	// caller's but still pending.
+	PatchInvite(ctx context.Context, inviteID, ownerUserID string, patch ShareInvitePatch) (ShareInviteRow, string, error)
 	// OwnerFirstName resolves the calling owner's first name — the `from`
 	// half of the signed share link (MYR-368). Same method, same ladder, and
 	// same P1 first-names-only policy as the redeem side; it is listed on
@@ -139,116 +175,17 @@ type redeemShareInviteRequest struct {
 	Code string `json:"code"`
 }
 
-// shareInviteWire is the owner-facing ShareInvite object.
+// patchShareInviteRequest is the PATCH /api/invites/{inviteId} body
+// (vehicle-sharing.schema.json PatchShareInviteRequest).
 //
-// Four fields are conditionally OMITTED, and the omission is contractual, not
-// cosmetic: `code`, `shareUrl` and `expiresAt` exist only while the row is
-// pending (an accepted grant's code is not re-readable and an accepted grant
-// does not expire), and `acceptedAt` exists only once it has been accepted.
-type shareInviteWire struct {
-	InviteID   string `json:"inviteId"`
-	VehicleID  string `json:"vehicleId"`
-	Label      string `json:"label"`
-	Permission string `json:"permission"`
-	Status     string `json:"status"`
-	Code       string `json:"code,omitempty"`
-	// ShareURL is the signed join link (MYR-368). It CONTAINS the code, so
-	// it is P1 and bearer exactly as Code is: never logged, never echoed
-	// into an error. Empty when no signing key is configured, in which case
-	// the key is omitted and a consumer falls back to sharing Code.
-	ShareURL   string `json:"shareUrl,omitempty"`
-	CreatedAt  string `json:"createdAt"`
-	ExpiresAt  string `json:"expiresAt,omitempty"`
-	AcceptedAt string `json:"acceptedAt,omitempty"`
-}
-
-// shareInviteListResponse is the GET envelope. The key is `invites`, NOT the
-// `items` used by the cursor-paginated list envelopes: this surface is
-// deliberately unpaginated and the distinct key keeps an SDK pagination helper
-// from mistaking it for a page.
-type shareInviteListResponse struct {
-	Invites []map[string]any `json:"invites"`
-}
-
-// redeemShareInviteResponse is the invited party's 200 body: everything the
-// join-success screen needs without a second round trip.
-type redeemShareInviteResponse struct {
-	OwnerFirstName string           `json:"ownerFirstName"`
-	Vehicles       []map[string]any `json:"vehicles"`
-}
-
-// toShareInviteWire projects a row onto the wire shape, applying the
-// conditional omissions. signer may be nil, in which case shareUrl is omitted.
-//
-// The code is emitted ONLY for a pending row. The store already blanks it for
-// non-pending rows in SQL; this is the second, independent gate, because a
-// leaked accepted-grant code is a live credential handed to whoever can list
-// the invite. `shareUrl` is minted inside the SAME branch and from the SAME
-// two values, so the link cannot outlive the code it embeds — an accepted row
-// that somehow carried a URL would leak the credential the code branch just
-// withheld.
-func toShareInviteWire(row *ShareInviteRow, link inviteLinkCtx) shareInviteWire {
-	out := shareInviteWire{
-		InviteID:   row.ID,
-		VehicleID:  row.VehicleID,
-		Label:      row.Label,
-		Permission: row.Permission,
-		Status:     row.Status,
-		CreatedAt:  row.CreatedAt.UTC().Format(time.RFC3339),
-	}
-	if row.Status == shareStatusPending {
-		out.Code = row.Code
-		if !row.ExpiresAt.IsZero() {
-			out.ExpiresAt = row.ExpiresAt.UTC().Format(time.RFC3339)
-		}
-		// Signed over the row's ACTUAL expires_at, so the instant in
-		// the link is the instant redemption enforces.
-		out.ShareURL = link.signer.ShareURL(row.Code, row.ExpiresAt, link.ownerName, row.Label)
-	}
-	if row.AcceptedAt != nil {
-		out.AcceptedAt = row.AcceptedAt.UTC().Format(time.RFC3339)
-	}
-	return out
-}
-
-// toShareInviteMasked projects a row onto the wire AND through the
-// ResourceInvite owner allow-list (internal/mask/tables.go inviteOwnerFields,
-// rest-api.md §5.2.5).
-//
-// Running the mask on a surface that is already owner-gated at the router looks
-// redundant, and that is the point: it makes the allow-list LOAD-BEARING. A
-// field added to shareInviteWire without a matching entry in the table is
-// dropped from the response instead of shipping unclassified — which is exactly
-// the drift that left the table describing a Prisma `Invite` shape this server
-// never served. The viewer role has no entry for this resource, so if a viewer
-// ever reached this code the same call would return an empty object rather than
-// an owner's labels and a live code.
-func toShareInviteMasked(row *ShareInviteRow, role auth.Role, link inviteLinkCtx) map[string]any {
-	wire := toShareInviteWire(row, link)
-	fields := map[string]any{
-		"inviteId":   wire.InviteID,
-		"vehicleId":  wire.VehicleID,
-		"label":      wire.Label,
-		"permission": wire.Permission,
-		"status":     wire.Status,
-		"createdAt":  wire.CreatedAt,
-	}
-	// The four conditional keys are added only when they have a value, so
-	// omission stays omission rather than becoming an empty string.
-	if wire.Code != "" {
-		fields["code"] = wire.Code
-	}
-	if wire.ShareURL != "" {
-		fields["shareUrl"] = wire.ShareURL
-	}
-	if wire.ExpiresAt != "" {
-		fields["expiresAt"] = wire.ExpiresAt
-	}
-	if wire.AcceptedAt != "" {
-		fields["acceptedAt"] = wire.AcceptedAt
-	}
-	projected, _ := mask.Apply(fields, mask.For(mask.ResourceInvite, role))
-	return projected
+// POINTER FIELDS, deliberately. encoding/json leaves a pointer nil when the key
+// is ABSENT and sets it to a pointer-to-false when the key is present with
+// `false`, which is precisely the distinction the partial semantics need. Plain
+// bools would collapse both onto false and make every patch that mentioned one
+// field silently revoke the other.
+type patchShareInviteRequest struct {
+	AllowRides *bool `json:"allowRides"`
+	Suspended  *bool `json:"suspended"`
 }
 
 // Wire-visible statuses. 'revoked' is deliberately absent: revoked rows are

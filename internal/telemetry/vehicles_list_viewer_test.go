@@ -74,7 +74,7 @@ func TestVehiclesListViewerMerge(t *testing.T) {
 	})
 
 	t.Run("shared rows are appended as viewer rows with their tier", func(t *testing.T) {
-		shared := &fakeSharedLister{rows: []SharedVehicleRow{sharedCatalogRow("live_history")}}
+		shared := &fakeSharedLister{rows: []SharedVehicleRow{sharedCatalogRow(false)}}
 		items := listAs(t, []VehicleCatalogRow{ownedRow}, shared)
 		if len(items) != 2 {
 			t.Fatalf("got %d items, want 2 (one owned, one shared)", len(items))
@@ -89,8 +89,10 @@ func TestVehiclesListViewerMerge(t *testing.T) {
 		if viewerRow["role"] != "viewer" {
 			t.Errorf("items[1].role = %v, want viewer", viewerRow["role"])
 		}
-		if viewerRow["sharePermission"] != "live_history" {
-			t.Errorf("sharePermission = %v, want live_history", viewerRow["sharePermission"])
+		// DERIVED from the flag (MYR-369), never a stored tier — and
+		// never `live_history`, which is retired and unemittable.
+		if viewerRow["sharePermission"] != "live" {
+			t.Errorf("sharePermission = %v, want live (derived from allowRides=false)", viewerRow["sharePermission"])
 		}
 		// `name` is VIEWER-VISIBLE (MYR-184): the rider UI renders
 		// "{Owner}'s {Vehicle}", and the field is `required` in
@@ -125,7 +127,7 @@ func TestVehiclesListViewerMerge(t *testing.T) {
 	})
 
 	t.Run("a caller with only shared cars still gets them", func(t *testing.T) {
-		shared := &fakeSharedLister{rows: []SharedVehicleRow{sharedCatalogRow("live")}}
+		shared := &fakeSharedLister{rows: []SharedVehicleRow{sharedCatalogRow(false)}}
 		items := listAs(t, nil, shared)
 		if len(items) != 1 {
 			t.Fatalf("got %d items, want 1 — this is the rider who owns nothing and was invited to one car", len(items))

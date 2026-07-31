@@ -20,16 +20,6 @@ func WithDriveRouteRoleResolver(roles roleResolver) DriveRouteOption {
 	}
 }
 
-// WithDriveRouteShareReader lets the handler admit VIEWERS holding an accepted
-// vehicle share of at least `live_history` (MYR-184). Without it the
-// handler is owner-only, which is the pre-MYR-184 behaviour and the
-// fail-closed default.
-func WithDriveRouteShareReader(shares VehicleShareReader) DriveRouteOption {
-	return func(h *DriveRouteHandler) {
-		h.shares = shares
-	}
-}
-
 // WithDriveRouteMaskAudit attaches a mask-audit emitter (MYR-71,
 // rest-api.md §5.3). endpoint is the route pattern written to
 // metadata.endpoint. emitter MAY be nil — in which case this is a no-op.
