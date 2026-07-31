@@ -57,12 +57,15 @@ func (g ShareGrant) GrantsRides() bool { return !g.Suspended && g.AllowRides }
 // GrantsHistory reports whether the holder may read the drives / trip-history
 // surfaces. It ALWAYS returns false (MYR-369).
 //
-// The method is kept, rather than deleted along with the live_history tier, so
-// that the drives gates have something explicit to call and so the retirement is
-// a fact stated in one place with a test on it — instead of an absence of code
-// that reads, at every call site, exactly like an omission. If the capability
-// ever returns it gets a real flag and this body changes; until then a reviewer
-// asking "can a viewer read drives?" gets an answer rather than silence.
+// THE DRIVES GATES DO NOT CALL THIS. They call vehicleAccessForOwnerOnly, which
+// denies every non-owner before any grant is resolved — the surfaces are
+// owner-only unconditionally, so there is no capability left to consult. This
+// method is kept anyway, and only for this: the retirement is then a fact stated
+// in one place with a test on it, rather than an absence of code that reads, at
+// every site that no longer mentions history, exactly like an omission. A
+// reviewer asking "can a viewer read drives?" gets an answer rather than
+// silence. If the capability ever returns it gets a real flag, this body
+// changes, and the gates change with it.
 func (g ShareGrant) GrantsHistory() bool { return false }
 
 // Permission derives the wire-compatible SharePermission for this grant — the
@@ -85,23 +88,17 @@ func (g ShareGrant) Permission() SharePermission {
 	return PermissionLive
 }
 
-// GrantForPreset maps an invite-time preset onto the flags the accepted grant
-// starts life with (MYR-369). This is the ONE place the retired tier is
-// interpreted, and it is what "pending invites keep tier-at-redeem" means: an
-// invite minted before this change, or by an un-updated client, redeems to
-// exactly the capabilities its preset always implied.
+// GrantForPreset was DELETED in MYR-369. It claimed to be "the ONE place the
+// retired tier is interpreted", and it was not: nothing called it. Redemption
+// maps preset onto flags IN SQL, inside the accept UPDATE itself
+// (store.queryAcceptSharesByID: `allow_rides = (permission = 'rides')`), which
+// is what keeps the mapping atomic with the accept — there is no window in which
+// a row is accepted but not yet capability-stamped, and no Go-side value
+// computed from a stale read of `permission`. Invite CREATE seeds the same
+// projection through store.grantAllowsRides.
 //
-//	rides                    -> AllowRides true
-//	live, live_history, else -> AllowRides false
-//
-// The default arm is FAIL-CLOSED and covers an unrecognized value: a preset the
-// enum does not know grants the base capability, never the ride one. It cannot
-// normally happen (create validates through ParseSharePermission and the column
-// carries a CHECK constraint), which is precisely why the arm must be the safe
-// one — the only way to reach it is a path that has already gone wrong.
-//
-// Never produces a suspended grant: suspension is an owner action on a live
-// grant, not a state anything can be born in.
-func GrantForPreset(p SharePermission) ShareGrant {
-	return ShareGrant{AllowRides: p == PermissionRides}
-}
+// A second, uncalled Go spelling of a mapping that lives in SQL is not a
+// safety net; it is a copy that can drift from the real one while its tests
+// keep passing. GrantsHistory above is kept on the opposite reasoning, and the
+// asymmetry is deliberate: it states a fact that is NOT implemented anywhere
+// else, whereas this one restated a fact that is.

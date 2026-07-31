@@ -15,8 +15,9 @@ import (
 // flags instead — see ShareGrant — and this type survives with exactly two jobs:
 //
 //  1. On a PENDING invite it is the preset the owner chose. Redemption maps it
-//     onto the new grant's flags via GrantForPreset, and that mapping is the
-//     only thing the preset ever does.
+//     onto the new grant's flags inside the accept UPDATE itself
+//     (store.queryAcceptSharesByID), and that mapping is the only thing the
+//     preset ever does.
 //  2. On an ACCEPTED grant it is DERIVED BACK from the flags on every read
 //     (ShareGrant.Permission) so pre-MYR-369 clients keep getting a coherent
 //     answer. Derived output, never stored state, never an input to a decision.
@@ -92,8 +93,9 @@ func ParseSharePermission(s string) (SharePermission, error) {
 // Applied at the CREATE boundary rather than at read time, so the retired value
 // never enters the database from this point forward and no read path has to
 // remember to translate it. Rows written before MYR-369 still hold it, which is
-// why GrantForPreset handles it too — normalization stops new ones, it does not
-// rewrite history.
+// why the redeem mapping in SQL handles it too (`allow_rides = (permission =
+// 'rides')` maps live_history to false along with live) — normalization stops
+// new ones, it does not rewrite history.
 //
 // An unrecognized value is returned UNCHANGED rather than defaulted: this
 // function is not a validator, and silently turning garbage into a real preset

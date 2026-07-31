@@ -213,10 +213,13 @@ func NormalizeSharePermission(s string) string {
 	return s
 }
 
-// grantAllowsRides maps an invite-time preset onto the accepted grant's ride
-// capability — the store-side half of the auth.GrantForPreset mapping, kept here
-// so the redeem SQL can compute it without internal/store importing
-// internal/auth (the dependency rule runs the other way).
+// grantAllowsRides maps an invite-time preset onto the ride capability, and is
+// used at invite CREATE to seed allow_rides on the pending row. The other half
+// of the mapping — the one that runs at REDEEM — is in SQL inside the accept
+// UPDATE (`allow_rides = (permission = 'rides')`, queryAcceptSharesByID) so it
+// is atomic with the accept. The two must agree; they are two spellings of one
+// rule, and that is the reason this Go copy is a named function with a test
+// rather than an inline comparison at the call site.
 //
 // Fail-closed default: anything other than the rides preset — including the
 // retired live_history and anything unrecognized — produces false.

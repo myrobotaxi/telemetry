@@ -3,27 +3,58 @@ package store
 // The ACCESS-CONTROL half of the go_vehicle_shares statement set (MYR-184,
 // MYR-369). Split out of vehicle_share_queries.go — which holds the invite
 // LIFECYCLE statements, mint through revoke — because these are the statements
-// that decide what a live grant conveys, and they share one predicate that every
-// one of them must carry:
+// that decide what a live grant conveys.
 //
-//	status = 'accepted' AND suspended_at IS NULL
+// TWO INVARIANTS govern every statement in this file:
 //
-// A statement in this file that omits the suspension term is a suspended viewer
-// keeping access. Reading them together is how that stays visible.
-
-// queryAcceptedShareVehicleIDs is the VIEWER ACCESS SET — the vehicles a person
-// may see because somebody shared them, unioned with their own cars by the
-// authenticator. Served by the leading column of the partial-unique
-// accepted-grant index.
+//	(1) THE PREDICATE IS THE AUTHORIZATION. The check that decides whether the
+//	    caller may see or change the row lives in that same statement's WHERE
+//	    clause, on the same row it reads or writes — never in Go wrapped around
+//	    a broader statement. That is what closes the check-then-act window and
+//	    what makes a future caller unable to reach the row by skipping a guard.
 //
-// `suspended_at IS NULL` is an ACCESS-CONTROL PREDICATE (MYR-369): this set is
-// what the catalog, the snapshot, the WebSocket handshake, the drives surfaces
-// and the rides surfaces all resolve through, so excluding suspended grants here
-// is what makes suspension gate everything at once rather than in five places
-// that could each be forgotten.
-const queryAcceptedShareVehicleIDs = `
-SELECT vehicle_id FROM go_vehicle_shares
-WHERE accepted_by_user_id = $1 AND status = 'accepted' AND suspended_at IS NULL`
+//	(2) EVERY ACCESS-SET STATEMENT CARRIES `status = 'accepted' AND
+//	    suspended_at IS NULL`. A statement that omits the suspension term is a
+//	    suspended viewer keeping access.
+//
+// WHERE THE SUSPENSION PREDICATE ACTUALLY LIVES — read this before assuming
+// this file is the whole story, because IT IS NOT. Reading these statements
+// together does NOT make a missing suspension term visible, and an earlier
+// version of this comment claimed it did. The predicate is REPEATED across six
+// live statements in five files in two packages, and only two of them are
+// here:
+//
+//	internal/auth/queries.go            queryUserVehicleIDs
+//	    The merged access set (owned UNION shared). The WebSocket subscribed
+//	    set and its cache, GET /api/vehicles, and every per-vehicle "may this
+//	    caller see this car" resolve through THIS one, not through anything in
+//	    this file.
+//	internal/auth/vehicle_access.go     queryShareGrant
+//	    Per-vehicle capability resolution behind ResolveVehicleAccess.
+//	internal/store/vehicle_repo_list_shared.go  sharedSummaryJoin
+//	    The viewer catalog. The predicate sits in the JOIN because the join IS
+//	    the access check.
+//	internal/store/vehicle_share_queries.go     queryAcceptedSharesByCodeAndUser
+//	    The idempotent re-redeem lookup — what makes re-redeeming a suspended
+//	    grant's code answer 404.
+//	THIS FILE                           queryAcceptedShareGrant
+//	    The REST snapshot gate (ShareGrantFor).
+//	THIS FILE                           queryRiderMayRequestRides
+//	    The reservation-dispatch probe used by the sweeper.
+//
+// The auth/store split is STRUCTURALLY FORCED, not sloppiness: internal/auth
+// cannot import internal/store — the dependency rule runs the other way
+// (internal/auth is a dependency of internal/ws, never the reverse) — so the two
+// packages necessarily carry their own copies. Within internal/store the
+// repetition is because each statement serves a different surface with a
+// different shape (a join, an EXISTS probe, a code lookup, a flags lookup) and
+// there is no one statement they could share.
+//
+// The honest consequence: this invariant is maintained by REPETITION, so it is
+// held by convention plus tests, not by construction. That is why the list above
+// exists, why it is inventoried site by site in rest-api.md §7.5.0, and why each
+// site carries a DB-level test — including auth.queryUserVehicleIDs, whose term
+// was untested until MYR-369's fix round (store.authAccessSet).
 
 // queryAcceptedShareGrant resolves the CAPABILITY FLAGS one person holds over
 // one vehicle. Returns no row when there is no accepted grant OR when the grant

@@ -180,29 +180,17 @@ func scanGrants(rows pgx.Rows) ([]ShareGrant, error) {
 	return out, nil
 }
 
-// SharedVehicleIDs returns the vehicles a person may see because somebody
-// shared them — the viewer half of the access set the authenticator unions with
-// the caller's own cars. An empty result is the ordinary state, not an error.
-func (r *VehicleShareRepo) SharedVehicleIDs(ctx context.Context, userID string) ([]string, error) {
-	rows, err := r.pool.Query(ctx, queryAcceptedShareVehicleIDs, userID)
-	if err != nil {
-		return nil, fmt.Errorf("store.SharedVehicleIDs(user=%s): %w", userID, err)
-	}
-	defer rows.Close()
-
-	var out []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("store.SharedVehicleIDs(user=%s): scan: %w", userID, err)
-		}
-		out = append(out, id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store.SharedVehicleIDs(user=%s): iterate: %w", userID, err)
-	}
-	return out, nil
-}
+// SharedVehicleIDs and its statement queryAcceptedShareVehicleIDs were DELETED
+// in MYR-369. They computed "the vehicles somebody shared with this person" and
+// had no non-test caller on any branch: the real access set is assembled in ONE
+// statement by internal/auth.queryUserVehicleIDs, which UNIONs owned and shared
+// in the database rather than merging two reads in Go. Keeping a second, dead
+// spelling of the access set was worse than useless — its comment described it
+// as the set "the catalog, the snapshot, the WebSocket handshake, the drives
+// surfaces and the rides surfaces all resolve through", which was false for all
+// five, so a reader auditing suspension was pointed at a statement no request
+// ever executed. The tests that used it as an access-set oracle now assert
+// against auth.GetUserVehicles, which is the statement production actually runs.
 
 // ShareGrantFor resolves the CAPABILITY FLAGS one person holds over one vehicle
 // (MYR-369). Returns ErrShareNotFound when there is no accepted grant OR when

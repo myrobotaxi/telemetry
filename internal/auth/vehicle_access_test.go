@@ -67,38 +67,12 @@ func TestShareGrant_Capabilities(t *testing.T) {
 	}
 }
 
-// TestGrantForPreset pins tier-at-redeem: what a pending invite's preset turns
-// into when somebody redeems it, including the retired tier and the fail-closed
-// default.
-func TestGrantForPreset(t *testing.T) {
-	tests := []struct {
-		name string
-		in   SharePermission
-		want ShareGrant
-	}{
-		{"rides preset grants the ride capability", PermissionRides, ShareGrant{AllowRides: true}},
-		{"live preset grants the base only", PermissionLive, ShareGrant{}},
-		// The retired tier collapses onto `live` — a legacy pending invite
-		// redeems to exactly what it now conveys, losing only the drives
-		// surfaces the product removed.
-		{"retired live_history collapses onto live", PermissionLiveHistory, ShareGrant{}},
-		// Fail-closed: an unrecognized preset grants the smaller thing.
-		{"unknown preset grants nothing extra", SharePermission("admin"), ShareGrant{}},
-		{"empty preset grants nothing extra", SharePermission(""), ShareGrant{}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := GrantForPreset(tt.in)
-			if got != tt.want {
-				t.Errorf("GrantForPreset(%q) = %+v, want %+v", tt.in, got, tt.want)
-			}
-			// Nothing is ever born suspended.
-			if got.Suspended {
-				t.Error("a freshly redeemed grant must never be suspended")
-			}
-		})
-	}
-}
+// TestGrantForPreset was deleted with GrantForPreset itself (MYR-369): the
+// function had no caller, and the preset → flag mapping it restated is enforced
+// in SQL. That mapping is pinned against the real statement by
+// store.TestVehicleShareRepo_TierAtRedeem, including the retired live_history
+// tier — which is where a test of it belongs, since that is where a divergence
+// would actually change what a redeemed grant conveys.
 
 // TestNormalizeInvitePermission pins the create-time collapse: the retired tier
 // is accepted from a client and never persisted.
