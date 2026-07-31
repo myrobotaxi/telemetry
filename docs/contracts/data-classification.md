@@ -409,7 +409,7 @@ The vehicle-sharing grant table — one row per (owner → recipient → vehicle
 > 3. **Suppressed on read, in SQL.** The projection is `CASE WHEN status = 'pending' THEN code ELSE '' END`, so no read path can carry an accepted grant's code out of the database even by mistake; the handler applies the same rule again independently.
 > 4. **Short-lived and rate-limited.** 7 days, and 10 redemption attempts per user per minute — the 36^6 space is only safe with a cap on guesses (`rest-api.md` §7.5.5).
 >
-> **Wire projection (Rule CG-DC-5):** `label`, `permission`, `status`, `code`, `created_at`, `expires_at` and `accepted_at` ARE projected, onto the owner-only `ShareInvite` object — see the `ResourceInvite` allow-list in `internal/mask/tables.go` and `rest-api.md` §5.2.5. The `viewer` role has **no entry** for that resource, so the fail-closed lookup yields deny-all. `owner_user_id`, `accepted_by_user_id` and `revoked_at` are projected nowhere. `permission` additionally reaches the invited party as `VehicleSummary.sharePermission` (P0, §5.2.0 viewer list); no other column in this table is ever visible to a non-owner.
+> **Wire projection (Rule CG-DC-5):** `label`, `permission`, `status`, `allow_rides`, `suspended_at`, `code`, `created_at`, `expires_at` and `accepted_at` ARE projected, onto the owner-only `ShareInvite` object — see the `ResourceInvite` allow-list in `internal/mask/tables.go` and `rest-api.md` §5.2.5. `allow_rides` and `suspended_at` reach the wire as `allowRides` / `suspended` ([MYR-369](https://linear.app/myrobotaxi/issue/MYR-369)) and only on **accepted** rows — a pending invite has no grant for them to describe — and `suspended_at` projects as the BOOLEAN `suspended` rather than the timestamp: the instant is kept for the owner's audit trail, not handed to a consumer. The `viewer` role has **no entry** for that resource, so the fail-closed lookup yields deny-all. `owner_user_id`, `accepted_by_user_id` and `revoked_at` are projected nowhere. `permission` additionally reaches the invited party as `VehicleSummary.sharePermission` (P0, §5.2.0 viewer list); no other column in this table is ever visible to a non-owner.
 >
 > **No FKs (CG-DL-9).** Deleting a person or a car leaves rows behind. They are inert — the read paths resolve the target through the sibling schema and find nothing — and the owner-offboarding path revokes a vehicle's grants explicitly (`RevokeSharesForVehicle`). **Since MYR-355 the mirror direction is covered too**: account deletion revokes every grant the departing person *redeemed* (`RevokeSharesReceived`), so neither end of a grant can outlive its parties as a live row.
 
@@ -720,7 +720,7 @@ The `contract-guard` agent/CI check enforces the following rules derived from th
 
 | Tier | Count | Description |
 |------|-------|-------------|
-| P0 | 139 | Public — timestamps, opaque IDs, aggregate stats, feature flags, enums, authorization tiers, notification-delivery preferences, saved-place slot names |
+| P0 | 141 | Public — timestamps, opaque IDs, aggregate stats, feature flags, enums, authorization tiers and per-grant authorization flags, notification-delivery preferences, saved-place slot names |
 | P1 | 47 | Sensitive — GPS coordinates (including saved Home/Work), location names/addresses, OAuth tokens, PII, route data, media now-playing text, push device tokens, sharing invite codes |
 | P2 | 0 | Access-logged — reserved for future use |
 
