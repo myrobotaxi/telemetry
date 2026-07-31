@@ -121,6 +121,18 @@ func TestMigration0024_UpDefaultsAllowRidesClosed(t *testing.T) {
 // flags as 'live', which is not an approximation — it is the product decision
 // this migration lands. That grant loses the drives surfaces (removed from the
 // product) and NOTHING ELSE.
+//
+// THIS TEST RUNS THE MIGRATION FILE, NOT A COPY OF IT. It rolls the schema back
+// to 23, seeds rows at the genuine pre-0024 shape — which is a shape with no
+// allow_rides column to pre-set, so the tier is the only input, exactly as it
+// was for the production rows — and then migrates UP, letting golang-migrate
+// execute 0024_vehicle_share_grant_flags.up.sql itself. The earlier form of this
+// test retyped the backfill UPDATE inline and asserted against that, which meant
+// the one statement in this change that mutates existing production rows had no
+// coverage at all: editing the .sql file could not fail it, and a typo divergence
+// between the file and the test would have read as a passing test. A down/up
+// cycle is not "a test of golang-migrate" — golang-migrate is the thing that
+// will run this file in production, so it is precisely the path worth exercising.
 func TestMigration0024_UpBackfillsFromThePermissionTier(t *testing.T) {
 	if !dockerAvailable {
 		t.Skip("docker unavailable; skipping migration integration test")
@@ -129,26 +141,47 @@ func TestMigration0024_UpBackfillsFromThePermissionTier(t *testing.T) {
 	cleanVehicleShares(t)
 	ctx := context.Background()
 
-	// Seed rows AT THE PRE-MIGRATION SHAPE, then re-run the backfill
-	// statement the up-migration carries. Seeding before a down/up cycle
-	// would be a test of golang-migrate; this is a test of the mapping.
+	m := newTestMigrator(t)
+	defer func() { _, _ = m.Close() }()
+
+	if err := m.Migrate(23); err != nil {
+		t.Fatalf("migrate down to 23: %v", err)
+	}
+	// Restore the schema no matter how the assertions below go, so whatever
+	// runs next still sees a head database.
+	t.Cleanup(func() {
+		if err := store.RunMigrations(context.Background(), testConnStr, testLogger()); err != nil {
+			t.Fatalf("restore migrations to head: %v", err)
+		}
+	})
+
+	// Seeded at the PRE-MIGRATION SHAPE: no allow_rides column exists yet, so
+	// there is nothing to pre-set and `permission` is the sole input to the
+	// mapping — the same starting position every row in production was in.
+	//
+	// The pending and revoked rows are here because the backfill deliberately
+	// runs over EVERY status, not just 'accepted': a pending row's flags must
+	// not disagree with the grant it becomes, and a revoked tombstone must keep
+	// an accurate record of what it conveyed while it was live.
 	seed := `INSERT INTO go_vehicle_shares
-		(id, vehicle_id, owner_user_id, label, permission, code, status, expires_at, allow_rides)
-		VALUES ($1,$2,'cown0024','L',$3,$4,'accepted', NOW() + INTERVAL '7 days', false)`
-	for _, row := range []struct{ id, vehicle, permission, code string }{
-		{"cmig0024live", "cveh0024a", "live", "BBB111"},
-		{"cmig0024hist", "cveh0024b", "live_history", "BBB222"},
-		{"cmig0024ride", "cveh0024c", "rides", "BBB333"},
+		(id, vehicle_id, owner_user_id, label, permission, code, status, expires_at)
+		VALUES ($1,$2,'cown0024','L',$3,$4,$5, NOW() + INTERVAL '7 days')`
+	for _, row := range []struct{ id, vehicle, permission, code, status string }{
+		{"cmig0024live", "cveh0024a", "live", "BBB111", "accepted"},
+		{"cmig0024hist", "cveh0024b", "live_history", "BBB222", "accepted"},
+		{"cmig0024ride", "cveh0024c", "rides", "BBB333", "accepted"},
+		{"cmig0024pend", "cveh0024d", "rides", "BBB444", "pending"},
+		{"cmig0024revk", "cveh0024e", "rides", "BBB555", "revoked"},
 	} {
-		if _, err := testPool.Exec(ctx, seed, row.id, row.vehicle, row.permission, row.code); err != nil {
+		if _, err := testPool.Exec(ctx, seed, row.id, row.vehicle, row.permission, row.code, row.status); err != nil {
 			t.Fatalf("seed %s: %v", row.id, err)
 		}
 	}
 
-	if _, err := testPool.Exec(ctx,
-		`UPDATE go_vehicle_shares SET allow_rides = true WHERE permission = 'rides'`,
-	); err != nil {
-		t.Fatalf("backfill: %v", err)
+	// THE MIGRATION ITSELF — ALTER plus the backfill UPDATE, read from
+	// migrations/0024_vehicle_share_grant_flags.up.sql on disk.
+	if err := m.Migrate(24); err != nil {
+		t.Fatalf("migrate up to 24: %v", err)
 	}
 
 	want := map[string]bool{
@@ -156,16 +189,25 @@ func TestMigration0024_UpBackfillsFromThePermissionTier(t *testing.T) {
 		// THE RETIREMENT: live_history maps to the same flags as live.
 		"cmig0024hist": false,
 		"cmig0024ride": true,
+		// Every status, not just accepted.
+		"cmig0024pend": true,
+		"cmig0024revk": true,
 	}
 	for id, wantRides := range want {
 		var got bool
+		var suspendedAt *string
 		if err := testPool.QueryRow(ctx,
-			`SELECT allow_rides FROM go_vehicle_shares WHERE id = $1`, id,
-		).Scan(&got); err != nil {
+			`SELECT allow_rides, suspended_at::text FROM go_vehicle_shares WHERE id = $1`, id,
+		).Scan(&got, &suspendedAt); err != nil {
 			t.Fatalf("read %s: %v", id, err)
 		}
 		if got != wantRides {
 			t.Errorf("%s: allow_rides = %v, want %v", id, got, wantRides)
+		}
+		// The backfill must not suspend anything. A migration that paused
+		// every existing grant would be an outage, not a schema change.
+		if suspendedAt != nil {
+			t.Errorf("%s: the backfill set suspended_at = %v — no pre-existing grant may be paused by a migration", id, *suspendedAt)
 		}
 	}
 }
