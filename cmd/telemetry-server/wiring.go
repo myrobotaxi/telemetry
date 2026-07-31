@@ -380,6 +380,12 @@ func setupRideRequestEndpoints(deps httpRouteDeps, vehicles telemetry.VehicleSna
 		// import internal/store to recognise that — the same sentinel
 		// translation the ride-status conflict already gets.
 		telemetry.WithLiveActivityRegistry(&liveActivityRegistryAdapter{repo: deps.liveActivityRepo}),
+		// MYR-385: the §7.22 range cap, taken from the STORE. The bound
+		// belongs to the read (it is what makes that statement's absent
+		// LIMIT safe), and internal/telemetry cannot import internal/store
+		// to read it — so the composition root, which sees both, carries it
+		// across. This is the endpoint's only source for the number.
+		telemetry.WithBookedWindowsMaxRange(store.MaxBookedWindowRange),
 	)
 	deps.srv.HandleFunc("POST /api/ride-requests", rideHandler.ServeCreate)
 	deps.srv.HandleFunc("GET /api/ride-requests", rideHandler.ServeList)

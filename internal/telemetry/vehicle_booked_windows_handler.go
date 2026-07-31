@@ -21,6 +21,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
@@ -29,18 +30,29 @@ import (
 
 // bookedWindowsDefaultRange is the horizon used when `to` is omitted: a week
 // forward from `from`. It matches what a schedule picker opens on, and it is a
-// DEFAULT, never a cap — bookedWindowsMaxRange is the cap.
+// DEFAULT, never a cap — the cap is injected (WithBookedWindowsMaxRange).
 const bookedWindowsDefaultRange = 7 * 24 * time.Hour
 
-// bookedWindowsMaxRange caps the span one call may ask about. It mirrors
-// store.MaxBookedWindowRange; the two are asserted equal by a test rather than
-// wired together, because the handler layer does not import internal/store.
+// WithBookedWindowsMaxRange injects the cap on the span one §7.22 call may ask
+// about. wiring.go passes store.MaxBookedWindowRange, and that is the ONLY
+// value this server ever runs with — the cap belongs to the store (it is the
+// bound that makes the read's missing LIMIT safe), and this package cannot
+// import internal/store to read it.
+//
+// It used to be a handler-local literal "mirroring" the store's, checked by a
+// test that compared two package-local constants and therefore proved nothing;
+// store.MaxBookedWindowRange itself was referenced by no code at all. One
+// injected value cannot drift from itself.
 //
 // The over-wide range is REFUSED (400) rather than silently clamped. A clamped
 // answer looks complete and is not, which produces a picker that under-dims —
 // the exact failure this endpoint exists to remove — whereas a 400 is a bug the
 // client author fixes once.
-const bookedWindowsMaxRange = 14 * 24 * time.Hour
+func WithBookedWindowsMaxRange(maxRange time.Duration) RideRequestOption {
+	return func(h *RideRequestHandler) {
+		h.bookedWindowsMax = maxRange
+	}
+}
 
 // bookedWindowWire is one item of the §7.22 response
 // (contracts schemas/booked-windows.schema.json $defs.BookedWindow).
@@ -177,6 +189,16 @@ func (h *RideRequestHandler) authorizeBookedWindows(
 func (h *RideRequestHandler) parseBookedWindowRange(
 	w http.ResponseWriter, r *http.Request,
 ) (from, to time.Time, ok bool) {
+	// An unconfigured cap is a WIRING bug, not a request the caller can fix:
+	// answering without one would let a single call ask for a decade. Fail the
+	// same way a missing Live Activity registry does — loudly, at the first
+	// request, with nothing served.
+	if h.bookedWindowsMax <= 0 {
+		h.logger.Error("booked windows: max range not configured — wiring.go must pass WithBookedWindowsMaxRange")
+		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
+		return time.Time{}, time.Time{}, false
+	}
+
 	q := r.URL.Query()
 
 	from = time.Now().UTC()
@@ -206,9 +228,13 @@ func (h *RideRequestHandler) parseBookedWindowRange(
 		h.writeError(w, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest, "from must be earlier than to")
 		return time.Time{}, time.Time{}, false
 	}
-	if to.Sub(from) > bookedWindowsMaxRange {
+	if to.Sub(from) > h.bookedWindowsMax {
+		// The number comes from the configured cap, never from a literal — a
+		// message that names a different 14 than the check enforces is worse
+		// than no number. The cap is a whole number of days by construction
+		// (store.MaxBookedWindowRange); a fractional one would round down here.
 		h.writeError(w, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest,
-			"range must not exceed 14 days")
+			"range must not exceed "+strconv.Itoa(int(h.bookedWindowsMax.Hours())/24)+" days")
 		return time.Time{}, time.Time{}, false
 	}
 

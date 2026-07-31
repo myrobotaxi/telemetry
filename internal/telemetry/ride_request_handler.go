@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/events"
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
@@ -47,7 +48,15 @@ type RideRequestHandler struct {
 	// activities is the Live Activity token registry (MYR-172). Nil leaves the
 	// §7.21 endpoints answering 500 — a deployment error, not a runtime state.
 	activities LiveActivityRegistry
-	logger     *slog.Logger
+	// bookedWindowsMax is the widest [from, to) span §7.22 will answer about,
+	// INJECTED from store.MaxBookedWindowRange by wiring.go (MYR-385). It is a
+	// field rather than a const here because this package must not import
+	// internal/store, and a restated literal is a cap that drifts from the one
+	// the store is actually built around. Zero — the option not wired — leaves
+	// the endpoint answering 500, the same fail-closed reading `activities`
+	// gets: a deployment error, not a runtime state.
+	bookedWindowsMax time.Duration
+	logger           *slog.Logger
 }
 
 // RideRequestOption configures optional dependencies on RideRequestHandler.
