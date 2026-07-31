@@ -195,6 +195,9 @@ type httpRouteDeps struct {
 	// pushPrefsRepo backs the MYR-349 notification-preference endpoints, and
 	// is the same row the notifier's per-send gate reads.
 	pushPrefsRepo *store.PushPrefsRepo
+	// liveActivityRepo backs the MYR-172 Live Activity token endpoints, and is
+	// the same table the activity sender and ETA ticker read.
+	liveActivityRepo *store.LiveActivityRepo
 	// shareRepo backs the MYR-184 vehicle-sharing endpoints.
 	shareRepo *store.VehicleShareRepo
 	// inviteLinks signs the MYR-368 `shareUrl` on pending invite rows. Never
@@ -365,6 +368,10 @@ func setupRideRequestEndpoints(deps httpRouteDeps, vehicles telemetry.VehicleSna
 		// car they do not own. This is the SEPARATE code path the read-side
 		// access-set widening does not cover.
 		telemetry.WithRideShareReader(&shareReaderAdapter{repo: deps.shareRepo}),
+		// MYR-172: the Live Activity token registry. The repo satisfies
+		// telemetry.LiveActivityRegistry directly — no adapter needed, because
+		// both methods already speak in plain strings.
+		telemetry.WithLiveActivityRegistry(deps.liveActivityRepo),
 	)
 	deps.srv.HandleFunc("POST /api/ride-requests", rideHandler.ServeCreate)
 	deps.srv.HandleFunc("GET /api/ride-requests", rideHandler.ServeList)
@@ -380,6 +387,13 @@ func setupRideRequestEndpoints(deps httpRouteDeps, vehicles telemetry.VehicleSna
 	deps.srv.HandleFunc("POST /api/ride-requests/{id}/picked-up", rideHandler.ServePickedUp)
 	deps.srv.HandleFunc("POST /api/ride-requests/{id}/start", rideHandler.ServeStart)
 	deps.srv.HandleFunc("POST /api/ride-requests/{id}/dropped-off", rideHandler.ServeDroppedOff)
+
+	// MYR-172: the rider's Live Activity push token (rest-api.md §7.21).
+	// RIDER-only — the owner is a party and reaches a 403, a stranger a 404.
+	// POST upserts (ActivityKit rotates the token mid-Activity); DELETE is the
+	// client saying the Activity ended on the phone.
+	deps.srv.HandleFunc("POST /api/ride-requests/{id}/activity-token", rideHandler.ServeRegisterActivityToken)
+	deps.srv.HandleFunc("DELETE /api/ride-requests/{id}/activity-token", rideHandler.ServeEndActivityToken)
 
 	// MYR-175: owner-facing surface. The literal /incoming segment takes
 	// precedence over the {id} wildcard in Go's ServeMux, so both routes

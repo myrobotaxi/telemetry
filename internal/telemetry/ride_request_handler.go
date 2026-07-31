@@ -44,7 +44,10 @@ type RideRequestHandler struct {
 	// shares admits a non-owner rider holding an accepted `rides` share.
 	// Nil keeps the endpoint owner-only — the fail-closed default.
 	shares VehicleShareReader
-	logger *slog.Logger
+	// activities is the Live Activity token registry (MYR-172). Nil leaves the
+	// §7.21 endpoints answering 500 — a deployment error, not a runtime state.
+	activities LiveActivityRegistry
+	logger     *slog.Logger
 }
 
 // RideRequestOption configures optional dependencies on RideRequestHandler.

@@ -73,6 +73,20 @@ func applyPushEnvOverrides(fc *fileConfig) error {
 		fc.apnsTopic = v
 	}
 
+	// MYR-172. A SECOND kill-switch rather than a reuse of PUSH_ENABLED,
+	// because they stop different things: PUSH_ENABLED=false silences every
+	// notification including the ride-lifecycle Live Activity updates, whereas
+	// this one stops ONLY the periodic ETA refresh and leaves lifecycle
+	// transitions updating the Activity. That intermediate state is the one an
+	// operator actually wants when Apple starts throttling a high-frequency
+	// push — the Activity falls back to its own stale-date rendering, which is
+	// exactly the degradation MYR-194 designed for, instead of going dark.
+	tickerEnabled, err := parseKillSwitchEnv("LIVE_ACTIVITY_TICKER_ENABLED")
+	if err != nil {
+		return err
+	}
+	fc.liveActivityTicker = tickerEnabled
+
 	return nil
 }
 
@@ -80,11 +94,12 @@ func applyPushEnvOverrides(fc *fileConfig) error {
 // PushConfig.
 func buildPushConfig(fc *fileConfig) PushConfig {
 	return PushConfig{
-		Enabled:  fc.pushEnabled,
-		KeyP8PEM: fc.apnsKeyP8,
-		KeyID:    fc.apnsKeyID,
-		TeamID:   fc.apnsTeamID,
-		Topic:    fc.apnsTopic,
+		Enabled:            fc.pushEnabled,
+		KeyP8PEM:           fc.apnsKeyP8,
+		KeyID:              fc.apnsKeyID,
+		TeamID:             fc.apnsTeamID,
+		Topic:              fc.apnsTopic,
+		LiveActivityTicker: fc.liveActivityTicker,
 	}
 }
 

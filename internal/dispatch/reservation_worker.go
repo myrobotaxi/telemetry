@@ -264,6 +264,10 @@ func (s *ReservationSweeper) expire(ctx context.Context, r *DueReservation) swee
 		slog.Time("scheduled_for", r.ScheduledFor),
 		slog.Duration("max_lateness", s.cfg.MaxLateness),
 	)
+	// MYR-172: the ride row stays `accepted`, so this failure is invisible on
+	// the event bus. Tell the rider's Live Activity directly, or it counts down
+	// to a pickup that will never happen.
+	s.endActivities(ctx, r.RideRequestID)
 	return decisionExpired
 }
 

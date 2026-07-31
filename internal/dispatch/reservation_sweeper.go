@@ -173,6 +173,10 @@ type ReservationSweeper struct {
 
 	sem chan struct{}    // the sweeper's OWN worker budget (never the dispatcher's)
 	now func() time.Time // injectable clock (lateness + due-boundary tests)
+
+	// activities ends the rider's Live Activity when a reservation expires
+	// (MYR-172). Nil is the ordinary unwired state, not a fault.
+	activities RideActivityEnder
 }
 
 // NewReservationSweeper builds a sweeper over an already-constructed

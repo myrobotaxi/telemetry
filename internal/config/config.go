@@ -259,8 +259,14 @@ type PushConfig struct {
 	// (APNS_TEAM_ID, default NFKX777598).
 	TeamID string
 	// Topic is the iOS bundle id sent as `apns-topic` (APNS_TOPIC, default
-	// app.myrobotaxi.ios).
+	// app.myrobotaxi.ios). The Live Activity topic is DERIVED from it by
+	// appending `.push-type.liveactivity`, rather than configured separately,
+	// so the two cannot drift apart in an environment file (MYR-172).
 	Topic string
+	// LiveActivityTicker is the MYR-172 ETA-refresh kill-switch
+	// (LIVE_ACTIVITY_TICKER_ENABLED, default true). False stops only the
+	// periodic ETA pass; ride-lifecycle Activity updates continue.
+	LiveActivityTicker bool
 }
 
 // Configured reports whether both APNs credentials are present, i.e. whether
