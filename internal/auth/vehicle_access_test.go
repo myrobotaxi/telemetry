@@ -10,47 +10,106 @@ import (
 // "userID|vehicleID". A missing key is a denial, matching the DB-backed
 // implementation's ErrNoVehicleAccess.
 type stubShareLookup struct {
-	grants map[string]SharePermission
+	grants map[string]ShareGrant
 	err    error
 }
 
-func (s *stubShareLookup) GetSharePermission(_ context.Context, userID, vehicleID string) (SharePermission, error) {
+func (s *stubShareLookup) GetShareGrant(_ context.Context, userID, vehicleID string) (ShareGrant, error) {
 	if s.err != nil {
-		return SharePermission(""), s.err
+		return ShareGrant{}, s.err
 	}
-	if p, ok := s.grants[userID+"|"+vehicleID]; ok {
-		return p, nil
+	if g, ok := s.grants[userID+"|"+vehicleID]; ok {
+		return g, nil
 	}
-	return SharePermission(""), ErrNoVehicleAccess
+	return ShareGrant{}, ErrNoVehicleAccess
 }
 
-func TestSharePermission_AtLeast(t *testing.T) {
+// TestShareGrant_Capabilities pins the MYR-369 capability model that replaced
+// the cumulative tier. The suspension term appears in EVERY row, because the
+// invariant under test is that no flag survives it.
+func TestShareGrant_Capabilities(t *testing.T) {
 	tests := []struct {
-		name     string
-		have     SharePermission
-		required SharePermission
-		want     bool
+		name        string
+		grant       ShareGrant
+		wantActive  bool
+		wantRides   bool
+		wantHistory bool
+		wantDerived SharePermission
 	}{
-		{"live satisfies live", PermissionLive, PermissionLive, true},
-		{"live does not satisfy live_history", PermissionLive, PermissionLiveHistory, false},
-		{"live does not satisfy rides", PermissionLive, PermissionRides, false},
-		{"live_history satisfies live (cumulative)", PermissionLiveHistory, PermissionLive, true},
-		{"live_history satisfies live_history", PermissionLiveHistory, PermissionLiveHistory, true},
-		{"live_history does not satisfy rides", PermissionLiveHistory, PermissionRides, false},
-		{"rides satisfies live (cumulative)", PermissionRides, PermissionLive, true},
-		{"rides satisfies live_history (cumulative)", PermissionRides, PermissionLiveHistory, true},
-		{"rides satisfies rides", PermissionRides, PermissionRides, true},
-		// Fail-closed edges: an unknown tier on either side opens nothing.
-		{"empty held tier satisfies nothing", SharePermission(""), PermissionLive, false},
-		{"unknown held tier satisfies nothing", SharePermission("admin"), PermissionLive, false},
-		{"unknown required tier is never satisfied", PermissionRides, SharePermission("admin"), false},
+		{"base grant is active and rides nothing", ShareGrant{}, true, false, false, PermissionLive},
+		{"ride grant is active and rides", ShareGrant{AllowRides: true}, true, true, false, PermissionRides},
+		// SUSPENSION OUT-VOTES EVERY CAPABILITY. This is the whole point of
+		// routing gates through the methods rather than the bare fields.
+		{"suspended base grant conveys nothing", ShareGrant{Suspended: true}, false, false, false, PermissionLive},
+		{"suspended RIDE grant still conveys no rides", ShareGrant{AllowRides: true, Suspended: true}, false, false, false, PermissionRides},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.have.AtLeast(tt.required); got != tt.want {
-				t.Errorf("%q.AtLeast(%q) = %v, want %v", tt.have, tt.required, got, tt.want)
+			if got := tt.grant.Active(); got != tt.wantActive {
+				t.Errorf("Active() = %v, want %v", got, tt.wantActive)
+			}
+			if got := tt.grant.GrantsRides(); got != tt.wantRides {
+				t.Errorf("GrantsRides() = %v, want %v", got, tt.wantRides)
+			}
+			// MYR-369 retired the history capability outright: no grant
+			// of any shape opens the drives surfaces.
+			if got := tt.grant.GrantsHistory(); got != tt.wantHistory {
+				t.Errorf("GrantsHistory() = %v, want %v", got, tt.wantHistory)
+			}
+			// Permission() is derived output and is deliberately total —
+			// it reports what the grant WOULD convey. Callers must not
+			// serialize it for a suspended grant, which is why the
+			// suspended rows above still derive a value.
+			if got := tt.grant.Permission(); got != tt.wantDerived {
+				t.Errorf("Permission() = %q, want %q", got, tt.wantDerived)
 			}
 		})
+	}
+}
+
+// TestGrantForPreset pins tier-at-redeem: what a pending invite's preset turns
+// into when somebody redeems it, including the retired tier and the fail-closed
+// default.
+func TestGrantForPreset(t *testing.T) {
+	tests := []struct {
+		name string
+		in   SharePermission
+		want ShareGrant
+	}{
+		{"rides preset grants the ride capability", PermissionRides, ShareGrant{AllowRides: true}},
+		{"live preset grants the base only", PermissionLive, ShareGrant{}},
+		// The retired tier collapses onto `live` — a legacy pending invite
+		// redeems to exactly what it now conveys, losing only the drives
+		// surfaces the product removed.
+		{"retired live_history collapses onto live", PermissionLiveHistory, ShareGrant{}},
+		// Fail-closed: an unrecognized preset grants the smaller thing.
+		{"unknown preset grants nothing extra", SharePermission("admin"), ShareGrant{}},
+		{"empty preset grants nothing extra", SharePermission(""), ShareGrant{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GrantForPreset(tt.in)
+			if got != tt.want {
+				t.Errorf("GrantForPreset(%q) = %+v, want %+v", tt.in, got, tt.want)
+			}
+			// Nothing is ever born suspended.
+			if got.Suspended {
+				t.Error("a freshly redeemed grant must never be suspended")
+			}
+		})
+	}
+}
+
+// TestNormalizeInvitePermission pins the create-time collapse: the retired tier
+// is accepted from a client and never persisted.
+func TestNormalizeInvitePermission(t *testing.T) {
+	if got := NormalizeInvitePermission(PermissionLiveHistory); got != PermissionLive {
+		t.Errorf("live_history normalized to %q, want %q", got, PermissionLive)
+	}
+	for _, keep := range []SharePermission{PermissionLive, PermissionRides, SharePermission("weird")} {
+		if got := NormalizeInvitePermission(keep); got != keep {
+			t.Errorf("NormalizeInvitePermission(%q) = %q, want it unchanged", keep, got)
+		}
 	}
 }
 
@@ -62,7 +121,10 @@ func TestParseSharePermission(t *testing.T) {
 		wantErr bool
 	}{
 		{"live", "live", PermissionLive, false},
-		{"live_history", "live_history", PermissionLiveHistory, false},
+		// STILL ACCEPTED despite being retired: rejecting it would break
+		// invite creation for every un-updated client. The write path
+		// normalizes it; the parser does not.
+		{"retired live_history is still accepted as input", "live_history", PermissionLiveHistory, false},
 		{"rides", "rides", PermissionRides, false},
 		{"empty is rejected (fail-closed sentinel)", "", SharePermission(""), true},
 		{"unknown is rejected", "owner", SharePermission(""), true},
@@ -100,31 +162,46 @@ func TestJWTAuthenticator_ResolveVehicleAccess(t *testing.T) {
 	tests := []struct {
 		name       string
 		ownerByID  map[string]string
-		grants     map[string]SharePermission
+		grants     map[string]ShareGrant
 		shareErr   error
 		noShareDep bool
 		wantRole   Role
-		wantTier   SharePermission
+		wantGrant  ShareGrant
 		wantDenied bool
 		wantErr    bool
 	}{
 		{
-			name:      "owner resolves owner with no tier",
+			// An owner holds no grant; the ZERO ShareGrant is returned,
+			// which is the most restrictive value, so a caller that
+			// forgets to branch on the role under-grants.
+			name:      "owner resolves owner with the zero grant",
 			ownerByID: map[string]string{vehicle: caller},
 			wantRole:  RoleOwner,
-			wantTier:  SharePermission(""),
+			wantGrant: ShareGrant{},
 		},
 		{
-			name:      "accepted share resolves viewer with its tier",
+			name:      "accepted share resolves viewer with its flags",
 			ownerByID: map[string]string{vehicle: other},
-			grants:    map[string]SharePermission{caller + "|" + vehicle: PermissionLiveHistory},
+			grants:    map[string]ShareGrant{caller + "|" + vehicle: {AllowRides: true}},
 			wantRole:  RoleViewer,
-			wantTier:  PermissionLiveHistory,
+			wantGrant: ShareGrant{AllowRides: true},
 		},
 		{
 			name:       "non-owner without a share is denied",
 			ownerByID:  map[string]string{vehicle: other},
-			grants:     map[string]SharePermission{},
+			grants:     map[string]ShareGrant{},
+			wantDenied: true,
+		},
+		{
+			// MYR-369 SECOND GATE. The DB statement already excludes
+			// suspended rows, so a lookup that returns one models a stub,
+			// a future implementation, or an edited WHERE clause. It must
+			// be DENIED — not returned as a viewer with an empty
+			// capability set, which would put the caller inside every
+			// handler's viewer branch.
+			name:       "suspended grant is denied, not a capability-less viewer",
+			ownerByID:  map[string]string{vehicle: other},
+			grants:     map[string]ShareGrant{caller + "|" + vehicle: {AllowRides: true, Suspended: true}},
 			wantDenied: true,
 		},
 		{
@@ -132,7 +209,7 @@ func TestJWTAuthenticator_ResolveVehicleAccess(t *testing.T) {
 			// on the same vehicle must not leak across users.
 			name:       "share belonging to another user does not grant access",
 			ownerByID:  map[string]string{vehicle: other},
-			grants:     map[string]SharePermission{"user-third|" + vehicle: PermissionRides},
+			grants:     map[string]ShareGrant{"user-third|" + vehicle: {AllowRides: true}},
 			wantDenied: true,
 		},
 		{
@@ -169,7 +246,7 @@ func TestJWTAuthenticator_ResolveVehicleAccess(t *testing.T) {
 				a.shares = &stubShareLookup{grants: tt.grants, err: tt.shareErr}
 			}
 
-			role, tier, err := a.ResolveVehicleAccess(context.Background(), caller, vehicle)
+			role, grant, err := a.ResolveVehicleAccess(context.Background(), caller, vehicle)
 
 			switch {
 			case tt.wantDenied:
@@ -190,16 +267,16 @@ func TestJWTAuthenticator_ResolveVehicleAccess(t *testing.T) {
 			}
 
 			if tt.wantDenied || tt.wantErr {
-				if role != Role("") || tier != SharePermission("") {
-					t.Errorf("expected zero role/tier on failure, got (%q, %q)", role, tier)
+				if role != Role("") || grant != (ShareGrant{}) {
+					t.Errorf("expected zero role/grant on failure, got (%q, %+v)", role, grant)
 				}
 				return
 			}
 			if role != tt.wantRole {
 				t.Errorf("role = %q, want %q", role, tt.wantRole)
 			}
-			if tier != tt.wantTier {
-				t.Errorf("tier = %q, want %q", tier, tt.wantTier)
+			if grant != tt.wantGrant {
+				t.Errorf("grant = %+v, want %+v", grant, tt.wantGrant)
 			}
 		})
 	}

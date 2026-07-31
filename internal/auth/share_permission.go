@@ -5,81 +5,102 @@ import (
 	"fmt"
 )
 
-// SharePermission is the cumulative access tier an owner grants one invited
-// person for one vehicle (MYR-184, vehicle-sharing.schema.json
-// SharePermission).
+// SharePermission is the INVITE-TIME PRESET an owner picks when they send a
+// sharing invite (MYR-184, vehicle-sharing.schema.json SharePermission).
 //
-// STRICTLY CUMULATIVE — the tiers form a total order:
+// IT IS NO LONGER A CUMULATIVE TIER, AND NO GATE READS IT (MYR-369). Before
+// MYR-369 these three values formed a total order (live < live_history < rides)
+// that every access gate compared with an AtLeast helper, and a grant's tier was
+// fixed for its life. An accepted grant now carries independent, owner-editable
+// flags instead — see ShareGrant — and this type survives with exactly two jobs:
 //
-//	live < live_history < rides
+//  1. On a PENDING invite it is the preset the owner chose. Redemption maps it
+//     onto the new grant's flags via GrantForPreset, and that mapping is the
+//     only thing the preset ever does.
+//  2. On an ACCEPTED grant it is DERIVED BACK from the flags on every read
+//     (ShareGrant.Permission) so pre-MYR-369 clients keep getting a coherent
+//     answer. Derived output, never stored state, never an input to a decision.
 //
-// Each tier grants everything below it PLUS its own increment, which is why
-// every gate in this codebase compares with AtLeast rather than testing
-// equality against a set of independent capabilities. Getting that wrong makes
-// a 'rides' viewer unable to see the live map they were also granted.
-//
-// Increments:
-//   - live          — the vehicle appears in the viewer's GET /api/vehicles,
-//     the REST snapshot is readable under the viewer mask,
-//     and the WS vehicle subscription is allowed.
-//   - live_history  — everything above, plus the drives surfaces.
-//   - rides         — everything above, plus creating a ride request against
-//     the vehicle as a rider who is NOT its owner.
-//
-// New members MUST be appended in increasing-privilege order so the rank table
-// below stays a total order.
+// AtLeast IS DELIBERATELY GONE rather than kept for convenience. Leaving a
+// comparison helper on a type that no longer models an order is how a future
+// gate quietly reintroduces the tier semantics this change removed.
 type SharePermission string
 
 const (
-	// PermissionLive is the lowest tier: live location and state only.
+	// PermissionLive is the base: the vehicle appears in the viewer's
+	// GET /api/vehicles, the REST snapshot is readable under the viewer
+	// mask, and the WS vehicle subscription is allowed.
 	PermissionLive SharePermission = "live"
-	// PermissionLiveHistory adds the drives / trip-history surfaces.
+
+	// PermissionLiveHistory is RETIRED (MYR-369) and is NEVER EMITTED by
+	// this server on any surface.
+	//
+	// The capability it named — the drives / trip-history surfaces for a
+	// non-owner — has been removed from the product: those endpoints are
+	// owner-only again, unconditionally, and a grant created at this preset
+	// reads drives no more than a `live` grant does.
+	//
+	// The constant is kept, and ParseSharePermission still ACCEPTS the
+	// value, for one reason: an installed client's send-invite sheet may
+	// still submit it, and rejecting it would break invite creation for
+	// every un-updated app. NormalizeInvitePermission collapses it to
+	// PermissionLive on the way in, so it is never persisted again.
 	PermissionLiveHistory SharePermission = "live_history"
-	// PermissionRides adds rider-side ride creation against the vehicle.
+
+	// PermissionRides is the derived value for a grant whose AllowRides
+	// flag is set: everything in live, plus creating a ride request against
+	// the vehicle as a rider who is NOT its owner.
 	PermissionRides SharePermission = "rides"
 )
 
-// sharePermissionRank maps each tier onto its position in the total order.
-// The zero value of the map lookup (0) is deliberately BELOW every real tier,
-// so an unrecognized or empty permission satisfies no gate — fail-closed by
-// construction rather than by a forgotten branch.
-var sharePermissionRank = map[SharePermission]int{
-	PermissionLive:        1,
-	PermissionLiveHistory: 2,
-	PermissionRides:       3,
+// knownSharePermissions is the set ParseSharePermission accepts. It is a SET,
+// not a ranked list — that change is the whole point of MYR-369. The retired
+// member is present because input must still be accepted; it is absent from
+// every output path.
+var knownSharePermissions = map[SharePermission]struct{}{
+	PermissionLive:        {},
+	PermissionLiveHistory: {},
+	PermissionRides:       {},
 }
 
 // ErrUnknownSharePermission is returned by ParseSharePermission for a value
-// outside the tier enum.
+// outside the enum.
 var ErrUnknownSharePermission = errors.New("unknown share permission")
-
-// AtLeast reports whether this tier grants everything the required tier does.
-//
-// An unrecognized value on EITHER side answers false: an unknown held tier
-// grants nothing, and an unknown required tier is never satisfied. Both are the
-// safe direction — a gate that cannot be evaluated must not open.
-func (p SharePermission) AtLeast(required SharePermission) bool {
-	have, ok := sharePermissionRank[p]
-	if !ok {
-		return false
-	}
-	want, ok := sharePermissionRank[required]
-	if !ok {
-		return false
-	}
-	return have >= want
-}
 
 // String implements fmt.Stringer.
 func (p SharePermission) String() string { return string(p) }
 
-// ParseSharePermission validates a string against the tier enum. The empty
-// string is rejected: SharePermission("") is the fail-closed "no tier" sentinel
-// and MUST NOT be producible from client input.
+// ParseSharePermission validates a string against the enum. The empty string is
+// rejected: SharePermission("") is the fail-closed "no preset" sentinel and MUST
+// NOT be producible from client input.
+//
+// Accepts the retired live_history so an un-updated client can still create an
+// invite; callers that PERSIST the result MUST run it through
+// NormalizeInvitePermission first.
 func ParseSharePermission(s string) (SharePermission, error) {
 	p := SharePermission(s)
-	if _, ok := sharePermissionRank[p]; ok {
+	if _, ok := knownSharePermissions[p]; ok {
 		return p, nil
 	}
 	return SharePermission(""), fmt.Errorf("auth.ParseSharePermission(%q): %w", s, ErrUnknownSharePermission)
+}
+
+// NormalizeInvitePermission collapses an accepted preset onto one the server
+// still writes: live_history becomes live (MYR-369), everything else is
+// unchanged.
+//
+// Applied at the CREATE boundary rather than at read time, so the retired value
+// never enters the database from this point forward and no read path has to
+// remember to translate it. Rows written before MYR-369 still hold it, which is
+// why GrantForPreset handles it too — normalization stops new ones, it does not
+// rewrite history.
+//
+// An unrecognized value is returned UNCHANGED rather than defaulted: this
+// function is not a validator, and silently turning garbage into a real preset
+// would hide a bug ParseSharePermission is there to catch.
+func NormalizeInvitePermission(p SharePermission) SharePermission {
+	if p == PermissionLiveHistory {
+		return PermissionLive
+	}
+	return p
 }

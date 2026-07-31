@@ -23,45 +23,6 @@ var (
 	ErrMissingSubject = errors.New("missing subject claim")
 )
 
-// queryUserVehicleIDs fetches the caller's full VEHICLE ACCESS SET — the
-// vehicles they own, UNIONed with the vehicles somebody has shared with them
-// (MYR-91 viewer merge / MYR-184 sharing).
-//
-// Before MYR-184 the access set was ownership alone, which is why the `viewer`
-// role existed in the mask matrix without a single row that could produce it.
-// The second leg is what makes it real: an accepted go_vehicle_shares grant
-// (Go-owned, migration 0020) puts the vehicle in the grantee's set, so it flows
-// through EVERY consumer of this query at once — the WebSocket subscribed set,
-// GET /api/vehicles, and every per-vehicle handler that asks "can this caller
-// see this car".
-//
-// Revoked and pending rows are excluded by the `status = 'accepted'` predicate:
-// an invite that was never redeemed grants nothing, and revocation is a
-// tombstone flip, so a revoked grant drops out of the set on the next lookup.
-// UNION (not UNION ALL) de-duplicates the case where an owner also holds a
-// stale grant row for their own car.
-const queryUserVehicleIDs = `
-SELECT "id" FROM "Vehicle" WHERE "userId" = $1
-UNION
-SELECT vehicle_id FROM go_vehicle_shares
-WHERE accepted_by_user_id = $1 AND status = 'accepted'`
-
-// queryUserExists is a slim row-existence probe used by the FR-10.1
-// fail-closed JWT existence check (data-lifecycle.md §3.5, MYR-73). A user
-// is "live" if a row exists in EITHER the Prisma-owned "User" table (web /
-// Google users) OR the Go-owned go_users table (Apple-native users minted by
-// the identity module, MYR-193 — they have no legacy Prisma row). Both EXISTS
-// sub-probes hit a primary-key index, so this stays a microsecond lookup.
-// The query returns one row when the user exists and zero rows otherwise, so
-// UserExists's pgx.ErrNoRows handling is unchanged.
-const queryUserExists = `SELECT 1 WHERE EXISTS (SELECT 1 FROM "User" WHERE "id" = $1) OR EXISTS (SELECT 1 FROM go_users WHERE "id" = $1)`
-
-// queryVehicleOwnerByID fetches the owning user ID for a vehicle. Used
-// by ResolveRole to determine whether the caller is the owner of the
-// vehicle or a viewer (post-MYR-Invite, after the FR-5.4 invite path
-// lands; today the only path to the viewer branch is a stale cache).
-const queryVehicleOwnerByID = `SELECT "userId" FROM "Vehicle" WHERE "id" = $1`
-
 // JWTAuthenticator validates HS256 JWTs and resolves the authenticated
 // user's vehicle IDs from the database. It caches vehicle lookups to
 // avoid hitting the DB on every WebSocket reconnect.
@@ -201,8 +162,8 @@ func (a *JWTAuthenticator) GetUserVehicles(ctx context.Context, userID string) (
 // non-owner with no accepted share gets ErrNoVehicleAccess, and callers convert
 // that to 403 / deny-all rather than to a viewer projection.
 //
-// See ResolveVehicleAccess (vehicle_access.go) for the tier-carrying form that
-// handlers gating on live_history / rides need.
+// See ResolveVehicleAccess (vehicle_access.go) for the capability-carrying form
+// that the ride gates need (MYR-369 — the tier it used to return is gone).
 func (a *JWTAuthenticator) ResolveRole(ctx context.Context, userID, vehicleID string) (Role, error) {
 	role, _, err := a.ResolveVehicleAccess(ctx, userID, vehicleID)
 	return role, err
