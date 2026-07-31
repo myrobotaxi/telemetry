@@ -142,6 +142,54 @@ func addChargeStateFields(fields map[string]events.TelemetryValue, ch *VehicleDa
 	}
 }
 
+// addDriveStateFields maps the drive_state subset (MYR-394): where the car is,
+// how fast it is going, and which way it points.
+//
+// Unlike every other mapper in this file, all three of these ARE streamed
+// fields (fieldMap: Field_Location, Field_VehicleSpeed, Field_GpsHeading), which
+// means they are in streamSourcedFields and the MYR-300 gate deletes them
+// wholesale whenever the car is streaming. That is not a limitation of this
+// mapper — it is the point of it. A REST fix is Tesla's CACHED position and can
+// be minutes old; a streamed fix is the car talking. The gate guarantees the
+// cached one is only ever used when there is no live one, and because
+// noteStreamFrame ignores non-streamed frames, a poll can never stamp the
+// freshness clock and latch itself into looking live.
+//
+// Heading is an int on Tesla's wire but is emitted as FloatVal: the store's
+// field_mapper applies both speed and heading via applyFloatAsInt, which reads
+// FloatVal. Emitting IntVal here would silently drop the value.
+//
+// Speed is skipped when nil (Tesla sends null for a stationary car) rather than
+// coerced to 0 — a parked car should contribute a position, not a fabricated
+// "measured 0 mph" that the gear-group derivation downstream would read as a
+// live motion signal.
+func addDriveStateFields(fields map[string]events.TelemetryValue, ds *VehicleDataDriveState) {
+	if ds == nil {
+		return
+	}
+	// Latitude and longitude travel as ONE LocationVal, matching the streamed
+	// Field_Location shape, so the broadcaster's splitLocationField and the
+	// writer's applyLocation both see exactly what they see from the stream.
+	// A half-populated fix is dropped: one coordinate without the other is not
+	// a position, and (0,0) would place the car in the Gulf of Guinea.
+	if ds.Latitude != nil && ds.Longitude != nil {
+		fields[string(FieldLocation)] = events.TelemetryValue{
+			LocationVal: &events.Location{
+				Latitude:  *ds.Latitude,
+				Longitude: *ds.Longitude,
+			},
+		}
+	}
+	if ds.Speed != nil {
+		s := *ds.Speed
+		fields[string(FieldSpeed)] = events.TelemetryValue{FloatVal: &s}
+	}
+	if ds.Heading != nil {
+		h := float64(*ds.Heading)
+		fields[string(FieldHeading)] = events.TelemetryValue{FloatVal: &h}
+	}
+}
+
 // hvacPowerFromBool renders is_climate_on as the capitalized hvacPower enum
 // string the stream emits, so field_mapping.go derives isClimateOn identically.
 func hvacPowerFromBool(on bool) string {

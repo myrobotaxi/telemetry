@@ -16,11 +16,11 @@ import (
 // fields are otherwise stream-fed only, so the app shows "— Syncing" forever
 // when the car does not stream.
 //
-// Only the four sub-objects and the specific fields that map onto the wire
-// are decoded. The full vehicle_data payload also carries live GPS
-// (drive_state.latitude/longitude) which is P1 — the raw payload is NEVER
-// logged (data-classification.md), so this struct exists purely to pluck the
-// non-identifying control fields we need.
+// Only the five sub-objects and the specific fields that map onto the wire
+// are decoded. The payload carries far more than this struct admits, and
+// everything it does decode from `drive_state` is P1 GPS — the raw payload is
+// NEVER logged (data-classification.md), so this struct exists purely to pluck
+// the fields we actually surface.
 //
 // Each field is a pointer so an absent field decodes to nil and is skipped by
 // the mapper rather than being written as a misleading zero value.
@@ -29,6 +29,31 @@ type VehicleData struct {
 	ClimateState  *VehicleDataClimateState  `json:"climate_state"`
 	ChargeState   *VehicleDataChargeState   `json:"charge_state"`
 	VehicleConfig *VehicleDataVehicleConfig `json:"vehicle_config"`
+	// DriveState carries position/speed/heading (MYR-394). Decoded — not
+	// merely tolerated — because a car that is NOT streaming has no other
+	// source of position at all, and the rider-tracking map was showing the
+	// last streamed fix from before the car went quiet (observed 1.5 miles from
+	// where the car actually sat). P1 GPS: never logged, and the MYR-300
+	// stream-recency gate drops every one of these fields whenever the car IS
+	// streaming, so a cached REST fix can never displace a live one.
+	DriveState *VehicleDataDriveState `json:"drive_state"`
+}
+
+// VehicleDataDriveState is the drive_state sub-object subset: where the car is,
+// how fast it is going, and which way it points.
+//
+// All four are P1 GPS data (data-classification.md §1.4) — encrypted at rest by
+// the existing writer path and never logged, here or anywhere downstream.
+//
+// Speed is null whenever the car is stationary, and heading is an integer on
+// the wire; both decode to nil-skipped pointers so a parked car contributes
+// position only, rather than a misleading `speed: 0` that would read as a live
+// measurement.
+type VehicleDataDriveState struct {
+	Latitude  *float64 `json:"latitude"`
+	Longitude *float64 `json:"longitude"`
+	Speed     *float64 `json:"speed"`   // mph, null when stationary
+	Heading   *int     `json:"heading"` // degrees, 0-359
 }
 
 // VehicleDataVehicleState is the vehicle_state sub-object subset: lock state,

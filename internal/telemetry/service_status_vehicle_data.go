@@ -198,6 +198,10 @@ func (m *ServiceStatusMonitor) RefreshFromVehicleData(ctx context.Context, vin, 
 //     (celsiusToFahrenheit), matching the stream's boundary conversion.
 //   - charging_state strings match the proto 179 DetailedChargeState enum, so
 //     chargeState passes through unchanged.
+//   - drive_state lat/lng become ONE LocationVal, matching Field_Location, and
+//     speed/heading become FloatVals (MYR-394). These are the only mapped fields
+//     the MYR-300 gate can drop, and dropping them is correct: see
+//     addDriveStateFields.
 func vehicleDataToFields(data *VehicleData) map[string]events.TelemetryValue {
 	fields := make(map[string]events.TelemetryValue)
 	if data == nil {
@@ -207,5 +211,6 @@ func vehicleDataToFields(data *VehicleData) map[string]events.TelemetryValue {
 	addClimateStateFields(fields, data.ClimateState)
 	addChargeStateFields(fields, data.ChargeState)
 	addVehicleConfigFields(fields, data.VehicleConfig)
+	addDriveStateFields(fields, data.DriveState)
 	return fields
 }
