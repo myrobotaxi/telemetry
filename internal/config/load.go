@@ -51,6 +51,8 @@ type fileConfig struct {
 	apnsKeyID   string
 	apnsTeamID  string
 	apnsTopic   string
+	// MYR-172 ETA-ticker kill-switch (LIVE_ACTIVITY_TICKER_ENABLED).
+	liveActivityTicker bool
 
 	// Identity module secrets/identifiers (env, not JSON).
 	es256PrivateKeyPEM string

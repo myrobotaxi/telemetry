@@ -44,7 +44,10 @@ type RideRequestHandler struct {
 	// shares admits a non-owner rider holding an accepted `rides` share.
 	// Nil keeps the endpoint owner-only — the fail-closed default.
 	shares VehicleShareReader
-	logger *slog.Logger
+	// activities is the Live Activity token registry (MYR-172). Nil leaves the
+	// §7.21 endpoints answering 500 — a deployment error, not a runtime state.
+	activities LiveActivityRegistry
+	logger     *slog.Logger
 }
 
 // RideRequestOption configures optional dependencies on RideRequestHandler.
@@ -446,6 +449,12 @@ func (h *RideRequestHandler) writeJSON(w http.ResponseWriter, status int, v any)
 // writeError writes the REST error envelope (rest-api.md §4.1).
 func (h *RideRequestHandler) writeError(w http.ResponseWriter, status int, code wserrors.ErrorCode, msg string) {
 	wserrors.WriteErrorEnvelope(w, h.logger, status, code, msg)
+}
+
+// writeErrorSub writes the same envelope with a typed sub-code, for the paths
+// where the primary code does not tell the client what to do on its own.
+func (h *RideRequestHandler) writeErrorSub(w http.ResponseWriter, status int, code wserrors.ErrorCode, sub wserrors.SubCode, msg string) {
+	wserrors.WriteErrorEnvelopeSub(w, h.logger, status, code, sub, msg)
 }
 
 // writeRideActive writes the 409 `ride_active` response (MYR-230): the

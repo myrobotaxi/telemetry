@@ -72,7 +72,7 @@ func main() {
 	}
 }
 
-func run() error { //nolint:funlen,cyclop // composition root — sequential dependency wiring; helpers extracted to wiring.go
+func run() error { //nolint:funlen,cyclop,gocognit // composition root — sequential dependency wiring; helpers extracted to wiring.go
 	// --- Flag parsing ---
 	var (
 		configPath = flag.String("config", "", "path to JSON configuration file")
@@ -222,6 +222,10 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 	// §7.5 invite/redeem endpoints and behind every viewer access check.
 	shareRepo := store.NewVehicleShareRepo(db.Pool(), logger.With(slog.String("component", "vehicle-share-repo")))
 	vehicleNameRepo := store.NewVehicleNameRepo(db.Pool())
+	// MYR-172: the ActivityKit push-token registry behind the rider's Live
+	// Activity, written by the §7.21 endpoints and read by both the lifecycle
+	// consumer and the ETA ticker.
+	liveActivityRepo := store.NewLiveActivityRepo(db.Pool(), logger.With(slog.String("component", "live-activity-repo")))
 
 	// --- Drive detector ---
 	// MYR-146: reconciler reads open Drive rows on Start so a Fly
@@ -392,24 +396,52 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 	}
 	runNotifyListener(ctx, cfg.Database().URL, bus, logger)
 
-	// --- Nav-dispatch (MYR-176) ---
-	// Subscribes to the ride.accepted seam (published by the owner-accept
-	// handler) and pushes the rider's pickup into the vehicle's Tesla
-	// navigation via the command Executor. Gated by DISPATCH_ENABLED.
-	if err := setupNavDispatcher(ctx, cfg, bus, vehicleRepo, accountRepo, rideRepo, shareRepo, logger); err != nil {
-		return fmt.Errorf("setting up nav dispatcher: %w", err)
-	}
-
 	// --- Push notifications (MYR-186) ---
 	// Subscribes to ride.request.created / ride.status.changed / ride.due and
 	// alerts the relevant party's registered phones. Gated by PUSH_ENABLED;
 	// runs keyless (every send logged as skipped) until the APNs secrets are
 	// set. Drained after the bus closes so in-flight sends finish.
-	notifier, err := setupPushNotifier(cfg, bus, pushRepo, pushPrefsRepo, vehicleNameRepo, logger)
+	//
+	// ONE APNs client serves both consumers below: the provider JWT is cached
+	// per client and Apple throttles re-minting the same key, so a second
+	// client over one key buys nothing and risks 403 ExpiredProviderToken.
+	apnsClient, err := buildAPNsClient(cfg, logger.With(slog.String("component", "push")))
+	if err != nil {
+		return fmt.Errorf("setting up apns client: %w", err)
+	}
+
+	notifier, err := setupPushNotifier(cfg, bus, apnsClient, pushRepo, pushPrefsRepo, vehicleNameRepo, logger)
 	if err != nil {
 		return fmt.Errorf("setting up push notifier: %w", err)
 	}
 	defer notifier.Wait()
+
+	// --- Live Activity push updates (MYR-172) ---
+	// The lifecycle consumer subscribes to ride.status.changed and replaces the
+	// rider's Live Activity content-state on every transition, ending it with a
+	// dismissal-date on a terminal one. The ticker refreshes the ETA every
+	// 60-90s while a leg is active (MYR-194 decision 3) and sweeps registrations
+	// whose Activity died on the phone without telling us.
+	activityNotifier, err := setupLiveActivityNotifier(cfg, bus, apnsClient, liveActivityRepo, pushPrefsRepo, logger)
+	if err != nil {
+		return fmt.Errorf("setting up live activity notifier: %w", err)
+	}
+	defer activityNotifier.Wait()
+	startLiveActivityTicker(ctx, cfg, activityNotifier, liveActivityRepo, logger)
+
+	// --- Nav-dispatch (MYR-176) ---
+	// Subscribes to the ride.accepted seam (published by the owner-accept
+	// handler) and pushes the rider's pickup into the vehicle's Tesla
+	// navigation via the command Executor. Gated by DISPATCH_ENABLED.
+	//
+	// Started AFTER the Live Activity notifier because the reservation sweeper
+	// it starts needs it: a reservation that runs past its lateness ceiling is
+	// recorded as a dispatch failure and leaves the ride row at `accepted`, so
+	// that ending is invisible on the event bus and has to be handed to the
+	// Activity directly (MYR-172).
+	if err := setupNavDispatcher(ctx, cfg, bus, activityNotifier, vehicleRepo, accountRepo, rideRepo, shareRepo, logger); err != nil {
+		return fmt.Errorf("setting up nav dispatcher: %w", err)
+	}
 
 	// --- HTTP server + route registration ---
 	srv := server.New(cfg.Server(), logger, db, reg, cfg.TeslaPublicKey())
@@ -428,8 +460,13 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 		accountRepo:   accountRepo,
 		pushRepo:      pushRepo,
 		pushPrefsRepo: pushPrefsRepo,
-		shareRepo:     shareRepo,
-		inviteLinks:   gates.inviteLinks,
+		// MYR-172: backs the §7.21 Live Activity token endpoints.
+		liveActivityRepo: liveActivityRepo,
+		// The same notifier the bus subscription and the ticker share; the
+		// teardown endpoint uses it to end Activities before deleting rides.
+		activityNotifier: activityNotifier,
+		shareRepo:        shareRepo,
+		inviteLinks:      gates.inviteLinks,
 		// The authenticator owns the access-set cache the sharing handlers
 		// bust on redeem and revoke.
 		accessInvalidator: accessInvalidator,

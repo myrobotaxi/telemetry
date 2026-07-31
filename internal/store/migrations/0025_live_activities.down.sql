@@ -1,0 +1,37 @@
+-- 0025_live_activities.down.sql
+--
+-- Reverts MYR-172: drops the Go-owned go_live_activities registry (the unique
+-- constraint and both indexes drop with it, and the foreign key onto
+-- go_ride_requests goes with the table rather than being detached from it —
+-- nothing on the ride side is touched).
+--
+-- WHAT REVERTING COSTS, and why it is mild compared with 0024's rollback.
+--
+-- Every registered ActivityKit update token is discarded, so every Live
+-- Activity currently on a rider's lock screen stops receiving remote updates
+-- the moment this runs. Those Activities do NOT disappear — ActivityKit keeps
+-- rendering the last content-state it was given — so the visible failure is a
+-- lock screen frozen at whatever the ride looked like when the table went away.
+--
+-- That is exactly the case the MYR-194 staleness policy was designed for: the
+-- content-state carries a stale-date roughly three minutes past each update, so
+-- a frozen Activity starts rendering its own "as of X min ago" honesty rather
+-- than presenting an old ETA as current. The client also holds a local final-
+-- state fallback and ends its own Activity when the ride reaches a terminal
+-- state through the ordinary REST/WebSocket surfaces. So the degradation is
+-- self-limiting and self-describing, and no rider is shown a confident lie.
+--
+-- Nothing is unrecoverable. The tokens are per-Activity and short-lived by
+-- construction — they are worthless within the hour anyway — and the client
+-- re-registers on the next ride it starts an Activity for. There is no owner
+-- decision, no authorization state and no user-authored content in this table,
+-- which is what separates this rollback from 0024's.
+--
+-- PREFER ROLLING THE APPLICATION BACK AND LEAVING THE TABLE IN PLACE, as ever:
+-- a pre-MYR-172 binary neither reads nor writes it, so the table is inert, and
+-- rolling forward again resumes updating the Activities that are still alive.
+--
+-- No data owned by the sibling app's schema is touched, and go_ride_requests is
+-- left exactly as migration 0002 and its successors built it.
+
+DROP TABLE IF EXISTS go_live_activities;

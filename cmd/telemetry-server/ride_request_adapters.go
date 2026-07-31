@@ -177,6 +177,7 @@ func fromStoreRideRequest(rec store.RideRequestRecord) telemetry.RideRequestData
 		UpdatedAt:             rec.UpdatedAt,
 		DispatchStatus:        dispatchStatus,
 		DispatchedAt:          rec.DispatchedAt,
+		DispatchError:         rec.DispatchError,
 	}
 }
 

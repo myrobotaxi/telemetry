@@ -40,7 +40,7 @@ func TestHandleHealthz(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequestWithContext(context.Background(),tt.method, "/healthz", nil)
+			req := httptest.NewRequestWithContext(context.Background(), tt.method, "/healthz", nil)
 			rec := httptest.NewRecorder()
 
 			handleHealthz(rec, req)
@@ -101,7 +101,7 @@ func TestHandleReadyz(t *testing.T) {
 			checker := &mockChecker{err: tt.pingErr}
 			handler := handleReadyz(checker, testLogger())
 
-			req := httptest.NewRequestWithContext(context.Background(),http.MethodGet, "/readyz", nil)
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/readyz", nil)
 			rec := httptest.NewRecorder()
 
 			handler(rec, req)

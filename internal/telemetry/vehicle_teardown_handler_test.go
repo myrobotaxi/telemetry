@@ -376,3 +376,119 @@ func TestVehicleTeardownHandler_MethodAndAuth(t *testing.T) {
 		}
 	})
 }
+
+// --- MYR-172: Live Activities are ended BEFORE the rides are deleted --------
+
+// fakeActivityEnder records the teardown's end-push call and its position in
+// the sequence.
+type fakeActivityEnder struct {
+	called       bool
+	gotVehicleID string
+	order        *int
+	seq          int
+}
+
+func (f *fakeActivityEnder) EndForVehicleTeardown(_ context.Context, vehicleID string) {
+	f.called = true
+	f.gotVehicleID = vehicleID
+	if f.order != nil {
+		*f.order++
+		f.seq = *f.order
+	}
+}
+
+// TestVehicleTeardownEndsLiveActivitiesBeforeDeleting is the MYR-172 review fix,
+// and the ORDER is the whole assertion.
+//
+// The teardown runs `DELETE FROM go_ride_requests WHERE vehicle_id` and
+// migration 0025's FK cascades the Activity registrations away with it. That
+// delete publishes no event, so nothing downstream ever learns of it, and
+// afterwards there is no token left to push to. End the Activities after the
+// delete and there is nothing to end; skip it entirely and every rider with an
+// Activity on one of this car's rides keeps "your car is on its way" on their
+// lock screen for hours.
+func TestVehicleTeardownEndsLiveActivitiesBeforeDeleting(t *testing.T) {
+	var order int
+	ender := &fakeActivityEnder{order: &order}
+	writer := &fakeTeardownWriter{result: VehicleTeardownResult{Removed: true}, order: &order}
+
+	h := NewVehicleTeardownHandler(
+		&stubTokenValidator{userID: teardownUserID},
+		&stubVehicleSnapshotReader{row: ownedTeardownRow()},
+		validResolver(),
+		nil,
+		writer,
+		VehicleTeardownConfig{RevokeClientID: teardownClientID},
+		discardLogger(),
+		WithVehicleTeardownLiveActivities(ender),
+	)
+
+	if rec := doTeardown(t, h, http.MethodDelete, true); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	if !ender.called {
+		t.Fatal("the teardown deleted the rides without ending their Live Activities")
+	}
+	if ender.gotVehicleID != teardownVehicleID {
+		t.Errorf("ended activities for vehicle %q, want %q", ender.gotVehicleID, teardownVehicleID)
+	}
+	if !writer.called {
+		t.Fatal("the local teardown did not run")
+	}
+	if ender.seq >= writer.seq {
+		t.Errorf("end-push ran at step %d and the delete at step %d;"+
+			" the push MUST come first or there is nothing left to push to",
+			ender.seq, writer.seq)
+	}
+}
+
+// TestVehicleTeardownSucceedsWithNoActivityEnderWired keeps the step optional
+// in the same way every other best-effort step here is: a deployment with no
+// APNs key, and every test harness that does not wire push, must still tear a
+// car down.
+func TestVehicleTeardownSucceedsWithNoActivityEnderWired(t *testing.T) {
+	writer := &fakeTeardownWriter{result: VehicleTeardownResult{Removed: true}}
+	h := newTeardownHandler(
+		&stubVehicleSnapshotReader{row: ownedTeardownRow()},
+		validResolver(),
+		nil,
+		writer,
+	)
+
+	if rec := doTeardown(t, h, http.MethodDelete, true); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d with no activity ender wired, want 200", rec.Code)
+	}
+	if !writer.called {
+		t.Error("the local teardown was skipped")
+	}
+}
+
+// TestVehicleTeardownDoesNotEndActivitiesForAnUnownedCar — the end-push runs
+// after the ownership check, so a caller who does not own the car cannot use
+// this endpoint to kill somebody else's riders' lock screens.
+func TestVehicleTeardownDoesNotEndActivitiesForAnUnownedCar(t *testing.T) {
+	ender := &fakeActivityEnder{}
+	writer := &fakeTeardownWriter{result: VehicleTeardownResult{Removed: true}}
+
+	row := ownedTeardownRow()
+	row.UserID = "somebody-else"
+
+	h := NewVehicleTeardownHandler(
+		&stubTokenValidator{userID: teardownUserID},
+		&stubVehicleSnapshotReader{row: row},
+		validResolver(),
+		nil,
+		writer,
+		VehicleTeardownConfig{RevokeClientID: teardownClientID},
+		discardLogger(),
+		WithVehicleTeardownLiveActivities(ender),
+	)
+
+	if rec := doTeardown(t, h, http.MethodDelete, true); rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d for an unowned car, want 403", rec.Code)
+	}
+	if ender.called {
+		t.Error("Live Activities were ended for a car the caller does not own")
+	}
+}

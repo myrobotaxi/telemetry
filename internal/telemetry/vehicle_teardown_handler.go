@@ -55,8 +55,13 @@ type VehicleTeardownHandler struct {
 	// which case the tokens are simply deleted without a revoke call, exactly
 	// as before MYR-366. Set via WithTeslaGrantRevocation rather than a
 	// constructor parameter so the existing eight call sites are untouched.
-	grant  teslaLinkRevoker
-	logger *slog.Logger
+	grant teslaLinkRevoker
+	// activities ends the riders' Live Activities on this car's rides before
+	// the teardown deletes them (MYR-172). Optional — nil in tests and in a
+	// deployment with no APNs key — and best-effort, like every other
+	// Tesla-side or push-side step here.
+	activities liveActivityEnder
+	logger     *slog.Logger
 }
 
 // VehicleTeardownConfig carries the non-dependency settings.
@@ -144,6 +149,13 @@ func (h *VehicleTeardownHandler) handle(w http.ResponseWriter, r *http.Request) 
 	// teardown DELETEs the "Account" row that holds the refresh token this call
 	// presents (MYR-366).
 	grantRevoked := h.revokeTeslaGrant(ctx, userID, vehicleID)
+
+	// Best-effort end of the riders' Live Activities on this car's rides.
+	// BEFORE the teardown, and that ordering is the whole point: the teardown
+	// deletes those rides and the FK cascade takes the Activity registrations
+	// with them, silently and with no event published. Afterwards there is
+	// nothing left to push to and no one left to tell (MYR-172).
+	h.endLiveActivities(ctx, vehicleID)
 
 	// Authoritative local teardown (ownership re-enforced at the SQL layer).
 	result, err := h.teardown.RemoveVehicle(ctx, userID, vehicleID)
@@ -255,6 +267,17 @@ func (h *VehicleTeardownHandler) revokeTeslaGrant(ctx context.Context, userID, v
 		return false
 	}
 	return h.grant.RevokeIfLastVehicle(ctx, userID, vehicleID)
+}
+
+// endLiveActivities best-effort ends the Live Activities on this vehicle's
+// rides. No return value and no error path: the teardown is authoritative and
+// must complete whether or not Apple was reachable, exactly like the
+// stream-config delete and the grant revocation above it.
+func (h *VehicleTeardownHandler) endLiveActivities(ctx context.Context, vehicleID string) {
+	if h.activities == nil {
+		return
+	}
+	h.activities.EndForVehicleTeardown(ctx, vehicleID)
 }
 
 // buildResponse assembles the honest post-teardown body.

@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://myrobotaxi.com/schemas/live-activity.schema.json",
+  "title": "LiveActivityRegistrationResponse",
+  "description": "200 response body for POST /api/ride-requests/{id}/activity-token — the rider's iOS app handing the server the ActivityKit push token for the Live Activity it just started (MYR-172, rest-api.md §7.21, FR-5.1). The response deliberately carries NO token: the value is P1 and the caller already knows what it sent, so echoing it would only put it in every client log and proxy trace. RIDER-ONLY: the vehicle owner is a party to the ride and may read it, but v1 starts no owner-side Activity and the endpoint answers 403 to an owner. A caller with no relation to the ride receives 404, never 403, so the endpoint is not an oracle for ride ids.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["registered", "sandbox"],
+  "properties": {
+    "registered": {
+      "type": "boolean",
+      "description": "Always true on a 200. The registration is an UPSERT keyed on (ride, rider), so a first registration and a mid-ride token rotation are indistinguishable here and both report true. A failure is an error envelope, never `registered: false`.",
+      "x-classification": "P0",
+      "examples": [true]
+    },
+    "sandbox": {
+      "type": "boolean",
+      "description": "Echoes the APNs environment the caller declared, so a client can confirm the server agrees about which gateway its token belongs to. A token minted by a development or TestFlight build is only valid against the APNs sandbox host, and pushing to the wrong one is rejected as BadDeviceToken.",
+      "x-classification": "P0",
+      "examples": [true]
+    }
+  },
+  "$defs": {
+    "RegisterLiveActivityRequest": {
+      "title": "RegisterLiveActivityRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["activityToken"],
+      "description": "Request body for POST /api/ride-requests/{id}/activity-token (MYR-172 §7.21). Authenticated: the registering rider is the JWT subject and is never client-supplied. IDEMPOTENT and UPSERTING — one Live Activity per (ride, rider), so re-posting REPLACES the stored token rather than accumulating rows. That is not an optimisation: ActivityKit ROTATES the push token during the life of a single Activity and expects the server to switch to the new one, so a rotation is an ordinary re-registration. Re-registering after an end also clears the end tombstone, because the client is telling us it has a live Activity again. Posting against a ride that has already reached a terminal state is 409 conflict — that Activity will never be pushed to, and the 409 is the signal to end it locally.",
+      "properties": {
+        "activityToken": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "The ActivityKit push token for this Activity, as returned by `Activity.pushToken` on the device. P1 — a capability: whoever holds it, together with the team's APNs signing key, can write to that phone's lock screen. NEVER log it in full (only an 8-character prefix), never echo it in a response, and never place it in an error message. The maxLength is a generous sanity bound rather than a format assertion: the token is 64 hex characters today, but rejecting a valid future shape would silently break Live Activities for every rider on that iOS release.",
+          "x-classification": "P1",
+          "examples": ["8a1f4c2e9b7d0356a1f4c2e9b7d0356a1f4c2e9b7d0356a1f4c2e9b7d0356a1f"]
+        },
+        "sandbox": {
+          "type": "boolean",
+          "description": "Whether the token was minted by a development or TestFlight build, selecting the APNs sandbox gateway. OPTIONAL on the wire and defaults to false (production). Carried per-Activity rather than read from the device registry because a rider who declined the notification permission still gets a Live Activity — starting one requires no prompt — and so may have no device row at all.",
+          "x-classification": "P0",
+          "examples": [true]
+        }
+      }
+    },
+    "EndLiveActivityResponse": {
+      "title": "EndLiveActivityResponse",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ended"],
+      "description": "200 response body for DELETE /api/ride-requests/{id}/activity-token — the rider's app reporting that the Live Activity has ended on the phone, whether the rider dismissed it or the app ended it from its own final-state fallback (MYR-172 §7.21). IDEMPOTENT: ending an already-ended Activity is a 200 reporting false, not an error, because the client's end and the server's terminal-state push race by design and both are correct.",
+      "properties": {
+        "ended": {
+          "type": "boolean",
+          "description": "True when a live registration was actually closed by this call; false when there was nothing live to close — either it had already ended or it was never registered. The two are deliberately indistinguishable, matching the §7.17 unregister response.",
+          "x-classification": "P0",
+          "examples": [true]
+        }
+      }
+    },
+    "LiveActivityEvent": {
+      "type": "string",
+      "enum": ["update", "end"],
+      "description": "The ActivityKit `aps.event` verb on a remote update. `update` replaces the Activity's content-state in place; `end` delivers a final content-state and schedules dismissal. Append-only.",
+      "x-classification": "P0"
+    },
+    "LiveActivityRideStatus": {
+      "type": "string",
+      "enum": [
+        "requested",
+        "accepted",
+        "declined",
+        "enroute",
+        "arrived",
+        "completed",
+        "cancelled",
+        "reservation_expired"
+      ],
+      "description": "The ride state a Live Activity is displaying. The first seven mirror RideRequestStatus (ride-request.schema.json) exactly. `reservation_expired` is the one member that is NOT a ride status: the reservation sweeper gives up on a scheduled ride that ran past its lateness ceiling by recording a dispatch failure and leaving the ride row at `accepted`, so without a distinct value here the rider's lock screen would sit on 'your car is on its way' forever. Append-only; a client MUST tolerate an unrecognised member rather than failing to decode.",
+      "x-classification": "P0"
+    },
+    "LiveActivityContentState": {
+      "title": "LiveActivityContentState",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "status", "vehicleName", "destination"],
+      "description": "The payload delivered as `aps.content-state` on an ActivityKit remote update, and the exact shape the iOS Activity's Swift ContentState decodes (MYR-172, decisions in MYR-194). Deliberately four fields plus an optional ETA: Apple caps the whole push at 4KB and throttles high-frequency Activity updates by budget, so the bar for inclusion is 'the rider would misread the screen without it'. NOT a REST response — it never appears on any endpoint, and it reaches the device only over APNs, addressed by a token that identifies exactly one Activity on exactly one ride for exactly one rider.",
+      "properties": {
+        "v": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Content-state schema version, currently 1. Carried explicitly because the Swift ContentState is compiled into an app a rider may not update for months, so the wire shape freezes the moment a build ships. When a field's MEANING changes (as opposed to a new optional field being added, which Codable already tolerates) the server can keep sending v1 to installed clients while v2 goes to new ones — the alternative being a lock screen full of wrong numbers on every phone that has not updated.",
+          "x-classification": "P0",
+          "examples": [1]
+        },
+        "status": {
+          "$ref": "#/$defs/LiveActivityRideStatus",
+          "description": "The ride's current state. The server sends the enum and never prose: all copy is the client's, so wording can change in an app update without a server deploy."
+        },
+        "eta": {
+          "type": "integer",
+          "x-unit": "unix-seconds",
+          "description": "The car's arrival time as an ABSOLUTE unix timestamp in seconds. OMITTED ENTIRELY when unknown — never null, never zero, never a guess. Absolute rather than a duration is the central decision: a duration decays silently on a screen the server cannot repaint ('4 min' stays '4 min' for an hour), whereas an instant stays true however late it is read, and the phone counts down on its own between the 60–90s pushes. Sourced from the CAR'S OWN carried navigation ETA (Tesla `minutesToArrival`, whole minutes, persisted verbatim), converted to an instant at send time; there is no server-side route solver, so a car with no active nav route yields no key at all rather than an invented number (MYR-194 staleness policy).",
+          "x-classification": "P0",
+          "examples": [1785535200]
+        },
+        "vehicleName": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "The owner-chosen vehicle nickname, e.g. 'Blue Whale'. Empty string when the car has no name set, in which case the client renders its own generic fallback rather than a blank. Same tier and same reasoning as the nickname already carried in ride-lifecycle alert copy.",
+          "x-classification": "P0",
+          "examples": ["Blue Whale"]
+        },
+        "destination": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "The dropoff's short label — the name the RIDER chose for the place when booking, e.g. 'Home'. P1, and the one field on this surface that the ride-lifecycle ALERT copy policy (internal/push/copy.go) does not permit on a lock screen. It is carried here deliberately and narrowly: a Live Activity is the rider's own ride on the rider's own device, addressed by a token scoped to that one Activity, and a ride card that cannot say where the car is taking you is not the feature. It is never sent to an owner's Activity and never appears in an alert body. See data-classification.md §1.18.",
+          "x-classification": "P1",
+          "examples": ["Home"]
+        }
+      }
+    }
+  }
+}

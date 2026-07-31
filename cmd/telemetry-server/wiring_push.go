@@ -25,9 +25,38 @@ import (
 // service is in between this PR shipping and the Fly secrets being set, so it
 // must never block startup — an unreachable phone is not a reason to refuse to
 // run a telemetry server.
+// buildAPNsClient constructs the shared APNs client, or returns nil for the
+// keyless mode.
+//
+// ONE client for the whole process, handed to both the alert notifier and the
+// Live Activity notifier (MYR-172). Not an economy: the provider JWT is cached
+// per client for 40 minutes and Apple throttles re-minting the same key more
+// often than every 20, so two clients over one signing key is a way to earn
+// 403 ExpiredProviderToken under load for no benefit at all.
+func buildAPNsClient(cfg *config.Config, log *slog.Logger) (*push.Client, error) {
+	pushCfg := cfg.Push()
+	if !pushCfg.Configured() {
+		log.Warn("push notifications not configured; sends will be skipped",
+			slog.Bool("has_key", pushCfg.KeyP8PEM != ""),
+			slog.Bool("has_key_id", pushCfg.KeyID != ""),
+		)
+		return nil, nil //nolint:nilnil // the keyless mode is a supported state, not an error
+	}
+
+	client, err := push.NewClient(pushCfg.KeyP8PEM, pushCfg.KeyID, pushCfg.TeamID, pushCfg.Topic, log)
+	if err != nil {
+		// A key that is PRESENT but unusable is a real config error: the
+		// operator believes push is on. Fail fast rather than silently
+		// degrading to the keyless path.
+		return nil, fmt.Errorf("push: build apns client: %w", err)
+	}
+	return client, nil
+}
+
 func setupPushNotifier(
 	cfg *config.Config,
 	bus events.Bus,
+	client *push.Client,
 	pushRepo *store.PushDeviceRepo,
 	prefsRepo *store.PushPrefsRepo,
 	vehicleNames *store.VehicleNameRepo,
@@ -36,21 +65,12 @@ func setupPushNotifier(
 	pushCfg := cfg.Push()
 	log := logger.With(slog.String("component", "push"))
 
+	// A typed nil *push.Client is NOT a nil push.Sender interface, and the
+	// notifier's keyless path keys off the interface being nil. Convert
+	// explicitly rather than assigning through.
 	var sender push.Sender
-	if pushCfg.Configured() {
-		client, err := push.NewClient(pushCfg.KeyP8PEM, pushCfg.KeyID, pushCfg.TeamID, pushCfg.Topic, log)
-		if err != nil {
-			// A key that is PRESENT but unusable is a real config error: the
-			// operator believes push is on. Fail fast rather than silently
-			// degrading to the keyless path.
-			return nil, fmt.Errorf("push: build apns client: %w", err)
-		}
+	if client != nil {
 		sender = client
-	} else {
-		log.Warn("push notifications not configured; sends will be skipped",
-			slog.Bool("has_key", pushCfg.KeyP8PEM != ""),
-			slog.Bool("has_key_id", pushCfg.KeyID != ""),
-		)
 	}
 
 	notifier := push.NewNotifier(

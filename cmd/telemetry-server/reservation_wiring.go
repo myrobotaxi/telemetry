@@ -57,6 +57,7 @@ func startReservationSweeper(
 	ctx context.Context,
 	cfg *config.Config,
 	bus events.Bus,
+	activities dispatch.RideActivityEnder,
 	dispatcher *dispatch.Dispatcher,
 	rideRepo *store.RideRequestRepo,
 	vehicleRepo *store.VehicleRepo,
@@ -76,7 +77,7 @@ func startReservationSweeper(
 			MaxConcurrent: reservationMaxConcurrent,
 		},
 		logger.With(slog.String("component", "reservation-sweeper")),
-	)
+	).WithActivityEnder(activities)
 	go sweeper.Run(ctx)
 }
 
