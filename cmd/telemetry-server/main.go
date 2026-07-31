@@ -110,15 +110,21 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 		slog.Int("metrics_port", cfg.Server().MetricsPort),
 	)
 
-	// --- Debug-fields gate ---
+	// --- Startup gates (debug-fields + invite-link signing key) ---
 	// Either --dev or a non-empty DEBUG_FIELDS_TOKEN turns on the
 	// RawVehicleTelemetryEvent pipeline and mounts /api/debug/fields.
 	// In non-dev mode the token must be at least 32 chars so `ops fields
 	// watch` can stream real-Tesla data against production behind a
 	// real secret.
-	debugGate, err := resolveDebugFieldsGate(*devMode, os.Getenv("DEBUG_FIELDS_TOKEN"))
+	//
+	// The MYR-368 invite-link signing key is resolved in the same call and
+	// FAILS FAST outside --dev: a keyless boot would silently stop emitting
+	// `shareUrl` on every invite, which is invisible from inside the running
+	// system. Both run before any listener or database connection, so a
+	// misconfigured deploy costs nothing to refuse.
+	gates, err := resolveStartupGates(*devMode, logger)
 	if err != nil {
-		return fmt.Errorf("invalid debug-fields configuration: %w", err)
+		return err
 	}
 
 	// --- Prometheus registry ---
@@ -187,7 +193,7 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 			// whenever the debug-fields gate is open (dev mode OR
 			// DEBUG_FIELDS_TOKEN set) so operators can tail real-Tesla
 			// frames against production without extra deploys.
-			PublishRawFields: debugGate.Enabled,
+			PublishRawFields: gates.debugFields.Enabled,
 		},
 	)
 
@@ -423,6 +429,7 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 		pushRepo:      pushRepo,
 		pushPrefsRepo: pushPrefsRepo,
 		shareRepo:     shareRepo,
+		inviteLinks:   gates.inviteLinks,
 		// The authenticator owns the access-set cache the sharing handlers
 		// bust on redeem and revoke.
 		accessInvalidator: accessInvalidator,
@@ -433,7 +440,7 @@ func run() error { //nolint:funlen,cyclop // composition root — sequential dep
 		encryptor:         encryptor,
 		auditEmitter:      auditEmitter,
 		auditMetrics:      auditMetrics,
-		debugGate:         debugGate,
+		debugGate:         gates.debugFields,
 		originPatterns:    originPatterns,
 		serviceStatus:     serviceStatusMonitor,
 		logger:            logger,

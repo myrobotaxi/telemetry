@@ -197,6 +197,11 @@ type httpRouteDeps struct {
 	pushPrefsRepo *store.PushPrefsRepo
 	// shareRepo backs the MYR-184 vehicle-sharing endpoints.
 	shareRepo *store.VehicleShareRepo
+	// inviteLinks signs the MYR-368 `shareUrl` on pending invite rows. Never
+	// nil in practice — resolveInviteLinkSigner refuses to boot without a
+	// key outside --dev — but the handler tolerates nil by omitting the
+	// field, so a test may leave it unset.
+	inviteLinks *telemetry.InviteLinkSigner
 	// accessInvalidator busts a user's cached vehicle access set when a
 	// share is redeemed or revoked (MYR-184). Satisfied by the
 	// authenticator; separate from it so the sharing handlers depend on the
