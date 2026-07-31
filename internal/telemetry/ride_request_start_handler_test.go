@@ -62,6 +62,26 @@ func TestRideRequestHandler_Start(t *testing.T) {
 			wantStatus: http.StatusConflict, wantErrCode: wserrors.ErrCodeConflict,
 		},
 		{
+			// MYR-376: start gets NO new gate — it does not need one. A dormant
+			// reservation can never reach `arrived`, because the pickup that
+			// would put it there is now refused, so the existing from-status
+			// guard (`arrived` only) already makes it unstartable. This case
+			// exists so that stays true: if the pickup gate ever regressed and
+			// let a dormant reservation through, the ride would arrive here
+			// startable and this assertion is the second line of defence.
+			name: "reject start of a DORMANT reservation (still accepted, sweeper never dispatched)", caller: rideUserID,
+			rec:        reservationRide(rideUserID, rideStatusAccepted, nil),
+			wantStatus: http.StatusConflict, wantErrCode: wserrors.ErrCodeConflict,
+		},
+		{
+			// The mirror: a DISPATCHED reservation is startable once the owner
+			// has confirmed pickup, exactly like an instant ride.
+			name: "dispatched reservation starts normally from arrived", caller: rideUserID,
+			rec:        reservationRide(rideUserID, rideStatusArrived, dispatchPtr("sent")),
+			wantStatus: http.StatusOK, wantStatusVal: rideStatusEnroute,
+			wantUpdate: true, wantStarted: 1, wantStatusEvt: true,
+		},
+		{
 			name: "reject from completed", caller: rideUserID,
 			rec:        fixtureRideData(rideUserID, rideStatusCompleted),
 			wantStatus: http.StatusConflict, wantErrCode: wserrors.ErrCodeConflict,

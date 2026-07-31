@@ -47,6 +47,10 @@ type fakeRideStore struct {
 	updatedState string
 	updatedFrom  []string
 	updateCalls  int
+	// dispatchGuardedCalls counts the writes that went through the MYR-376
+	// DORMANCY-guarded variant, so a test can pin that the pickup path uses it
+	// (and that nothing else does).
+	dispatchGuardedCalls int
 
 	riderPage RideRequestListPage
 	riderErr  error
@@ -158,6 +162,38 @@ func (f *fakeRideStore) UpdateStatusFrom(_ context.Context, id string, from []st
 	}
 	rec.Status = to
 	return rec, nil
+}
+
+// UpdateStatusFromDispatched models the MYR-376 dormancy-guarded write the way
+// the single UPDATE behaves: the reservation predicate is evaluated as part of
+// the SAME write as the allowed-from guard, against the CURRENT row — never as
+// a pre-check the caller could have raced past. A dormant reservation matches no
+// row and yields ErrRideReservationDormant; everything else defers to the plain
+// guard, so an instant ride is unaffected whatever its dispatch outcome.
+//
+// Dormancy here is the three-armed SQL predicate, verbatim: a reservation is
+// dormant only while it is BOTH undispatched AND not yet due. `scheduledFor` in
+// the past lifts it on its own (§7.8 manual proceed), exactly as
+// `scheduled_for <= NOW()` does in the store. The store's own docker suite is
+// what pins the SQL; this keeps the fake from disagreeing with it.
+func (f *fakeRideStore) UpdateStatusFromDispatched(ctx context.Context, id string, from []string, to string) (RideRequestData, error) {
+	f.dispatchGuardedCalls++
+	current := f.getRec
+	if f.updated.ID != "" {
+		current = f.updated
+	}
+	if f.updateErr == nil && current.ScheduledFor != nil &&
+		current.ScheduledFor.After(time.Now()) &&
+		(current.DispatchStatus == nil || *current.DispatchStatus != "sent") {
+		// Count the attempt exactly as the real write would: the refusal comes
+		// from the write, not from a check that skipped it.
+		f.updateCalls++
+		f.updatedID = id
+		f.updatedState = to
+		f.updatedFrom = from
+		return RideRequestData{}, fmt.Errorf("update ride request status: %w", ErrRideReservationDormant)
+	}
+	return f.UpdateStatusFrom(ctx, id, from, to)
 }
 
 func (f *fakeRideStore) ListByRiderPage(_ context.Context, riderID string, cursor RideRequestListCursor, limit int) (RideRequestListPage, error) {
