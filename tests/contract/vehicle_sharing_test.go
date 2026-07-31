@@ -155,7 +155,7 @@ func TestShareInviteSchema_ShareURL(t *testing.T) {
 	}
 
 	t.Run("a pending row WITH a shareUrl validates", func(t *testing.T) {
-		row := withShareURL("https://myrobotaxi.app/join/RBO246?k=1.1786064645.Zm9v&from=Alex&to=Mira")
+		row := withShareURL("https://myrobotaxi.app/join/RBO246?k=1.1785942245.Zm9v&from=Alex&to=Mira")
 		if err := schema.Validate(row); err != nil {
 			t.Fatalf("signed row rejected: %v", err)
 		}
@@ -187,7 +187,7 @@ func TestShareInviteSchema_ShareURL(t *testing.T) {
 	t.Run("a link with both names omitted validates", func(t *testing.T) {
 		// Both display names sanitize away independently, so the shortest
 		// legal link is code + k alone.
-		row := withShareURL("https://myrobotaxi.app/join/RBO246?k=1.1786064645.Zm9v")
+		row := withShareURL("https://myrobotaxi.app/join/RBO246?k=1.1785942245.Zm9v")
 		if err := schema.Validate(row); err != nil {
 			t.Fatalf("nameless link rejected: %v", err)
 		}

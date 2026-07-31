@@ -1151,7 +1151,7 @@ A single `ShareInvite`: **the row for the PATH vehicle**. Sibling rows are not r
   "permission": "live_history",
   "status": "pending",
   "code": "RBO246",
-  "shareUrl": "https://myrobotaxi.app/join/RBO246?k=1.1786064645.mHRTPwZlrUFqzQ9k1p8O_5xkzXQ9dHTh5rHhNaeJ0OQz3n0XmL4vJ8ptKQC1cO8bZ5MPKB6h0nlFmVLbUqEQAg&from=Alex&to=Mira",
+  "shareUrl": "https://myrobotaxi.app/join/RBO246?k=1.1785942245.mHRTPwZlrUFqzQ9k1p8O_5xkzXQ9dHTh5rHhNaeJ0OQz3n0XmL4vJ8ptKQC1cO8bZ5MPKB6h0nlFmVLbUqEQAg&from=Alex&to=Mira",
   "createdAt": "2026-07-29T15:04:05Z",
   "expiresAt": "2026-08-05T15:04:05Z"
 }
@@ -1194,7 +1194,7 @@ The owner's sharing screen for one vehicle: pending invites and accepted viewer 
       "permission": "live_history",
       "status": "pending",
       "code": "RBO246",
-      "shareUrl": "https://myrobotaxi.app/join/RBO246?k=1.1786064645.mHRTPwZlrUFqzQ9k1p8O_5xkzXQ9dHTh5rHhNaeJ0OQz3n0XmL4vJ8ptKQC1cO8bZ5MPKB6h0nlFmVLbUqEQAg&from=Alex&to=Mira",
+      "shareUrl": "https://myrobotaxi.app/join/RBO246?k=1.1785942245.mHRTPwZlrUFqzQ9k1p8O_5xkzXQ9dHTh5rHhNaeJ0OQz3n0XmL4vJ8ptKQC1cO8bZ5MPKB6h0nlFmVLbUqEQAg&from=Alex&to=Mira",
       "createdAt": "2026-07-29T15:04:05Z",
       "expiresAt": "2026-08-05T15:04:05Z"
     },
