@@ -100,14 +100,54 @@ func (c *Client) SendActivity(ctx context.Context, n ActivityNotification) error
 		pushType:    pushTypeLiveActivity,
 		topic:       activityTopic(c.topic),
 		priority:    n.priority(),
-		// Expire the push at the moment its content stops being trustworthy.
-		// A queued update that only reaches the phone after its stale-date
-		// would overwrite the Activity with a state ActivityKit is about to
-		// mark stale anyway — worse than not arriving, because it resets the
-		// staleness clock on information that has already expired.
-		expiration: strconv.FormatInt(n.StaleDate().Unix(), 10),
-		body:       body,
+		expiration:  strconv.FormatInt(activityExpiration(n).Unix(), 10),
+		body:        body,
 	})
+}
+
+// endPushRetention is how long APNs holds an undelivered `end` push for a phone
+// that is off or out of signal. A day is far longer than any ride and far
+// shorter than the ActivityKit ceiling; it exists to outlast a flat battery or
+// an overnight flight, not to be precise.
+const endPushRetention = 24 * time.Hour
+
+// activityExpiration is the apns-expiration instant for one update, and the two
+// shapes want OPPOSITE things from it.
+//
+// AN UPDATE EXPIRES AT ITS STALE-DATE. A queued ETA refresh that reaches the
+// phone after its content stopped being trustworthy is worse than one that
+// never arrives: it overwrites the Activity with a state ActivityKit was about
+// to mark stale anyway, resetting the staleness clock on expired information.
+// Late is worthless here, so we tell Apple to drop it.
+//
+// AN `end` MUST OUTLIVE THE PHONE BEING OFFLINE. It is the only push in this
+// system with no successor — the rows are tombstoned the moment it is sent, the
+// ticker will never look at them again, and nothing retries. Pinned to the
+// stale-date it would be discarded by APNs after ~3 minutes, and a rider whose
+// phone was in a tunnel when their ride was declined would be left with a lock
+// screen reading "your car is on its way" until ActivityKit's own ceiling
+// removed it hours later.
+//
+// It is NOT pinned to the dismissal-date, which is the tempting answer and the
+// wrong one. The dismissal-date is 30 SECONDS for the unhappy endings
+// (DismissPromptly) — pinning to it would make the most important push in the
+// feature the shortest-lived one, worse than the bug being fixed. And an end
+// that arrives after its dismissal-date is not wasted: a dismissal-date in the
+// past tells iOS to remove the Activity at once, which is exactly the outcome
+// wanted for a card that has been lying since the tunnel. So the floor is a
+// day, and a dismissal-date is only honoured when it is even later.
+//
+// Everything is computed off n.Timestamp, not the wall clock, so the header,
+// the `aps.timestamp` and the stale-date in the body all describe one instant.
+func activityExpiration(n ActivityNotification) time.Time {
+	if n.Event != ActivityEventEnd {
+		return n.StaleDate()
+	}
+	retainUntil := n.Timestamp.Add(endPushRetention)
+	if n.DismissalDate != nil && n.DismissalDate.After(retainUntil) {
+		return *n.DismissalDate
+	}
+	return retainUntil
 }
 
 // DismissAfter is how long a COMPLETED ride's Activity lingers before iOS

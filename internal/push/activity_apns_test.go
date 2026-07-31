@@ -252,6 +252,93 @@ func TestActivityEndCarriesDismissalDate(t *testing.T) {
 	}
 }
 
+// TestActivityExpirationPerShape is the MYR-172 review fix, and the assertion
+// is per-SHAPE on purpose: `update` and `end` want opposite things from
+// apns-expiration, and the original code gave both the stale-date.
+//
+// An update that arrives after its content stopped being trustworthy is worse
+// than one that never arrives, so it expires with the stale-date. An `end` is
+// the only push here with NO successor — the rows are tombstoned as it is sent
+// and nothing ever retries — so a three-minute expiration meant a phone in a
+// tunnel kept "your car is on its way" on the lock screen for hours after the
+// ride was declined. It now outlives a flat battery.
+func TestActivityExpirationPerShape(t *testing.T) {
+	promptly := fixedNow.Add(DismissPromptly)
+	linger := fixedNow.Add(DismissAfter)
+	distant := fixedNow.Add(72 * time.Hour)
+
+	tests := []struct {
+		name      string
+		event     ActivityEvent
+		dismissAt *time.Time
+		want      time.Time
+	}{
+		{
+			name:  "update expires at its stale-date",
+			event: ActivityEventUpdate,
+			want:  fixedNow.Add(StaleAfter),
+		},
+		{
+			// The regression guard. DismissPromptly is 30 SECONDS, so pinning
+			// the expiration to the dismissal-date would have made the most
+			// important push in the feature the shortest-lived one — worse
+			// than the bug being fixed.
+			name:      "declined end outlives its 30s dismissal-date",
+			event:     ActivityEventEnd,
+			dismissAt: &promptly,
+			want:      fixedNow.Add(endPushRetention),
+		},
+		{
+			name:      "completed end outlives its 15m dismissal-date",
+			event:     ActivityEventEnd,
+			dismissAt: &linger,
+			want:      fixedNow.Add(endPushRetention),
+		},
+		{
+			name:  "end with no dismissal-date still gets the full day",
+			event: ActivityEventEnd,
+			want:  fixedNow.Add(endPushRetention),
+		},
+		{
+			// The one case where the dismissal-date wins: it is genuinely
+			// later, so delivering past it really would be pointless.
+			name:      "a dismissal-date beyond the floor is honoured",
+			event:     ActivityEventEnd,
+			dismissAt: &distant,
+			want:      distant,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			n := testActivityNotification()
+			n.Event = tc.event
+			n.DismissalDate = tc.dismissAt
+
+			got := captureActivity(t, n).header.Get("Apns-Expiration")
+			if want := strconv.FormatInt(tc.want.Unix(), 10); got != want {
+				t.Errorf("Apns-Expiration = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestActivityEndExpirationOutlivesTheStaleDate states the invariant the table
+// above enforces case by case, so a future edit that changes every constant at
+// once still has to keep the property.
+func TestActivityEndExpirationOutlivesTheStaleDate(t *testing.T) {
+	n := testActivityNotification()
+	n.Event = ActivityEventEnd
+	dismissAt := fixedNow.Add(DismissPromptly)
+	n.DismissalDate = &dismissAt
+
+	if got := activityExpiration(n); !got.After(n.StaleDate()) {
+		t.Errorf("end expiration = %s, want later than the stale-date %s — an end push"+
+			" that expires with the content is one an offline phone never receives",
+			got, n.StaleDate())
+	}
+}
+
 // TestActivityTopicDerivation pins the suffix rather than trusting a literal
 // spread across the sender and its test.
 func TestActivityTopicDerivation(t *testing.T) {
