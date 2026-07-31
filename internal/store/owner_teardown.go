@@ -112,8 +112,12 @@ const queryTeardownDeleteVehicle = `
 DELETE FROM "Vehicle" WHERE "id" = $1 AND "userId" = $2`
 
 // queryTeardownDeleteAccount clears the owner's Tesla OAuth tokens on a
-// last-vehicle removal. Owner+provider scoped. This removes OUR access; it
-// does NOT revoke the grant at Tesla (owner-confirmed consent page — §1.2).
+// last-vehicle removal. Owner+provider scoped. This removes OUR access. The
+// GRANT at Tesla is revoked separately, by the caller, BEFORE this transaction
+// opens — telemetry.TeslaLinkRevoker (MYR-366), which needs the refresh token
+// this statement is about to destroy. That call is best-effort, so a failed
+// revocation still reaches this DELETE and the owner-confirmed consent page
+// (§1.2) remains the fallback.
 // #nosec G101 -- column/predicate SQL, not a credential (gosec greps the
 // literal 'tesla' + 'Account' and can misflag it).
 const queryTeardownDeleteAccount = `
@@ -298,8 +302,9 @@ func applyTeardownDeletes(ctx context.Context, tx pgx.Tx, d teardownDeletion) er
 
 // clearLastVehicleState deletes the owner's Tesla Account tokens and resets the
 // Settings link/pairing flags — the last-vehicle-only tail of a teardown. It
-// removes OUR access; it does NOT revoke the grant at Tesla (data-lifecycle
-// §1.2). Runs inside the teardown transaction.
+// removes OUR access; the grant itself is revoked before this transaction by
+// telemetry.TeslaLinkRevoker (MYR-366, data-lifecycle §3.1 step 2), best-effort.
+// Runs inside the teardown transaction.
 func clearLastVehicleState(ctx context.Context, tx pgx.Tx, userID string) error {
 	if _, err := tx.Exec(ctx, queryTeardownDeleteAccount, userID); err != nil {
 		return fmt.Errorf("store.RemoveVehicle(user=%s): delete account: %w", userID, err)

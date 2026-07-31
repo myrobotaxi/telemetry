@@ -33,6 +33,18 @@ type teslaTokenResolver interface {
 	Resolve(ctx context.Context, userID string) (TeslaToken, error)
 }
 
+// VehicleTeardownOption configures optional dependencies on
+// VehicleTeardownHandler.
+type VehicleTeardownOption func(*VehicleTeardownHandler)
+
+// WithTeslaGrantRevocation enables the MYR-366 active revocation of the Tesla
+// OAuth grant on a last-vehicle removal. Without it the handler behaves as it
+// did before MYR-366: the local teardown clears our stored tokens and the
+// owner-confirmed revokeUrl remains the only way to withdraw the grant.
+func WithTeslaGrantRevocation(revoker teslaLinkRevoker) VehicleTeardownOption {
+	return func(h *VehicleTeardownHandler) { h.grant = revoker }
+}
+
 // FleetConfigDeleter removes a vehicle's fleet-telemetry config at Tesla
 // (satisfied by *FleetAPIClient.DeleteTelemetryConfig). It is nil in tests/CI
 // and only wired when the tesla-http-proxy is configured at runtime, so no

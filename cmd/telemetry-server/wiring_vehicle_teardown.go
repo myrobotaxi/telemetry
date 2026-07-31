@@ -36,6 +36,15 @@ func setupVehicleTeardownEndpoint(deps httpRouteDeps) {
 
 	resolver := newTeslaTokenResolver(deps.cfg, deps.accountRepo, logger)
 
+	// MYR-366: active revocation of the Tesla grant on a last-vehicle removal.
+	// Wired ONLY when an OAuth client id is configured — with no client id the
+	// revoke call has nothing to identify itself with, and leaving it nil keeps
+	// tests/CI and creds-less deployments incapable of any outbound Tesla call.
+	var grantOpts []telemetry.VehicleTeardownOption
+	if revoker := newTeslaLinkRevoker(deps, logger); revoker != nil {
+		grantOpts = append(grantOpts, telemetry.WithTeslaGrantRevocation(revoker))
+	}
+
 	handler := telemetry.NewVehicleTeardownHandler(
 		deps.authenticator,
 		&vehicleSnapshotAdapter{repo: deps.vehicleRepo},
@@ -47,11 +56,38 @@ func setupVehicleTeardownEndpoint(deps httpRouteDeps) {
 			RevokeBackURL:  teslaUnlinkedDeepLink,
 		},
 		logger,
+		grantOpts...,
 	)
 
 	deps.srv.HandleFunc("DELETE /api/tesla/vehicles/{vehicleId}", handler.ServeHTTP)
 	logger.Info("vehicle teardown endpoint enabled (DELETE /api/tesla/vehicles/{vehicleId})",
 		slog.Bool("tesla_stream_config_delete", fleet != nil),
+		slog.Bool("tesla_grant_revocation", len(grantOpts) > 0),
+	)
+}
+
+// newTeslaLinkRevoker builds the MYR-366 Tesla grant revoker shared by the
+// per-vehicle teardown (last car only) and the account-deletion sequence
+// (whole account). Returns nil when no Tesla OAuth client id is configured, so
+// a deployment without Tesla credentials — and every unit test — makes no
+// outbound revoke call at all.
+//
+// It reads the STORED token through teslaTokenAdapter rather than the
+// refreshing TeslaTokenResolver: revocation needs the refresh token, and
+// resolving would mint a fresh grant from Tesla purely to destroy it.
+func newTeslaLinkRevoker(deps httpRouteDeps, logger *slog.Logger) *telemetry.TeslaLinkRevoker {
+	if deps.cfg.TeslaOAuth().ClientID == "" {
+		return nil
+	}
+	sub := logger.With(slog.String("subcomponent", "tesla-revoke"))
+	return telemetry.NewTeslaLinkRevoker(
+		&teslaTokenAdapter{repo: deps.accountRepo},
+		&ownedVehicleListerAdapter{repo: deps.vehicleRepo},
+		telemetry.NewTokenRevoker(telemetry.TeslaOAuthConfig{
+			ClientID:     deps.cfg.TeslaOAuth().ClientID,
+			ClientSecret: deps.cfg.TeslaOAuth().ClientSecret,
+		}, sub),
+		sub,
 	)
 }
 

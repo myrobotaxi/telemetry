@@ -67,6 +67,16 @@ type AccountIdentityOutcome struct {
 	AuditLogID    string
 }
 
+// AccountTeslaLinkRevoker actively revokes the caller's Tesla OAuth grant at
+// Tesla, BEFORE any later step deletes the stored tokens (MYR-366). Backed by
+// telemetry.TeslaLinkRevoker. The bool is "did Tesla accept it" — there is no
+// error, because no answer from Tesla may block a deletion. Nil is legal: the
+// deployment has no Tesla OAuth client configured, and the tokens are simply
+// deleted without a revoke call, exactly as before MYR-366.
+type AccountTeslaLinkRevoker interface {
+	RevokeTeslaLink(ctx context.Context, userID string) bool
+}
+
 // AccountSessionInvalidator drops the caches that would otherwise keep a
 // deleted user's still-unexpired access token working. Backed by
 // auth.JWTAuthenticator. Nil is legal — the caches expire on their own, this
@@ -82,6 +92,9 @@ type AccountSessionInvalidator interface {
 type AccountDeletionDeps struct {
 	// Vehicles lists the caller's owned cars (step 1).
 	Vehicles AccountOwnedVehicleLister
+	// TeslaLink revokes the caller's Tesla OAuth grant at Tesla before any
+	// step deletes the stored tokens (MYR-366). Nil skips the revoke.
+	TeslaLink AccountTeslaLinkRevoker
 	// Teardown is the MYR-258 per-vehicle teardown, reused verbatim (step 1).
 	Teardown VehicleTeardownWriter
 	// Rides cancels the caller's open rides as RIDER (step 3).
