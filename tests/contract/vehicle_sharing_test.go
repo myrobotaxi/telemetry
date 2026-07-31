@@ -123,3 +123,112 @@ func TestShareInviteSchema_StatusAndCodeRules(t *testing.T) {
 		}
 	})
 }
+
+// TestShareInviteSchema_ShareURL covers the MYR-368 signed join link. The
+// schema can only police the field's presence and type — the signature is
+// verified by unit tests in internal/telemetry and, in production, by the web
+// join shell. What matters here is that `shareUrl` is genuinely ADDITIVE
+// (0.21.0 → 0.22.0 is a minor bump): every 0.21.0-era payload must still
+// validate, and the new field must not have been made required.
+func TestShareInviteSchema_ShareURL(t *testing.T) {
+	root := repoRoot(t)
+	c := newCompiler(t, root)
+	schema := compileSchema(t, c, sharingSchemaID+"#/$defs/ShareInvite")
+
+	base := map[string]any{
+		"inviteId":   "csh0123456789abcdef0123456789abcd",
+		"vehicleId":  "clxyz1234567890abcdef",
+		"label":      "Mira Chen",
+		"permission": "live_history",
+		"status":     "pending",
+		"code":       "RBO246",
+		"createdAt":  "2026-07-29T15:04:05Z",
+		"expiresAt":  "2026-08-05T15:04:05Z",
+	}
+	withShareURL := func(v any) map[string]any {
+		row := map[string]any{}
+		for k, val := range base {
+			row[k] = val
+		}
+		row["shareUrl"] = v
+		return row
+	}
+
+	t.Run("a pending row WITH a shareUrl validates", func(t *testing.T) {
+		row := withShareURL("https://myrobotaxi.app/join/RBO246?k=1.1786064645.Zm9v&from=Alex&to=Mira")
+		if err := schema.Validate(row); err != nil {
+			t.Fatalf("signed row rejected: %v", err)
+		}
+	})
+
+	t.Run("a pending row WITHOUT a shareUrl still validates", func(t *testing.T) {
+		// The additive guarantee, and the keyless-server fallback: a
+		// consumer that finds `code` with no `shareUrl` shares the code.
+		if err := schema.Validate(base); err != nil {
+			t.Fatalf("unsigned row rejected — shareUrl was made required: %v", err)
+		}
+	})
+
+	t.Run("an accepted row carries neither code nor shareUrl", func(t *testing.T) {
+		row := map[string]any{
+			"inviteId":   base["inviteId"],
+			"vehicleId":  base["vehicleId"],
+			"label":      base["label"],
+			"permission": base["permission"],
+			"status":     "accepted",
+			"createdAt":  base["createdAt"],
+			"acceptedAt": "2026-07-30T09:12:44Z",
+		}
+		if err := schema.Validate(row); err != nil {
+			t.Fatalf("accepted row rejected: %v", err)
+		}
+	})
+
+	t.Run("a link with both names omitted validates", func(t *testing.T) {
+		// Both display names sanitize away independently, so the shortest
+		// legal link is code + k alone.
+		row := withShareURL("https://myrobotaxi.app/join/RBO246?k=1.1786064645.Zm9v")
+		if err := schema.Validate(row); err != nil {
+			t.Fatalf("nameless link rejected: %v", err)
+		}
+	})
+
+	t.Run("a non-string shareUrl is rejected", func(t *testing.T) {
+		for _, bad := range []any{42, true, map[string]any{"url": "x"}, []any{"x"}} {
+			if err := schema.Validate(withShareURL(bad)); err == nil {
+				t.Errorf("shareUrl %v (%T) was accepted; it is typed string/uri", bad, bad)
+			}
+		}
+	})
+
+	t.Run("shareUrl is classified P1 and typed as a uri", func(t *testing.T) {
+		// It embeds the code, so it is the same P1 bearer tier as `code`.
+		// An unclassified field on this object is a contract-guard
+		// failure, and the annotation is also what the TS/Swift codegen
+		// folds into the generated doc comment — losing it breaks no
+		// validation at all, which is why it needs its own assertion.
+		raw := loadRawSchema(t, root, "vehicle-sharing.schema.json")
+		defs, ok := raw["$defs"].(map[string]any)
+		if !ok {
+			t.Fatal("schema has no $defs")
+		}
+		invite, ok := defs["ShareInvite"].(map[string]any)
+		if !ok {
+			t.Fatal("$defs.ShareInvite missing")
+		}
+		props, ok := invite["properties"].(map[string]any)
+		if !ok {
+			t.Fatal("$defs.ShareInvite.properties missing")
+		}
+		prop, ok := props["shareUrl"].(map[string]any)
+		if !ok {
+			t.Fatal("property shareUrl missing")
+		}
+		if got := prop["x-classification"]; got != "P1" {
+			t.Errorf("x-classification = %v, want P1", got)
+		}
+		if got := prop["format"]; got != "uri" {
+			t.Errorf("format = %v, want uri", got)
+		}
+	})
+}
