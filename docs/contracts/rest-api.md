@@ -1082,12 +1082,14 @@ See §5.2.4. Owners and viewers see the full polyline; denying viewers would def
 ### 7.5 Vehicle sharing (invites + redeem)
 
 > **Anchored:** FR-5.1, FR-5.2, FR-5.3, FR-5.4.
-> **Schema:** [`schemas/vehicle-sharing.schema.json`](schemas/vehicle-sharing.schema.json) — `ShareInvite`, `SharePermission`, `CreateShareInviteRequest`, `RedeemShareInviteRequest`, `RedeemShareInviteResponse`, `ShareInviteListResponse` (contracts v0.19.0).
+> **Schema:** [`schemas/vehicle-sharing.schema.json`](schemas/vehicle-sharing.schema.json) — `ShareInvite`, `SharePermission`, `CreateShareInviteRequest`, `RedeemShareInviteRequest`, `RedeemShareInviteResponse`, `ShareInviteListResponse` (contracts v0.22.0 — `ShareInvite.shareUrl` added by MYR-368, §7.5.6).
 > **Persisted:** Go-owned `go_vehicle_shares` table (migration 0020 — [`data-classification.md`](data-classification.md) §1.15). No foreign keys to the sibling schema (CG-DL-9).
 
 Mounted on the **Go telemetry server** as of **MYR-184** (2026-07-29). This **SUPERSEDES §10 DV-23**, which had assigned invites to the now-deprecated Next.js app: `react-frontend` is retired, the email-keyed Prisma `Invite` table is retired **unused**, and sharing is Go-owned end to end. See the DV-23 row in §10 for the full supersession note.
 
 **Codes, not emails.** MyRoboTaxi has no email infrastructure and riders are Apple-native, so the owner sends a server-minted **6-character code** out-of-band through the iOS system share sheet. Nothing in this family accepts, stores, or resolves an email address. The pre-MYR-184 shape documented here — `email`, `senderId`, `sentDate`, `isOnline` — never shipped and is gone.
+
+**Links, not dictation (MYR-368).** Every pending row also carries `shareUrl`, a complete **signed** join URL that embeds the code. It is what the share sheet actually sends; the bare `code` remains on the wire as the fallback and as what the redeem endpoint consumes. The signature is verified **statically by the web join shell**, against a public key compiled into it — no database, no round trip, so a forged or tampered link is bounced before it can turn the join page into a code oracle. See **§7.5.6** for the full format, the canonical signed payload, key management, and rotation.
 
 **Five endpoints, two audiences.** Four are OWNER-facing and return the `ShareInvite` object; one is RIDER-facing and returns `RedeemShareInviteResponse`. `ShareInvite` is **never** delivered to an invited party: it carries the owner-typed `label` and, while pending, the live `code`.
 
@@ -1149,12 +1151,13 @@ A single `ShareInvite`: **the row for the PATH vehicle**. Sibling rows are not r
   "permission": "live_history",
   "status": "pending",
   "code": "RBO246",
+  "shareUrl": "https://myrobotaxi.app/join/RBO246?k=1.1785942245.mHRTPwZlrUFqzQ9k1p8O_5xkzXQ9dHTh5rHhNaeJ0OQz3n0XmL4vJ8ptKQC1cO8bZ5MPKB6h0nlFmVLbUqEQAg&from=Alex&to=Mira",
   "createdAt": "2026-07-29T15:04:05Z",
   "expiresAt": "2026-08-05T15:04:05Z"
 }
 ```
 
-`code` and `expiresAt` are present because the row is `pending`; `acceptedAt` is omitted for the same reason. The 7-day expiry is computed by the **database** (`NOW() + INTERVAL '7 days'`), the same clock the redeem predicate reads.
+`code`, `shareUrl` and `expiresAt` are present because the row is `pending`; `acceptedAt` is omitted for the same reason. The 7-day expiry is computed by the **database** (`NOW() + INTERVAL '7 days'`), the same clock the redeem predicate reads — and it is that exact value, in unix seconds, that `shareUrl` signs (§7.5.6).
 
 **All-or-nothing.** The whole create is one transaction and ownership of every requested vehicle is verified inside it. A set containing one car the caller does not own mints nothing at all — a partial grant would hand out a code that grants less than the owner believes.
 
@@ -1191,6 +1194,7 @@ The owner's sharing screen for one vehicle: pending invites and accepted viewer 
       "permission": "live_history",
       "status": "pending",
       "code": "RBO246",
+      "shareUrl": "https://myrobotaxi.app/join/RBO246?k=1.1785942245.mHRTPwZlrUFqzQ9k1p8O_5xkzXQ9dHTh5rHhNaeJ0OQz3n0XmL4vJ8ptKQC1cO8bZ5MPKB6h0nlFmVLbUqEQAg&from=Alex&to=Mira",
       "createdAt": "2026-07-29T15:04:05Z",
       "expiresAt": "2026-08-05T15:04:05Z"
     },
@@ -1211,7 +1215,7 @@ Three rules the response body encodes, all of them server-enforced:
 
 1. **The envelope key is `invites`, not `items`.** This surface is deliberately **unpaginated** — an owner's per-vehicle invite set is small and bounded, there is no cursor and no `hasMore` — and the distinct key keeps an SDK pagination helper from mistaking it for a page. Always an array, never `null`.
 2. **Revoked rows are NEVER serialized.** Revocation is a tombstone flip kept server-side for audit; the wire `status` enum has no `revoked` member, so a revoked row simply disappears from this list. Consumers never need to filter it.
-3. **`code` appears only on `pending` rows**, and `expiresAt` with it; `acceptedAt` appears only on `accepted` rows. Order is newest first (`created_at DESC`).
+3. **`code` appears only on `pending` rows**, and `shareUrl` and `expiresAt` with it; `acceptedAt` appears only on `accepted` rows. Order is newest first (`created_at DESC`). `shareUrl` is minted in the same branch and from the same two values as `code`, so a row that has one always has the other — an accepted row carrying a link would resurrect the credential the `code` rule just withheld.
 
 **Expiry is not a status.** An expired invite stays `pending` with an `expiresAt` in the past and simply stops redeeming. A client that wants an "Expired" affordance derives it by comparing that value to the current time.
 
@@ -1259,6 +1263,8 @@ Mints a **new** code and resets `expiresAt` to a full 7 days from now, invalidat
 ##### Response — 200 OK
 
 The updated `ShareInvite` **for the path row** — one row, the invite the caller named, even when the re-mint touched several. `inviteId` is unchanged (a client holding it keeps working) and `createdAt` is unchanged (the owner's "sent {ago}" line still refers to the original send). Sibling rows carry the same new `code` and `expiresAt`; the owner sees them on the next §7.5.2 listing of their vehicles.
+
+**The link is RE-SIGNED, not reissued.** `shareUrl` is derived from the code, the expiry, and the two display names, all three of which a resend refreshes — so the returned URL is entirely new and the previous one stops redeeming along with the code it embeds. There is no separate "link revocation": killing the code kills the link.
 
 ##### Response — error
 
@@ -1346,6 +1352,94 @@ On success the server busts the redeemer's cached access set, so the granted veh
 ##### Rate limiting
 
 The code space is only 36^6 (~2.2 billion), so this endpoint is rate-limited **per authenticated user** at 10 attempts per minute — every attempt counted, successes included, so an attacker cannot interleave a known-good code with guesses to stay under the cap. The counter is **in-process**, which is exact only because the app runs a single Fly machine (`fly.toml` declares one `[[vm]]` with no scale-out); a second machine would make the effective cap N × the limit, and this must move to a shared store **before** any scale-out, not after.
+
+#### 7.5.6 Signed invite links (`ShareInvite.shareUrl` — MYR-368)
+
+> **Anchored:** FR-5.1, FR-5.2, NFR-3.23.
+> **Added in contracts v0.22.0.** Additive and optional — a consumer that finds `code` with no `shareUrl` shares the bare code.
+
+##### Why the link is signed
+
+An owner shares a URL, not six dictated characters. That URL necessarily contains the code, which means the join page is now reachable by anyone who can type an address — and a join page that answers "is `RBO247` real?" is an **oracle** against a 36^6 space that the §7.5.5 rate limit only protects on the API side.
+
+So the shell answers nothing. Every link carries an Ed25519 signature that the **web join shell verifies statically**, against a public key **compiled into the shell**: no database, no API call, no server round trip. A link that is unsigned, forged, or edited is bounced by JavaScript that never learned whether the code exists.
+
+What the signature does **not** prove is that the invite is live. A link can verify perfectly and still be expired, cancelled, or already redeemed. Redemption remains the only authority: the shell hands the code to §7.5.5, which decides. The signature buys exactly one thing — the shell can discard obvious garbage without asking.
+
+##### Format
+
+```
+https://myrobotaxi.app/join/{code}?k={keyId}.{expUnix}.{sigB64url}&from={from}&to={to}
+```
+
+| Part | Value |
+|------|-------|
+| path segment | The 6-character `code`, verbatim. |
+| `k` — part 1 | **Key id**, one character. `1` today. |
+| `k` — part 2 | Expiry as **unix seconds** — the row's actual `expires_at`, the value the redeem predicate reads. |
+| `k` — part 3 | The 64-byte Ed25519 signature, **base64url, unpadded** (RFC 4648 §5). |
+| `from` | The **owner's** first name, sanitized (below). **Omitted entirely** when nothing survives sanitization. |
+| `to` | The **recipient's** first name — the first token of this row's owner-typed `label` — sanitized. Omitted on the same rule. |
+
+Parameter order is `k`, `from`, `to`. Nothing in a well-formed link needs percent-encoding: base64url and the sanitized name alphabet are both URL-safe.
+
+##### Canonical signed payload
+
+The signature covers this exact ASCII string:
+
+```
+join:{code}:{expUnix}:{from}:{to}
+```
+
+**Five fields, always four colons.** `{from}` and `{to}` are the **sanitized** values, and an omitted parameter is signed as the **empty string** — so "no name" and "a name that sanitized to nothing" are the same thing, and a verifier reconstructs the payload from the query exactly as it finds it. No field can contain a `:`: the code alphabet is `[A-Z0-9]`, the expiry is decimal digits, and the names are ASCII letters. The `join:` prefix **domain-separates** this signature, so nothing signed by this key can ever be replayed as a signature over something else.
+
+##### Name sanitization
+
+Applied server-side to both names; a verifier does **not** re-apply it, it simply reads the query values as given.
+
+1. Take the **first whitespace-separated token** (`strings.Fields`, so any run of Unicode whitespace collapses). This is the P1 **first-names-only** policy that governs `RideRequest.requesterName` and the push payloads — a link arriving by text message must not carry somebody's surname.
+2. Strip to **ASCII letters** `[A-Za-z]`. One rule removes every injection question a more permissive filter would have to answer case by case: no markup, no separators, no percent-encoding, no bidi or zero-width tricks. The cost is honest — accented and non-Latin names lose characters or vanish.
+3. **Cap at 20 characters**, a bound on a value that originates as owner-typed input.
+4. If nothing survives, **omit the parameter** and sign the empty string. Consumers MUST render generic copy for an absent name — never a placeholder built from the code.
+
+Worked examples: `"Mira Chen"` → `Mira`; `"  Ada   Lovelace "` → `Ada`; `"O'Brien-Smith"` → `OBrienSmith`; `"José"` → `Jos`; `"🙂"` → omitted; `"123"` → omitted.
+
+**Tampering with a name breaks the signature**, which is the reason the names are in the payload at all: without it, somebody holding a genuine link could rewrite `from` to any name the recipient would trust.
+
+##### Key management
+
+The private half is an Ed25519 **seed**, 32 bytes, base64, in the Fly secret **`INVITE_LINK_SIGNING_KEY`**. It exists nowhere else.
+
+```bash
+# 1. Generate the seed
+openssl rand -base64 32
+
+# 2. Derive the PUBLIC key to paste into the web join shell's constant
+INVITE_LINK_SIGNING_KEY='<seed>' go run ./cmd/ops invite-link public-key
+
+# 3. Set the secret and deploy
+fly secrets set INVITE_LINK_SIGNING_KEY='<seed>'
+```
+
+`ops invite-link public-key` needs no database, no network, and no deployed process — it is arithmetic on the seed, so it can be run before the secret is ever set. It is deliberately the boring option: an authenticated admin endpoint would have meant a new route and a new auth surface to print a constant.
+
+The server also logs the public key at startup (`invite-link signing key loaded`, with `public_key_b64`). Public by definition and safe to log — and it answers the one question the subcommand cannot: **which key the running process actually loaded**. Use the subcommand to obtain the value, the log line to confirm the deploy took it.
+
+**Startup FAILS FAST** when `INVITE_LINK_SIGNING_KEY` is absent outside `--dev`, and on a malformed value in **any** mode. This is the kill-switch precedent (`DISPATCH_ENABLED`, `PUSH_ENABLED`, `SERVICE_REPOLL_ENABLED`) applied to a security control: without the key the server runs perfectly well and simply stops emitting `shareUrl`, which is exactly the failure worth refusing because it is **invisible** — every owner's share sheet quietly degrades to dictating six characters and nothing in the running system says why. Under `--dev` with no seed the server generates an **ephemeral** key per process, so a local link can never be mistaken for one production would honour.
+
+##### Rotation
+
+The key id is why it is in the URL. To rotate:
+
+1. Teach the shell key `2` **alongside** `1` — it verifies against whichever id the link names.
+2. Set the new seed on the server; it signs everything new as `2`.
+3. Links signed under `1` keep verifying until the last of them expires, at most 7 days later. Then drop `1` from the shell.
+
+Without the id the shell could hold only one key at a time and a rotation would break every unredeemed invite the moment it happened.
+
+##### Classification
+
+`shareUrl` is **P1 and bearer**, identical to `code` — it contains it. Never logged, never in an error envelope, never on a non-owner surface, and present only on `pending` rows. It is in the owner allow-list in `internal/mask/tables.go` (`inviteOwnerFields`); a wire field missing from that list is silently dropped from the response. No new persisted column: the URL is derived per request from `code`, `expires_at`, and the two names — [`data-classification.md`](data-classification.md) §1.15 is unchanged.
 
 ---
 
@@ -3621,6 +3715,7 @@ Same as [`websocket-protocol.md`](websocket-protocol.md) §10 divergence managem
 ## 11. Change log
 
 | Date | Change | Author |
+| 2026-07-30 | **Invite codes become signed join LINKS — `ShareInvite.shareUrl`, new §7.5.6 ([MYR-368](https://linear.app/myrobotaxi/issue/MYR-368)).** Every `pending` row now carries `shareUrl` alongside `code`: `https://myrobotaxi.app/join/{code}?k={kid}.{expUnix}.{sigB64url}&from={from}&to={to}`. **Additive and optional** (contracts 0.21.0 → **0.22.0**) — a consumer that finds `code` with no `shareUrl` shares the bare code, and the field appears in exactly the same branch as `code`, so it is pending-only and absent on every accepted row. `k` is an **Ed25519** signature the **web join shell verifies statically** against a **compiled-in public key** — no database, no round trip — so a forged or edited link is bounced before the join page can act as an oracle against the 36^6 code space; the §7.5.5 rate limit only ever protected the API side. **Canonical signed payload: `join:{code}:{expUnix}:{from}:{to}`** — five colon-separated fields, always four colons, sanitized names, **empty string for an omitted name**. Every value the link carries is covered by the one signature, including BOTH display names, so somebody holding a genuine link cannot rewrite `from` to a name the recipient would trust. Names are reduced server-side to the **first whitespace token, ASCII letters only, capped at 20**, and the parameter is **omitted entirely** when nothing survives (accented and non-Latin names lose characters or drop out; consumers render generic copy, never a placeholder built from the code). The signed expiry is the row's **actual `expires_at`** in unix seconds — the same value the redeem predicate reads — not a re-derived TTL. **The signature does not mean the invite is live**: redemption (§7.5.5) stays the only authority, and a resend **re-signs** with the new code, the new expiry, and the current names, so the previous link dies with the code it embeds. Key management: private **seed** in the Fly secret `INVITE_LINK_SIGNING_KEY` (`openssl rand -base64 32`), public half via `ops invite-link public-key` (no DB, no network, runnable before the secret exists) plus a startup log line naming the key the **running** process loaded. **Startup fails fast** without the seed outside `--dev`, and on a malformed seed in any mode — the kill-switch precedent, because a keyless boot silently stops emitting `shareUrl` and nothing in the running system says so. The one-character **key id** in `k` is the rotation seam: the shell holds `1` and `2` at once while links signed under `1` age out over their 7 days. `shareUrl` is **P1 and bearer** exactly as `code` is (it contains it) and is listed in `inviteOwnerFields`; **no new persisted column** — the URL is derived per request, so `data-classification.md` §1.15 is unchanged. | Claude |
 | 2026-07-30 | **Severing a Tesla link now REVOKES the grant at Tesla, not just our copy of the tokens ([MYR-366](https://linear.app/myrobotaxi/issue/MYR-366)).** Both severing paths gain an active, server-side `POST https://auth.tesla.com/oauth2/v3/revoke` (RFC 7009; `token`=stored **refresh** token, `token_type_hint=refresh_token`, `client_id`, **no client secret**) issued BEFORE the local delete — because the delete destroys the very credential the revoke presents, and after it only the owner can withdraw the grant by hand. **§7.6 account deletion:** a new step 2 in the [`data-lifecycle.md`](data-lifecycle.md) §3.1 ordering (the following steps renumber; both order tables were also brought back in line with the MYR-321 saved-places step, which had been added to the code but not to the tables), placed ahead of the vehicle teardown whose last-vehicle arm deletes the `Account` row and ahead of the identity transaction whose `User` cascade takes any that survives. **§7.12 per-vehicle teardown:** revokes on a **LAST-VEHICLE removal only** — the one removal that clears the tokens; a **mid-fleet** removal deliberately does NOT revoke, since the owner's remaining cars still need the link. The last-vehicle pre-check runs OUTSIDE the teardown's `FOR UPDATE` transaction (an HTTP call to Tesla must not be made while holding row locks over an owner's fleet); the store's locked count stays authoritative and a disagreement is logged, never fatal. **Best-effort throughout and NON-FATAL by construction** — no tokens on file, a DB read error, a network error, a Tesla 5xx and an already-invalid token are each a WARN and a continue; the revoker's signature returns a `bool`, not an `error`, so a failure cannot be propagated into a deletion. Tesla's availability MUST NOT be able to block a person's erasure of their own account. **Re-runnable:** a second run finds no stored token and makes no call. **No wire change on either endpoint** — §7.6 is still `204` with no body and §7.12's response is byte-identical, `revokeUrl` included and unchanged: revocation may have failed, so the honest client behaviour (offer the manual consent page) is the same either way and a `grantRevoked` field would only invite clients to hide a step still sometimes necessary. **Audit/logging:** no new `AuditLog` action; a P0 structured log line `event=tesla_tokens_revoked` carries the `user_id` and nothing else — never the token, its prefix, its length, or a VIN. Skipped entirely when no Tesla OAuth `client_id` is configured, so no unit test and no creds-less deployment can make an outbound revoke call. §7.6 gains a "Tesla grant revocation" subsection, its order table and "What is NOT deleted" rows are corrected, and §7.12's "OAuth revoke" note is rewritten (it previously stated there was no partner machine call). `data-lifecycle.md` §3.1 + §3.3 updated. Implementation: `internal/telemetry/{tesla_token_revoker,tesla_link_revocation,account_deletion_sequence,vehicle_teardown_handler}.go`, `cmd/telemetry-server/{wiring_vehicle_teardown,wiring_account_deletion}.go`. | go-engineer |
 | 2026-07-30 | **Saved places become account state — §7.20 `GET /api/users/me/places`, `PUT`/`DELETE /api/users/me/places/{kind}`, and `go_saved_places` (migration 0023) ([MYR-321](https://linear.app/myrobotaxi/issue/MYR-321)).** Contracts **v0.21.0**. The same class of gap §7.19 closed, and the same kind of lie: the ride sheet's Home and Work shortcut chips have shipped since the sheet landed, backed by a private client-side `@State` struct — so "Home" meant one address on somebody's iPhone and a different one on their iPad, and a reinstall forgot both. **Account-scoped, not vehicle-scoped and not device-scoped:** a saved place belongs to a PERSON, so it follows them across every car they own, every car they are a viewer of, and every device they sign in on. Keying it by car would force a re-entry per vehicle AND put a home address on a surface a co-owner can read; **sharing a car grants access to the CAR, never to the other person's address book**, so these rows have no non-self reader and therefore no §5.2 mask entry (CG-DC-5 satisfied by statement, as §7.19 does). **TWO FIXED SLOTS, not a favourites list** — `home` and `work` are PEERS, not `SharePermission`-style cumulative tiers, and the enum IS the key space: it bounds the response at two rows, it is the `{kind}` path segment, and it is half the `(user_id, kind)` primary key. A user-named collection would need ordering, renaming, a create endpoint and a cap, none of which two chips need. Matched **case-sensitively** — `Home` is a `400`, not a synonym, because two spellings reaching an upsert whose conflict target is the exact bytes would give one person two homes, one of them invisible. **NO ROW MEANS NOT SET:** there is no tombstone and no null-coordinate placeholder, so a kind never set and a kind deleted are indistinguishable, and the list is a SPARSE array of 0–2 rows rather than a fixed pair with nullable members — a half-populated place is not a weaker place, it is not a place. The envelope is keyed `places` (not `items`), unpaginated for the same reason `ShareInviteListResponse` is and harder-bounded: `maxItems: 2`. An account that has saved nothing gets `{"places": []}`, a `200` and never a `404` — the state EVERY account is in on day one. **The `PUT` is a WHOLE-OBJECT UPSERT, the deliberate opposite of §7.19.2's partial body**, and the difference is the shape of the data rather than a style choice: five notification switches are genuinely independent, but a label and the coordinate it describes are ONE fact, and a partial write would let a client move the pin while keeping a label that no longer describes it. `200` on first write as well as replace, never `201` — the resource is the SLOT, which always exists in the URL space whether or not a row backs it — and the echo is scanned back OUT of the database through the decrypt path rather than reflected from the request. The body's `kind` is optional and redundant with the path, present only so a client holding a whole `SavedPlace` can post it back unstripped; a body disagreeing with the path is `400` and is **never** honoured over it, since a body that could redirect the write would let a stale client overwrite Home while its URL said Work. The `DELETE` is **always `204`, idempotent, and `404` is deliberately absent** — a retrying client must not be told its completed work failed, and a `404` would be an oracle for whether the account ever set that slot. It is a REAL delete, not a `go_vehicle_shares`-style tombstone: a revoked share is evidence in the CAR OWNER's audit trail, whereas a saved place is a person's own note to themselves. **ENCRYPTION FOLLOWS `go_ride_requests` EXACTLY (NFR-3.23):** `lat_enc`/`lng_enc` are TEXT holding base64 AES-256-GCM ciphertext, encrypt-only with no plaintext column, no dual-write window and no backfill; the repo panics on a nil `Encryptor` at construction and treats a decrypt failure as a hard read error, because there is no fallback column to fall back to. If anything on this platform justifies column encryption it is this table — a ride coordinate is where somebody went once, a saved home coordinate is where they SLEEP, and it is re-read on every launch. `label` stays P1 log-redacted but unencrypted, the same split 0002 makes between `pickup_lat_enc` and `pickup_label`. **Nothing here is ever logged** — no coordinate and no label on any path, and a `400` names the offending field without echoing its value, because error envelopes end up in crash reporters. Validation: `label` required/trimmed/non-blank/≤ 200 **runes** (not bytes, so a 200-character address in a non-Latin script is accepted), coordinates required, **finite** (`1e400` decodes to `+Inf` and would otherwise be sealed into ciphertext no reader can turn back into a place) and in range, decoded through POINTERS so an omitted key is distinguishable from an explicit `0` — `0` is a real coordinate and a plain `float64` would silently save a place off the coast of Ghana. **Account deletion (§7.6) gains a step 6**, before the identity transaction: `go_saved_places` has no FK so nothing cascades, and a row surviving the identity delete would be encrypted GPS of where a deleted person lives, keyed by a cuid nothing resolves and reachable only by a table scan. The audit row gains `savedPlacesDeleted` — a COUNT, never the places (CG-DL-5). No new error code: `invalid_request` and `auth_failed` cover the surface. P1 location throughout; `data-classification.md` §1.17. | Claude (go-engineer) |
 | 2026-07-30 | **Notification preferences become real — §7.19 `GET`/`PUT /api/users/me/push-prefs`, `go_push_prefs` (migration 0022), and a per-category gate in the push notifier ([MYR-349](https://linear.app/myrobotaxi/issue/MYR-349)).** Fixes a LIE rather than a missing feature: both Settings screens have rendered a Notifications card since MYR-170 whose switches were backed by a private client-side struct — they moved, persisted nowhere and gated nothing — and MYR-186 then shipped the entire delivery pipeline with no preference layer, so an owner who had switched "Charging complete" off kept receiving it. Five categories (`rideLifecycle`, `driveStarted`, `driveCompleted`, `chargingComplete`, `viewerJoined`) on ONE row per person, because an account can be both owner and rider at once and the phone is the same phone; the NOTIFIER decides which column a given send answers to. `rideLifecycle` deliberately covers the whole ride status class — the rider's two switches both resolve to it, since no send site distinguishes `arrived` from `accepted`, and minting a column the server would never honour differently would be the same lie one layer down. The `GET` and the `PUT` echo ALL FIVE keys with no `omitempty` (dropping `false` would erase the interesting half of every value); the `PUT` body is PARTIAL, so an omitted key means LEAVE ALONE and two phones on two switches cannot clobber each other, and unknown keys are a `400` rather than a silent `200` that changes nothing. Enforcement is ONE gate on the single fan-out and it **fails OPEN** in all four failure modes — unwired store, lookup error, absent row, unknown category — because nothing about a ride waits on push, so failing closed would turn a database hiccup into platform-wide silence with no error anywhere. **Audit: only ONE of the five categories has a sender today.** `internal/push` has exactly three fan-out sites and all three are `rideLifecycle`; there is no drive-started, drive-completed, charging-complete or viewer-joined notifier in this service at all. The other four columns are created anyway because their switches are already on the owner's screen, so whichever notifier eventually sends them is born gated. P0 throughout. | go-engineer |

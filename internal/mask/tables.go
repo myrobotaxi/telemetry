@@ -483,6 +483,14 @@ var inviteOwnerFields = []string{
 	// code is P1 and BEARER. Present only on pending rows (enforced in the
 	// handler and again in SQL); never logged, never echoed into an error.
 	"code",
+	// shareUrl (MYR-368) is the signed join link. It CONTAINS the code, so
+	// it is the same tier and the same handling rule as the line above —
+	// P1, bearer, pending rows only, never logged. Listed separately rather
+	// than folded into `code` because the mask is a flat allow-list of wire
+	// names: an entry missing here is a field silently dropped from the
+	// response, which for this one would look like "signed links stopped
+	// working" with nothing to point at.
+	"shareUrl",
 	"createdAt",
 	"expiresAt",
 	"acceptedAt",

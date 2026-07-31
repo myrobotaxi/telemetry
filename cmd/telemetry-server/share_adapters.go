@@ -70,6 +70,17 @@ func (a *shareInviteAdapter) ResendInvite(ctx context.Context, inviteID, ownerUs
 	return toShareInviteRow(&row), nil
 }
 
+// OwnerFirstName resolves the calling owner's first name for the `from` half of
+// a signed share link (MYR-368). Same repository method the redeem side uses:
+// one ladder, one policy, no second definition of "first name" to drift.
+func (a *shareInviteAdapter) OwnerFirstName(ctx context.Context, ownerUserID string) (string, error) {
+	name, err := a.repo.OwnerFirstName(ctx, ownerUserID)
+	if err != nil {
+		return "", translateShareError(err)
+	}
+	return name, nil
+}
+
 // shareRedeemAdapter binds store.VehicleShareRepo to telemetry.ShareRedeemStore.
 type shareRedeemAdapter struct {
 	repo *store.VehicleShareRepo

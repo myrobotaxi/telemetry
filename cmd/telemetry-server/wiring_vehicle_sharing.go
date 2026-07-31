@@ -36,6 +36,7 @@ func setupVehicleSharingEndpoints(deps httpRouteDeps, vehicles telemetry.Vehicle
 		vehicles,
 		&shareInviteAdapter{repo: deps.shareRepo},
 		deps.accessInvalidator,
+		deps.inviteLinks,
 		logger,
 	)
 	deps.srv.HandleFunc("POST /api/vehicles/{vehicleId}/invites", inviteHandler.ServeCreate)

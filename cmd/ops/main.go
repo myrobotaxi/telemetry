@@ -12,6 +12,7 @@
 //	ops fleet-config push --vin <vin> --user-id <id>
 //	ops fields watch      --vin <vin>
 //	ops fields snapshot   --vin <vin>
+//	ops invite-link public-key
 //
 // The CLI reads DATABASE_URL from the environment (same as the server).
 // Fleet API operations additionally require TESLA_PROXY_URL,
@@ -57,6 +58,8 @@ func run() error {
 		return runFields(ctx, os.Args[2:])
 	case "geocode":
 		return runGeocode(ctx, os.Args[2:])
+	case "invite-link":
+		return runInviteLink(os.Args[2:])
 	case "help", "-h", "--help":
 		fmt.Print(usage())
 		return nil
@@ -84,6 +87,8 @@ Commands:
   fields watch        --vin <vin> [--server <url>]   Stream raw decoded fields from /api/debug/fields
   fields snapshot     --vin <vin>                    Dump the current vehicle row as JSON
   geocode backfill    [--dry-run] [--limit N]        Reverse-geocode Drive rows missing startAddress/endAddress (MYR-240)
+  invite-link public-key                             Print the base64 Ed25519 PUBLIC key derived from
+                                                     INVITE_LINK_SIGNING_KEY, for the web join shell (MYR-368)
 
 Environment:
   DATABASE_URL                  Postgres connection string (required)
@@ -97,5 +102,7 @@ Environment:
   MAPBOX_TOKEN                  Mapbox API token (required for geocode backfill)
   ENCRYPTION_KEY                base64(32B) AES-256 key (optional for geocode backfill;
                                  falls back to plaintext routePoints reads when unset)
+  INVITE_LINK_SIGNING_KEY       base64(32B) Ed25519 SEED signing join links (required for
+                                 invite-link public-key; generate with: openssl rand -base64 32)
 `
 }

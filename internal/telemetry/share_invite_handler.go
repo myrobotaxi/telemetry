@@ -1,11 +1,11 @@
 package telemetry
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/myrobotaxi/telemetry/internal/auth"
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
@@ -35,17 +35,22 @@ type ShareInviteHandler struct {
 	invites  ShareInviteStore
 	// access busts a revoked viewer's cached access set. Optional.
 	access AccessCacheInvalidator
+	// links signs the `shareUrl` on pending rows (MYR-368). Nil means no
+	// signing key is configured and the field is simply omitted.
+	links  *InviteLinkSigner
 	logger *slog.Logger
 }
 
 // NewShareInviteHandler builds the owner-facing sharing handler. invalidator
 // may be nil, in which case a revocation becomes effective on the next cache
-// expiry rather than immediately.
+// expiry rather than immediately. links may be nil, in which case pending rows
+// carry `code` with no `shareUrl` and a client falls back to sharing the code.
 func NewShareInviteHandler(
 	tokens tokenValidator,
 	vehicles VehicleSnapshotReader,
 	invites ShareInviteStore,
 	invalidator AccessCacheInvalidator,
+	links *InviteLinkSigner,
 	logger *slog.Logger,
 ) *ShareInviteHandler {
 	return &ShareInviteHandler{
@@ -53,8 +58,38 @@ func NewShareInviteHandler(
 		vehicles: vehicles,
 		invites:  invites,
 		access:   invalidator,
+		links:    links,
 		logger:   logger,
 	}
+}
+
+// linkCtx assembles the signing context for one request: the key plus the
+// CALLING OWNER's display name, resolved once per request rather than once per
+// row.
+//
+// A name lookup failure DEGRADES rather than fails the request. The name is
+// decoration on a link whose security comes from the signature, so refusing to
+// mint an invite because a display name could not be read would trade a
+// cosmetic loss for a functional one. The link is still signed — over an empty
+// `from`, which is a canonical form the verifier already handles — and the
+// `from` parameter is simply absent.
+//
+// Skipped entirely when there is no signing key: without one there is no
+// shareUrl to decorate, so the query would be pure waste.
+func (h *ShareInviteHandler) linkCtx(ctx context.Context, ownerUserID string) inviteLinkCtx {
+	if h.links == nil {
+		return inviteLinkCtx{}
+	}
+	name, err := h.invites.OwnerFirstName(ctx, ownerUserID)
+	if err != nil {
+		// The name itself is P1 and is not logged; only that it failed.
+		h.logger.Warn("share invite: owner name lookup failed, link omits from",
+			slog.String("user_id", ownerUserID),
+			slog.String("error", err.Error()),
+		)
+		return inviteLinkCtx{signer: h.links}
+	}
+	return inviteLinkCtx{signer: h.links, ownerName: name}
 }
 
 // ServeCreate handles POST /api/vehicles/{vehicleId}/invites.
@@ -93,7 +128,8 @@ func (h *ShareInviteHandler) ServeCreate(w http.ResponseWriter, r *http.Request)
 		slog.Int("vehicle_count", len(in.VehicleIDs)),
 		slog.String("permission", in.Permission),
 	)
-	h.writeJSON(w, http.StatusCreated, toShareInviteMasked(&row, auth.RoleOwner))
+	h.writeJSON(w, http.StatusCreated,
+		toShareInviteMasked(&row, auth.RoleOwner, h.linkCtx(r.Context(), userID)))
 }
 
 // writeCreateError maps a create failure onto a response. A vehicle in the set
@@ -114,65 +150,6 @@ func (h *ShareInviteHandler) writeCreateError(w http.ResponseWriter, vehicleID, 
 		slog.String("error", err.Error()),
 	)
 	h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
-}
-
-// validateCreateInvite checks the body and normalizes the vehicle set.
-// Returns a non-empty reason when the request must be rejected 400.
-func validateCreateInvite(body createShareInviteRequest, pathVehicleID, ownerID string) (in ShareInviteCreateInput, rejectReason string) {
-	label := strings.TrimSpace(body.Label)
-	switch {
-	case label == "":
-		return ShareInviteCreateInput{}, "label is required"
-	case len(label) > maxShareInviteLabelLen:
-		return ShareInviteCreateInput{}, "label is too long"
-	case !validSharePermission(body.Permission):
-		return ShareInviteCreateInput{}, "permission must be one of live, live_history, rides"
-	}
-
-	// vehicleIds is OPTIONAL: omitting it is exactly equivalent to sending
-	// the path vehicle alone.
-	ids := body.VehicleIDs
-	if body.VehicleIDs == nil {
-		ids = []string{pathVehicleID}
-	}
-	if len(ids) == 0 {
-		return ShareInviteCreateInput{}, "vehicleIds must not be empty"
-	}
-	if len(ids) > maxShareInviteVehicles {
-		return ShareInviteCreateInput{}, "vehicleIds exceeds the per-invite limit"
-	}
-
-	// The PATH vehicle is what authorizes the call, so a set that omits it
-	// is rejected rather than silently extended: accepting it would let a
-	// caller use one owned vehicle's path to mint invites for a set that
-	// never included it.
-	deduped := make([]string, 0, len(ids))
-	seen := make(map[string]struct{}, len(ids))
-	includesPath := false
-	for _, id := range ids {
-		if id == "" {
-			return ShareInviteCreateInput{}, "vehicleIds must not contain empty ids"
-		}
-		if id == pathVehicleID {
-			includesPath = true
-		}
-		if _, dup := seen[id]; dup {
-			continue
-		}
-		seen[id] = struct{}{}
-		deduped = append(deduped, id)
-	}
-	if !includesPath {
-		return ShareInviteCreateInput{}, "vehicleIds must include the vehicle in the path"
-	}
-
-	return ShareInviteCreateInput{
-		OwnerUserID:   ownerID,
-		PathVehicleID: pathVehicleID,
-		VehicleIDs:    deduped,
-		Label:         label,
-		Permission:    body.Permission,
-	}, ""
 }
 
 // ServeList handles GET /api/vehicles/{vehicleId}/invites.
@@ -196,9 +173,10 @@ func (h *ShareInviteHandler) ServeList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Always an array, never null: an owner with no invites gets [].
+	link := h.linkCtx(r.Context(), userID)
 	invites := make([]map[string]any, 0, len(rows))
 	for i := range rows {
-		invites = append(invites, toShareInviteMasked(&rows[i], auth.RoleOwner))
+		invites = append(invites, toShareInviteMasked(&rows[i], auth.RoleOwner, link))
 	}
 	h.writeJSON(w, http.StatusOK, shareInviteListResponse{Invites: invites})
 }
