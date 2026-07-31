@@ -5,12 +5,49 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/myrobotaxi/telemetry/internal/auth"
 	"github.com/myrobotaxi/telemetry/internal/store"
 	"github.com/myrobotaxi/telemetry/pkg/sdk"
 )
 
 // MYR-369 PatchInvite: the owner editing one accepted grant in place, and the
 // suspension invariant reaching every access-set read.
+
+// authAccessSet resolves userID's REAL vehicle access set: the owned-UNION-shared
+// statement in internal/auth (queryUserVehicleIDs) that the WebSocket subscribed
+// set, GET /api/vehicles, and every per-vehicle "may this caller see this car"
+// resolve through.
+//
+// WHY THIS CALLS ACROSS THE PACKAGE BOUNDARY INSTEAD OF RE-TYPING THE SQL.
+// queryUserVehicleIDs carries `suspended_at IS NULL`, and before MYR-369 that
+// was the one occurrence of the predicate with no database-level coverage at
+// all: internal/auth's tests drive the access paths through a stub querier, so
+// the entire term could be deleted and every auth test would still pass, with
+// the failure direction being OVER-EXPOSURE — a suspended viewer keeping access.
+// Asserting here against a hand-copied literal of that statement would reproduce
+// exactly that hole one package over: the copy would keep passing while the real
+// statement rotted. So this builds a real authenticator over the test pool and
+// calls the exported method, which executes the production statement itself.
+//
+// There is no import cycle to fear: internal/auth does not import internal/store
+// (the dependency rule runs the other way), and store's tests already import
+// auth — see mask_audit_integration_test.go.
+//
+// The JWT parameters are unused on this path; only the pool matters. A fresh
+// authenticator gets a fresh cache, and the explicit bust states the intent
+// anyway: GetUserVehicles memoizes for vehicleCacheTTL, so a suspension made
+// mid-test must never be answered from a warm entry. Production busts the same
+// entry on every share mutation for the same reason.
+func authAccessSet(t *testing.T, userID string) []string {
+	t.Helper()
+	a := auth.NewJWTAuthenticator("test-secret", "test-issuer", "test-audience", testPool)
+	a.InvalidateVehicles(userID)
+	ids, err := a.GetUserVehicles(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("auth.GetUserVehicles(%s): %v", userID, err)
+	}
+	return ids
+}
 
 // acceptedGrantFixture mints an invite at the given preset, redeems it as
 // shareViewer1, and returns the accepted row's id.
@@ -101,9 +138,13 @@ func TestVehicleShareRepo_PatchInvite(t *testing.T) {
 		id := acceptedGrantFixture(t, repo, vehA1, store.SharePermissionRides)
 		vehicles := store.NewVehicleRepo(testPool, store.NoopMetrics{})
 
-		// Before: visible everywhere.
-		if ids, err := repo.SharedVehicleIDs(ctx, shareViewer1); err != nil || len(ids) != 1 {
-			t.Fatalf("pre-suspend access set = %v (err %v), want one vehicle", ids, err)
+		// Before: visible everywhere. The access-set leg goes through the
+		// REAL merged statement (auth.queryUserVehicleIDs) rather than a
+		// store-side spelling of it — that statement is what the WebSocket
+		// handshake and GET /api/vehicles actually resolve through, so it is
+		// the one whose suspension term has to hold.
+		if ids := authAccessSet(t, shareViewer1); len(ids) != 1 {
+			t.Fatalf("pre-suspend access set = %v, want one vehicle", ids)
 		}
 
 		if _, err := repo.PatchInvite(ctx, store.PatchShareInviteInput{
@@ -113,11 +154,7 @@ func TestVehicleShareRepo_PatchInvite(t *testing.T) {
 		}
 
 		// After: gone from the access set...
-		ids, err := repo.SharedVehicleIDs(ctx, shareViewer1)
-		if err != nil {
-			t.Fatalf("SharedVehicleIDs: %v", err)
-		}
-		if len(ids) != 0 {
+		if ids := authAccessSet(t, shareViewer1); len(ids) != 0 {
 			t.Errorf("a suspended grant is still in the access set: %v", ids)
 		}
 		// ...from the per-vehicle grant lookup, indistinguishably from no
@@ -237,6 +274,72 @@ func TestVehicleShareRepo_PatchInvite(t *testing.T) {
 			t.Fatal("an empty patch succeeded; a client bug must not look like an applied edit")
 		}
 	})
+}
+
+// TestVehicleShareRepo_ReRedeemOfSuspendedGrant covers the LAST access-set
+// surface the suspension predicate reaches: queryAcceptedSharesByCodeAndUser,
+// the idempotent re-redeem lookup.
+//
+// Re-redeeming a code you already accepted normally answers 200 with the same
+// grants — that is what makes a retried request after a dropped response safe.
+// Once the owner suspends the grant, that same request must answer 404 INSTEAD:
+// a suspended grant conveys nothing, so it must not be re-servable as a
+// successful join. The 404 also matters for what it does NOT say. It is the
+// identical answer an unknown, expired, or already-consumed code gets, so it
+// never announces "you were suspended" to somebody the owner deliberately cut
+// off.
+//
+// The row is untouched by all this, so un-suspending restores the re-redeem
+// along with everything else — which the final leg asserts, because a
+// suspension that silently burned the code would be a revoke wearing a
+// different name.
+func TestVehicleShareRepo_ReRedeemOfSuspendedGrant(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable")
+	}
+	ctx := context.Background()
+	vehA1, _, _ := seedShareFixtures(t)
+	repo := newShareRepo(t)
+	cleanVehicleShares(t)
+
+	invite := mustCreateInvite(t, repo, shareOwnerA, vehA1, []string{vehA1}, store.SharePermissionRides)
+	if _, err := repo.RedeemCode(ctx, invite.Code, shareViewer1); err != nil {
+		t.Fatalf("redeem: %v", err)
+	}
+
+	// Precondition: the idempotent re-redeem works while the grant is live.
+	grants, err := repo.RedeemCode(ctx, invite.Code, shareViewer1)
+	if err != nil {
+		t.Fatalf("re-redeem of a LIVE grant must be idempotent, not an error: %v", err)
+	}
+	if len(grants) != 1 {
+		t.Fatalf("re-redeem returned %d grants, want 1", len(grants))
+	}
+
+	if _, err := repo.PatchInvite(ctx, store.PatchShareInviteInput{
+		InviteID: invite.ID, OwnerUserID: shareOwnerA, Suspended: boolPtr(true),
+	}); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+
+	if _, err := repo.RedeemCode(ctx, invite.Code, shareViewer1); !errors.Is(err, sdk.ErrNotFound) {
+		t.Errorf("re-redeeming a SUSPENDED grant's code: err = %v, want not-found — "+
+			"a suspended grant must not be re-servable as a successful join", err)
+	}
+
+	// Un-suspending restores it: the code was paused, not burned.
+	if _, err := repo.PatchInvite(ctx, store.PatchShareInviteInput{
+		InviteID: invite.ID, OwnerUserID: shareOwnerA, Suspended: boolPtr(false),
+	}); err != nil {
+		t.Fatalf("un-suspend: %v", err)
+	}
+	restored, err := repo.RedeemCode(ctx, invite.Code, shareViewer1)
+	if err != nil {
+		t.Fatalf("re-redeem after un-suspend: %v", err)
+	}
+	if len(restored) != 1 {
+		t.Errorf("re-redeem after un-suspend returned %d grants, want 1", len(restored))
+	}
 }
 
 // TestVehicleShareRepo_TierAtRedeem pins the preset → flag mapping, including

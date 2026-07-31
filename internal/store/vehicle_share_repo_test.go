@@ -491,20 +491,16 @@ func TestVehicleShareRepo_AccessLookups(t *testing.T) {
 		t.Fatalf("redeem: %v", err)
 	}
 
-	t.Run("shared vehicle ids", func(t *testing.T) {
-		ids, err := repo.SharedVehicleIDs(ctx, shareViewer1)
-		if err != nil {
-			t.Fatalf("SharedVehicleIDs: %v", err)
-		}
+	t.Run("the grant lands in the caller's access set", func(t *testing.T) {
+		// Asserted through auth.GetUserVehicles — the merged owned-UNION-shared
+		// statement every access-gated surface resolves through — rather than a
+		// store-side spelling of the same idea. See authAccessSet.
+		ids := authAccessSet(t, shareViewer1)
 		if len(ids) != 1 || ids[0] != vehA1 {
 			t.Fatalf("got %v, want [%s]", ids, vehA1)
 		}
 		// Somebody with no grants sees nothing, not an error.
-		none, err := repo.SharedVehicleIDs(ctx, shareViewer2)
-		if err != nil {
-			t.Fatalf("SharedVehicleIDs(no grants): %v", err)
-		}
-		if len(none) != 0 {
+		if none := authAccessSet(t, shareViewer2); len(none) != 0 {
 			t.Errorf("an ungranted user saw %v", none)
 		}
 	})
@@ -537,11 +533,7 @@ func TestVehicleShareRepo_AccessLookups(t *testing.T) {
 		if _, err := repo.ShareGrantFor(ctx, shareViewer1, vehA1); !errors.Is(err, sdk.ErrNotFound) {
 			t.Errorf("a revoked viewer still resolves a grant: err = %v", err)
 		}
-		ids, err := repo.SharedVehicleIDs(ctx, shareViewer1)
-		if err != nil {
-			t.Fatalf("SharedVehicleIDs: %v", err)
-		}
-		if len(ids) != 0 {
+		if ids := authAccessSet(t, shareViewer1); len(ids) != 0 {
 			t.Errorf("a revoked viewer still has %v in their access set", ids)
 		}
 	})
@@ -658,11 +650,7 @@ func TestVehicleShareRepo_TeardownRevokesGrants(t *testing.T) {
 	if _, err := shares.ShareGrantFor(ctx, shareViewer1, vehA1); !errors.Is(err, sdk.ErrNotFound) {
 		t.Errorf("the viewer still holds a grant on an offboarded car: err = %v", err)
 	}
-	ids, err := shares.SharedVehicleIDs(ctx, shareViewer1)
-	if err != nil {
-		t.Fatalf("SharedVehicleIDs: %v", err)
-	}
-	if len(ids) != 0 {
+	if ids := authAccessSet(t, shareViewer1); len(ids) != 0 {
 		t.Errorf("the offboarded car is still in the viewer's access set: %v", ids)
 	}
 
