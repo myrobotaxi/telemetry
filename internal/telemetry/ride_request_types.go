@@ -98,6 +98,23 @@ type RideRequestListPage struct {
 // stays decoupled from internal/store.
 var ErrRideStatusConflict = errors.New("ride request status conflict")
 
+// ErrRideReservationDormant is returned by
+// RideRequestStore.UpdateStatusFromDispatched when the guarded write matched no
+// row because the ride is a RESERVATION THAT IS NEITHER DISPATCHED NOR YET DUE
+// (MYR-376) — `scheduledFor` is set, still in the future, and its dispatch has
+// not resolved `sent`. A reservation is DORMANT between accept and the earlier
+// of those two instants, so the owner pickup transition refuses it. At/after
+// `scheduledFor` the refusal lifts even without a dispatch: §7.8 promises an
+// expired reservation's parties may still proceed manually.
+//
+// The pickup handler maps it to the SAME HTTP 409 `conflict` code as
+// ErrRideStatusConflict (no new error code — rest-api.md §7.8); it is a
+// separate sentinel only so the message can name the real reason instead of
+// blaming the status. The cmd adapter translates
+// store.ErrRideRequestReservationDormant into it so the handler layer stays
+// decoupled from internal/store.
+var ErrRideReservationDormant = errors.New("ride request reservation not yet dispatched")
+
 // ErrRideActive is returned by RideRequestStore.Create when the rider
 // already has an OPEN instant ride request and the partial unique guard
 // (migration 0004) rejects the second insert. The create handler maps it to
@@ -139,6 +156,16 @@ type RideRequestStore interface {
 	// ErrRideStatusConflict (row exists, status outside `from`) or an
 	// sdk.ErrNotFound-wrapping error (row gone).
 	UpdateStatusFrom(ctx context.Context, id string, from []string, to string) (RideRequestData, error)
+	// UpdateStatusFromDispatched is UpdateStatusFrom plus the MYR-376
+	// RESERVATION DORMANCY precondition, carried in the SAME guarded UPDATE:
+	// the row must also satisfy `scheduled_for IS NULL OR dispatch_status =
+	// 'sent' OR scheduled_for <= NOW()`. It backs the owner pickup transition
+	// (accepted → arrived) and nothing else. A reservation that is neither
+	// dispatched nor yet due returns ErrRideReservationDormant; the other miss
+	// outcomes are UpdateStatusFrom's (ErrRideStatusConflict, sdk.ErrNotFound).
+	// INSTANT rides are unaffected — they satisfy the predicate whatever their
+	// dispatch outcome — and so is any reservation past its due instant.
+	UpdateStatusFromDispatched(ctx context.Context, id string, from []string, to string) (RideRequestData, error)
 	ListByRiderPage(ctx context.Context, riderID string, cursor RideRequestListCursor, limit int) (RideRequestListPage, error)
 	ListByOwnerPage(ctx context.Context, ownerID string, status *string, cursor RideRequestListCursor, limit int) (RideRequestListPage, error)
 	// ListUpcomingByOwnerVehiclePage returns the owner's ACCEPTED, still

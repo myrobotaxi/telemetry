@@ -60,19 +60,52 @@ func (a *rideRequestStoreAdapter) GetActiveInstantByRider(ctx context.Context, r
 	return fromStoreRideRequest(rec), nil
 }
 
+// repoStatusWriter is one of the repo's guarded transition writes — the plain
+// MYR-174/175 guard or the MYR-376 dormancy-guarded one. Both adapter methods
+// below funnel through guardedUpdate over this shape so the row and sentinel
+// translations can never drift between them.
+type repoStatusWriter func(ctx context.Context, id string, from []store.RideRequestStatus, to store.RideRequestStatus) (store.RideRequestRecord, error)
+
 // UpdateStatusFrom delegates to the repo's guarded single-statement
 // transition (MYR-174/175 race fix) and translates the store conflict
 // sentinel into the handler layer's telemetry.ErrRideStatusConflict.
 // sdk.ErrNotFound-wrapping errors pass through untouched.
 func (a *rideRequestStoreAdapter) UpdateStatusFrom(ctx context.Context, id string, from []string, to string) (telemetry.RideRequestData, error) {
+	return a.guardedUpdate(ctx, a.repo.UpdateStatusFrom, id, from, to)
+}
+
+// UpdateStatusFromDispatched delegates to the repo's DORMANCY-guarded variant
+// (MYR-376) — the same single statement plus `AND (scheduled_for IS NULL OR
+// dispatch_status = 'sent' OR scheduled_for <= NOW())` — and additionally
+// translates store.ErrRideRequestReservationDormant into
+// telemetry.ErrRideReservationDormant so the pickup handler can name the reason
+// in its 409 without coupling to internal/store. Backs the owner pickup
+// transition only.
+func (a *rideRequestStoreAdapter) UpdateStatusFromDispatched(ctx context.Context, id string, from []string, to string) (telemetry.RideRequestData, error) {
+	return a.guardedUpdate(ctx, a.repo.UpdateStatusFromDispatched, id, from, to)
+}
+
+// guardedUpdate runs one guarded transition write and translates the store's
+// typed refusals into the handler layer's sentinels. Every sentinel is mapped
+// here for BOTH variants: the dormancy one simply never fires for the plain
+// guard, which cannot produce it.
+func (a *rideRequestStoreAdapter) guardedUpdate(
+	ctx context.Context, write repoStatusWriter, id string, from []string, to string,
+) (telemetry.RideRequestData, error) {
 	fromStatuses := make([]store.RideRequestStatus, 0, len(from))
 	for _, s := range from {
 		fromStatuses = append(fromStatuses, store.RideRequestStatus(s))
 	}
-	rec, err := a.repo.UpdateStatusFrom(ctx, id, fromStatuses, store.RideRequestStatus(to))
+	rec, err := write(ctx, id, fromStatuses, store.RideRequestStatus(to))
 	if err != nil {
 		if errors.Is(err, store.ErrRideRequestConflict) {
 			return telemetry.RideRequestData{}, fmt.Errorf("update ride request status: %w", telemetry.ErrRideStatusConflict)
+		}
+		// Reservation dormancy (MYR-376): the ride is still legally `accepted`,
+		// but it is neither dispatched nor yet due, so there is no pickup to
+		// confirm. Same 409 class as the conflict above, different reason.
+		if errors.Is(err, store.ErrRideRequestReservationDormant) {
+			return telemetry.RideRequestData{}, fmt.Errorf("update ride request status: %w", telemetry.ErrRideReservationDormant)
 		}
 		// Per-vehicle one-active-ride guard (0013, MYR-266): the car is already
 		// committed to another active ride. Translate to the handler sentinel so
