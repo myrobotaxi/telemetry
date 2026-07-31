@@ -70,6 +70,17 @@ type ReservationStore interface {
 	// vehicles exist, and a reservation could only have been accepted for a real
 	// car. Existence is not this method's question.
 	VehicleRideShareEnabled(ctx context.Context, vehicleID string) (bool, error)
+	// RiderMayRequestRides reports whether riderID is still permitted to
+	// ride in vehicleID (MYR-369) — true when they OWN the car, and
+	// otherwise true only when they hold a LIVE accepted share whose
+	// allow_rides flag is set.
+	//
+	// A suspended grant answers false, identically to no grant at all: the
+	// suspension invariant reaches the dispatch path through this method,
+	// which is the only layer that runs outside a request and therefore the
+	// only one that can catch an owner who withdrew access AFTER the
+	// reservation was accepted.
+	RiderMayRequestRides(ctx context.Context, riderID, vehicleID string) (bool, error)
 	// ClaimReservationDispatch wins the leg-1 latch for a reservation, but
 	// ONLY while the row is still `accepted` and still a reservation. false
 	// means the row was claimed by someone else or moved on — skip silently.

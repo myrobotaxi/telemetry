@@ -85,6 +85,10 @@ func (s *ReservationSweeper) handleDue(ctx context.Context, r *DueReservation) s
 		return decisionHeld
 	}
 
+	if held := s.holdIfRiderNotGranted(ctx, r); held {
+		return decisionHeld
+	}
+
 	claimed, err := s.store.ClaimReservationDispatch(ctx, r.RideRequestID)
 	if err != nil {
 		s.logger.Error("reservation sweep: claim failed",
@@ -153,6 +157,56 @@ func (s *ReservationSweeper) holdIfRideSharePaused(ctx context.Context, r *DueRe
 	}
 	if !enabled {
 		s.logger.Info("reservation sweep: ride sharing paused for vehicle, holding",
+			slog.String("ride_id", r.RideRequestID),
+			slog.String("vehicle_id", r.VehicleID),
+			slog.Time("scheduled_for", r.ScheduledFor),
+		)
+		return true
+	}
+	return false
+}
+
+// holdIfRiderNotGranted is the MYR-369 ride-capability probe — the THIRD and
+// last enforcement layer of the per-grant ride flag, and, like the pause probe
+// above it, the only one that runs outside a request.
+//
+// WHAT IT CATCHES that the other two cannot. The create gate refuses a rider who
+// lacks the capability, and the accept gate refuses again in case it moved while
+// the request sat in the owner's queue. Neither can reach forward to a
+// reservation that was ALREADY accepted when its owner suspended the grant or
+// patched `allowRides` off — and a reservation may sit accepted for DAYS, which
+// is exactly the window an editable capability opens and a fixed tier did not.
+// Without this probe, suspending somebody would still let their booked car turn
+// up on Saturday.
+//
+// AN OWNER'S OWN RESERVATION always passes: the store answers true when the
+// rider owns the vehicle, so the ordinary case never consults a grant.
+//
+// HOLDS RATHER THAN EXPIRES, and sits BESIDE the pause probe and BEFORE the
+// claim, for the identical reason: the claim is irreversible, so a reservation
+// claimed and then not pushed is burnt permanently, while holding is free and
+// the next tick re-decides. An owner who un-suspends inside the lateness window
+// still gets the dispatch they meant to allow, and one who does not lets the
+// reservation expire honestly as `reservation_expired` at
+// scheduledFor + MaxLateness — no new resolution path.
+//
+// AN UNREADABLE GRANT HOLDS, matching both the busy probe and the pause probe.
+// Nobody is waiting on an answer here, so the recoverable choice is the right
+// one: we cannot tell whether pushing would dial a car to somebody who has been
+// cut off, and a held reservation can still be dispatched where a wrong push
+// cannot be recalled.
+func (s *ReservationSweeper) holdIfRiderNotGranted(ctx context.Context, r *DueReservation) bool {
+	granted, err := s.store.RiderMayRequestRides(ctx, r.RiderID, r.VehicleID)
+	if err != nil {
+		s.logger.Error("reservation sweep: rider grant check failed",
+			slog.String("ride_id", r.RideRequestID),
+			slog.String("vehicle_id", r.VehicleID),
+			slog.String("error", err.Error()),
+		)
+		return true
+	}
+	if !granted {
+		s.logger.Info("reservation sweep: rider no longer holds the ride capability, holding",
 			slog.String("ride_id", r.RideRequestID),
 			slog.String("vehicle_id", r.VehicleID),
 			slog.Time("scheduled_for", r.ScheduledFor),

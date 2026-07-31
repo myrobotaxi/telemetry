@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/myrobotaxi/telemetry/internal/auth"
 	"github.com/myrobotaxi/telemetry/internal/events"
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
 	"github.com/myrobotaxi/telemetry/pkg/sdk"
@@ -117,10 +116,15 @@ func (h *RideRequestHandler) ServeCreate(w http.ResponseWriter, r *http.Request)
 		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
 		return
 	}
-	// `rides` is the TOP tier and its whole increment is this endpoint, so a
-	// viewer at `live` or `live_history` is refused here even though they can
-	// see the car and (at live_history) its trip history.
-	if _, accessErr := vehicleAccessFor(ctx, h.shares, userID, in.VehicleID, row.UserID, auth.PermissionRides); accessErr != nil {
+	// MYR-369: the gate reads the grant's `allow_rides` FLAG, not a tier. A
+	// viewer whose grant does not carry it is refused here even though they
+	// can see the car — and the owner can now take the capability away in
+	// place (PATCH /api/invites/{inviteId}) instead of revoking the whole
+	// grant, so this check is live state rather than something fixed at
+	// invite time. capRides carries the suspension term itself, so a
+	// suspended grant is refused here as well as being absent from the
+	// access set.
+	if _, accessErr := vehicleAccessFor(ctx, h.shares, userID, in.VehicleID, row.UserID, capRides); accessErr != nil {
 		if errors.Is(accessErr, errNoVehicleAccess) {
 			denyVehicleAccess(w, h.logger, "ride-request create", in.VehicleID, userID)
 			return

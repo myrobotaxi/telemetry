@@ -223,6 +223,17 @@ func (h *RideRequestHandler) rejectIfVehicleUnavailable(ctx context.Context, w h
 		return true
 	}
 
+	// MYR-369 ride-capability backstop. Applies to SCHEDULED accepts too, for
+	// the same reason as the pause above and more sharply: a suspension or a
+	// withdrawn ride capability has no horizon at all, so a reservation
+	// accepted under one would be dispatched days later to somebody the owner
+	// had already cut off. Rides the same `row` read, so the vehicle's owner
+	// and the rider's grant come from one consistent view.
+	// See ride_grant_gate.go.
+	if rejectIfRideNotGranted(ctx, w, h.logger, h.shares, rec.RiderID, rec.VehicleID, row.UserID) {
+		return true
+	}
+
 	// MYR-313: the availability gate below is INSTANT-only.
 	if rec.ScheduledFor != nil {
 		return false

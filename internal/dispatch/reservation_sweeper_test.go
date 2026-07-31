@@ -141,6 +141,14 @@ type fakeReservationStore struct {
 	paused   map[string]bool
 	pauseErr error
 	pauseCnt int
+
+	// MYR-369 rider ride capability. A (rider|vehicle) pair ABSENT from the
+	// map IS permitted, so every pre-existing test keeps its meaning — and
+	// that matches production for the common case, where the rider owns the
+	// car and the grant table is never consulted.
+	ungranted map[string]bool
+	grantErr  error
+	grantCnt  int
 }
 
 func (f *fakeReservationStore) ListDueReservations(
@@ -186,6 +194,22 @@ func (f *fakeReservationStore) VehicleRideShareEnabled(_ context.Context, vehicl
 		return false, f.pauseErr
 	}
 	return !f.paused[vehicleID], nil
+}
+
+func (f *fakeReservationStore) RiderMayRequestRides(_ context.Context, riderID, vehicleID string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.grantCnt++
+	if f.grantErr != nil {
+		return false, f.grantErr
+	}
+	return !f.ungranted[riderID+"|"+vehicleID], nil
+}
+
+func (f *fakeReservationStore) grantCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.grantCnt
 }
 
 func (f *fakeReservationStore) pauseCount() int {
