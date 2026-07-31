@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -129,7 +131,17 @@ func (c *Client) attempt(ctx context.Context, m apnsMessage) (retryable bool, er
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return true, fmt.Errorf("push: apns request: %w", err)
+		// http.Client.Do ALWAYS returns *url.Error, whose Error() renders the
+		// full request URL — which on this client ends in the P1 device or
+		// activity token. This is the routine failure (a dropped connection, a
+		// timeout) and deliver() logs it on every retry, so an unstripped wrap
+		// here would put tokens in the log on an ordinary bad network day.
+		// Unwrap to the transport cause and identify the token by prefix.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
+		return true, fmt.Errorf("push: apns request (token %s): %w", tokenPrefix(m.deviceToken), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -222,11 +234,32 @@ const (
 )
 
 // newRequest builds the POST /3/device/{token} request with the APNs headers.
+//
+// THE TOKEN IS P1 AND THIS FUNCTION IS THE ONE PLACE IT IS INTERPOLATED INTO A
+// STRING (data-classification.md §1.18, §3.2 — "never logged in full"). Two
+// things keep that claim structurally true rather than merely intended:
+//
+//   - url.PathEscape. Any byte that could make the URL unparseable is
+//     percent-encoded, so there is no input for which url.Parse fails and hands
+//     back a *url.Error carrying the whole address — token included.
+//   - the unwrap below. Even so, the error from a failed parse is stripped of
+//     its *url.Error skin before it leaves, because that type's Error() prints
+//     the URL verbatim and a `%w` of it would put the token in a log line the
+//     moment anything upstream formatted the chain.
+//
+// The two are belt and braces on purpose: the first makes the failure
+// unreachable, the second makes it harmless if a future net/url ever finds a
+// new way to fail.
 func (c *Client) newRequest(ctx context.Context, m apnsMessage) (*http.Request, error) {
-	url := fmt.Sprintf("%s/3/device/%s", c.host(m.sandbox), m.deviceToken)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(m.body))
+	endpoint := c.host(m.sandbox) + "/3/device/" + url.PathEscape(m.deviceToken)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(m.body))
 	if err != nil {
-		return nil, fmt.Errorf("push: build apns request: %w", err)
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
+		// Identify the token by its 8-character prefix, never by its value.
+		return nil, fmt.Errorf("push: build apns request (token %s): %w", tokenPrefix(m.deviceToken), err)
 	}
 
 	providerToken, err := c.tokens.token()
