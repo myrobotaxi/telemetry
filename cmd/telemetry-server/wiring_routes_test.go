@@ -4,9 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -14,6 +18,7 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/cryptox"
 	"github.com/myrobotaxi/telemetry/internal/events"
 	"github.com/myrobotaxi/telemetry/internal/server"
+	"github.com/myrobotaxi/telemetry/internal/store"
 	"github.com/myrobotaxi/telemetry/internal/telemetry"
 	"github.com/myrobotaxi/telemetry/internal/ws"
 )
@@ -140,6 +145,10 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 		// unconditionally like its /users/me siblings — every operation is a
 		// local database read or write with no proxy and no Tesla call.
 		{"saved places list (MYR-321, §7.20)", "/api/users/me/places"},
+		// MYR-385: the picker's read side of the booking gate (§7.22). A
+		// /api/vehicles/ path served by the RIDE-request handler, which is
+		// exactly the wiring mistake this test class exists for.
+		{"booked windows (MYR-385, §7.22)", "/api/vehicles/clxyz1234567890abcdef/booked-windows"},
 	}
 
 	for _, rt := range routes {
@@ -252,5 +261,55 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 				t.Fatalf("route %q returned 404 — handler not mounted. Body: %s", rt.path, rec.Body.String())
 			}
 		})
+	}
+
+	assertBookedWindowsCapIsWired(t, handler)
+}
+
+// assertBookedWindowsCapIsWired pins that the composition root hands §7.22 the
+// STORE's range cap (MYR-385).
+//
+// The cap used to be a literal in internal/telemetry "mirroring" one in
+// internal/store, checked by a test that compared two constants inside the
+// handler package — which could not fail, and left store.MaxBookedWindowRange
+// referenced by nothing at all. It is now injected in setupRideRequestEndpoints,
+// and THIS is the only place both packages are visible, so this is where the
+// injection can actually be observed.
+//
+// Observing it without a database: an over-wide range is refused during
+// validation, before the vehicle read, so the request never touches the nil
+// repos. A wired cap answers 400 invalid_request; an unwired one answers 500.
+func assertBookedWindowsCapIsWired(t *testing.T, handler http.Handler) {
+	t.Helper()
+
+	const day = 24 * time.Hour
+	from := time.Now().UTC()
+	ask := func(span time.Duration) *httptest.ResponseRecorder {
+		path := "/api/vehicles/clxyz1234567890abcdef/booked-windows" +
+			"?from=" + url.QueryEscape(from.Format(time.RFC3339)) +
+			"&to=" + url.QueryEscape(from.Add(span).Format(time.RFC3339))
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, nil)
+		// NoopAuthenticator accepts any non-empty bearer, which is what lets
+		// this reach range validation at all.
+		req.Header.Set("Authorization", "Bearer wiring-test")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	rec := ask(store.MaxBookedWindowRange + day)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("a range one day WIDER than store.MaxBookedWindowRange (%s) answered %d, want 400 —"+
+			" wiring.go is not passing WithBookedWindowsMaxRange. Body: %s",
+			store.MaxBookedWindowRange, rec.Code, rec.Body.String())
+	}
+	// And the refusal names the CAP IT ENFORCED, so this also rules out a
+	// wired-but-wrong value. The complementary boundary (exactly the cap is
+	// accepted) is not asserted here: it would pass validation and reach the
+	// nil vehicle repo this test deliberately wires. It is covered against a
+	// real handler in internal/telemetry's TestBookedWindowsCapIsTheInjectedOne.
+	wantDays := int(store.MaxBookedWindowRange.Hours()) / 24
+	if want := fmt.Sprintf("must not exceed %d days", wantDays); !strings.Contains(rec.Body.String(), want) {
+		t.Errorf("refusal does not name store.MaxBookedWindowRange (%q): %s", want, rec.Body.String())
 	}
 }

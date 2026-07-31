@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://myrobotaxi.com/schemas/booked-windows.schema.json",
+  "title": "VehicleBookedWindowsResponse",
+  "description": "Envelope returned by GET /api/vehicles/{vehicleId}/booked-windows?from=&to= — the time windows in which the named vehicle is ALREADY SPOKEN FOR, so a rider's schedule picker can dim them BEFORE the rider submits (MYR-385). It is the READ SIDE of the MYR-383 booking gate: the gate refuses a colliding reservation with 409 vehicle_unavailable / subCode time_conflict, and this surface is how a picker stops that refusal from being the first thing the rider hears. THE INVARIANT: a slot the picker dims from this response is exactly a slot the gate would refuse at that instant, and a slot it leaves enabled is exactly one the gate would allow — the server derives both from the SAME predicate and the SAME window constant (telemetry internal/store/ride_request_conflict_queries.go), so the picker and the gate cannot drift. Wraps the rows under `items` (NOT a cursor-paginated envelope: there is no cursor and no `hasMore` — the caller-supplied [from, to) range IS the bound, capped at 14 days, and the gate's own minimum separation means the result set is small by construction). The envelope is part of the wire contract: consumers MUST NOT strip it silently. WHAT IT DELIBERATELY DOES NOT CARRY: no ride ids, no rider or requester identity, no pickup or dropoff, no passenger — all of that is P1 and belongs to a party the caller is not (telemetry data-classification.md §1.9). A booking probe must never become a way to read a stranger's calendar; the only facts that leave the server are WHEN the car is unavailable and the two flags below, which are P0 operational timing, the same tier as `status`. AUTHORIZATION is byte-for-byte the ride-CREATE gate: the vehicle's owner, or a viewer holding a live accepted share whose grant carries the ride capability (§7.5.7). Anyone else gets the identical refusal a ride create would give them, so this endpoint is never an oracle that answers a question POST /api/ride-requests would not. This grants no capability a caller did not already have — such a caller can already learn the same instants one at a time by attempting creates, because the 409 names the conflicting instant — it only makes the answer cheap enough to render a picker with.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["items"],
+  "properties": {
+    "items": {
+      "type": "array",
+      "description": "The blocked windows overlapping the requested range, ordered by `start` ascending (ties broken server-side deterministically). Always present; an EMPTY ARRAY (never null) means the car is free for the whole range, which is the common case and MUST be rendered as an unrestricted picker, never as an error or a loading state. ONE ITEM PER OCCUPYING RIDE, not a merged union: two items may overlap, and a consumer that wants a single dimmed mask should union them itself. They are not merged server-side because `pending` and `own` are per-ride facts that a merge would have to either drop or lie about. In practice overlap is rare — the MYR-383 gate refuses new bookings closer together than the window half-width, so open rides on one car are normally at least that far apart; overlapping pairs are pre-gate legacy rows or the products of the reschedule path, both of which are documented remaining boundaries of the gate, not of this surface. NOT PAGINATED, and the result set needs no cursor: the 14-day range cap divided by the gate's minimum separation bounds it at a few hundred rows even before ordinary human booking density is considered. A consumer needing a longer horizon issues several calls.",
+      "x-classification": "P0",
+      "items": { "$ref": "#/$defs/BookedWindow" }
+    }
+  },
+  "$defs": {
+    "BookedWindow": {
+      "title": "BookedWindow",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end", "pending", "own"],
+      "description": "One interval in which the vehicle cannot take a new reservation, plus the two facts a picker needs to word its label. CONCRETE INSTANTS, NOT AN ANCHOR PLUS A RADIUS — and that is the whole design. The server could have emitted the occupying ride's instant and let the client add ±45 minutes, and it deliberately does not: the half-width is a PRODUCT GUESS that lives in exactly one place on the server (`store.RideConflictWindow`), is passed to SQL as a bind parameter, and is encoded in no schema, no enum and no client. Emitting the resolved endpoints means widening or narrowing it later changes every picker on the next response, with no client release, no contract bump and no migration. CONSUMERS MUST NOT re-derive, re-centre, pad, or round these instants, and MUST NOT infer the half-width from them — a client that hard-codes 45 minutes is a client that will silently disagree with the gate the day the number moves. THE INTERVAL IS OPEN AT BOTH ENDS: a reservation booked at exactly `start` or exactly `end` is ALLOWED and the gate will accept it, because the gate's comparison is strictly inside the window ('exactly this far apart is allowed' — two rides that touch at a boundary are a legal back-to-back booking). A picker that dims the endpoints refuses a slot the server would have taken; it should dim `start < slot < end`. A SNAPSHOT, NOT A SUBSCRIPTION: the response describes the vehicle as of the moment it was read, and nothing pushes an update. A window can vanish before the rider submits (the holder declines or cancels — a refusal is a DEFERRAL, never a permanent hold on a slot) and a new one can appear (somebody else books, or an instant ride starts). The 409 `time_conflict` on create therefore remains the authoritative answer and MUST still be handled; this surface reduces how often a rider meets it, it does not replace it.",
+      "properties": {
+        "start": {
+          "type": "string",
+          "format": "date-time",
+          "description": "RFC 3339 / ISO 8601 UTC instant at which the blocked interval begins, EXCLUSIVE — a reservation for exactly this instant is accepted by the gate. Derived server-side as the occupying ride's instant minus the conflict half-width. For a RESERVATION that instant is its `scheduledFor`; for an ACTIVE INSTANT RIDE (a ride with no `scheduledFor` that the car is currently committed to) it is the server's clock at the moment of the read — see `end` for what that implies. P0 operational timing: the same tier as `status`, and the same disclosure the MYR-383 refusal message already makes when it names the conflicting instant.",
+          "x-classification": "P0",
+          "examples": ["2026-08-01T18:15:00Z"]
+        },
+        "end": {
+          "type": "string",
+          "format": "date-time",
+          "description": "RFC 3339 / ISO 8601 UTC instant at which the blocked interval ends, EXCLUSIVE — a reservation for exactly this instant is accepted by the gate. Always strictly after `start`, and `end - start` is always exactly twice the server's conflict half-width, identical across every item in the response. THE ACTIVE-INSTANT CAVEAT, stated plainly: when the occupying ride is an instant ride in progress, the gate anchors its window on the CURRENT time rather than on a stored instant, so that window SLIDES FORWARD with the wall clock while this response does not. The interval reported for such a ride is true at the instant of the read and drifts afterwards — it can under-report (a slot an hour out is enabled now and would be refused if the rider submitted forty minutes from now, with the ride still running) but never over-report against the same live ride. It also disappears entirely the moment the ride completes. This is the one place where the picker's answer is a snapshot of a moving quantity rather than of a stored one, and it is why the create-time 409 stays the authority.",
+          "x-classification": "P0",
+          "examples": ["2026-08-01T19:45:00Z"]
+        },
+        "pending": {
+          "type": "boolean",
+          "description": "True when the claim on this window is a still-UNDECIDED reservation (status `requested`) rather than one the vehicle's owner has committed to (`accepted` / `arrived` / `enroute`). It exists so a picker can say 'already requested' instead of the untrue 'booked' — a rider told a slot is booked when it is merely contested has been misinformed, and this whole surface exists because the client asked for accuracy. IT DOES NOT MEAN 'SOFT' OR 'PROBABLY FINE': pending claims count in full against a CREATE (the gate's create path counts them deliberately, so a rider is never handed a booking that is going to collide with somebody's unanswered request and cost the owner a hand-decline), so a `pending: true` window MUST be dimmed exactly as hard as a committed one. The flag changes the WORDS, never the availability. Always false on an active-instant window, whose statuses are the committed set by construction.",
+          "x-classification": "P0",
+          "examples": [false]
+        },
+        "own": {
+          "type": "boolean",
+          "description": "True when the ride occupying this window is one the CALLER themselves requested (the caller is its rider). Lets the picker say 'your ride' — the r15 report that opened MYR-385 was a rider colliding with their OWN noon reservation, and 'that car is busy' would have been a poor answer to it. Purely presentational: an own window blocks a new booking exactly as hard as anybody else's, because the gate does not care whose the other ride is. FALSE IS NOT AN IDENTITY DISCLOSURE — it says only 'not yours', never who. A caller wanting the details of their own conflicting ride already has them through GET /api/ride-requests; this flag deliberately carries no id, so it cannot be used to correlate a window with a ride the caller is not a party to. Note that an OWNER browsing their own vehicle sees `own: false` for rides other people booked in their car, even though they are the ride's `ownerId` — the flag tracks the RIDER, which is the party the picker is speaking to.",
+          "x-classification": "P0",
+          "examples": [true]
+        }
+      }
+    }
+  }
+}

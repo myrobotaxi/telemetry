@@ -323,6 +323,10 @@ func (s *racingDeclineStore) ListUpcomingByOwnerVehiclePage(context.Context, str
 	return RideRequestListPage{}, errors.New("not used")
 }
 
+func (s *racingDeclineStore) ListBookedWindows(context.Context, string, string, time.Time, time.Time) ([]BookedWindowData, error) {
+	return nil, errors.New("not used")
+}
+
 // syncRidePublisher counts publishes across goroutines.
 type syncRidePublisher struct {
 	mu sync.Mutex
