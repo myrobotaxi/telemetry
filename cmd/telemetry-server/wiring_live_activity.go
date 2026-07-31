@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/events"
 	"github.com/myrobotaxi/telemetry/internal/push"
 	"github.com/myrobotaxi/telemetry/internal/store"
+	"github.com/myrobotaxi/telemetry/internal/telemetry"
 )
 
 // Live Activity wiring (MYR-172).
@@ -156,12 +158,54 @@ func (a *liveActivityStoreAdapter) ActiveLegs(ctx context.Context, limit int) ([
 	return out, nil
 }
 
+func (a *liveActivityStoreAdapter) RideIDsWithActivitiesForVehicle(ctx context.Context, vehicleID string) ([]string, error) {
+	ids, err := a.repo.ActivityRideIDsForVehicle(ctx, vehicleID)
+	if err != nil {
+		return nil, fmt.Errorf("live activity: list vehicle rides: %w", err)
+	}
+	return ids, nil
+}
+
+func (a *liveActivityStoreAdapter) MarkPushed(ctx context.Context, keys []push.ActivityKey) (int64, error) {
+	rows := make([]store.LiveActivityKey, 0, len(keys))
+	for _, k := range keys {
+		rows = append(rows, store.LiveActivityKey{RideRequestID: k.RideRequestID, UserID: k.UserID})
+	}
+	n, err := a.repo.MarkActivitiesPushed(ctx, rows)
+	if err != nil {
+		return 0, fmt.Errorf("live activity: mark pushed: %w", err)
+	}
+	return n, nil
+}
+
 func (a *liveActivityStoreAdapter) SweepStale(ctx context.Context, olderThan time.Duration) (int64, error) {
 	n, err := a.repo.SweepStaleActivities(ctx, olderThan)
 	if err != nil {
 		return 0, fmt.Errorf("live activity: sweep registrations: %w", err)
 	}
 	return n, nil
+}
+
+// liveActivityRegistryAdapter adapts the repo onto
+// telemetry.LiveActivityRegistry, whose only job beyond forwarding is to
+// translate the store's refusal sentinel into the handler layer's. Without it
+// the handler would have to import internal/store to tell "the ride closed"
+// (a 409) from "the database broke" (a 500) — the same reason
+// ErrRideRequestConflict is translated rather than exported upward.
+type liveActivityRegistryAdapter struct {
+	repo *store.LiveActivityRepo
+}
+
+func (a *liveActivityRegistryAdapter) RegisterActivity(ctx context.Context, rideRequestID, userID, token string, sandbox bool) error {
+	err := a.repo.RegisterActivity(ctx, rideRequestID, userID, token, sandbox)
+	if errors.Is(err, store.ErrLiveActivityRideClosed) {
+		return telemetry.ErrLiveActivityRideClosed
+	}
+	return err
+}
+
+func (a *liveActivityRegistryAdapter) EndActivity(ctx context.Context, rideRequestID, userID string) (bool, error) {
+	return a.repo.EndActivity(ctx, rideRequestID, userID)
 }
 
 // activityFromRow converts a store row to the notifier's own shape. Written out

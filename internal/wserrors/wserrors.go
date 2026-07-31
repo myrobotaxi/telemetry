@@ -172,9 +172,10 @@ func AllCodes() []ErrorCode {
 // docs/contracts/rest-api.md §4.1: {error: {code, message, subCode}}.
 //
 // SDK consumers branch on Error.Code (typed enum, FR-7.1) and never on
-// Error.Message. SubCode is nullable in v1 — only the WS path emits a
-// non-null sub-code (rate_limited.device_cap) and that path uses the
-// WS frame payload, not this envelope.
+// Error.Message. SubCode is nullable and usually null; the sub-codes in
+// v1 are `device_cap` (WS-only, carried on the WS frame payload rather
+// than this envelope), `reauth_required` (REST §7.6/§7.7) and
+// `reservation_expired` (REST §7.21.1, MYR-172).
 type ErrorEnvelope struct {
 	Error ErrorEnvelopeBody `json:"error"`
 }
@@ -192,11 +193,48 @@ type ErrorEnvelopeBody struct {
 // string literals at the call site — every 4xx/5xx path in the codebase
 // reaches this helper with a typed code, never a magic string.
 func WriteErrorEnvelope(w http.ResponseWriter, logger *slog.Logger, status int, code ErrorCode, msg string) {
+	writeEnvelope(w, logger, status, ErrorEnvelopeBody{Code: code, Message: msg})
+}
+
+// SubCode is the closed enum of typed sub-codes. It exists for the same
+// reason ErrorCode does: the compiler, not review, is what stops a
+// call site inventing a string the SDK's generated union cannot decode.
+type SubCode string
+
+const (
+	// SubCodeDeviceCap qualifies rate_limited on the WS per-user
+	// concurrent-connection cap. WS-only; declared here because the SDK
+	// carries ONE sub-code union across both transports.
+	SubCodeDeviceCap SubCode = "device_cap"
+	// SubCodeReauthRequired qualifies auth_failed when the recent-login
+	// gate rejects an otherwise-valid bearer (rest-api.md §7.6 / §7.7).
+	SubCodeReauthRequired SubCode = "reauth_required"
+	// SubCodeReservationExpired qualifies conflict on §7.21.1 when a Live
+	// Activity registration is refused because the ride's reservation
+	// expired (MYR-172). It is NOT derivable from the ride's status: the
+	// sweeper leaves the row at `accepted` and records the give-up in the
+	// dispatch columns, so a client that read the ride would see a live
+	// ride and a 409 it could not explain. With this sub-code it knows to
+	// end its Activity and say the reservation expired rather than
+	// retrying the registration forever.
+	SubCodeReservationExpired SubCode = "reservation_expired"
+)
+
+// WriteErrorEnvelopeSub is WriteErrorEnvelope with a typed sub-code, for
+// the handful of 4xx paths where the primary code alone does not tell
+// the client what to do.
+func WriteErrorEnvelopeSub(w http.ResponseWriter, logger *slog.Logger, status int, code ErrorCode, sub SubCode, msg string) {
+	s := string(sub)
+	writeEnvelope(w, logger, status, ErrorEnvelopeBody{Code: code, Message: msg, SubCode: &s})
+}
+
+// writeEnvelope is the single encoder both helpers share, so the wire
+// shape cannot drift between a sub-coded error and a plain one.
+func writeEnvelope(w http.ResponseWriter, logger *slog.Logger, status int, body ErrorEnvelopeBody) {
+	code := body.Code
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(ErrorEnvelope{
-		Error: ErrorEnvelopeBody{Code: code, Message: msg},
-	}); err != nil {
+	if err := json.NewEncoder(w).Encode(ErrorEnvelope{Error: body}); err != nil {
 		logger.Error("WriteErrorEnvelope: encode failed",
 			slog.Int("status", status),
 			slog.String("code", string(code)),

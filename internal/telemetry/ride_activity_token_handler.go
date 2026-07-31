@@ -3,12 +3,20 @@ package telemetry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
 
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
 )
+
+// ErrLiveActivityRideClosed is returned by LiveActivityRegistry.RegisterActivity
+// when the ride is past registration — a terminal status, or a reservation the
+// sweeper gave up on. The cmd adapter translates store.ErrLiveActivityRideClosed
+// into this sentinel so the handler layer stays decoupled from internal/store,
+// exactly as ErrRideStatusConflict does.
+var ErrLiveActivityRideClosed = errors.New("live activity: ride is closed to registration")
 
 // Live Activity token registration (MYR-172, rest-api.md §7.21).
 //
@@ -36,6 +44,37 @@ import (
 // Activities for everyone on that iOS release, which is far worse than storing
 // a slightly odd string.
 const maxActivityTokenLen = 256
+
+// isHexToken reports whether every character of the token is a hex digit.
+//
+// The LENGTH bound above is generous on purpose — Apple could plausibly mint a
+// longer token. The CHARSET is a different kind of bet: an APNs push token is
+// the hex rendering of opaque binary and has been since the API existed, both
+// halves of the platform (device tokens and ActivityKit tokens) agree on it,
+// and a token containing anything else could not address a device even if we
+// stored it. So this rejects a shape that is already broken rather than one
+// that is merely unfamiliar.
+//
+// It is also a SECURITY control, and that is the reason it is here rather than
+// on a wish-list. The token is interpolated into the APNs request path
+// (push.Client.newRequest), and the P1 rule in data-classification.md §1.18 is
+// that it is never logged in full. That file's belt-and-braces escaping and
+// error-unwrapping make the rule hold for any input; refusing non-hex at the
+// door means the pathological input never enters the system to begin with.
+// Upper case is accepted: it is the same token, and rejecting a client that
+// upper-cased its hex would be a bug report nobody could diagnose.
+func isHexToken(token string) bool {
+	for _, r := range token {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'f':
+		case r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 // LiveActivityRegistry is the persistence seam for these two endpoints.
 // Satisfied by *store.LiveActivityRepo directly; no adapter needed.
@@ -102,20 +141,30 @@ func (h *RideRequestHandler) ServeRegisterActivityToken(w http.ResponseWriter, r
 		h.writeError(w, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest, "activityToken is too long")
 		return
 	}
+	if !isHexToken(token) {
+		h.writeError(w, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest,
+			"activityToken must be hexadecimal")
+		return
+	}
 
-	// A ride that has already ended will never be pushed to again — the
-	// terminal `event: "end"` has fired and the rows are tombstoned — so
-	// accepting a registration here would store a row nothing will ever update
-	// and only the 24h sweep would remove. The 409 tells the client to end its
-	// Activity locally now, which is exactly what its final-state fallback is
-	// for.
-	if isTerminalRideStatus(rec.Status) {
-		h.writeError(w, http.StatusConflict, wserrors.ErrCodeConflict,
-			"ride request is already "+rec.Status)
+	if !h.guardActivityRegistrable(w, rec) {
 		return
 	}
 
 	if err := h.activities.RegisterActivity(ctx, rec.ID, rec.RiderID, token, body.Sandbox); err != nil {
+		if errors.Is(err, ErrLiveActivityRideClosed) {
+			// The write's own guard refused. The checks above already covered
+			// every state we could SEE, so reaching here means the ride closed
+			// between that read and this write — the race the SQL guard exists
+			// for. Same instruction to the client, no sub-code: we no longer
+			// know which ending won, and guessing would be worse than silence.
+			h.logger.Info("ride-request: activity registration lost a race with the ride ending",
+				slog.String("ride_request_id", rec.ID),
+			)
+			h.writeError(w, http.StatusConflict, wserrors.ErrCodeConflict,
+				"ride request is no longer accepting Live Activity registrations")
+			return
+		}
 		h.logger.Error("ride-request: activity token registration failed",
 			slog.String("ride_request_id", rec.ID),
 			slog.String("error", err.Error()),
@@ -126,6 +175,74 @@ func (h *RideRequestHandler) ServeRegisterActivityToken(w http.ResponseWriter, r
 
 	h.writeJSON(w, http.StatusOK, activityTokenResponse{Registered: true, Sandbox: body.Sandbox})
 }
+
+// guardActivityRegistrable refuses a registration for a ride whose Live
+// Activity has already been ended for good, writing the error and reporting
+// false. It is the readable half of the guard; the enforcing half is the
+// predicate inside the upsert (store.queryUpsertLiveActivity), which is what
+// actually holds under a race.
+//
+// TWO ENDINGS ARE FINAL, and they look nothing alike from here.
+//
+// A TERMINAL STATUS is the obvious one and is visible in rec.Status.
+//
+// A RESERVATION EXPIRY is invisible in the status. The sweeper gives up on a
+// late scheduled ride by recording dispatch_status='failed' with
+// dispatch_error='reservation_expired' and LEAVING THE ROW AT `accepted` — and
+// it latches dispatched_at, so no second expiry is possible. It ends and
+// tombstones the Activities on the way past. A registration that only looked at
+// the status would happily re-register (the upsert clears ended_at by design,
+// which is right for a token rotation and wrong for this), the ETA ticker would
+// pick the row back up, and the rider would watch a lock screen count down to a
+// pickup that is never coming, with nothing left in the system able to end it a
+// second time.
+//
+// That second case gets a sub-code precisely because the status does not
+// explain it: a client seeing `conflict` on an `accepted` ride would have no
+// way to tell a bug from a reservation that lapsed.
+func (h *RideRequestHandler) guardActivityRegistrable(w http.ResponseWriter, rec RideRequestData) bool {
+	// A ride that has already ended will never be pushed to again — the
+	// terminal `event: "end"` has fired and the rows are tombstoned — so
+	// accepting a registration here would store a row nothing will ever update
+	// and only the 24h sweep would remove. The 409 tells the client to end its
+	// Activity locally now, which is exactly what its final-state fallback is
+	// for.
+	if isTerminalRideStatus(rec.Status) {
+		h.writeError(w, http.StatusConflict, wserrors.ErrCodeConflict,
+			"ride request is already "+rec.Status)
+		return false
+	}
+
+	if isReservationExpired(rec) {
+		h.writeErrorSub(w, http.StatusConflict, wserrors.ErrCodeConflict,
+			wserrors.SubCodeReservationExpired,
+			"the reservation for this ride expired and its Live Activity has ended")
+		return false
+	}
+
+	return true
+}
+
+// isReservationExpired reports whether the reservation sweeper gave up on this
+// ride. Both columns are checked: dispatch_status alone is `failed` for any
+// dispatch failure, and an ordinary failed nav push leaves a ride that is still
+// genuinely happening — the owner can drive it manually — whose Activity must
+// keep working, token rotations included.
+func isReservationExpired(rec RideRequestData) bool {
+	if rec.DispatchStatus == nil || *rec.DispatchStatus != dispatchStatusFailed {
+		return false
+	}
+	return rec.DispatchError != nil && *rec.DispatchError == dispatchErrorReservationExpired
+}
+
+// The two dispatch-column values this file reads. Kept as constants here
+// rather than imported from internal/dispatch, which internal/telemetry does
+// not depend on; the migration-0025 registration test pins the pair against the
+// value the sweeper actually writes.
+const (
+	dispatchStatusFailed            = "failed"
+	dispatchErrorReservationExpired = "reservation_expired"
+)
 
 // ServeEndActivityToken handles DELETE /api/ride-requests/{id}/activity-token.
 //

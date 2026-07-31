@@ -22,6 +22,7 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/events"
 	"github.com/myrobotaxi/telemetry/internal/geocode"
 	"github.com/myrobotaxi/telemetry/internal/mask"
+	"github.com/myrobotaxi/telemetry/internal/push"
 	"github.com/myrobotaxi/telemetry/internal/server"
 	"github.com/myrobotaxi/telemetry/internal/store"
 	"github.com/myrobotaxi/telemetry/internal/store/accountbackfill"
@@ -198,6 +199,11 @@ type httpRouteDeps struct {
 	// liveActivityRepo backs the MYR-172 Live Activity token endpoints, and is
 	// the same table the activity sender and ETA ticker read.
 	liveActivityRepo *store.LiveActivityRepo
+	// activityNotifier is the SENDER half of MYR-172, needed on the route side
+	// by exactly one endpoint: owner teardown, which must end the riders' Live
+	// Activities before it deletes the rides they are attached to. May be nil
+	// in a test that does not wire push.
+	activityNotifier *push.ActivityNotifier
 	// shareRepo backs the MYR-184 vehicle-sharing endpoints.
 	shareRepo *store.VehicleShareRepo
 	// inviteLinks signs the MYR-368 `shareUrl` on pending invite rows. Never
@@ -368,10 +374,12 @@ func setupRideRequestEndpoints(deps httpRouteDeps, vehicles telemetry.VehicleSna
 		// car they do not own. This is the SEPARATE code path the read-side
 		// access-set widening does not cover.
 		telemetry.WithRideShareReader(&shareReaderAdapter{repo: deps.shareRepo}),
-		// MYR-172: the Live Activity token registry. The repo satisfies
-		// telemetry.LiveActivityRegistry directly — no adapter needed, because
-		// both methods already speak in plain strings.
-		telemetry.WithLiveActivityRegistry(deps.liveActivityRepo),
+		// MYR-172: the Live Activity token registry. Wrapped rather than passed
+		// directly because the registration write can now REFUSE (a ride that
+		// ended, or a reservation that expired), and the handler must not
+		// import internal/store to recognise that — the same sentinel
+		// translation the ride-status conflict already gets.
+		telemetry.WithLiveActivityRegistry(&liveActivityRegistryAdapter{repo: deps.liveActivityRepo}),
 	)
 	deps.srv.HandleFunc("POST /api/ride-requests", rideHandler.ServeCreate)
 	deps.srv.HandleFunc("GET /api/ride-requests", rideHandler.ServeList)

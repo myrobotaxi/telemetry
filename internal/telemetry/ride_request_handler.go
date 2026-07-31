@@ -451,6 +451,12 @@ func (h *RideRequestHandler) writeError(w http.ResponseWriter, status int, code 
 	wserrors.WriteErrorEnvelope(w, h.logger, status, code, msg)
 }
 
+// writeErrorSub writes the same envelope with a typed sub-code, for the paths
+// where the primary code does not tell the client what to do on its own.
+func (h *RideRequestHandler) writeErrorSub(w http.ResponseWriter, status int, code wserrors.ErrorCode, sub wserrors.SubCode, msg string) {
+	wserrors.WriteErrorEnvelopeSub(w, h.logger, status, code, sub, msg)
+}
+
 // writeRideActive writes the 409 `ride_active` response (MYR-230): the
 // standard error envelope plus the rider's existing OPEN instant ride under
 // `activeRideRequest`, so the client adopts it into the pending/tracking UI.

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -40,6 +41,15 @@ type LiveActivity struct {
 	Sandbox bool
 }
 
+// LiveActivityKey is the natural key of one registration — the pair the table
+// is UNIQUE on. Carried as a type rather than two loose strings because
+// MarkActivitiesPushed takes a slice of them and a []string pair would be two
+// slices the caller could silently misalign.
+type LiveActivityKey struct {
+	RideRequestID string
+	UserID        string
+}
+
 // queryUpsertLiveActivity registers an Activity's update token, or replaces the
 // token if one is already registered for this (ride, party).
 //
@@ -53,10 +63,45 @@ type LiveActivity struct {
 // us it has a live Activity again; leaving a stale tombstone in place would
 // silently exclude the row from every send path and the rider would watch a
 // frozen lock screen with nothing in the logs to explain it.
+//
+// THE WRITE IS GUARDED IN SQL, and that is the point of the INSERT … SELECT
+// shape (which otherwise buys nothing over a VALUES list).
+//
+// Clearing the tombstone is the right behaviour for the case it was written
+// for — an ordinary token rotation on a ride that is still happening — and
+// exactly the wrong one for a ride whose Activity was ended for good. There are
+// two such endings and they fail differently:
+//
+//   - A TERMINAL RIDE STATUS. The handler checks this before calling, but the
+//     check is a read and this is the write, so a POST that arrives while the
+//     ride is transitioning would re-register after the terminal `event: "end"`
+//     had already tombstoned the row. Narrowing that window is not a fix;
+//     making the guard part of the write is.
+//   - A RESERVATION THAT EXPIRED. The sweeper ends and tombstones the
+//     Activities but leaves the ride at `accepted` (it records the give-up in
+//     the dispatch columns instead), and dispatched_at is latched, so nothing
+//     can ever expire the ride a second time. Without this predicate a single
+//     token rotation after the expiry would resurrect the row and the ETA
+//     ticker would resume a countdown to a pickup that is never coming.
+//
+// Both predicates are COALESCEd because NULL is the ordinary state of
+// dispatch_status: `NOT (NULL = 'failed' AND …)` is NULL, not TRUE, which would
+// silently reject every registration on a ride that has not dispatched yet.
+//
+// A guard miss affects zero rows, which RegisterActivity reports as
+// ErrLiveActivityRideClosed. Note this deliberately does NOT refuse every
+// dispatch failure: a nav push that failed for any other reason leaves a ride
+// that is still genuinely happening (the owner can drive it manually), and its
+// Activity must keep rotating tokens.
 const queryUpsertLiveActivity = `
 INSERT INTO go_live_activities
     (id, ride_request_id, user_id, activity_push_token, sandbox, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+SELECT $1, r.id, $3, $4, $5, NOW(), NOW()
+FROM go_ride_requests r
+WHERE r.id = $2
+  AND r.status NOT IN ('completed', 'declined', 'cancelled')
+  AND NOT (COALESCE(r.dispatch_status, '') = 'failed'
+           AND COALESCE(r.dispatch_error, '') = 'reservation_expired')
 ON CONFLICT (ride_request_id, user_id) DO UPDATE
 SET activity_push_token = EXCLUDED.activity_push_token,
     sandbox             = EXCLUDED.sandbox,
@@ -96,15 +141,71 @@ const queryDeleteRejectedActivity = `
 DELETE FROM go_live_activities
 WHERE activity_push_token = $1`
 
-// querySweepLiveActivities reaps rows whose last write is older than the cutoff.
+// querySweepLiveActivities reaps rows whose last TOUCH is older than the cutoff.
 //
 // The predicate is updated_at, NOT ended_at, and that is the point: the rows
 // most worth reaping are the ones that NEVER ended — the Activity died on the
 // phone, or the app was deleted mid-ride — and those keep ended_at IS NULL
 // forever. An ended-only sweep would leak exactly the rows it exists to clean.
+//
+// updated_at means "last registration, end, OR successful push" (see
+// queryMarkLiveActivitiesPushed), which is what makes 24 hours the right
+// horizon: a row still being pushed to is by definition not stale, so a ride
+// that outlives the horizon is never swept out from under a live Activity.
 const querySweepLiveActivities = `
 DELETE FROM go_live_activities
 WHERE updated_at < NOW() - make_interval(secs => $1)`
+
+// queryMarkLiveActivitiesPushed stamps updated_at on the rows a ticker pass
+// actually delivered to.
+//
+// This is what makes the ticker's `ORDER BY updated_at ASC LIMIT n` an
+// anti-starvation order rather than a decoration. Without it updated_at is
+// frozen at registration time, the ordering is a fixed permutation, and a pass
+// truncated by MaxPerPass sheds the SAME tail on every tick forever — the rows
+// most in need of a refresh are precisely the ones that never get one.
+//
+// One statement per pass rather than one per send: a pass can deliver
+// MaxPerPass (200) updates every 60–90s, and 200 single-row UPDATEs to move one
+// timestamp is write amplification bought for nothing.
+//
+// Scoped to live rows so a send that raced the ride's terminal end cannot
+// un-stale a tombstoned row and hold it back from the sweep.
+//
+// The pairs arrive as two parallel text arrays rather than one array of
+// composites: pgx encodes text[] natively, whereas a record[] needs a
+// registered composite type, and `unnest` of two arrays is the standard
+// Postgres spelling for "these tuples".
+const queryMarkLiveActivitiesPushed = `
+UPDATE go_live_activities
+SET updated_at = NOW()
+WHERE ended_at IS NULL
+  AND (ride_request_id, user_id) IN (
+      SELECT * FROM unnest($1::text[], $2::text[])
+  )`
+
+// queryLiveActivityRideIDsForVehicle lists the rides of one vehicle that still
+// have a live Activity registered against them.
+//
+// Used by owner teardown (MYR-258): the teardown hard-DELETEs go_ride_requests
+// by vehicle and the FK cascade takes go_live_activities with it, silently. The
+// rows go away; the Live Activities on the riders' phones do not. This read
+// gives the teardown the set it must end-push BEFORE the delete.
+const queryLiveActivityRideIDsForVehicle = `
+SELECT DISTINCT a.ride_request_id
+FROM go_live_activities a
+JOIN go_ride_requests r ON r.id = a.ride_request_id
+WHERE r.vehicle_id = $1 AND a.ended_at IS NULL`
+
+// ErrLiveActivityRideClosed is returned by RegisterActivity when the SQL guard
+// refuses the write: the ride has reached a terminal status, or its reservation
+// expired, and its Live Activity has been ended for good.
+//
+// Deliberately does NOT wrap sdk.ErrNotFound. The ride exists — the caller was
+// proven to be its rider before we got here — it is simply past the point where
+// a registration means anything. The HTTP layer maps it to 409 (rest-api.md
+// §7.21.1), which is an instruction to the client to end its Activity locally.
+var ErrLiveActivityRideClosed = errors.New("live activity: ride is closed to registration")
 
 // LiveActivityRepo is the go_live_activities repository.
 type LiveActivityRepo struct {
@@ -124,6 +225,12 @@ func NewLiveActivityRepo(pool *pgxpool.Pool, logger *slog.Logger) *LiveActivityR
 // one ride, replacing a rotated token in place and clearing any previous
 // end-tombstone.
 //
+// Returns ErrLiveActivityRideClosed when the ride is past registration — a
+// terminal status, or a reservation that expired. That decision is made by the
+// statement itself rather than by a read before it: the handler's own check is
+// a read-then-write and a POST can arrive in the middle of the terminal
+// transition, so the guard that actually holds is the one inside the write.
+//
 // The caller is responsible for having established that userID is a party to
 // rideRequestID — this method enforces the shape of the write, not the
 // authorization behind it.
@@ -139,12 +246,76 @@ func (r *LiveActivityRepo) RegisterActivity(ctx context.Context, rideRequestID, 
 		return fmt.Errorf("store.RegisterActivity(ride=%s, user=%s): empty activity token", rideRequestID, userID)
 	}
 
-	if _, err := r.pool.Exec(ctx, queryUpsertLiveActivity,
+	tag, err := r.pool.Exec(ctx, queryUpsertLiveActivity,
 		newProvisionID(), rideRequestID, userID, token, sandbox,
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("store.RegisterActivity(ride=%s, user=%s): %w", rideRequestID, userID, err)
 	}
+	if tag.RowsAffected() == 0 {
+		// The guard refused, or the ride vanished under us (owner teardown
+		// hard-deletes rides). Both mean the same thing to the caller: there is
+		// no Activity to keep alive here.
+		return fmt.Errorf("store.RegisterActivity(ride=%s, user=%s): %w",
+			rideRequestID, userID, ErrLiveActivityRideClosed)
+	}
 	return nil
+}
+
+// MarkActivitiesPushed stamps updated_at on the (ride, party) rows a ticker
+// pass delivered to, and reports how many it moved.
+//
+// Called after the sends rather than instead of them: an Activity Apple
+// refused is not "recently pushed", and stamping it would let a permanently
+// failing row hold the front of the queue while healthy ones starve.
+func (r *LiveActivityRepo) MarkActivitiesPushed(ctx context.Context, keys []LiveActivityKey) (int64, error) {
+	if len(keys) == 0 {
+		return 0, nil
+	}
+
+	rideIDs := make([]string, 0, len(keys))
+	userIDs := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if strings.TrimSpace(k.RideRequestID) == "" || strings.TrimSpace(k.UserID) == "" {
+			return 0, fmt.Errorf("store.MarkActivitiesPushed: empty ride request id or user id")
+		}
+		rideIDs = append(rideIDs, k.RideRequestID)
+		userIDs = append(userIDs, k.UserID)
+	}
+
+	tag, err := r.pool.Exec(ctx, queryMarkLiveActivitiesPushed, rideIDs, userIDs)
+	if err != nil {
+		return 0, fmt.Errorf("store.MarkActivitiesPushed(n=%d): %w", len(keys), err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// ActivityRideIDsForVehicle lists the rides of one vehicle that still have a
+// live Activity, so a caller about to hard-delete those rides can end their
+// Activities first. An empty result is the ordinary case.
+func (r *LiveActivityRepo) ActivityRideIDsForVehicle(ctx context.Context, vehicleID string) ([]string, error) {
+	if strings.TrimSpace(vehicleID) == "" {
+		return nil, fmt.Errorf("store.ActivityRideIDsForVehicle: empty vehicle id")
+	}
+
+	rows, err := r.pool.Query(ctx, queryLiveActivityRideIDsForVehicle, vehicleID)
+	if err != nil {
+		return nil, fmt.Errorf("store.ActivityRideIDsForVehicle(vehicle=%s): %w", vehicleID, err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("store.ActivityRideIDsForVehicle(vehicle=%s): scan: %w", vehicleID, err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store.ActivityRideIDsForVehicle(vehicle=%s): iterate: %w", vehicleID, err)
+	}
+	return out, nil
 }
 
 // EndActivity tombstones the caller's Activity for a ride, reporting whether a

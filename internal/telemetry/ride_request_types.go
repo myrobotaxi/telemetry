@@ -69,6 +69,18 @@ type RideRequestData struct {
 	// the internal error code is not exposed on the wire.
 	DispatchStatus *string
 	DispatchedAt   *time.Time
+
+	// DispatchError is the opaque reason code recorded alongside a `failed`
+	// DispatchStatus. SERVER-SIDE ONLY — it is deliberately absent from the
+	// wire projection in this file, and adding it there would be a contract
+	// change, not a refactor.
+	//
+	// It is read for exactly one decision (MYR-172): `reservation_expired` is
+	// how the sweeper records giving up on a late scheduled ride, and it is the
+	// ONLY signal that the ride's Live Activity has been ended for good — the
+	// sweeper leaves the ride's own status at `accepted`, so nothing else on
+	// this record distinguishes an expired reservation from a live one.
+	DispatchError *string
 }
 
 // RideRequestListPage is one page of a keyset scan plus the has-more probe

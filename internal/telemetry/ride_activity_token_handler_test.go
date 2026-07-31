@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/myrobotaxi/telemetry/internal/wserrors"
 	"github.com/myrobotaxi/telemetry/pkg/sdk"
 )
 
@@ -209,13 +210,13 @@ func TestActivityToken_RegisterScopesTheWriteToTheRider(t *testing.T) {
 	h := newActivityHandler(store, registry, rideUserID)
 
 	rec := httptest.NewRecorder()
-	activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, `{"activityToken":"tok-abc","sandbox":true}`))
+	activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, `{"activityToken":"deadbeef01","sandbox":true}`))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
-	if got := registry.riderToken(); got != "tok-abc" {
-		t.Errorf("token stored against (ride, rider) = %q, want tok-abc", got)
+	if got := registry.riderToken(); got != "deadbeef01" {
+		t.Errorf("token stored against (ride, rider) = %q, want deadbeef01", got)
 	}
 
 	var body activityTokenResponse
@@ -235,7 +236,7 @@ func TestActivityToken_ResponseNeverEchoesTheToken(t *testing.T) {
 	store := &fakeRideStore{getRec: fixtureRideData("clowner999999999999xyz", rideStatusAccepted)}
 	h := newActivityHandler(store, registry, rideUserID)
 
-	secret := strings.Repeat("secretish", 3)
+	secret := strings.Repeat("dec0de", 4)
 	rec := httptest.NewRecorder()
 	activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, `{"activityToken":"`+secret+`"}`))
 
@@ -253,7 +254,7 @@ func TestActivityToken_Rotation(t *testing.T) {
 	h := newActivityHandler(store, registry, rideUserID)
 	mux := activityMux(h)
 
-	for _, token := range []string{"tok-first", "tok-rotated"} {
+	for _, token := range []string{"aaa111", "bbb222"} {
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, activityRequest(http.MethodPost, `{"activityToken":"`+token+`"}`))
 		if rec.Code != http.StatusOK {
@@ -261,8 +262,8 @@ func TestActivityToken_Rotation(t *testing.T) {
 		}
 	}
 
-	if got := registry.riderToken(); got != "tok-rotated" {
-		t.Errorf("stored token = %q, want the rotated value tok-rotated", got)
+	if got := registry.riderToken(); got != "bbb222" {
+		t.Errorf("stored token = %q, want the rotated value bbb222", got)
 	}
 }
 
@@ -277,7 +278,7 @@ func TestActivityToken_TerminalRideIsConflict(t *testing.T) {
 			h := newActivityHandler(store, registry, rideUserID)
 
 			rec := httptest.NewRecorder()
-			activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, `{"activityToken":"tok"}`))
+			activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, `{"activityToken":"cafe01"}`))
 
 			if rec.Code != http.StatusConflict {
 				t.Errorf("status = %d for terminal ride %q, want 409", rec.Code, status)
@@ -299,7 +300,7 @@ func TestActivityToken_NonTerminalRidesAccepted(t *testing.T) {
 			h := newActivityHandler(store, registry, rideUserID)
 
 			rec := httptest.NewRecorder()
-			activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, `{"activityToken":"tok"}`))
+			activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, `{"activityToken":"cafe01"}`))
 
 			if rec.Code != http.StatusOK {
 				t.Errorf("status = %d for live ride %q, want 200", rec.Code, status)
@@ -315,7 +316,7 @@ func TestActivityToken_BadBodies(t *testing.T) {
 		body string
 	}{
 		{"malformed json", `{"activityToken":`},
-		{"unknown field", `{"activityToken":"tok","nope":1}`},
+		{"unknown field", `{"activityToken":"cafe01","nope":1}`},
 		{"empty token", `{"activityToken":""}`},
 		{"whitespace token", `{"activityToken":"   "}`},
 		{"token too long", `{"activityToken":"` + strings.Repeat("a", maxActivityTokenLen+1) + `"}`},
@@ -389,7 +390,7 @@ func TestActivityToken_UnwiredRegistryIs500(t *testing.T) {
 	)
 
 	rec := httptest.NewRecorder()
-	activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, `{"activityToken":"tok"}`))
+	activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, `{"activityToken":"cafe01"}`))
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d with no registry wired, want 500", rec.Code)
@@ -406,7 +407,7 @@ func TestActivityToken_StoreFailureIs500AndHidesTheToken(t *testing.T) {
 	// Built at runtime rather than as a literal: a string constant assigned to
 	// a name like `secret` is exactly the shape gosec G101 flags, and it is a
 	// test fixture, not a credential.
-	secret := strings.Repeat("leaky", 3)
+	secret := strings.Repeat("fee1", 5)
 	rec := httptest.NewRecorder()
 	activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, `{"activityToken":"`+secret+`"}`))
 
@@ -415,6 +416,217 @@ func TestActivityToken_StoreFailureIs500AndHidesTheToken(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), secret) {
 		t.Errorf("the error envelope leaked the P1 activity token: %s", rec.Body.String())
+	}
+}
+
+// --- MYR-172 review fixes ---
+
+// expiredReservationRide is a ride exactly as the reservation sweeper leaves
+// one: status still `accepted`, the give-up recorded only in the dispatch
+// columns. Nothing about the ride's own status says the Activity is over.
+func expiredReservationRide() RideRequestData {
+	rec := fixtureRideData("clowner999999999999xyz", rideStatusAccepted)
+	status := dispatchStatusFailed
+	code := dispatchErrorReservationExpired
+	rec.DispatchStatus = &status
+	rec.DispatchError = &code
+	return rec
+}
+
+// TestActivityToken_ExpiredReservationIsRefused is the headline fix.
+//
+// The sweeper ends and tombstones a late reservation's Activities but leaves
+// the ride at `accepted`, and it LATCHES dispatched_at, so a second expiry is
+// impossible. The register guard only read the status, and the upsert clears
+// ended_at by design — so one ordinary ActivityKit token rotation after the
+// expiry resurrected the row, the ETA ticker picked it back up, and the rider
+// watched a phantom countdown to a pickup nobody was ever making, with nothing
+// left in the system able to end it again.
+func TestActivityToken_ExpiredReservationIsRefused(t *testing.T) {
+	registry := newFakeActivityRegistry()
+	store := &fakeRideStore{getRec: expiredReservationRide()}
+	h := newActivityHandler(store, registry, rideUserID)
+
+	rec := httptest.NewRecorder()
+	activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, `{"activityToken":"cafe01"}`))
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d for an expired reservation, want 409 (body %s)", rec.Code, rec.Body.String())
+	}
+	if registry.riderToken() != "" {
+		t.Error("a token was registered against a ride whose reservation had expired —" +
+			" the ETA ticker will resume a countdown nothing can ever end")
+	}
+
+	// The sub-code is load-bearing: the ride's status is `accepted`, so a
+	// client seeing a bare `conflict` on a live-looking ride could not tell a
+	// lapsed reservation from a server bug, and would keep retrying.
+	var body struct {
+		Error struct {
+			Code    string  `json:"code"`
+			SubCode *string `json:"subCode"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error envelope: %v", err)
+	}
+	if body.Error.Code != string(wserrors.ErrCodeConflict) {
+		t.Errorf("error.code = %q, want conflict", body.Error.Code)
+	}
+	if body.Error.SubCode == nil {
+		t.Fatal("error.subCode is null; the client cannot distinguish this from an ordinary conflict")
+	}
+	if got, want := *body.Error.SubCode, string(wserrors.SubCodeReservationExpired); got != want {
+		t.Errorf("error.subCode = %q, want %q", got, want)
+	}
+}
+
+// TestActivityToken_OtherDispatchFailuresStillRegister is the counterweight,
+// and it is why the guard reads BOTH dispatch columns rather than just the
+// status.
+//
+// `dispatch_status = failed` on its own means any nav push that did not land —
+// the car was asleep, the proxy was down. That ride is still genuinely
+// happening (the owner can drive it manually), so its Activity must keep
+// working, token rotations included. Refusing every failure would have swapped
+// one broken lock screen for a different one.
+func TestActivityToken_OtherDispatchFailuresStillRegister(t *testing.T) {
+	for _, code := range []string{"vehicle_asleep", "coordinate_out_of_range", ""} {
+		t.Run("dispatch_error="+code, func(t *testing.T) {
+			rec := fixtureRideData("clowner999999999999xyz", rideStatusAccepted)
+			status := dispatchStatusFailed
+			rec.DispatchStatus = &status
+			if code != "" {
+				rec.DispatchError = &code
+			}
+
+			registry := newFakeActivityRegistry()
+			h := newActivityHandler(&fakeRideStore{getRec: rec}, registry, rideUserID)
+
+			w := httptest.NewRecorder()
+			activityMux(h).ServeHTTP(w, activityRequest(http.MethodPost, `{"activityToken":"cafe01"}`))
+
+			if w.Code != http.StatusOK {
+				t.Errorf("status = %d, want 200 — a failed nav push does not end the ride", w.Code)
+			}
+			if registry.riderToken() != "cafe01" {
+				t.Error("the rotation was refused for a ride that is still happening")
+			}
+		})
+	}
+}
+
+// TestActivityToken_StoreGuardRaceIsConflict covers the OTHER half of the fix.
+//
+// The handler's checks are a read; the registration is a write. A POST that
+// arrives while the ride is transitioning passes every check above and then
+// races the terminal tombstone. The upsert's own SQL predicate is what actually
+// holds, and its refusal must surface as a 409 rather than the 500 an
+// unrecognised store error would produce — a 500 tells the client to retry,
+// which is precisely wrong here.
+func TestActivityToken_StoreGuardRaceIsConflict(t *testing.T) {
+	registry := newFakeActivityRegistry()
+	registry.registerErr = ErrLiveActivityRideClosed
+	store := &fakeRideStore{getRec: fixtureRideData("clowner999999999999xyz", rideStatusAccepted)}
+	h := newActivityHandler(store, registry, rideUserID)
+
+	rec := httptest.NewRecorder()
+	activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, `{"activityToken":"cafe01"}`))
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d when the write's guard refused, want 409 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// No sub-code: by this point we no longer know WHICH ending won the race,
+	// and naming one would be a guess the client would act on.
+	var body struct {
+		Error struct {
+			SubCode *string `json:"subCode"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error envelope: %v", err)
+	}
+	if body.Error.SubCode != nil {
+		t.Errorf("error.subCode = %q on a race we cannot attribute, want null", *body.Error.SubCode)
+	}
+}
+
+// TestActivityToken_NonHexIsRejected pins the charset validation (P1 hardening).
+//
+// An APNs push token is the hex rendering of opaque binary and always has been,
+// so anything else could not address a device even if we stored it. Rejecting
+// it at the door means the pathological value never reaches the sender, which
+// interpolates the token into an APNs request URL — the path on which the
+// "never logged in full" rule in data-classification.md §1.18 has to hold.
+func TestActivityToken_NonHexIsRejected(t *testing.T) {
+	tests := []struct {
+		name  string
+		token string
+	}{
+		{"url metacharacters", "aabb/../%2e%2e"},
+		{"whitespace inside", "aabb ccdd"},
+		{"a query string", "aabbccdd?x=1"},
+		{"newline (log injection)", `aabb\ncc`},
+		{"plainly not a token", "not-a-token"},
+		{"unicode", "aabbccdd東"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registry := newFakeActivityRegistry()
+			store := &fakeRideStore{getRec: fixtureRideData("clowner999999999999xyz", rideStatusAccepted)}
+			h := newActivityHandler(store, registry, rideUserID)
+
+			rec := httptest.NewRecorder()
+			body, err := json.Marshal(map[string]string{"activityToken": tt.token})
+			if err != nil {
+				t.Fatalf("marshal body: %v", err)
+			}
+			activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, string(body)))
+
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d for %q, want 400", rec.Code, tt.token)
+			}
+			// The rejection describes the RULE and never the value (P1).
+			if strings.Contains(rec.Body.String(), tt.token) {
+				t.Errorf("the 400 echoed the rejected token: %s", rec.Body.String())
+			}
+			if registry.riderToken() != "" {
+				t.Error("a non-hex token was stored")
+			}
+		})
+	}
+}
+
+// TestActivityToken_RealTokenShapesAccepted is the mirror: the validation must
+// not reject anything Apple actually mints. Upper case is accepted because it
+// is the same token, and a client that upper-cased its hex would otherwise file
+// a bug nobody could diagnose.
+func TestActivityToken_RealTokenShapesAccepted(t *testing.T) {
+	tests := []struct {
+		name  string
+		token string
+	}{
+		{"64 lowercase hex, today's shape", strings.Repeat("0a1b2c3d", 8)},
+		{"upper case", strings.Repeat("0A1B2C3D", 8)},
+		{"mixed case", strings.Repeat("0a1B2c3D", 8)},
+		{"a longer future token", strings.Repeat("f", maxActivityTokenLen)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registry := newFakeActivityRegistry()
+			store := &fakeRideStore{getRec: fixtureRideData("clowner999999999999xyz", rideStatusAccepted)}
+			h := newActivityHandler(store, registry, rideUserID)
+
+			rec := httptest.NewRecorder()
+			activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, `{"activityToken":"`+tt.token+`"}`))
+
+			if rec.Code != http.StatusOK {
+				t.Errorf("status = %d for a valid token shape, want 200 (body %s)", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 

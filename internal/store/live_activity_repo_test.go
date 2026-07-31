@@ -193,12 +193,18 @@ func TestLiveActivityRepo_ActiveLegsSelectsOnlyLiveMidRideActivities(t *testing.
 	}
 	for _, c := range cases {
 		seedActivityRide(t, c.ride)
+		// Register FIRST, then move the ride to its status — which is also the
+		// only order that can happen for real. An Activity is started when the
+		// ride is accepted and the ride finishes underneath it; registering
+		// against an already-terminal ride is refused outright by the upsert's
+		// own guard (MYR-172 review), so seeding that way would be testing a
+		// state the system cannot reach.
+		if err := repo.RegisterActivity(ctx, c.ride, "rider-"+c.ride, "token-"+c.ride, false); err != nil {
+			t.Fatalf("RegisterActivity(%s): %v", c.ride, err)
+		}
 		if _, err := testPool.Exec(ctx,
 			`UPDATE go_ride_requests SET status = $2 WHERE id = $1`, c.ride, c.status); err != nil {
 			t.Fatalf("set status %s: %v", c.status, err)
-		}
-		if err := repo.RegisterActivity(ctx, c.ride, "rider-"+c.ride, "token-"+c.ride, false); err != nil {
-			t.Fatalf("RegisterActivity(%s): %v", c.ride, err)
 		}
 	}
 	// An ended Activity on an otherwise-active ride must not be listed.
