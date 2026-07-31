@@ -69,6 +69,20 @@ type fakeRideStore struct {
 		limit  int
 	}
 
+	// MYR-385 booked-windows read. windowsCall records the range and the
+	// caller the handler passed down, which is how the §7.22 tests pin the
+	// default range and that `own` is resolved against the JWT subject rather
+	// than against anything client-supplied.
+	windowsResult []BookedWindowData
+	windowsErr    error
+	windowsCalls  int
+	windowsCall   struct {
+		vehicleID string
+		callerID  string
+		from      time.Time
+		to        time.Time
+	}
+
 	ownerPage RideRequestListPage
 	ownerErr  error
 	ownerCall struct {
@@ -269,6 +283,18 @@ func (f *fakeRideStore) ListUpcomingByOwnerVehiclePage(_ context.Context, ownerI
 		return RideRequestListPage{}, f.upcomingErr
 	}
 	return f.upcomingPage, nil
+}
+
+func (f *fakeRideStore) ListBookedWindows(_ context.Context, vehicleID, callerID string, from, to time.Time) ([]BookedWindowData, error) {
+	f.windowsCalls++
+	f.windowsCall.vehicleID = vehicleID
+	f.windowsCall.callerID = callerID
+	f.windowsCall.from = from
+	f.windowsCall.to = to
+	if f.windowsErr != nil {
+		return nil, f.windowsErr
+	}
+	return f.windowsResult, nil
 }
 
 // fakeRidePublisher captures every published event so tests can assert the
