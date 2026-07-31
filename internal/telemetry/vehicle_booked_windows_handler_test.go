@@ -15,10 +15,10 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"testing"
 	"time"
 
-	"github.com/myrobotaxi/telemetry/internal/auth"
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
 )
 
@@ -35,14 +35,33 @@ func windowsMux(h *RideRequestHandler) *http.ServeMux {
 	return mux
 }
 
+// testBookedWindowsMax is what these tests INJECT as the §7.22 cap. It happens
+// to equal the production value (store.MaxBookedWindowRange, carried in by
+// wiring.go) so the §7.22 boundary cases below read as the documented ones —
+// but nothing here asserts the two are equal, because a test comparing two
+// literals in two packages proves only that somebody typed the same number
+// twice. That the SERVER runs on the store's value is a property of wiring.go
+// and is pinned in cmd/telemetry-server/wiring_routes_test.go;
+// TestBookedWindowsCapIsTheInjectedOne below pins that the handler honours
+// whatever it is handed rather than a number of its own.
+const testBookedWindowsMax = 14 * 24 * time.Hour
+
 // windowsHandler builds a handler whose JWT resolves to callerID, over the
 // fixture vehicle owned by shareOwnerUser, with the given share reader (nil =
 // no sharing wired, the fail-closed default). The owner is pinned rather than
 // parameterised: every case here varies the CALLER against one fixed car, and
 // a second owner would only give the matrix a way to be accidentally trivial.
 func windowsHandler(store RideRequestStore, callerID string, shares VehicleShareReader) *RideRequestHandler {
+	return windowsHandlerWithMax(store, callerID, shares, testBookedWindowsMax)
+}
+
+// windowsHandlerWithMax is windowsHandler with the §7.22 range cap under the
+// test's control — zero meaning "wiring.go forgot the option".
+func windowsHandlerWithMax(
+	store RideRequestStore, callerID string, shares VehicleShareReader, maxRange time.Duration,
+) *RideRequestHandler {
 	reader := &stubVehicleSnapshotReader{row: fixtureSnapshotRow(shareOwnerUser)}
-	opts := []RideRequestOption{}
+	opts := []RideRequestOption{WithBookedWindowsMaxRange(maxRange)}
 	if shares != nil {
 		opts = append(opts, WithRideShareReader(shares))
 	}
@@ -65,14 +84,22 @@ func decodeWindows(t *testing.T, body []byte) bookedWindowsResponse {
 	return resp
 }
 
-// TestBookedWindowsAuthMatrix is the load-bearing test on this endpoint.
+// TestBookedWindowsAuthMatrix covers what is SPECIFIC to this endpoint's gate.
 //
 // The rule is not "similar to" the ride-create gate, it IS the ride-create
 // gate: this surface answers "what would create refuse?", so a caller create
 // would turn away must be turned away here identically or the endpoint becomes
-// an oracle answering a question POST /api/ride-requests would not. The matrix
-// is therefore the same four rows create's own gate is tested over, and a
-// divergence in any of them is the bug this test exists to catch.
+// an oracle answering a question POST /api/ride-requests would not. THE TIER
+// MATRIX ITSELF LIVES WHERE EVERY OTHER PER-VEHICLE ENDPOINT'S DOES —
+// TestEndpointGrantMatrix in vehicle_share_access_test.go, where this endpoint
+// is now a row carrying the same expectations as POST /api/ride-requests, so
+// the two gates are compared side by side in one table rather than in two
+// files that can drift.
+//
+// What is left here is what that table cannot express: the two REFUSALS whose
+// shape matters (the error code, not just the status), and the two "no
+// subsystem wired" defaults which are properties of this handler's
+// construction rather than of a tier.
 func TestBookedWindowsAuthMatrix(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -92,29 +119,14 @@ func TestBookedWindowsAuthMatrix(t *testing.T) {
 			wantStore:  true,
 		},
 		{
-			name:       "viewer holding the ride capability is served",
-			caller:     shareViewerUser,
-			shares:     grantingReader(rideGrant),
-			wantStatus: http.StatusOK,
-			wantStore:  true,
-		},
-		{
 			// The base-capability viewer can SEE the car and cannot BOOK it.
 			// A picker they could never submit from has nothing to dim, and
 			// serving them would turn any share at all into a way to watch a
-			// stranger's car fill up.
+			// stranger's car fill up. Pinned here for the CODE: the refusal
+			// must be vehicle_not_owned, indistinguishable from a stranger's.
 			name:       "viewer without the ride capability is refused",
 			caller:     shareViewerUser,
 			shares:     grantingReader(baseGrant),
-			wantStatus: http.StatusForbidden,
-			wantCode:   wserrors.ErrCodeVehicleNotOwned,
-		},
-		{
-			// Suspension denies identically to having no grant at all — the
-			// caller learns nothing about which it is.
-			name:       "suspended ride grant is refused",
-			caller:     shareViewerUser,
-			shares:     grantingReader(auth.ShareGrant{AllowRides: true, Suspended: true}),
 			wantStatus: http.StatusForbidden,
 			wantCode:   wserrors.ErrCodeVehicleNotOwned,
 		},
@@ -127,7 +139,8 @@ func TestBookedWindowsAuthMatrix(t *testing.T) {
 		},
 		{
 			// No sharing subsystem wired: every non-owner is denied rather
-			// than silently admitted.
+			// than silently admitted. Not a tier at all — a property of how
+			// this handler is constructed, so the tier table cannot state it.
 			name:       "non-owner with no share reader is refused",
 			caller:     shareViewerUser,
 			shares:     nil,
@@ -175,38 +188,98 @@ func TestBookedWindowsUnknownVehicle(t *testing.T) {
 	store := &fakeRideStore{}
 	reader := &stubVehicleSnapshotReader{err: fmtNotFound()}
 	h := NewRideRequestHandler(
-		&stubTokenValidator{userID: shareOwnerUser}, reader, store, nil, discardLogger())
+		&stubTokenValidator{userID: shareOwnerUser}, reader, store, nil, discardLogger(),
+		WithBookedWindowsMaxRange(testBookedWindowsMax))
 	rec := doRequest(t, windowsMux(h), http.MethodGet, bookedWindowsPath, "", "Bearer t")
 	assertErrEnvelope(t, rec, http.StatusNotFound, wserrors.ErrCodeNotFound)
 }
 
-// TestBookedWindowsRangeValidation covers §7.22's four validation rules.
+// TestBookedWindowsRangeValidation covers §7.22's validation rules AND, for
+// every accepted range, the instants the handler actually handed the store.
 //
-// The two that matter are the ones that REFUSE rather than clamp. An empty or
-// reversed range can only ever answer `items: []`, which a picker reads as
-// "wide open" — a wrong answer dressed as a right one. An over-wide range is
-// refused for the same reason: a silently clamped answer looks complete and is
-// not, and under-dimming is precisely the failure this endpoint removes.
+// THE SECOND HALF IS THE POINT. A status-only table passes unchanged against a
+// handler that parses `from`/`to` and then ignores them — the picker would be
+// answered about the default week whatever it asked for, and every assertion
+// here would stay green. So each 200 row states the exact [from, to) the store
+// must have been called with.
+//
+// The two rules that matter are the ones that REFUSE rather than clamp. An
+// empty or reversed range can only ever answer `items: []`, which a picker
+// reads as "wide open" — a wrong answer dressed as a right one. An over-wide
+// range is refused for the same reason: a silently clamped answer looks
+// complete and is not, and under-dimming is precisely the failure this endpoint
+// removes.
 func TestBookedWindowsRangeValidation(t *testing.T) {
 	base := time.Date(2029, 6, 12, 15, 0, 0, 0, time.UTC)
 	rfc := func(t time.Time) string { return t.UTC().Format(time.RFC3339) }
+	at := func(t time.Time) *time.Time { return &t }
+
+	// An RFC 3339 instant carrying a NON-ZERO UTC offset, percent-encoded for
+	// the query string. See the "+ must be percent-encoded" case below.
+	offsetFrom := "2029-06-12T15:00:00+02:00"
+	offsetTo := "2029-06-13T15:00:00+02:00"
+	enc := func(s string) string { return url.QueryEscape(s) }
 
 	tests := []struct {
 		name       string
 		query      string
 		wantStatus int
+		// wantFrom/wantTo are the instants the STORE must be called with. A nil
+		// wantFrom means the row's `from` is "now" and is pinned by
+		// TestBookedWindowsDefaultRange instead.
+		wantFrom, wantTo *time.Time
 	}{
-		{"no params defaults to now..now+7d", "", http.StatusOK},
-		{"explicit valid range", "?from=" + rfc(base) + "&to=" + rfc(base.Add(24*time.Hour)), http.StatusOK},
-		{"from only, to defaults", "?from=" + rfc(base), http.StatusOK},
-		{"to only, from defaults to now", "?to=" + rfc(time.Now().Add(time.Hour)), http.StatusOK},
-		{"from equals to", "?from=" + rfc(base) + "&to=" + rfc(base), http.StatusBadRequest},
-		{"from after to", "?from=" + rfc(base.Add(time.Hour)) + "&to=" + rfc(base), http.StatusBadRequest},
-		{"range wider than 14 days", "?from=" + rfc(base) + "&to=" + rfc(base.Add(15*24*time.Hour)), http.StatusBadRequest},
-		{"exactly 14 days is allowed", "?from=" + rfc(base) + "&to=" + rfc(base.Add(14*24*time.Hour)), http.StatusOK},
-		{"unparseable from", "?from=tomorrow", http.StatusBadRequest},
-		{"bare date is not RFC 3339", "?from=2029-06-12", http.StatusBadRequest},
-		{"unparseable to", "?from=" + rfc(base) + "&to=soon", http.StatusBadRequest},
+		{
+			name: "no params defaults to now..now+7d", query: "", wantStatus: http.StatusOK,
+		},
+		{
+			name:  "explicit valid range",
+			query: "?from=" + rfc(base) + "&to=" + rfc(base.Add(24*time.Hour)), wantStatus: http.StatusOK,
+			wantFrom: at(base), wantTo: at(base.Add(24 * time.Hour)),
+		},
+		{
+			name: "from only, to defaults", query: "?from=" + rfc(base), wantStatus: http.StatusOK,
+			wantFrom: at(base), wantTo: at(base.Add(bookedWindowsDefaultRange)),
+		},
+		{
+			name: "to only, from defaults to now", query: "?to=" + rfc(time.Now().Add(time.Hour)), wantStatus: http.StatusOK,
+		},
+		{
+			// A NON-UTC offset is legal RFC 3339 and must be honoured as the
+			// INSTANT it names, not re-read as wall time: 15:00+02:00 is
+			// 13:00Z, and a handler that dropped the offset would dim the wrong
+			// two hours of the picker.
+			name:  "non-UTC offset is honoured as the instant it names",
+			query: "?from=" + enc(offsetFrom) + "&to=" + enc(offsetTo), wantStatus: http.StatusOK,
+			wantFrom: at(time.Date(2029, 6, 12, 13, 0, 0, 0, time.UTC)),
+			wantTo:   at(time.Date(2029, 6, 13, 13, 0, 0, 0, time.UTC)),
+		},
+		{
+			// AND THE TRAP, pinned so §7.22's caveat has a test behind it: a
+			// LITERAL `+` in a query string decodes to a SPACE, so the
+			// unencoded form of the row above arrives as "2029-06-12T15:00:00
+			// 02:00" and is not RFC 3339 at all. The 400 is correct; clients
+			// must percent-encode it (or just send UTC `Z`).
+			name:  "a literal + in the query string decodes to a space and is refused",
+			query: "?from=" + offsetFrom, wantStatus: http.StatusBadRequest,
+		},
+		{name: "from equals to", query: "?from=" + rfc(base) + "&to=" + rfc(base), wantStatus: http.StatusBadRequest},
+		{
+			name:  "from after to",
+			query: "?from=" + rfc(base.Add(time.Hour)) + "&to=" + rfc(base), wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:  "range wider than 14 days",
+			query: "?from=" + rfc(base) + "&to=" + rfc(base.Add(15*24*time.Hour)), wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:  "exactly 14 days is allowed",
+			query: "?from=" + rfc(base) + "&to=" + rfc(base.Add(14*24*time.Hour)), wantStatus: http.StatusOK,
+			wantFrom: at(base), wantTo: at(base.Add(14 * 24 * time.Hour)),
+		},
+		{name: "unparseable from", query: "?from=tomorrow", wantStatus: http.StatusBadRequest},
+		{name: "bare date is not RFC 3339", query: "?from=2029-06-12", wantStatus: http.StatusBadRequest},
+		{name: "unparseable to", query: "?from=" + rfc(base) + "&to=soon", wantStatus: http.StatusBadRequest},
 	}
 
 	for _, tt := range tests {
@@ -224,6 +297,86 @@ func TestBookedWindowsRangeValidation(t *testing.T) {
 			}
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status: got %d want 200. body=%s", rec.Code, rec.Body.String())
+			}
+			if store.windowsCalls != 1 {
+				t.Fatalf("store calls = %d, want exactly 1", store.windowsCalls)
+			}
+			if tt.wantFrom != nil && !store.windowsCall.from.Equal(*tt.wantFrom) {
+				t.Errorf("store from = %s, want %s", store.windowsCall.from.UTC(), tt.wantFrom.UTC())
+			}
+			if tt.wantTo != nil && !store.windowsCall.to.Equal(*tt.wantTo) {
+				t.Errorf("store to = %s, want %s", store.windowsCall.to.UTC(), tt.wantTo.UTC())
+			}
+		})
+	}
+}
+
+// TestBookedWindowsCapIsTheInjectedOne pins that the cap is the value WIRED IN,
+// not a number the handler keeps of its own — which is the whole reason
+// store.MaxBookedWindowRange is now passed through wiring.go instead of being
+// restated here. A handler still holding a private 14 days passes every §7.22
+// boundary case above and fails both rows below.
+func TestBookedWindowsCapIsTheInjectedOne(t *testing.T) {
+	base := time.Date(2029, 6, 12, 15, 0, 0, 0, time.UTC)
+	rfc := func(t time.Time) string { return t.UTC().Format(time.RFC3339) }
+	rangeQuery := func(d time.Duration) string {
+		return "?from=" + rfc(base) + "&to=" + rfc(base.Add(d))
+	}
+
+	tests := []struct {
+		name       string
+		maxRange   time.Duration
+		span       time.Duration
+		wantStatus int
+		wantCode   wserrors.ErrorCode
+	}{
+		{
+			// A cap NARROWER than the production one: a 3-day ask must now be
+			// refused, which no hard-coded 14 days would do.
+			name:     "a narrower injected cap refuses a span the default would allow",
+			maxRange: 2 * 24 * time.Hour, span: 3 * 24 * time.Hour,
+			wantStatus: http.StatusBadRequest, wantCode: wserrors.ErrCodeInvalidRequest,
+		},
+		{
+			name: "exactly the injected cap is allowed", maxRange: 2 * 24 * time.Hour, span: 2 * 24 * time.Hour,
+			wantStatus: http.StatusOK,
+		},
+		{
+			// A cap WIDER than production: a 20-day ask must now be served.
+			name:     "a wider injected cap allows a span the default would refuse",
+			maxRange: 30 * 24 * time.Hour, span: 20 * 24 * time.Hour,
+			wantStatus: http.StatusOK,
+		},
+		{
+			// wiring.go forgot the option. Serving without a cap would let one
+			// call ask about a decade, so the endpoint refuses everything and
+			// says so in the log — the same fail-closed reading a missing Live
+			// Activity registry gets (§7.21).
+			name:     "an unconfigured cap is a deployment error, not an open door",
+			maxRange: 0, span: time.Hour,
+			wantStatus: http.StatusInternalServerError, wantCode: wserrors.ErrCodeInternalError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &fakeRideStore{}
+			h := windowsHandlerWithMax(store, shareOwnerUser, nil, tt.maxRange)
+			rec := doRequest(t, windowsMux(h), http.MethodGet,
+				bookedWindowsPath+rangeQuery(tt.span), "", "Bearer t")
+
+			if tt.wantStatus != http.StatusOK {
+				assertErrEnvelope(t, rec, tt.wantStatus, tt.wantCode)
+				if store.windowsCalls != 0 {
+					t.Error("a refused range must not reach the store")
+				}
+				return
+			}
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status: got %d want 200. body=%s", rec.Code, rec.Body.String())
+			}
+			if store.windowsCalls != 1 {
+				t.Errorf("store calls = %d, want 1", store.windowsCalls)
 			}
 		})
 	}
@@ -256,18 +409,6 @@ func TestBookedWindowsDefaultRange(t *testing.T) {
 	// identity on this endpoint and there must never be one.
 	if got.callerID != shareOwnerUser {
 		t.Errorf("callerID = %q, want the JWT subject %q", got.callerID, shareOwnerUser)
-	}
-}
-
-// TestBookedWindowsMaxRangeMirrorsTheStore pins the two caps together. The
-// handler layer cannot import internal/store, so the constant is duplicated —
-// and a duplicated constant that nothing compares is a constant that drifts.
-func TestBookedWindowsMaxRangeMirrorsTheStore(t *testing.T) {
-	// store.MaxBookedWindowRange, restated. Kept as an arithmetic expression
-	// rather than a duration literal so the two read the same way.
-	const storeMax = 14 * 24 * time.Hour
-	if bookedWindowsMaxRange != storeMax {
-		t.Fatalf("handler cap %s != store cap %s", bookedWindowsMaxRange, storeMax)
 	}
 }
 

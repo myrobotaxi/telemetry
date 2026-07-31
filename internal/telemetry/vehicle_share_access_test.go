@@ -262,6 +262,22 @@ func TestEndpointGrantMatrix(t *testing.T) {
 				"suspended-base": forbidden, "suspended-rides": forbidden,
 			},
 		},
+		{
+			endpoint: "GET /api/vehicles/{vehicleId}/booked-windows",
+			serve:    serveBookedWindowsFor,
+			// MYR-385: the READ side of the ride-create gate, so the column
+			// MUST match the row above it in every cell. The endpoint answers
+			// "what would create refuse?", and a tier served here but not there
+			// makes it an oracle for a question POST /api/ride-requests would
+			// not answer — a base-tier viewer watching a stranger's calendar
+			// fill up. Adjacency in this table is the assertion: the two rows
+			// are read together, and a divergence is visible rather than
+			// distributed across two files.
+			wantByGrant: map[string]int{
+				"none": forbidden, "base": forbidden, "rides": ok,
+				"suspended-base": forbidden, "suspended-rides": forbidden,
+			},
+		},
 	}
 
 	readers := map[string]VehicleShareReader{
@@ -339,6 +355,27 @@ func serveRideCreateFor(t *testing.T, caller string, reader VehicleShareReader) 
 	mux.HandleFunc("POST /api/ride-requests", h.ServeCreate)
 
 	return doTieredRequest(t, mux, http.MethodPost, "/api/ride-requests", validRideCreateBody())
+}
+
+// serveBookedWindowsFor mounts §7.22 the way wiring.go does, INCLUDING the
+// range-cap option — without it the endpoint answers 500 for every caller and
+// the tier column below would be measuring a wiring bug instead of a gate.
+func serveBookedWindowsFor(t *testing.T, caller string, reader VehicleShareReader) int {
+	t.Helper()
+	h := NewRideRequestHandler(
+		&stubTokenValidator{userID: caller},
+		&stubVehicleSnapshotReader{row: fixtureSnapshotRow(shareOwnerUser)},
+		&fakeRideStore{},
+		nil,
+		discardLogger(),
+		WithRideShareReader(reader),
+		WithBookedWindowsMaxRange(testBookedWindowsMax),
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/vehicles/{vehicleId}/booked-windows", h.ServeBookedWindows)
+
+	return doTieredRequest(t, mux, http.MethodGet,
+		"/api/vehicles/"+fixtureSnapshotRowID+"/booked-windows", nil)
 }
 
 // doTieredRequest issues one authenticated request and returns the status.
