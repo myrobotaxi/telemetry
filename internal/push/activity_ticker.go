@@ -26,11 +26,21 @@ type ActivityLeg struct {
 	RideContext
 }
 
+// ActivityKey identifies one registration — the (ride, party) pair the
+// registry is unique on.
+type ActivityKey struct {
+	RideRequestID string
+	UserID        string
+}
+
 // ActivityLegStore is the ticker's view of the registry.
 type ActivityLegStore interface {
 	// ActiveLegs lists up to limit live Activities whose ride is mid-leg,
 	// least recently updated first.
 	ActiveLegs(ctx context.Context, limit int) ([]ActivityLeg, error)
+	// MarkPushed records that these registrations were just delivered to, so
+	// the next pass orders them last.
+	MarkPushed(ctx context.Context, keys []ActivityKey) (int64, error)
 	// SweepStale deletes rows untouched for longer than olderThan.
 	SweepStale(ctx context.Context, olderThan time.Duration) (int64, error)
 }
@@ -196,7 +206,7 @@ func (t *ActivityTicker) RunPass(ctx context.Context) {
 	}
 
 	now := t.notifier.now()
-	var delivered int
+	pushed := make([]ActivityKey, 0, len(legs))
 	for _, leg := range legs {
 		if !t.notifier.allowed(ctx, leg.UserID, leg.RideRequestID) {
 			continue
@@ -205,18 +215,45 @@ func (t *ActivityTicker) RunPass(ctx context.Context) {
 		// with a lifecycle transition for Apple's per-Activity budget
 		// (MYR-194 decision 3).
 		if t.notifier.send(ctx, leg.Activity, contentState(leg.RideContext, now), ActivityEventUpdate, nil, true, now) {
-			delivered++
+			pushed = append(pushed, ActivityKey{RideRequestID: leg.RideRequestID, UserID: leg.UserID})
 		}
 	}
+
+	t.markPushed(ctx, pushed)
 
 	if len(legs) > 0 {
 		t.logger.Info("live activity ticker pass",
 			slog.Int("legs", len(legs)),
-			slog.Int("delivered", delivered),
+			slog.Int("delivered", len(pushed)),
 			slog.Bool("capped", len(legs) == t.cfg.MaxPerPass))
 	}
 
 	t.sweepIfDue(ctx, now)
+}
+
+// markPushed stamps the delivered rows so the next pass sorts them last.
+//
+// This is what turns the LIST's `ORDER BY updated_at ASC LIMIT n` into an
+// actual rotation. Without it the order is a fixed permutation and MaxPerPass
+// truncates the same tail on every tick forever — the Activities that most need
+// a refresh would be exactly the ones that never get one, and the anti-
+// starvation claim in the query's own comment would be false.
+//
+// Non-fatal and detached from the pass deadline, which the sends may have
+// consumed: a failed stamp costs one pass of fairness, never a pass of updates.
+func (t *ActivityTicker) markPushed(ctx context.Context, keys []ActivityKey) {
+	if len(keys) == 0 {
+		return
+	}
+
+	markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), t.cfg.ListTimeout)
+	defer cancel()
+
+	if _, err := t.legs.MarkPushed(markCtx, keys); err != nil {
+		t.logger.Error("live activity ticker: mark pushed failed",
+			slog.Int("activities", len(keys)),
+			slog.String("error", err.Error()))
+	}
 }
 
 // sweepIfDue runs the stale-row cleanup at most once per sweepEvery.

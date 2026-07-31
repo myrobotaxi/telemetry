@@ -150,6 +150,73 @@ func TestTickerPassRespectsTheCap(t *testing.T) {
 	}
 }
 
+// TestTickerCapRotatesRatherThanStarving is the MYR-172 review fix.
+//
+// The LIST orders by `updated_at ASC` and its own comment calls that
+// anti-starvation: when a pass is capped, the cap is supposed to shed the
+// Activities that were refreshed most recently. That was FALSE, because nothing
+// ever moved updated_at after registration — the order was a fixed permutation
+// and every capped pass shed the same tail forever. With two rides and a cap of
+// one, the second ride's Activity would never have been updated again for the
+// whole length of its ride.
+//
+// Two passes at cap=1 must therefore reach two DIFFERENT Activities.
+func TestTickerCapRotatesRatherThanStarving(t *testing.T) {
+	ticker, sender, store := newTestTicker(t, 2, nil)
+	ticker.cfg.MaxPerPass = 1
+
+	ticker.RunPass(context.Background())
+	ticker.RunPass(context.Background())
+
+	sent := sender.Sent()
+	if len(sent) != 2 {
+		t.Fatalf("sent %d updates over two capped passes, want 2", len(sent))
+	}
+	if sent[0].ActivityToken == sent[1].ActivityToken {
+		t.Errorf("both passes went to %s — the cap is starving the second Activity,"+
+			" which is exactly what ordering by updated_at is supposed to prevent",
+			tokenPrefix(sent[0].ActivityToken))
+	}
+
+	// And the rotation is driven by a real write, not by luck in the fake:
+	// each pass must have stamped exactly the row it delivered to.
+	pushed := store.pushedKeys()
+	if len(pushed) != 2 {
+		t.Fatalf("MarkPushed recorded %d keys, want 2 (one per pass)", len(pushed))
+	}
+	if pushed[0] == pushed[1] {
+		t.Errorf("both passes stamped %+v; the second pass re-picked the first row", pushed[0])
+	}
+}
+
+// TestTickerMarksOnlyDeliveredActivities pins the other half: a row Apple
+// refused is not "recently pushed". Stamping it anyway would let a permanently
+// failing Activity hold the front of the queue and starve healthy ones — the
+// same bug, inverted.
+func TestTickerMarksOnlyDeliveredActivities(t *testing.T) {
+	ticker, sender, store := newTestTicker(t, 3, nil)
+	sender.Err = errors.New("apns unavailable")
+
+	ticker.RunPass(context.Background())
+
+	if got := store.pushedKeys(); len(got) != 0 {
+		t.Errorf("MarkPushed recorded %d keys after every send failed, want 0", len(got))
+	}
+}
+
+// TestTickerSurvivesAMarkFailure — a failed stamp costs one pass of FAIRNESS,
+// never a pass of updates. The sends have already happened by then.
+func TestTickerSurvivesAMarkFailure(t *testing.T) {
+	ticker, sender, store := newTestTicker(t, 2, nil)
+	store.markErr = errors.New("db blip")
+
+	ticker.RunPass(context.Background())
+
+	if got := len(sender.Sent()); got != 2 {
+		t.Errorf("sent %d updates despite a mark-pushed failure, want 2", got)
+	}
+}
+
 // TestTickerPassHonoursTheMuteGate proves the ETA ticker goes through the same
 // preference gate as the lifecycle path — a rider who muted ride updates must
 // not be reached 60 times an hour by the surface that ignores the switch.

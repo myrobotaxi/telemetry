@@ -51,10 +51,22 @@
 -- The FK earns its place because this row is meaningless without its ride and
 -- because the ride already has a hard-delete path: owner teardown issues a bare
 -- DELETE over go_ride_requests by vehicle, and account deletion cascades. ON
--- DELETE CASCADE means those paths cannot strand a token that addresses an
--- Activity for a ride that no longer exists. The alternative — an unenforced
--- pointer plus a bespoke delete in every teardown path — is three places to
--- forget instead of zero. user_id stays unenforced, as it must.
+-- DELETE CASCADE means those paths cannot leave behind a ROW addressing a ride
+-- that no longer exists. The alternative — an unenforced pointer plus a bespoke
+-- delete in every teardown path — is three places to forget instead of zero.
+-- user_id stays unenforced, as it must.
+--
+-- WHAT THE CASCADE DOES NOT DO, stated plainly because an earlier draft of this
+-- header claimed the delete paths "cannot strand" anything, and that is only
+-- true of database rows. The Live Activity itself lives on a PHONE. Deleting
+-- the row removes the only address we had for it and publishes no event, so the
+-- cascade does not end the Activity — it destroys our ability to. The rider is
+-- left looking at "your car is on its way" until ActivityKit's own multi-hour
+-- ceiling reaps it. Every hard-delete path must therefore END the Activities
+-- (one `event: "end"` push each) BEFORE it deletes the rides: owner teardown
+-- does this in telemetry.VehicleTeardownHandler via
+-- push.ActivityNotifier.EndForVehicleTeardown. The cascade is the cleanup, not
+-- the notification.
 --
 -- ended_at IS A TOMBSTONE, NOT A DELETE.
 --
@@ -72,6 +84,16 @@
 -- internal/push), which covers both the ordinary ended row and the row whose
 -- Activity died on the phone without ever telling us — the case a delete-on-end
 -- design has no answer for at all.
+--
+-- updated_at MEANS "LAST TOUCHED", INCLUDING BY A PUSH. Registration, end and
+-- every successful ETA-ticker send stamp it (LiveActivityRepo.MarkActivities
+-- Pushed). That is load-bearing twice over. It makes the ticker's
+-- `ORDER BY updated_at ASC LIMIT n` a genuine rotation — without a stamp the
+-- order is a fixed permutation and a capped pass sheds the same tail on every
+-- tick forever, starving exactly the Activities most in need of a refresh. And
+-- it gives the 24-hour sweep an honest predicate: a row still being pushed to
+-- is by definition not stale, so a long ride is never swept out from under a
+-- live Activity.
 --
 -- NULLABILITY. activity_push_token is NOT NULL because a row without a token
 -- addresses nothing and there is no honest-unknown state; a caller with no
@@ -117,9 +139,11 @@ CREATE TABLE IF NOT EXISTS go_live_activities (
     CONSTRAINT go_live_activities_ride_user_key UNIQUE (ride_request_id, user_id)
 );
 
--- The 24-hour sweep's predicate. Deliberately on updated_at rather than
--- ended_at: the rows most worth reaping are the ones that NEVER ended (the
--- Activity died on the phone), and those have ended_at IS NULL forever.
+-- The 24-hour sweep's predicate, AND the ETA ticker's ordering. Deliberately on
+-- updated_at rather than ended_at: the rows most worth reaping are the ones
+-- that NEVER ended (the Activity died on the phone), and those have ended_at IS
+-- NULL forever. The ticker reads the same column ascending to serve its least
+-- recently pushed Activity first.
 CREATE INDEX IF NOT EXISTS idx_go_live_activities_updated_at
     ON go_live_activities (updated_at);
 
