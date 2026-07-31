@@ -37,11 +37,21 @@ func seedReservation(t *testing.T, repo *store.RideRequestRepo, riderSuffix stri
 
 	rec := minimalRideRequest()
 	rec.RiderID = "clrider" + riderSuffix
-	rec.ScheduledFor = s.scheduledFor
+	// Create against a spaced-apart placeholder, then plant the instant this
+	// seed actually wants: the sweeper matrix deliberately parks several
+	// reservations minutes apart on ONE car, which the MYR-383 booking gate
+	// refuses at Create. See plantScheduledFor.
+	if s.scheduledFor != nil {
+		placeholder := nextFixtureInstant()
+		rec.ScheduledFor = &placeholder
+	}
 
 	created, err := repo.Create(ctx, rec)
 	if err != nil {
 		t.Fatalf("Create(%s): %v", riderSuffix, err)
+	}
+	if s.scheduledFor != nil {
+		plantScheduledFor(t, created.ID, s.scheduledFor)
 	}
 	if _, err := testPool.Exec(ctx,
 		`UPDATE go_ride_requests SET status = $2 WHERE id = $1`,

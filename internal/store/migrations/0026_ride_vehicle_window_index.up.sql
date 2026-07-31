@@ -1,0 +1,53 @@
+-- 0026_ride_vehicle_window_index.up.sql
+--
+-- MYR-383: index the per-vehicle ride-window conflict probe. The probe
+-- (queryRideWindowConflict) runs on EVERY reservation create and EVERY accept,
+-- inside the per-vehicle advisory booking lock — so its cost is held serially
+-- per car and must be an index probe, not a scan. go_ride_requests retains
+-- terminal rows (completed/cancelled/declined) indefinitely, so an unindexed
+-- predicate degrades monotonically with lifetime ride volume on the exact path
+-- a rider is waiting on.
+--
+-- The index covers the RESERVATION arm of rideWindowConflictPredicate. Its
+-- predicate is that arm's two static conjuncts:
+--
+--   scheduled_for IS NOT NULL                          -- reservations only
+--   status IN ('requested','accepted','arrived','enroute')  -- the OPEN set
+--
+-- so it is PARTIAL over the small, self-draining set of live reservations
+-- rather than over every ride ever booked. The leading column is vehicle_id
+-- (the probe's equality conjunct) and the second is scheduled_for, which serves
+-- the remaining range conjuncts (scheduled_for strictly inside the window).
+--
+-- The ACTIVE-INSTANT arm needs NO index of its own: its predicate is character
+-- for character uq_go_ride_requests_active_instant_vehicle (migration 0013),
+-- which is already exactly that arm and already leads on vehicle_id — the same
+-- reuse migration 0016 relies on for the sweeper's busy subquery.
+--
+-- Why the existing indexes cannot serve the reservation arm:
+-- idx_go_ride_requests_vehicle leads on vehicle_id but is unpartitioned and
+-- carries no scheduled_for, so it degrades with every terminal row a car ever
+-- accumulates; idx_go_ride_requests_reservation_due (0016) is partial on
+-- `status = 'accepted' AND dispatched_at IS NULL` (narrower than the OPEN set)
+-- and leads on scheduled_for, not vehicle_id; and the two partial UNIQUE
+-- indexes (0004, 0013) are partial on the OPPOSITE predicate
+-- `scheduled_for IS NULL`.
+--
+-- NO PRE-DEDUP, and that is the point. This is a plain non-unique INDEX, not a
+-- constraint: it cannot fail to install over existing data, so — unlike the
+-- 0004 / 0013 guards — no production reservation is cancelled to make room for
+-- it. Reservations already double-booked from the era before this gate stay
+-- exactly as they are and are caught at ACCEPT instead, which is where a human
+-- is present to choose. Enforcement lives in the advisory-lock transaction
+-- (internal/store/ride_request_conflict.go), never in this index; the index is
+-- purely how the probe stays fast. The reasoning for choosing a lock over a
+-- btree_gist EXCLUDE constraint is recorded in that file.
+--
+-- Naming convention (CG-DL-9): Go-owned table, "go_" prefix, snake_case; no
+-- Prisma-owned table is referenced. Classification: no new columns; an index
+-- over existing P0 columns, not exposed on the wire.
+
+CREATE INDEX IF NOT EXISTS idx_go_ride_requests_vehicle_window
+    ON go_ride_requests (vehicle_id, scheduled_for)
+    WHERE scheduled_for IS NOT NULL
+      AND status IN ('requested', 'accepted', 'arrived', 'enroute');

@@ -57,14 +57,24 @@ func seedRideRow(t *testing.T, repo *store.RideRequestRepo, s upcomingSeed) stri
 	if s.riderID != "" {
 		in.RiderID = s.riderID
 	}
+	var at *time.Time
 	if !s.instant {
-		at := time.Now().UTC().Add(s.offset)
-		in.ScheduledFor = &at
+		want := time.Now().UTC().Add(s.offset)
+		at = &want
+		// Create against a spaced-apart placeholder, then plant the intended
+		// instant: these fixtures sit minutes apart on one car (and two of them
+		// deliberately SHARE an instant to exercise the cursor tie-break), which
+		// the MYR-383 booking gate refuses at Create. See plantScheduledFor.
+		placeholder := nextFixtureInstant()
+		in.ScheduledFor = &placeholder
 	}
 
 	rec, err := repo.Create(ctx, in)
 	if err != nil {
 		t.Fatalf("seed %q: Create: %v", s.name, err)
+	}
+	if at != nil {
+		plantScheduledFor(t, rec.ID, at)
 	}
 	if s.status != "" && s.status != store.RideRequestStatusRequested {
 		if _, err := repo.UpdateStatus(ctx, rec.ID, s.status); err != nil {

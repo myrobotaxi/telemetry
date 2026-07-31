@@ -28,7 +28,7 @@ import (
 // ErrRideRequestNotFound, an existing row whose status is outside `from`
 // returns ErrRideRequestConflict.
 func (r *RideRequestRepo) UpdateStatusFrom(ctx context.Context, id string, from []RideRequestStatus, to RideRequestStatus) (RideRequestRecord, error) {
-	return r.updateStatusGuarded(ctx, statusGuard{
+	return r.updateStatusGuarded(ctx, r.pool, statusGuard{
 		name:  "UpdateStatusFrom",
 		op:    "ride_request.update_status_from",
 		query: queryRideRequestUpdateStatusFrom,
@@ -71,12 +71,97 @@ func (r *RideRequestRepo) UpdateStatusFrom(ctx context.Context, id string, from 
 // reservation returns ErrRideRequestReservationDormant, so the HTTP layer can
 // name the actual reason in its 409 rather than blaming the status.
 func (r *RideRequestRepo) UpdateStatusFromDispatched(ctx context.Context, id string, from []RideRequestStatus, to RideRequestStatus) (RideRequestRecord, error) {
-	return r.updateStatusGuarded(ctx, statusGuard{
+	return r.updateStatusGuarded(ctx, r.pool, statusGuard{
 		name:            "UpdateStatusFromDispatched",
 		op:              "ride_request.update_status_from_dispatched",
 		query:           queryRideRequestUpdateStatusFromDispatched,
 		dormancyGuarded: true,
 	}, id, from, to)
+}
+
+// UpdateStatusFromUnconflicted is UpdateStatusFrom wrapped in the MYR-383
+// per-vehicle BOOKING LOCK, and it backs exactly one caller: the owner accept
+// transition (requested → accepted).
+//
+// Accept is the BACKSTOP half of the two-layer gate whose rider-facing half is
+// the create-time refusal (see ride_request_conflict.go) — the same shape as
+// the MYR-316 service-window bound, and for the same reason: the create gate
+// cannot reach backwards to a request that was already outstanding when the
+// window filled up. Two things reach this layer and not the other one:
+//
+//   - RESERVATIONS BOOKED BEFORE THIS GATE EXISTED. Rows already in production
+//     from the era the boundary was open — including the pair the client
+//     reported — can still be mutually conflicting. Accept is where that is
+//     discovered instead of by an owner declining by hand.
+//   - THE ACTIVE-INSTANT ARM, which is time-relative. A car that was idle when
+//     a reservation was booked may be mid-ride by the time the owner confirms
+//     it, and the conflict only exists at the second layer.
+//
+// The whole transition runs inside ONE transaction holding the vehicle's
+// advisory lock: lock, re-read what the ride promises, probe the window, then
+// the same guarded `WHERE status = ANY(from)` UPDATE. So the two races that
+// matter both resolve in the database — two owners accepting conflicting
+// reservations for one car, and an accept racing the instant ride that is about
+// to fill the window (every accept takes the lock, including an instant one
+// that skips the probe, which is what makes them serialize).
+//
+// INSTANT accepts are UNGATED by the window rule itself: `scheduled_for IS
+// NULL` skips the probe entirely, so their behaviour is byte-identical to
+// UpdateStatusFrom's — the per-vehicle unique index (0013) remains their guard.
+// v1a deliberately does not refuse an instant accept that would collide with a
+// near-term reservation; that direction is the follow-up (rest-api.md §7.8).
+//
+// Miss classification is UpdateStatusFrom's, unchanged. The window refusal is
+// not a miss at all — it is a *RideWindowConflictError raised before the UPDATE
+// runs, so no row is touched and nothing is published.
+func (r *RideRequestRepo) UpdateStatusFromUnconflicted(ctx context.Context, id string, from []RideRequestStatus, to RideRequestStatus) (RideRequestRecord, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.UpdateStatusFromUnconflicted(%s): begin: %w", id, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after Commit
+
+	if err := lockVehicleForRide(ctx, tx, id); err != nil {
+		return RideRequestRecord{}, err
+	}
+	if err := r.rejectBookingConflict(ctx, tx, id); err != nil {
+		return RideRequestRecord{}, err
+	}
+
+	rec, err := r.updateStatusGuarded(ctx, tx, statusGuard{
+		name:  "UpdateStatusFromUnconflicted",
+		op:    "ride_request.update_status_from_unconflicted",
+		query: queryRideRequestUpdateStatusFrom,
+	}, id, from, to)
+	if err != nil {
+		return RideRequestRecord{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.UpdateStatusFromUnconflicted(%s): commit: %w", id, err)
+	}
+	return rec, nil
+}
+
+// rejectBookingConflict runs the MYR-383 window probe for the ride being
+// accepted, from inside the already-locked transaction. An INSTANT ride has no
+// window to check and returns nil. A ride that vanished between the lock and
+// this read also returns nil — the guarded UPDATE reports the missing row, and
+// a second not-found path here could only disagree with it.
+func (r *RideRequestRepo) rejectBookingConflict(ctx context.Context, tx rideConflictTx, id string) error {
+	vehicleID, scheduledFor, err := readRideBooking(ctx, tx, id)
+	if err != nil {
+		if errors.Is(err, ErrRideRequestNotFound) {
+			return nil
+		}
+		return err
+	}
+	if scheduledFor == nil {
+		return nil
+	}
+	// countPending FALSE: an owner's accept is HOW a contested slot is decided,
+	// so a peer request must not refuse both sides of it. See
+	// rideWindowConflictPredicate.
+	return checkRideWindowConflict(ctx, tx, vehicleID, *scheduledFor, id, false)
 }
 
 // statusGuard names one guarded-transition statement: the SQL to run, the
@@ -93,11 +178,13 @@ type statusGuard struct {
 	dormancyGuarded bool
 }
 
-// updateStatusGuarded runs one guarded transition statement and classifies its
-// outcome. Shared by UpdateStatusFrom and UpdateStatusFromDispatched so the two
-// can never drift in how they stamp a row or map a miss.
+// updateStatusGuarded runs one guarded transition statement on q and
+// classifies its outcome. Shared by all three variants so they can never drift
+// in how they stamp a row or map a miss. q is the pool for the two
+// single-statement variants and the open transaction for the MYR-383
+// booking-locked one — the statement itself is identical either way.
 func (r *RideRequestRepo) updateStatusGuarded(
-	ctx context.Context, g statusGuard, id string, from []RideRequestStatus, to RideRequestStatus,
+	ctx context.Context, q pgxQuerier, g statusGuard, id string, from []RideRequestStatus, to RideRequestStatus,
 ) (RideRequestRecord, error) {
 	fromStrs := make([]string, 0, len(from))
 	for _, s := range from {
@@ -105,7 +192,7 @@ func (r *RideRequestRepo) updateStatusGuarded(
 	}
 
 	start := time.Now()
-	row := r.pool.QueryRow(ctx, g.query, id, string(to), fromStrs)
+	row := q.QueryRow(ctx, g.query, id, string(to), fromStrs)
 	rec, err := r.scanRideRequest(row)
 	r.metrics.ObserveQueryDuration(g.op, time.Since(start).Seconds())
 	if err == nil {

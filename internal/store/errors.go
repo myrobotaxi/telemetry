@@ -65,6 +65,24 @@ var (
 	// ride): the transition is legal, the vehicle is just busy.
 	ErrVehicleRideActive = errors.New("vehicle already on an active ride")
 
+	// ErrRideWindowConflict is the sentinel every *RideWindowConflictError
+	// unwraps to (MYR-383): the target VEHICLE is already promised to another
+	// OPEN ride within RideConflictWindow of the requested instant, so it
+	// cannot also serve this one. Raised at BOTH booking sites — the
+	// reservation INSERT (Create) and the guarded requested->accepted UPDATE
+	// (UpdateStatusFromUnconflicted) — each under the per-vehicle advisory
+	// booking lock, so two concurrent conflicting bookings never both commit.
+	//
+	// The HTTP layer maps it to 409 `vehicle_unavailable` with
+	// `subCode: time_conflict` (rest-api.md §7.8): like the MYR-277
+	// in-service/offline gate and the MYR-266 per-vehicle busy guard, this is a
+	// CAPABILITY refusal — the request is well formed and the caller
+	// authorised, the car simply cannot serve it — not the `conflict` that
+	// means an illegal lifecycle transition. Use errors.As with
+	// *RideWindowConflictError to read the conflicting instant. Deliberately
+	// does NOT wrap sdk.ErrNotFound.
+	ErrRideWindowConflict = errors.New("vehicle already booked in this window")
+
 	// ErrTeslaTokenNotFound is returned when no Tesla OAuth token exists
 	// for a user in the Prisma-owned Account table.
 	// Wraps sdk.ErrNotFound so callers can use errors.Is(err, sdk.ErrNotFound).

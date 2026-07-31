@@ -199,11 +199,12 @@ func TestRideRequestRepo_Create_OneActiveInstant(t *testing.T) {
 		if _, err := testPool.Exec(ctx, `DELETE FROM go_ride_requests`); err != nil {
 			t.Fatalf("clean: %v", err)
 		}
-		sched := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+		// Distinct instants: the per-RIDER guard under test is indifferent to
+		// them, but the MYR-383 per-VEHICLE window gate is not, and stacking
+		// three reservations on one car at one instant would now (correctly) be
+		// refused by a rule this test is not about.
 		mkScheduled := func() store.RideRequestRecord {
-			r := minimalRideRequest()
-			r.ScheduledFor = &sched
-			return r
+			return scheduledRideRequest()
 		}
 		// Many scheduled rides for one rider: all allowed.
 		for i := 0; i < 3; i++ {
