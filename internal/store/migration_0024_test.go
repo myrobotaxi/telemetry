@@ -22,33 +22,29 @@ var migration0024Columns = map[string]string{
 	"suspended_at": "timestamp with time zone",
 }
 
-// shareColumnTypes introspects the installed go_vehicle_shares columns.
-func shareColumnTypes(t *testing.T) map[string]string {
+// shareColumnNullability reports information_schema.is_nullable per column.
+//
+// Split from the type introspection (vehicleShareColumnTypes, migration_0020_test.go)
+// rather than duplicating it: nullability is the one property these two columns
+// disagree on, and it is load-bearing in OPPOSITE directions for each.
+func shareColumnNullability(t *testing.T) map[string]string {
 	t.Helper()
 	rows, err := testPool.Query(context.Background(),
-		`SELECT column_name, data_type, is_nullable
+		`SELECT column_name, is_nullable
 		 FROM information_schema.columns
 		 WHERE table_name = 'go_vehicle_shares'`)
 	if err != nil {
-		t.Fatalf("introspect go_vehicle_shares columns: %v", err)
+		t.Fatalf("introspect go_vehicle_shares nullability: %v", err)
 	}
 	defer rows.Close()
 
 	got := map[string]string{}
 	for rows.Next() {
-		var name, dataType, nullable string
-		if err := rows.Scan(&name, &dataType, &nullable); err != nil {
+		var name, nullable string
+		if err := rows.Scan(&name, &nullable); err != nil {
 			t.Fatalf("scan column row: %v", err)
 		}
-		got[name] = dataType
-		if name == "allow_rides" && nullable != "NO" {
-			t.Error("allow_rides is NULLABLE — there is no unknown state for a capability, " +
-				"and a nullable column would invent a third one every reader would collapse anyway")
-		}
-		if name == "suspended_at" && nullable != "YES" {
-			t.Error("suspended_at is NOT NULL — NULL is the ordinary active state, " +
-				"which is what leaves every pre-existing row correct untouched")
-		}
+		got[name] = nullable
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate column rows: %v", err)
@@ -62,7 +58,7 @@ func TestMigration0024_UpAddsGrantFlags(t *testing.T) {
 	}
 	mustApplyGoMigrations(t)
 
-	got := shareColumnTypes(t)
+	got := vehicleShareColumnTypes(t)
 	for col, wantType := range migration0024Columns {
 		actual, ok := got[col]
 		if !ok {
@@ -72,6 +68,17 @@ func TestMigration0024_UpAddsGrantFlags(t *testing.T) {
 		if actual != wantType {
 			t.Errorf("column %s: data_type = %q, want %q", col, actual, wantType)
 		}
+	}
+
+	// NULLABILITY IS LOAD-BEARING IN OPPOSITE DIRECTIONS HERE.
+	nullable := shareColumnNullability(t)
+	if nullable["allow_rides"] != "NO" {
+		t.Error("allow_rides is NULLABLE — there is no unknown state for a capability, " +
+			"and a nullable column would invent a third one every reader would collapse anyway")
+	}
+	if nullable["suspended_at"] != "YES" {
+		t.Error("suspended_at is NOT NULL — NULL is the ordinary active state, " +
+			"which is what leaves every pre-existing row correct untouched")
 	}
 }
 
@@ -211,7 +218,7 @@ func TestMigration0024_DownDropsOnlyTheFlags(t *testing.T) {
 		}
 	})
 
-	got := shareColumnTypes(t)
+	got := vehicleShareColumnTypes(t)
 	for col := range migration0024Columns {
 		if _, present := got[col]; present {
 			t.Errorf("column %s survived the down-migration", col)
