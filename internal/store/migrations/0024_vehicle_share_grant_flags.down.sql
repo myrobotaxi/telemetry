@@ -1,0 +1,46 @@
+-- 0024_vehicle_share_grant_flags.down.sql
+--
+-- Reverse MYR-369: drop the per-grant capability flags from go_vehicle_shares
+-- and return the surface to the fixed cumulative tier migration 0020 installed.
+-- The `permission` column is untouched — it was never dropped — so every grant
+-- falls back to the tier it was originally created at, and the pre-MYR-369
+-- gates (which read `permission` with a >= comparison) resume working with no
+-- data loss for grants nobody edited.
+--
+-- TWO STATES ARE LOST, and both of them are access-control decisions an owner
+-- made deliberately. Read this before running it anywhere real.
+--
+--  1. EVERY SUSPENSION IS LIFTED. `suspended_at` is the only record that a
+--     grant is paused; dropping it silently RESTORES access for every viewer
+--     an owner had suspended, immediately and without anybody acting. Those
+--     viewers reappear in their own vehicle list, their WebSocket subscriptions
+--     are accepted again, and the car is theirs to see exactly as before the
+--     suspension. There is nowhere else the paused state is kept, so it cannot
+--     be recovered by re-migrating: an owner would have to suspend each person
+--     again, and would have no list of who to suspend.
+--
+--  2. EVERY PATCHED CAPABILITY REVERTS TO ITS INVITE-TIME TIER. A grant created
+--     at 'rides' whose owner later PATCHed allow_rides to false goes back to
+--     conveying 'rides' — the ride capability the owner explicitly took away is
+--     handed back. The reverse case is harmless by comparison (a grant created
+--     at 'live' and patched to allow_rides=true simply loses the addition), but
+--     the first is a privilege RESTORATION the owner did not ask for.
+--
+-- Both directions are widenings, which is why this down-migration is more
+-- dangerous than most: the failure mode is somebody having access they were
+-- deliberately denied, not somebody losing a feature.
+--
+-- PREFER ROLLING THE APPLICATION BACK AND LEAVING THE COLUMNS IN PLACE. A
+-- pre-MYR-369 binary does not read either column, so they are inert — the tier
+-- gates resume, suspensions stop being enforced (that part is unavoidable), but
+-- the STATE SURVIVES and rolling forward again restores every suspension and
+-- every edited capability exactly. Running this file is what makes the loss
+-- permanent.
+--
+-- No data owned by the sibling app's ORM is touched, and the surrounding
+-- go_vehicle_shares columns, constraints and indexes from migration 0020 are
+-- left intact — the rollback is surgical to the two columns 0024 added.
+
+ALTER TABLE go_vehicle_shares
+    DROP COLUMN IF EXISTS allow_rides,
+    DROP COLUMN IF EXISTS suspended_at;
