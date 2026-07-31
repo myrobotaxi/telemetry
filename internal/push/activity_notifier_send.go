@@ -240,8 +240,8 @@ func contentState(rc RideContext, now time.Time) ActivityContentState {
 	state := ActivityContentState{
 		Version:     ActivityContentStateVersion,
 		Status:      rc.Status,
-		VehicleName: rc.VehicleName,
-		Destination: rc.Destination,
+		VehicleName: truncateLabel(rc.VehicleName),
+		Destination: truncateLabel(rc.Destination),
 	}
 	if rc.ETAMinutes != nil && *rc.ETAMinutes >= 0 {
 		eta := now.Add(time.Duration(*rc.ETAMinutes) * time.Minute).Unix()

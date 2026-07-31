@@ -3,6 +3,7 @@ package push
 import (
 	"context"
 	"time"
+	"unicode/utf8"
 )
 
 // ActivityKit remote updates (MYR-172, decisions in MYR-194).
@@ -90,6 +91,47 @@ type ActivityContentState struct {
 	// the car is taking you is not the feature. It is never sent to the owner's
 	// Activity, and never appears in an alert body.
 	Destination string `json:"destination"`
+}
+
+// MaxContentStateLabel bounds the free-text labels in a content-state, in
+// RUNES, matching `maxLength: 128` on `destination` and `vehicleName` in
+// schemas/live-activity.schema.json.
+//
+// The contract declared the bound; nothing enforced it. `destination` is the
+// rider's own label for a saved place and `vehicleName` is the owner's nickname
+// for the car — both arrive from a request body and neither is bounded on the
+// way in, so a 4,000-character "Home" was one POST away from pushing the whole
+// payload past Apple's 4KB ceiling. Apple's rejection for that is a flat 400
+// with no route back to the cause, and it would take out the ENTIRE Activity
+// for that ride — every subsequent ETA tick included — not merely the long
+// field.
+//
+// Enforced here, at the content-state build, rather than at the write: it is
+// the one place every send path passes through, and it also covers the labels
+// already in the database from before the bound existed.
+const MaxContentStateLabel = 128
+
+// truncateLabel shortens s to at most MaxContentStateLabel runes, marking the
+// cut with an ellipsis so the rider can see the label was shortened rather than
+// silently misreading a truncated address.
+//
+// It differs from truncateRunes beside it (which caps a first name flat) only
+// in that ellipsis, and the difference is deliberate: a name cut short still
+// reads as a name, whereas "1 Infinite Loop, Cuperti" reads as an address the
+// rider does not recognise.
+//
+// Counted in RUNES, not bytes, and that is not pedantry: byte-slicing UTF-8
+// splits a multi-byte character, and encoding/json re-encodes the broken tail
+// as U+FFFD — so a destination in Japanese or with an emoji would arrive on the
+// lock screen ending in a replacement character. The ellipsis is counted within
+// the budget, so the result is never longer than the bound the schema promises.
+func truncateLabel(s string) string {
+	if utf8.RuneCountInString(s) <= MaxContentStateLabel {
+		return s
+	}
+	// -1 leaves room for the ellipsis INSIDE the budget, so the result is never
+	// longer than the bound the schema promises.
+	return truncateRunes(s, MaxContentStateLabel-1) + "…"
 }
 
 // StaleAfter is how far past a send the content-state stays trustworthy.
