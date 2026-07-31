@@ -95,10 +95,11 @@ func (f *fakeActivityStore) SweepStale(_ context.Context, olderThan time.Duratio
 	return 0, nil
 }
 
-func (f *fakeActivityStore) endCount(rideID string) int {
+// endCount reports how many times the fixture ride was tombstoned.
+func (f *fakeActivityStore) endCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.ended[rideID]
+	return f.ended[activityRideID]
 }
 
 func (f *fakeActivityStore) deletedTokens() []string {
@@ -211,7 +212,7 @@ func TestActivityNotifierTerminalDismissal(t *testing.T) {
 			if got, want := *sent[0].DismissalDate, fixedNow.Add(tt.wantLinger); !got.Equal(want) {
 				t.Errorf("dismissal-date = %s, want %s (linger %s)", got, want, tt.wantLinger)
 			}
-			if store.endCount(activityRideID) != 1 {
+			if store.endCount() != 1 {
 				t.Error("terminal send did not tombstone the registry rows")
 			}
 		})
@@ -237,7 +238,7 @@ func TestActivityNotifierSendsBeforeTombstoning(t *testing.T) {
 	if len(sender.Sent()) != 1 {
 		t.Fatalf("the final update was not sent (%d sends); the rows were ended first", len(sender.Sent()))
 	}
-	if store.endCount(activityRideID) != 1 {
+	if store.endCount() != 1 {
 		t.Error("rows were not tombstoned after the final send")
 	}
 }
@@ -266,7 +267,7 @@ func TestActivityNotifierNonTerminalStatusesNeverEnd(t *testing.T) {
 			if sent[0].Event != ActivityEventUpdate {
 				t.Errorf("status %q produced event %q, want update", status, sent[0].Event)
 			}
-			if store.endCount(activityRideID) != 0 {
+			if store.endCount() != 0 {
 				t.Errorf("status %q tombstoned the registry", status)
 			}
 		})
@@ -365,7 +366,7 @@ func TestActivityNotifierReservationExpiryEnds(t *testing.T) {
 	if sent[0].DismissalDate == nil || !sent[0].DismissalDate.Equal(fixedNow.Add(DismissPromptly)) {
 		t.Error("reservation expiry did not dismiss promptly")
 	}
-	if store.endCount(activityRideID) != 1 {
+	if store.endCount() != 1 {
 		t.Error("reservation expiry did not tombstone the registry rows")
 	}
 }
@@ -384,7 +385,7 @@ func TestActivityNotifierKeylessSendsNothing(t *testing.T) {
 	}))
 	n.Wait()
 
-	if store.endCount(activityRideID) != 0 {
+	if store.endCount() != 0 {
 		t.Error("a keyless notifier tombstoned rows it never pushed to")
 	}
 }

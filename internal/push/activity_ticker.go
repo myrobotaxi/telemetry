@@ -254,5 +254,9 @@ func jitterDuration(d time.Duration, fraction float64) time.Duration {
 	}
 	spread := float64(d) * fraction
 	// rand.Float64() is [0,1); map onto [-spread, +spread).
-	return time.Duration(float64(d) + (rand.Float64()*2-1)*spread) //nolint:gosec // G404: cadence de-synchronisation, not a security decision
+	//
+	// #nosec G404 -- not a security decision. The only requirement on this
+	// number is that two replicas disagree about when to wake up; a
+	// cryptographic source would buy nothing and cost a syscall per tick.
+	return time.Duration(float64(d) + (rand.Float64()*2-1)*spread) //nolint:gosec // G404 — see the #nosec rationale above
 }

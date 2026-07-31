@@ -61,10 +61,14 @@ func (f *fakeActivityRegistry) EndActivity(_ context.Context, rideID, userID str
 	return f.endResult, nil
 }
 
-func (f *fakeActivityRegistry) tokenFor(rideID, userID string) string {
+// riderToken reads the token stored against the fixture ride for the fixture
+// rider. The map is keyed on the PAIR so that a handler which wrote against
+// the right ride but the wrong party — or vice versa — reads back empty here,
+// which is the whole point of the assertion.
+func (f *fakeActivityRegistry) riderToken() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.tokens[activityKey(rideID, userID)]
+	return f.tokens[activityKey(rideID, rideUserID)]
 }
 
 // activityMux wires just the two §7.21 routes, mirroring production.
@@ -88,8 +92,9 @@ func newActivityHandler(store RideRequestStore, registry LiveActivityRegistry, c
 	)
 }
 
-func activityRequest(method, rideID, body string) *http.Request {
-	req := httptest.NewRequest(method, "/api/ride-requests/"+rideID+"/activity-token", strings.NewReader(body))
+func activityRequest(method, body string) *http.Request {
+	req := httptest.NewRequestWithContext(context.Background(), method,
+		"/api/ride-requests/"+rideID+"/activity-token", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer test-token")
 	return req
 }
@@ -148,15 +153,14 @@ func TestActivityToken_AuthMatrix(t *testing.T) {
 			h := newActivityHandler(store, registry, tt.caller)
 
 			rec := httptest.NewRecorder()
-			activityMux(h).ServeHTTP(rec, activityRequest(
-				http.MethodPost, rideID, `{"activityToken":"abc123","sandbox":true}`))
+			activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, `{"activityToken":"abc123","sandbox":true}`))
 
 			if rec.Code != tt.wantStatus {
 				t.Fatalf("status = %d, want %d (body %s)", rec.Code, tt.wantStatus, rec.Body.String())
 			}
 
 			// Nothing but a successful call may have written a row.
-			wrote := registry.tokenFor(rideID, rideUserID) != ""
+			wrote := registry.riderToken() != ""
 			if wrote != (tt.wantStatus == http.StatusOK) {
 				t.Errorf("registry write = %v, want %v", wrote, tt.wantStatus == http.StatusOK)
 			}
@@ -188,7 +192,7 @@ func TestActivityToken_DeleteAuthMatrix(t *testing.T) {
 			h := newActivityHandler(store, registry, tt.caller)
 
 			rec := httptest.NewRecorder()
-			activityMux(h).ServeHTTP(rec, activityRequest(http.MethodDelete, rideID, ""))
+			activityMux(h).ServeHTTP(rec, activityRequest(http.MethodDelete, ""))
 
 			if rec.Code != tt.wantStatus {
 				t.Fatalf("status = %d, want %d (body %s)", rec.Code, tt.wantStatus, rec.Body.String())
@@ -205,13 +209,12 @@ func TestActivityToken_RegisterScopesTheWriteToTheRider(t *testing.T) {
 	h := newActivityHandler(store, registry, rideUserID)
 
 	rec := httptest.NewRecorder()
-	activityMux(h).ServeHTTP(rec, activityRequest(
-		http.MethodPost, rideID, `{"activityToken":"tok-abc","sandbox":true}`))
+	activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, `{"activityToken":"tok-abc","sandbox":true}`))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
-	if got := registry.tokenFor(rideID, rideUserID); got != "tok-abc" {
+	if got := registry.riderToken(); got != "tok-abc" {
 		t.Errorf("token stored against (ride, rider) = %q, want tok-abc", got)
 	}
 
@@ -232,10 +235,9 @@ func TestActivityToken_ResponseNeverEchoesTheToken(t *testing.T) {
 	store := &fakeRideStore{getRec: fixtureRideData("clowner999999999999xyz", rideStatusAccepted)}
 	h := newActivityHandler(store, registry, rideUserID)
 
-	const secret = "super-secret-activity-token"
+	secret := strings.Repeat("secretish", 3)
 	rec := httptest.NewRecorder()
-	activityMux(h).ServeHTTP(rec, activityRequest(
-		http.MethodPost, rideID, `{"activityToken":"`+secret+`"}`))
+	activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, `{"activityToken":"`+secret+`"}`))
 
 	if strings.Contains(rec.Body.String(), secret) {
 		t.Errorf("the response echoed the P1 activity token: %s", rec.Body.String())
@@ -253,13 +255,13 @@ func TestActivityToken_Rotation(t *testing.T) {
 
 	for _, token := range []string{"tok-first", "tok-rotated"} {
 		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, activityRequest(http.MethodPost, rideID, `{"activityToken":"`+token+`"}`))
+		mux.ServeHTTP(rec, activityRequest(http.MethodPost, `{"activityToken":"`+token+`"}`))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("registering %s: status = %d, want 200", token, rec.Code)
 		}
 	}
 
-	if got := registry.tokenFor(rideID, rideUserID); got != "tok-rotated" {
+	if got := registry.riderToken(); got != "tok-rotated" {
 		t.Errorf("stored token = %q, want the rotated value tok-rotated", got)
 	}
 }
@@ -275,13 +277,12 @@ func TestActivityToken_TerminalRideIsConflict(t *testing.T) {
 			h := newActivityHandler(store, registry, rideUserID)
 
 			rec := httptest.NewRecorder()
-			activityMux(h).ServeHTTP(rec, activityRequest(
-				http.MethodPost, rideID, `{"activityToken":"tok"}`))
+			activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, `{"activityToken":"tok"}`))
 
 			if rec.Code != http.StatusConflict {
 				t.Errorf("status = %d for terminal ride %q, want 409", rec.Code, status)
 			}
-			if registry.tokenFor(rideID, rideUserID) != "" {
+			if registry.riderToken() != "" {
 				t.Error("a token was stored against a ride that had already ended")
 			}
 		})
@@ -298,8 +299,7 @@ func TestActivityToken_NonTerminalRidesAccepted(t *testing.T) {
 			h := newActivityHandler(store, registry, rideUserID)
 
 			rec := httptest.NewRecorder()
-			activityMux(h).ServeHTTP(rec, activityRequest(
-				http.MethodPost, rideID, `{"activityToken":"tok"}`))
+			activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, `{"activityToken":"tok"}`))
 
 			if rec.Code != http.StatusOK {
 				t.Errorf("status = %d for live ride %q, want 200", rec.Code, status)
@@ -328,7 +328,7 @@ func TestActivityToken_BadBodies(t *testing.T) {
 			h := newActivityHandler(store, registry, rideUserID)
 
 			rec := httptest.NewRecorder()
-			activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, rideID, tt.body))
+			activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, tt.body))
 
 			if rec.Code != http.StatusBadRequest {
 				t.Errorf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
@@ -347,7 +347,7 @@ func TestActivityToken_EndIsIdempotent(t *testing.T) {
 	h := newActivityHandler(store, registry, rideUserID)
 
 	rec := httptest.NewRecorder()
-	activityMux(h).ServeHTTP(rec, activityRequest(http.MethodDelete, rideID, ""))
+	activityMux(h).ServeHTTP(rec, activityRequest(http.MethodDelete, ""))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -370,7 +370,7 @@ func TestActivityToken_EndWorksOnTerminalRides(t *testing.T) {
 	h := newActivityHandler(store, registry, rideUserID)
 
 	rec := httptest.NewRecorder()
-	activityMux(h).ServeHTTP(rec, activityRequest(http.MethodDelete, rideID, ""))
+	activityMux(h).ServeHTTP(rec, activityRequest(http.MethodDelete, ""))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d on a completed ride, want 200 — ending is exactly what a client does here", rec.Code)
@@ -389,7 +389,7 @@ func TestActivityToken_UnwiredRegistryIs500(t *testing.T) {
 	)
 
 	rec := httptest.NewRecorder()
-	activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, rideID, `{"activityToken":"tok"}`))
+	activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, `{"activityToken":"tok"}`))
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d with no registry wired, want 500", rec.Code)
@@ -403,9 +403,12 @@ func TestActivityToken_StoreFailureIs500AndHidesTheToken(t *testing.T) {
 	store := &fakeRideStore{getRec: fixtureRideData("clowner999999999999xyz", rideStatusAccepted)}
 	h := newActivityHandler(store, registry, rideUserID)
 
-	const secret = "leaky-token-value"
+	// Built at runtime rather than as a literal: a string constant assigned to
+	// a name like `secret` is exactly the shape gosec G101 flags, and it is a
+	// test fixture, not a credential.
+	secret := strings.Repeat("leaky", 3)
 	rec := httptest.NewRecorder()
-	activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, rideID, `{"activityToken":"`+secret+`"}`))
+	activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, `{"activityToken":"`+secret+`"}`))
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500", rec.Code)

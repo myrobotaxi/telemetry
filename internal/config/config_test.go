@@ -45,7 +45,7 @@ func writeTestConfig(t *testing.T, dir string, overrides map[string]any) string 
 		"websocket": map[string]any{
 			"heartbeat_interval":       "15s",
 			"write_timeout":            "10s",
-			"max_connections_per_user":  5,
+			"max_connections_per_user": 5,
 			"read_limit":               4096,
 		},
 		"auth": map[string]any{

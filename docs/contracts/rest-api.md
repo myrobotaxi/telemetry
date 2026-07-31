@@ -82,6 +82,7 @@ Every FR/NFR listed here is anchored in at least one section of this doc. The ta
    18. `PUT /api/tesla/vehicles/{vehicleId}/ride-share` (owner ride-share pause toggle — MYR-342)
    19. Notification preferences (2 operations — MYR-349)
    20. Saved places (3 operations — MYR-321)
+   21. Live Activity token registration (2 operations — MYR-172)
 8. Resource schemas
 9. Observability
 10. Code <-> spec divergences
@@ -597,6 +598,8 @@ No contract changes are required for the new role's wire shape (the REST respons
 | `GET` | `/api/users/me/places` | Read the caller's saved Home/Work places — 0–2 rows, `[]` when none (§7.20.1) | Bearer (self only) | FR-9.3, NFR-3.21, NFR-3.23, MYR-321 |
 | `PUT` | `/api/users/me/places/{kind}` | Set or replace one saved place — whole-object upsert, echoes the stored row (§7.20.2) | Bearer (self only) | FR-9.3, NFR-3.21, NFR-3.23, MYR-321 |
 | `DELETE` | `/api/users/me/places/{kind}` | Forget one saved place — 204, idempotent (§7.20.3) | Bearer (self only) | FR-9.3, NFR-3.21, MYR-321 |
+| `POST` | `/api/ride-requests/{id}/activity-token` | Register (or rotate) the ActivityKit push token for the rider's Live Activity on this ride — upsert on `(ride, rider)`, clears any end tombstone (§7.21.1) | Bearer + **rider** of the ride (owner → 403; non-party → 404) | FR-9.3, NFR-3.21, MYR-172 |
+| `DELETE` | `/api/ride-requests/{id}/activity-token` | End the Live Activity registration when the Activity ends on the phone — 200 `{ended}`, idempotent (§7.21.2) | Bearer + **rider** of the ride (owner → 403; non-party → 404) | FR-9.3, NFR-3.21, MYR-172 |
 | `POST` | `/api/auth/apple` | Native Sign in with Apple → ES256 access + refresh pair | None (pre-auth; per-IP rate-limited) | FR-6.1, MYR-193 |
 | `POST` | `/api/auth/refresh` | Single-use refresh-token rotation | Refresh token in body (pre-auth; per-IP rate-limited) | FR-6.2, MYR-193 |
 | `POST` | `/api/auth/revoke` | Revoke a refresh-token family (sign-out) | Refresh token in body (pre-auth; per-IP rate-limited) | MYR-193 |
@@ -3764,6 +3767,220 @@ coordinate crypto `internal/store/saved_places_scan.go` (reusing
 
 ---
 
+### 7.21 Live Activity token registration (MYR-172)
+
+> **Anchored:** FR-9.3 (ride-scoped resources), NFR-3.9 (data tiers), NFR-3.21 (party enforcement on every API call).
+
+Two rider-scoped operations on one path, letting the rider's phone say "here is the Live Activity I just started for this ride" and "it is over now." Everything else about the feature — what the lock screen says, when it changes, when it goes away — is a **server-side APNs push**, not an endpoint, and is documented below because a client depends on it even though it cannot call it.
+
+**Why this exists.** §7.17 gave us the first server→phone channel that survives a backgrounded app, but an alert is a MESSAGE: it fires once, it stacks up, and it tells a rider that something happened rather than what is true now. A ride is a **state a rider watches** — the car is 6 minutes away, then 4, then it is here — and the honest rendering of that is a Live Activity on the lock screen, not eleven notifications. The app starts the Activity locally when a ride is accepted (which needs **no permission prompt**, unlike an alert) and ActivityKit hands it a per-Activity push token. These endpoints are how that token reaches the server, which from then on owns what the Activity displays.
+
+**RIDER-ONLY in v1, deliberately.** The vehicle owner is a party to the ride and may READ it (§7.8), but this surface answers a `403` to an owner. An endpoint that accepted an owner's token would quietly create rows the sender then pushes RIDER content to — including the P1 `destination` label, which is on a rider's own lock screen by design and on an owner's by accident. The owner-side Activity is an explicit [MYR-172](https://linear.app/myrobotaxi/issue/MYR-172) follow-up and will arrive with its own content-state; the `(ride, party)` key already admits it without a migration.
+
+**Storage.** Go-owned `go_live_activities` (migration **0025**), `UNIQUE (ride_request_id, user_id)`, swept 24 hours after the last write. `ride_request_id` is the **first genuine foreign key in the `go_` namespace** — CG-DL-9 bars references to the Prisma-owned schema, but `go_ride_requests` is Go-owned, and the ride's hard-delete paths (owner teardown, account deletion) make `ON DELETE CASCADE` the choice that cannot strand a token addressing a ride that no longer exists. `user_id` remains an unenforced pointer, as CG-DL-9 requires.
+
+**Classification.** `activityToken` is **P1** — a capability: whoever holds it plus the team's APNs key can write to that phone's lock screen. Stored raw and protected by log redaction rather than app-level encryption, the same posture and the same rationale as `go_push_devices.device_token`; see [`data-classification.md`](data-classification.md) §1.18 and §3.2. Consequences that show up in this contract: **neither response echoes the token**, no error envelope repeats it, and only an 8-character prefix ever reaches a log line.
+
+**No §5.2 mask entry**, for the same reason §7.19 and §7.20 have none: the resource is self-scoped — the JWT subject must BE the ride's rider, and the token is projected onto no wire field at all, since both responses return only booleans — so there is no role dimension to mask across (**Rule CG-DC-5** satisfied by this statement).
+
+**Contract:** [`schemas/live-activity.schema.json`](schemas/live-activity.schema.json) (contracts **v0.24.0**) — `RegisterLiveActivityRequest`, `LiveActivityRegistrationResponse`, `EndLiveActivityResponse`, `LiveActivityContentState`, `LiveActivityEvent`, `LiveActivityRideStatus`.
+
+#### 7.21.1 `POST /api/ride-requests/{id}/activity-token`
+
+**Request.**
+
+```
+POST /api/ride-requests/rr_01HZX9K2M4/activity-token
+Authorization: Bearer <app session JWT>        # MUST be the ride's rider
+Content-Type: application/json
+
+{ "activityToken": "8a1f4c2e9b7d0356…", "sandbox": false }
+```
+
+| Field | Type | Classification | Notes |
+|-------|------|----------------|-------|
+| `activityToken` | `string` | **P1** | The token from `Activity.pushToken` on the device. **Required.** Trimmed; must be non-empty and at most **256 characters**. The bound is a generous sanity check, not a format assertion — the token is 64 hex characters today, but rejecting a valid future shape would silently break Live Activities for every rider on that iOS release. |
+| `sandbox` | `boolean` | P0 | `true` when the token was minted by a development or TestFlight build. **Optional, defaults to `false`.** Carried per-Activity rather than read from the device registry, because a rider who declined the notification permission still gets a Live Activity and may have **no `go_push_devices` row at all**. |
+
+**Behavior / sequence:**
+
+1. Validate the bearer → `userId`. Missing/invalid → `401 auth_failed`.
+2. Resolve the ride and require the caller to be a **party**. A caller with no relation to the ride → `404 not_found`.
+3. Require the caller to be the **rider**. A genuine party who is the OWNER → `403 permission_denied`.
+4. Strict-decode the body — **unknown keys are a `400`**, matching §7.14 / §7.17 / §7.19 / §7.20.
+5. Reject an empty or over-long token → `400 invalid_request`, describing the RULE and **never echoing the value**.
+6. Reject a ride already in a terminal state (`completed`, `declined`, `cancelled`) → `409 conflict`.
+7. **Upsert** on `(ride_request_id, user_id)`, replacing `activity_push_token` and `sandbox`, stamping `updated_at`, and **clearing `ended_at`**.
+
+**This is an UPSERT, and rotation is the reason — not deduplication.** ActivityKit **rotates the push token during the life of a single Activity**: the system hands the app a replacement and expects the server to start using it. So a rotation is an ordinary re-registration, and the conflict target is the `(ride, rider)` pair rather than the token — the §7.17 posture, where the token IS the identity, would accumulate a row per rotation and leave the sender guessing which one is live. A first registration and a rotation are indistinguishable on the wire and both answer `registered: true`.
+
+**Re-registering after an end CLEARS the tombstone.** A client posting again is telling us it has a live Activity, which is the truth the server should adopt — the alternative is a registered Activity the ETA ticker skips forever because a stale `ended_at` says it is finished.
+
+**Idempotent (§4.5).** Re-sending an identical body is a no-op producing the same response, so a retry after a dropped response is safe.
+
+**Response `200`** (`application/json`):
+
+```json
+{ "registered": true, "sandbox": false }
+```
+
+| Field | Type | Classification | Notes |
+|-------|------|----------------|-------|
+| `registered` | `boolean` | P0 | Always `true` on a `200`. A failure is an error envelope, never `registered: false`. |
+| `sandbox` | `boolean` | P0 | Echoes the declared APNs environment, so a client can confirm the server agrees about which gateway its token belongs to. **The response deliberately does NOT echo `activityToken`** — it is P1, the caller already knows the value it sent, and echoing it would put the token in every client log and proxy trace for no benefit. Same rule, same reason, as §7.17.1. |
+
+**Errors:**
+
+| HTTP | `error.code` | When |
+|------|--------------|------|
+| 400 | `invalid_request` | Malformed JSON; unknown key; missing/empty `activityToken`; token longer than 256 characters. |
+| 401 | `auth_failed` | Missing/malformed/invalid bearer. |
+| 403 | `permission_denied` | The caller is a party to this ride but is the **owner**, not the rider. Live Activities are rider-only in v1. |
+| 404 | `not_found` | Unknown ride id, **or** a ride the caller is no party to — deliberately indistinguishable. |
+| 409 | `conflict` | The ride is already `completed`, `declined` or `cancelled`. |
+| 500 | `internal_error` | Store-layer failure, or the registry not wired into this deployment. Nothing written; retryable. |
+
+**The `404`-vs-`403` split is the house rule (§5.2), and it is load-bearing here.** A stranger gets `404`, never `403`, so this endpoint never confirms that a ride id exists to somebody with no relation to it — it is not an oracle for ride ids. Only a genuine party who happens to be the owner reaches the `403`, and telling THEM the ride exists reveals nothing they cannot already read from §7.8.
+
+**The `409` is an instruction, not just a refusal.** A terminal ride will never be pushed to again — its final `event: "end"` has already fired and its rows are tombstoned — so accepting the registration would store a row nothing will ever update and only the 24-hour sweep would remove. The `409` tells the client to **end its Activity locally now**, which is exactly what its final-state fallback is for.
+
+#### 7.21.2 `DELETE /api/ride-requests/{id}/activity-token`
+
+**Request.** No body.
+
+```
+DELETE /api/ride-requests/rr_01HZX9K2M4/activity-token
+Authorization: Bearer <app session JWT>
+```
+
+Called when the Activity ends on the phone — the rider dismissed it, or the app ended it from its own final-state fallback.
+
+**Response `200`** (`application/json`):
+
+```json
+{ "ended": true }
+```
+
+| Field | Type | Classification | Notes |
+|-------|------|----------------|-------|
+| `ended` | `boolean` | P0 | `true` when a live registration was actually closed by this call; `false` when there was nothing live to close — either it had already ended or it was never registered. **The two are deliberately indistinguishable**, matching the §7.17.2 unregister response. |
+
+**Idempotent, and `false` is a `200`, not an error.** The client's end and the server's terminal-state push **race by design** and both are correct: the ride completing tombstones the row from the server side at the same moment the rider swipes the Activity away. A client told its completed work failed would retry forever. Unlike §7.17.2 there is no oracle concern to manage — the caller has already been proven to be this ride's rider, so there is nothing here they could probe.
+
+**Errors:** identical to §7.21.1 except that there is no body to reject (**no `400`**) and **no `409`** — ending an Activity on a terminal ride is the ordinary case, not a conflict.
+
+| HTTP | `error.code` | When |
+|------|--------------|------|
+| 401 | `auth_failed` | Missing/malformed/invalid bearer. |
+| 403 | `permission_denied` | Caller is the ride's owner rather than its rider. |
+| 404 | `not_found` | Unknown ride id, or caller is no party to it. |
+| 500 | `internal_error` | Store-layer failure, or the registry not wired. Retryable. |
+
+#### 7.21.3 The content-state (informative — no REST surface)
+
+What the Activity DISPLAYS is delivered over APNs, addressed by the registered token. It never appears on any endpoint, and it reaches the device only over a token that identifies exactly one Activity, on one ride, for one rider. It is documented here because the Swift `ContentState` must decode it exactly.
+
+| Field | Type | Classification | Notes |
+|-------|------|----------------|-------|
+| `v` | `integer` | P0 | Content-state schema version, currently **`1`**. Carried explicitly because the Swift `ContentState` is compiled into an app a rider may not update for months, so the wire shape freezes the moment a build ships. When a field's MEANING changes the server keeps sending `v1` to installed clients while `v2` goes to new ones — the alternative is a lock screen full of wrong numbers on every phone that has not updated. |
+| `status` | `enum` | P0 | `requested` \| `accepted` \| `declined` \| `enroute` \| `arrived` \| `completed` \| `cancelled` \| `reservation_expired`. The first seven mirror `RideRequestStatus` exactly. **`reservation_expired` is the one member that is NOT a ride status**: the reservation sweeper gives up on a late scheduled ride by recording a dispatch failure and leaving the row at `accepted`, so without a distinct value the lock screen would sit on "your car is on its way" forever. Append-only; a client MUST tolerate an unrecognised member rather than fail to decode. The server sends the enum and **never prose** — all copy is the client's, so wording changes in an app update, not a deploy. |
+| `eta` | `integer` (unix seconds) | P0 | The car's arrival time as an **ABSOLUTE instant**. **OMITTED ENTIRELY when unknown** — never `null`, never `0`, never a guess. |
+| `vehicleName` | `string` | P0 | The owner-chosen nickname, e.g. `"Blue Whale"`. `""` when the car has no name, in which case the client renders its own generic fallback rather than a blank. |
+| `destination` | `string` | **P1** | The dropoff's short label — the name the RIDER chose when booking, e.g. `"Home"`. See the note below. |
+
+**`eta` is absolute, and that is the central decision ([MYR-194](https://linear.app/myrobotaxi/issue/MYR-194)).** A duration decays silently on a screen the server cannot repaint — "4 min" stays "4 min" for an hour — whereas an instant stays true however late it is read, and the phone counts down on its own between pushes. It is what lets a ~60–90s cadence look continuous.
+
+**The ETA is the CAR'S OWN carried navigation ETA.** Tesla's `minutesToArrival`, whole minutes, persisted verbatim and converted to an instant at send time. **There is no server-side route solver in this service**, so a car with no active nav route yields **no `eta` key at all** rather than an invented number.
+
+**`destination` is P1 and is the one deliberate exception to the alert-copy policy.** `internal/push/copy.go` refuses to put pickup/dropoff labels on a lock screen for §7.17 alerts, and that rule stands. It is carried here narrowly: a Live Activity is the rider's OWN ride on the rider's OWN device, addressed by a token scoped to that one Activity, and a ride card that cannot say where the car is taking you is not the feature. It is **never sent to an owner's Activity and never appears in an alert body**. See [`data-classification.md`](data-classification.md) §1.18.
+
+#### 7.21.4 The APNs envelope (informative)
+
+```
+POST /3/device/{activityPushToken}
+apns-topic:       app.myrobotaxi.ios.push-type.liveactivity
+apns-push-type:   liveactivity
+apns-priority:    10          # 5 for an ETA tick
+apns-expiration:  1785535140  # == aps.stale-date
+```
+
+A routine ETA update:
+
+```json
+{
+  "aps": {
+    "timestamp": 1785534960,
+    "event": "update",
+    "content-state": {
+      "v": 1,
+      "status": "enroute",
+      "eta": 1785535200,
+      "vehicleName": "Blue Whale",
+      "destination": "Home"
+    },
+    "stale-date": 1785535140
+  }
+}
+```
+
+The final update on a completed ride — note the omitted `eta` (the car has arrived, so there is no route) and the `dismissal-date`:
+
+```json
+{
+  "aps": {
+    "timestamp": 1785535380,
+    "event": "end",
+    "content-state": {
+      "v": 1,
+      "status": "completed",
+      "vehicleName": "Blue Whale",
+      "destination": "Home"
+    },
+    "stale-date": 1785535560,
+    "dismissal-date": 1785536280
+  }
+}
+```
+
+**The topic is DERIVED, not configured.** It is `APNS_TOPIC` + `.push-type.liveactivity`, so there is no second environment variable and no way for the two topics to drift apart in an environment file. Apple requires the suffix on the topic **and** the matching `apns-push-type` header; either alone is rejected as `TopicDisallowed`, a `403` that reads like a credential problem and is not one.
+
+**There is no `userInfo`.** Unlike the §7.17 alert payload, an Activity update carries no ride id outside the content-state — the token already addresses exactly one Activity on exactly one ride, so a ride id on the wire would be a P0 identifier buying nothing.
+
+**`timestamp` is the ordering defence.** ActivityKit discards an update older than the one it is already showing, which the network makes a routine event rather than a theoretical one.
+
+**Priority 10 for lifecycle transitions, 5 for ETA ticks (MYR-194).** Apple throttles high-frequency Activity updates by budget, so a periodic ETA refresh rides at conserving priority and never competes with "your car is here" for that budget.
+
+**`stale-date` is timestamp + 3 minutes, and it is an HONESTY mechanism.** Once it passes, ActivityKit renders its own "as of X min ago" treatment on its own, so a phone that stopped receiving pushes SAYS SO instead of presenting a three-hour-old ETA as current. Three minutes is a little over two missed ticks — long enough that one dropped push does not flap the display, short enough that a rider is never confidently misinformed. This is what makes every degraded mode below safe rather than merely tolerable.
+
+**`apns-expiration` equals the stale-date.** A queued update that only reaches the phone after its content stopped being trustworthy would overwrite the Activity with a state ActivityKit is about to mark stale anyway — **worse than not arriving**, because it resets the staleness clock on information that has already expired.
+
+**`dismissal-date` policy.** A `completed` ride lingers **15 minutes**: the rider should get to look at the arrival state rather than have it vanish the instant the owner taps "Dropped off". The unhappy endings — `declined`, `cancelled`, `reservation_expired` — dismiss after **30 seconds**. Not zero, deliberately: an Activity dismissed the same instant it is ended can disappear before the rider's eyes reach it, and "my ride vanished" is a worse experience than the bad news itself.
+
+**Ending is a send, THEN a tombstone, in that order.** A row ended first would be excluded from its own final push, leaving the lock screen on the last state it happened to receive — which for a declined ride is "your car is on its way".
+
+#### 7.21.5 Update cadence and the preference gate
+
+**Lifecycle transitions** are pushed as they happen: the notifier subscribes to the same `ride.status.changed` topic §7.17 does, so every transition the service already publishes is covered without a call site being edited. **Nothing is filtered out** — unlike an alert, where a rider's own cancellation would be noise, a Live Activity still showing "on its way" after the rider cancelled is simply a WRONG lock screen.
+
+**ETA ticks** re-push the current content-state every **60–90 seconds** (75s ± 20% jitter) while the ride is in `accepted`, `arrived` or `enroute`. The ETA is the one thing on the Activity that goes wrong by SITTING STILL — the status changes only when something happens, but "arrives at 4:12" stops being true the moment traffic does. The jitter also de-synchronises replicas so they do not push Apple in a burst.
+
+**Kill-switch: `LIVE_ACTIVITY_TICKER_ENABLED`, default `true`.** Turning it off stops **only** the periodic ETA refresh; lifecycle transitions keep updating the Activity, and the Activity's own stale-date does the rest. That intermediate state is the one an operator actually wants when Apple starts throttling — degraded and honest rather than dark. `PUSH_ENABLED=false` (or a keyless deployment) silences the whole channel instead; in every such state the endpoints stay mounted and registrations still persist. See [`docs/deployment.md`](../deployment.md).
+
+**The whole surface rides the existing `ride_lifecycle` push-preference category ([MYR-349](https://linear.app/myrobotaxi/issue/MYR-349), §7.19).** A rider who muted ride updates gets **no Activity updates at all** — neither lifecycle nor ETA — checked per recipient before every send and failing OPEN on a preference-lookup error, exactly as the alert notifier does. **The Activity still runs.** It was started locally by the app, which needs no permission to do so, and with nothing arriving it falls back to its own stale rendering once each stale-date passes: a card that says it is out of date rather than one that lies. This is deliberate and is the reason the gate can be a simple silence — a muted rider loses freshness, never correctness, and the same switch that stops the alerts stops the pushes that would contradict them.
+
+**Registrations are unaffected by the gate.** A muted rider's token is still stored, so flipping `ride_lifecycle` back on resumes updates on the next transition or tick without the app re-registering.
+
+**Observability.** Registration lines carry the P0 `ride_request_id`, `user_id` and `sandbox` plus the **8-character token prefix only** — never a whole token ([`data-classification.md`](data-classification.md) §3.2). The send line carries `ride_id`, `event`, `status`, a `has_eta` boolean and delivery counts, and deliberately **not** the content-state, which embeds the P1 `destination`. Handler:
+[`internal/telemetry/ride_activity_token_handler.go`](../../internal/telemetry/ride_activity_token_handler.go);
+sender `internal/push/{activity,activity_apns}.go`; consumers
+`internal/push/{activity_notifier,activity_notifier_send}.go`; ETA ticker
+`internal/push/activity_ticker.go`; store
+[`internal/store/live_activity_repo.go`](../../internal/store/live_activity_repo.go)
+and `internal/store/live_activity_leg.go`; wiring
+`cmd/telemetry-server/wiring_live_activity.go`.
+
+---
+
 ## 8. Resource schemas
 
 The canonical v1 `VehicleState` schema is [`schemas/vehicle-state.schema.json`](schemas/vehicle-state.schema.json). The REST snapshot endpoint returns that shape directly via `$ref` in the OpenAPI spec -- it is NOT re-declared.
@@ -3834,6 +4051,7 @@ Same as [`websocket-protocol.md`](websocket-protocol.md) §10 divergence managem
 ## 11. Change log
 
 | Date | Change | Author |
+| 2026-07-31 | **Live Activity push updates for the rider's active ride — new §7.21 `POST`/`DELETE /api/ride-requests/{id}/activity-token`, `go_live_activities` (migration 0025), an ActivityKit sender and an ETA ticker ([MYR-172](https://linear.app/myrobotaxi/issue/MYR-172); content-state, cadence and staleness decisions from [MYR-194](https://linear.app/myrobotaxi/issue/MYR-194)).** Contracts **v0.24.0**. §7.17 gave us alerts, which are MESSAGES: they fire once, they stack, and they say something happened rather than what is true now. A ride is a STATE a rider watches — 6 minutes away, then 4, then here — and the honest rendering of that is one lock-screen card the server keeps current, not eleven notifications. The app starts the Activity locally when a ride is accepted (which needs **no permission prompt**, unlike an alert) and ActivityKit hands it a per-Activity token; these two endpoints are how that token arrives and how the client says it is over. **RIDER-ONLY in v1** and the split matters: the owner is a party and may read the ride, but an owner registration would create rows the sender pushes RIDER content to — including the P1 `destination` — so an owner gets `403 permission_denied` while a **non-party gets `404 not_found`, never `403`**, preserving the §5.2 rule that the endpoint is not an oracle for ride ids. A terminal ride answers **`409 conflict`**, which is an instruction rather than a refusal: that Activity will never be pushed to again, so the client should end it locally now. **Registration is an UPSERT on `(ride, rider)` because ActivityKit ROTATES the token mid-Activity** and expects the server to switch to the new one — the §7.17 posture of keying on the token itself would accumulate a row per rotation and leave the sender guessing which is live — and re-registering after an end **clears the tombstone**, because the client is telling us it has a live Activity again. **Neither response echoes the token** (P1): `{"registered":true,"sandbox":…}` and `{"ended":…}` are booleans only, which is also the CG-DC-5 discharge — the token is projected onto no wire field, so `internal/mask` needs no entry, and both routes are self-scoped to the ride's rider so there is no role dimension to mask across. **What the lock screen shows is an APNs push, not an endpoint:** topic `{APNS_TOPIC}.push-type.liveactivity` (DERIVED, no new env var — Apple rejects the suffix and the `apns-push-type: liveactivity` header independently as `TopicDisallowed`), priority **10** for lifecycle transitions and **5** for ETA ticks so a periodic refresh never competes with "your car is here" for Apple's per-Activity budget, and `apns-expiration` pinned to the **stale-date**, because an update arriving after its content stopped being trustworthy is worse than one that never arrives — it resets the staleness clock on expired information. `aps.stale-date` is timestamp **+ 3 minutes** (MYR-194 honest-staleness): past it ActivityKit renders its own "as of X min ago" treatment, so a phone that stopped receiving pushes SAYS SO instead of presenting a three-hour-old ETA as current — which is what makes every degraded mode here safe. Dismissal: `completed` lingers **15 minutes** so the rider can look at the arrival state; `declined`/`cancelled`/`reservation_expired` go after **30 seconds** — not zero, because an Activity that vanishes before the rider's eyes reach it is worse than the bad news. Ending is a **send THEN a tombstone**, in that order: a row ended first would be excluded from its own final push and leave a declined ride reading "your car is on its way". Content-state is five fields (`v`, `status`, `eta`, `vehicleName`, `destination`) — `v` because the Swift `ContentState` is frozen the moment a build ships, `status` as an ENUM never prose so copy changes in an app update rather than a deploy (and `reservation_expired` is a member that is NOT a ride status, since the sweeper leaves a late reservation at `accepted`), and **`eta` as an ABSOLUTE unix instant, OMITTED when unknown** — a duration decays silently on a screen the server cannot repaint while an instant stays true however late it is read. **The ETA is the CAR'S OWN carried nav ETA** (Tesla `minutesToArrival`, whole minutes); there is **no server-side route solver in this service**, so no route means no key rather than an invented number. Ticks run every **60–90s** (75s ± 20% jitter) while the ride is `accepted`/`arrived`/`enroute`, under the new kill-switch **`LIVE_ACTIVITY_TICKER_ENABLED` (default true)**, which stops ONLY the periodic refresh and leaves lifecycle transitions updating — the degraded-but-honest state an operator wants when Apple throttles; stale rows are swept after 24h. **The whole surface rides the existing `ride_lifecycle` preference category (§7.19, MYR-349):** a rider who muted ride updates gets NO Activity updates, the Activity still RUNS locally, and it falls back to its own stale rendering — a card that says it is out of date rather than one that lies. `destination` is the one deliberate exception to the alert-copy policy (`internal/push/copy.go`): the rider's own ride on the rider's own device, never sent to an owner's Activity and never in an alert body. **`ride_request_id` is the FIRST genuine foreign key in the `go_` namespace** — CG-DL-9 bars references to the Prisma-owned schema, but `go_ride_requests` is Go-owned, and the ride's hard-delete paths make `ON DELETE CASCADE` the choice that cannot strand a token addressing a ride that no longer exists; `user_id` stays an unenforced pointer as CG-DL-9 requires. No new error code: `invalid_request`, `auth_failed`, `permission_denied`, `not_found`, `conflict` and `internal_error` cover the surface. **Sections updated in this document:** §1 table of contents (entry 21), §6 endpoint catalog (two new rows), §7.21 (new — §7.21.1 register, §7.21.2 end, §7.21.3 content-state, §7.21.4 APNs envelope, §7.21.5 cadence + preference gate). **In [`data-classification.md`](data-classification.md):** §1.18 (new table, 8 columns), §3.2 (`activity_push_token` row), §6 "By tier" and the count audit trail — **P0 141 → 148** (7 new P0 columns) and **P1 47 → 48** (one log-redaction-only token), with the log-redaction-only list growing 30 → 31 columns and the AES-256-GCM list unchanged at 17. **In [`docs/deployment.md`](../deployment.md):** the `LIVE_ACTIVITY_TICKER_ENABLED` row and the derived-topic note. | Claude (go-engineer) |
 | 2026-07-30 | **Per-viewer share controls — the cumulative tier becomes per-grant editable flags, new §7.5.7 `PATCH /api/invites/{inviteId}` ([MYR-369](https://linear.app/myrobotaxi/issue/MYR-369)).** Contracts **v0.23.0**, migration **0024**. Until now a grant carried one `SharePermission` on a total order (`live` < `live_history` < `rides`), every gate compared with a `>=` over it, and §7.5 said in as many words that there was no edit-in-place endpoint — so an owner who wanted to stop ONE person requesting rides, while leaving them the live map, had exactly one move available: **revoke the grant and make them redeem a fresh code**. The tier could not express "paused" either; the only way to stop access at all was the permanent tombstone. An accepted grant now carries **independent, owner-editable flags** — `allow_rides` and `suspended_at` on `go_vehicle_shares` — surfaced as `ShareInvite.allowRides` / `ShareInvite.suspended` (accepted rows only, both **optional**, so every 0.22.0-era payload still validates) and edited through a **partial** `PATCH` whose body is `{allowRides?, suspended?}` with `minProperties: 1` and `additionalProperties: false`. **Absent ≠ false** — pointer-valued fields carry the distinction end to end, because a partial update that silently cleared the field it did not mention would be an access-control failure in both directions; an EMPTY body is `400`, never a `200` echo, since on this surface "I turned it off and it said OK" is the worst available outcome. **THE SUSPENSION INVARIANT, enforced server-side:** a suspended grant is excluded from the **viewer-merge access set** (`suspended_at IS NULL` — **six live occurrences across five files in two packages**, inventoried site by site in §7.5.0; the `auth`/`store` split is forced by the dependency rule, so the predicate is an invariant maintained by REPETITION and held up by convention plus tests rather than by construction), which is the single thing the §7.0 list, the §7.1 snapshot, the WS handshake and the §7.8 rides all resolve through — so one predicate kills all of them together and **no capability out-votes it** (`allowRides: true` on a suspended grant allows nothing). Consequences a consumer must know: a suspended grant produces **no `VehicleSummary` row at all** rather than a reduced one (there is deliberately no "suspended" marker to render); re-redeeming its code answers **404**, indistinguishably from an unknown or expired one, so the server never announces a suspension to the person it was applied to; and it **still serializes on the owner's own §7.5.2 listing**, which is the only place it appears and the only way to lift it. Suspension is the **reversible** alternative to §7.5.3 revoke — the row and its flags survive and one PATCH restores exactly what it held. **`live_history` IS RETIRED.** The "Live + history" capability is **removed from the product**: §7.2/§7.3/§7.4 are **owner-only again, unconditionally**, and no grant of any shape opens them — a legacy `live_history` grant loses the drives surfaces and **nothing else**. The enum member is **kept, not removed** (dropping it would break every installed decoder and make 0.23.0 a MAJOR bump), so it is **decodable and never emitted**: §7.5.1 still **accepts** it — an un-updated send-invite sheet must not start failing — and **persists it as `live`**, which is why a client MUST read the created row's `permission` rather than assume its input round-trips. **`permission` is now DERIVED on accepted rows** (`allowRides` → `rides`, else `live`) rather than stored, and the same derivation produces `VehicleSummary.sharePermission`; on a PENDING row it remains the invite-time **preset**, and **pending invites keep tier-at-redeem** — the mapping happens inside the accept `UPDATE` itself (`allow_rides = (permission = 'rides')`), atomically with the accept, so an invite minted before this change redeems to exactly what its preset always implied. The old `>=` instruction is **obsolete**; a `>=` over the two values still emitted happens to agree, which is what keeps un-updated clients correct. **THREE ENFORCEMENT LAYERS for the ride flag**, because the capability is now editable and an owner can withdraw it after a request exists: create (§7.8), the **owner-accept backstop** (the capability moving while a request sat unanswered), and the **reservation-dispatch probe** (`internal/dispatch/reservation_worker.go` — a reservation may sit accepted for DAYS, which is exactly the window a fixed tier did not have). Dispatch **holds** rather than expires and sits before the irreversible claim, so an owner who restores access inside the lateness window still gets the dispatch; accept **fails closed** on an unreadable grant, deliberately unlike the MYR-313 fail-open on an unreadable *vehicle*, because dispatching a car to somebody who may have just been suspended is not recoverable the way a retried accept is. **Cache bust targets the GRANTEE** on every successful patch (the MYR-184 bust-on-mutation pattern) — unconditional rather than conditional on which field moved, because for a suspension it is a security property: the cached access set is what the WS handshake consults, so a stale entry IS a live grant for up to the TTL. **Adversarial shape:** one conditional `UPDATE ... RETURNING` with `owner_user_id` and `status = 'accepted'` both ON THE WRITE (no read-then-write, no window), partial semantics expressed as `CASE WHEN $present THEN $value ELSE <column> END` rather than runtime-composed SQL, and **404-indistinguishability preserved** — missing, foreign and revoked are one body, so the endpoint cannot be an oracle for other people's invite ids; only "yours but still pending" is told plainly (`409`), because the caller demonstrably owns that row. The `permission` CHECK constraint is deliberately **unchanged** and still admits `live_history`: existing rows carry it, and tightening a CHECK under rows that violate it fails the migration outright. **Down-migration is a WIDENING and is documented as dangerous** — dropping the columns lifts every suspension and reverts every patched capability to its invite-time tier, unrecoverably; roll the application back and leave the columns in place instead. **DV-09 CAVEAT, recorded not closed:** suspension is enforced at the WS **handshake**, so a viewer on an already-open socket keeps receiving broadcasts until they reconnect — the same caveat §7.5.3(b) records for revoke, inherited rather than introduced, and tracked as [MYR-373](https://linear.app/myrobotaxi/issue/MYR-373). No socket teardown ships here. `data-classification.md` §1.15 updated (both columns P0), and its §6 "By tier" P0 count reconciled to the audit trail (139 → 141). **Sections updated in this document:** §2.3 (`PATCH` is no longer "NOT used in v1"), the §5 role table, §5.2.0 (viewer `sharePermission` now DERIVED — an earlier version of this entry said **§5.2.1**, which is the *snapshot* mask and was NOT touched by this change), §5.2.2–§5.2.4 (drive list / detail / route — owner-only), §5.2.5 (`inviteOwnerFields` enumeration + the PATCH role-access row), §6 endpoint catalog, §7.2–§7.4 RBAC, §7.5 (six endpoints, not five), §7.5.0 (including the six-site suspension-predicate inventory and the DV-09 caveat), §7.5.1, §7.5.2, §7.5.7 (new), §7.8 (create gate + the accept-path `403 vehicle_not_owned`). | Claude (go-engineer) |
 | 2026-07-30 | **Invite codes become signed join LINKS — `ShareInvite.shareUrl`, new §7.5.6 ([MYR-368](https://linear.app/myrobotaxi/issue/MYR-368)).** Every `pending` row now carries `shareUrl` alongside `code`: `https://myrobotaxi.app/join/{code}?k={kid}.{expUnix}.{sigB64url}&from={from}&to={to}`. **Additive and optional** (contracts 0.21.0 → **0.22.0**) — a consumer that finds `code` with no `shareUrl` shares the bare code, and the field appears in exactly the same branch as `code`, so it is pending-only and absent on every accepted row. `k` is an **Ed25519** signature the **web join shell verifies statically** against a **compiled-in public key** — no database, no round trip — so a forged or edited link is bounced before the join page can act as an oracle against the 36^6 code space; the §7.5.5 rate limit only ever protected the API side. **Canonical signed payload: `join:{code}:{expUnix}:{from}:{to}`** — five colon-separated fields, always four colons, sanitized names, **empty string for an omitted name**. Every value the link carries is covered by the one signature, including BOTH display names, so somebody holding a genuine link cannot rewrite `from` to a name the recipient would trust. Names are reduced server-side to the **first whitespace token, ASCII letters only, capped at 20**, and the parameter is **omitted entirely** when nothing survives (accented and non-Latin names lose characters or drop out; consumers render generic copy, never a placeholder built from the code). The signed expiry is the row's **actual `expires_at`** in unix seconds — the same value the redeem predicate reads — not a re-derived TTL. **The signature does not mean the invite is live**: redemption (§7.5.5) stays the only authority, and a resend **re-signs** with the new code, the new expiry, and the current names, so the previous link dies with the code it embeds. Key management: private **seed** in the Fly secret `INVITE_LINK_SIGNING_KEY` (`openssl rand -base64 32`), public half via `ops invite-link public-key` (no DB, no network, runnable before the secret exists) plus a startup log line naming the key the **running** process loaded. **Startup fails fast** without the seed outside `--dev`, and on a malformed seed in any mode — the kill-switch precedent, because a keyless boot silently stops emitting `shareUrl` and nothing in the running system says so. The one-character **key id** in `k` is the rotation seam: the shell holds `1` and `2` at once while links signed under `1` age out over their 7 days. `shareUrl` is **P1 and bearer** exactly as `code` is (it contains it) and is listed in `inviteOwnerFields`; **no new persisted column** — the URL is derived per request, so `data-classification.md` §1.15 is unchanged. | Claude |
 | 2026-07-30 | **Severing a Tesla link now REVOKES the grant at Tesla, not just our copy of the tokens ([MYR-366](https://linear.app/myrobotaxi/issue/MYR-366)).** Both severing paths gain an active, server-side `POST https://auth.tesla.com/oauth2/v3/revoke` (RFC 7009; `token`=stored **refresh** token, `token_type_hint=refresh_token`, `client_id`, **no client secret**) issued BEFORE the local delete — because the delete destroys the very credential the revoke presents, and after it only the owner can withdraw the grant by hand. **§7.6 account deletion:** a new step 2 in the [`data-lifecycle.md`](data-lifecycle.md) §3.1 ordering (the following steps renumber; both order tables were also brought back in line with the MYR-321 saved-places step, which had been added to the code but not to the tables), placed ahead of the vehicle teardown whose last-vehicle arm deletes the `Account` row and ahead of the identity transaction whose `User` cascade takes any that survives. **§7.12 per-vehicle teardown:** revokes on a **LAST-VEHICLE removal only** — the one removal that clears the tokens; a **mid-fleet** removal deliberately does NOT revoke, since the owner's remaining cars still need the link. The last-vehicle pre-check runs OUTSIDE the teardown's `FOR UPDATE` transaction (an HTTP call to Tesla must not be made while holding row locks over an owner's fleet); the store's locked count stays authoritative and a disagreement is logged, never fatal. **Best-effort throughout and NON-FATAL by construction** — no tokens on file, a DB read error, a network error, a Tesla 5xx and an already-invalid token are each a WARN and a continue; the revoker's signature returns a `bool`, not an `error`, so a failure cannot be propagated into a deletion. Tesla's availability MUST NOT be able to block a person's erasure of their own account. **Re-runnable:** a second run finds no stored token and makes no call. **No wire change on either endpoint** — §7.6 is still `204` with no body and §7.12's response is byte-identical, `revokeUrl` included and unchanged: revocation may have failed, so the honest client behaviour (offer the manual consent page) is the same either way and a `grantRevoked` field would only invite clients to hide a step still sometimes necessary. **Audit/logging:** no new `AuditLog` action; a P0 structured log line `event=tesla_tokens_revoked` carries the `user_id` and nothing else — never the token, its prefix, its length, or a VIN. Skipped entirely when no Tesla OAuth `client_id` is configured, so no unit test and no creds-less deployment can make an outbound revoke call. §7.6 gains a "Tesla grant revocation" subsection, its order table and "What is NOT deleted" rows are corrected, and §7.12's "OAuth revoke" note is rewritten (it previously stated there was no partner machine call). `data-lifecycle.md` §3.1 + §3.3 updated. Implementation: `internal/telemetry/{tesla_token_revoker,tesla_link_revocation,account_deletion_sequence,vehicle_teardown_handler}.go`, `cmd/telemetry-server/{wiring_vehicle_teardown,wiring_account_deletion}.go`. | go-engineer |

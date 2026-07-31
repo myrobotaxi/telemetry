@@ -138,7 +138,11 @@ func (a *liveActivityStoreAdapter) ActiveLegs(ctx context.Context, limit int) ([
 		return nil, fmt.Errorf("live activity: list active legs: %w", err)
 	}
 	out := make([]push.ActivityLeg, 0, len(rows))
-	for _, row := range rows {
+	// Indexed rather than ranged by value: LiveActivityLeg is wide enough that
+	// gocritic flags the per-iteration copy, and this loop runs once per live
+	// Activity on every 60-90s tick.
+	for i := range rows {
+		row := &rows[i]
 		out = append(out, push.ActivityLeg{
 			Activity: activityFromRow(row.LiveActivity),
 			RideContext: push.RideContext{

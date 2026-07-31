@@ -171,6 +171,55 @@ injected at runtime via environment variables.
 | `APNS_TEAM_ID` | No | Apple developer team id (the token's `iss`). Defaults to `NFKX777598`. |
 | `APNS_TOPIC` | No | iOS bundle id sent as `apns-topic`. Defaults to `app.myrobotaxi.ios`. |
 | `PUSH_ENABLED` | No | Kill-switch, default `true`. **Fails fast** on a non-boolean (`off`, `no`, `""` are errors, not "enabled") — a switch you cannot trust is worse than none. Accepted values are exactly `strconv.ParseBool`'s. |
+| `LIVE_ACTIVITY_TICKER_ENABLED` | No | Kill-switch for the Live Activity **ETA ticker** only (MYR-172), default `true`. Same fail-fast parsing as `PUSH_ENABLED`. See below. |
+
+**No new variable for the Live Activity topic.** Apple addresses Live Activity
+pushes at `{bundleId}.push-type.liveactivity`, and the server **derives** that by
+appending the suffix to `APNS_TOPIC` — it also sets the matching
+`apns-push-type: liveactivity` header, since Apple rejects either one alone with
+`TopicDisallowed` (a `403` that reads like a credential problem and is not one).
+Deriving rather than configuring is deliberate: a second topic variable is a
+second thing to get wrong, and the two could then drift apart in an environment
+file. The same APNs key, key id and team id serve both channels.
+
+### The Live Activity ETA ticker (MYR-172)
+
+**Contract:** [`contracts/rest-api.md`](contracts/rest-api.md) §7.21 (FR-9.3,
+NFR-3.21); classification in
+[`contracts/data-classification.md`](contracts/data-classification.md) §1.18
+(NFR-3.9).
+
+`LIVE_ACTIVITY_TICKER_ENABLED` controls the loop that re-pushes a rider's Live
+Activity every **60–90 seconds** (75s ± 20% jitter) while their ride is
+`accepted`, `arrived` or `enroute`, so the ETA on the lock screen keeps moving.
+It exists because the ETA is the one thing on that card that goes wrong by
+**sitting still**: the status only changes when something happens, but "arrives
+at 4:12" stops being true the moment traffic does. The same loop sweeps
+registrations untouched for 24 hours, hourly.
+
+**It is a SECOND kill-switch rather than a reuse of `PUSH_ENABLED`, because the
+two stop different things.** `PUSH_ENABLED=false` silences every notification
+this service sends, Live Activity updates included. Setting
+`LIVE_ACTIVITY_TICKER_ENABLED=false` stops **only the periodic ETA refresh** —
+ride lifecycle transitions (accepted, arrived, enroute, completed, cancelled)
+still update the Activity as they happen, and it is still ended and dismissed
+correctly at the end of the ride.
+
+**What turning it off degrades to, and why that is a safe place to stand.**
+Every Activity update carries an `aps.stale-date` three minutes out, so once a
+card stops being refreshed ActivityKit renders its own "as of X min ago"
+treatment. A rider therefore sees a card that **says it is out of date** rather
+than one that confidently shows a stale ETA — degraded and honest, not dark.
+That is the degradation MYR-194's staleness policy was designed for, and it is
+the intermediate state an operator actually wants while investigating APNs
+throttling on a high-frequency push. The default is ON because the periodic
+refresh IS the feature, not an optimisation.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Startup log `live activity ticker disabled` with `enabled=false` | `LIVE_ACTIVITY_TICKER_ENABLED` is set false | Expected while the switch is off; unset it (or set `true`) and restart to resume ETA refreshes |
+| Lock-screen cards go grey/"as of N min ago" mid-ride, but status changes still land | The ticker is off, or its passes are failing | Check for `live activity ticker: list failed`; confirm the switch, then `fly deploy` (or restart) |
+| Live Activity sends log `apns status 403 TopicDisallowed` | `APNS_TOPIC` is not the app's real bundle id | Fix `APNS_TOPIC` — the Live Activity topic is derived from it and cannot be set independently |
 
 **Keyless is a supported state.** Without `APNS_KEY_P8`/`APNS_KEY_ID` the
 service starts normally, `PUT`/`DELETE /api/push/devices` stay mounted,

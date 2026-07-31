@@ -61,7 +61,7 @@ func TestRequestLogger(t *testing.T) {
 			middleware := requestLogger(logger, tt.skipPaths)
 			handler := middleware(inner)
 
-			req := httptest.NewRequestWithContext(context.Background(),http.MethodGet, tt.path, nil)
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, tt.path, nil)
 			rec := httptest.NewRecorder()
 
 			handler.ServeHTTP(rec, req)
@@ -121,7 +121,7 @@ func TestRequestLogger_IncludesMethodAndDuration(t *testing.T) {
 	middleware := requestLogger(logger, map[string]struct{}{})
 	handler := middleware(inner)
 
-	req := httptest.NewRequestWithContext(context.Background(),http.MethodPost, "/test", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/test", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 

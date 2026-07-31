@@ -72,7 +72,7 @@ func main() {
 	}
 }
 
-func run() error { //nolint:funlen,cyclop // composition root — sequential dependency wiring; helpers extracted to wiring.go
+func run() error { //nolint:funlen,cyclop,gocognit // composition root — sequential dependency wiring; helpers extracted to wiring.go
 	// --- Flag parsing ---
 	var (
 		configPath = flag.String("config", "", "path to JSON configuration file")

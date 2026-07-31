@@ -123,12 +123,12 @@ func TestRouteFollower_InterpolatesBetweenWaypoints(t *testing.T) {
 
 func TestBearing_Cardinal(t *testing.T) {
 	tests := []struct {
-		name     string
-		lat1     float64
-		lng1     float64
-		lat2     float64
-		lng2     float64
-		wantNear float64
+		name      string
+		lat1      float64
+		lng1      float64
+		lat2      float64
+		lng2      float64
+		wantNear  float64
 		tolerance float64
 	}{
 		{"north", 32.0, -96.0, 33.0, -96.0, 0, 1},

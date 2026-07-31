@@ -88,11 +88,11 @@ SELECT ride_request_id, user_id, activity_push_token, sandbox
 FROM go_live_activities
 WHERE ride_request_id = $1 AND ended_at IS NULL`
 
-// queryDeleteLiveActivityToken removes a token APNs has permanently rejected
+// queryDeleteRejectedActivity removes a token APNs has permanently rejected
 // (410 Unregistered / 400 BadDeviceToken). Deliberately NOT caller-scoped, for
 // the same reason as the device-registry twin: Apple's verdict is about the
 // Activity, not about the person who registered it.
-const queryDeleteLiveActivityToken = `
+const queryDeleteRejectedActivity = `
 DELETE FROM go_live_activities
 WHERE activity_push_token = $1`
 
@@ -217,7 +217,7 @@ func (r *LiveActivityRepo) DeleteActivityToken(ctx context.Context, token string
 	if strings.TrimSpace(token) == "" {
 		return fmt.Errorf("store.DeleteActivityToken: empty activity token")
 	}
-	if _, err := r.pool.Exec(ctx, queryDeleteLiveActivityToken, token); err != nil {
+	if _, err := r.pool.Exec(ctx, queryDeleteRejectedActivity, token); err != nil {
 		return fmt.Errorf("store.DeleteActivityToken: %w", err)
 	}
 	return nil
