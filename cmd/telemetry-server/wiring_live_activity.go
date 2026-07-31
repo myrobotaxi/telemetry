@@ -127,11 +127,31 @@ func (a *liveActivityStoreAdapter) RideContextFor(ctx context.Context, rideReque
 		return push.RideContext{}, fmt.Errorf("live activity: read ride context: %w", err)
 	}
 	return push.RideContext{
-		Status:      string(row.Status),
-		VehicleName: row.VehicleName,
-		Destination: row.DropoffLabel,
-		ETAMinutes:  row.ETAMinutes,
+		Status:             string(row.Status),
+		VehicleName:        row.VehicleName,
+		Destination:        row.DropoffLabel,
+		ETAMinutes:         row.ETAMinutes,
+		TripMilesRemaining: row.TripMilesRemaining,
+		NavUpdatedAt:       row.NavUpdatedAt,
 	}, nil
+}
+
+// SaveProgress persists the leg-progress anchor an Activity was just shown
+// (MYR-398). The push package owns the arithmetic; the store owns the row.
+func (a *liveActivityStoreAdapter) SaveProgress(ctx context.Context, key push.ActivityKey, anchor push.ProgressAnchor) error {
+	err := a.repo.SaveActivityProgress(ctx,
+		store.LiveActivityKey{RideRequestID: key.RideRequestID, UserID: key.UserID},
+		store.LiveActivityProgress{
+			Leg:      string(anchor.Leg),
+			Source:   string(anchor.Source),
+			Baseline: anchor.Baseline,
+			Value:    anchor.Value,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("live activity: save progress anchor: %w", err)
+	}
+	return nil
 }
 
 func (a *liveActivityStoreAdapter) ActiveLegs(ctx context.Context, limit int) ([]push.ActivityLeg, error) {
@@ -148,10 +168,12 @@ func (a *liveActivityStoreAdapter) ActiveLegs(ctx context.Context, limit int) ([
 		out = append(out, push.ActivityLeg{
 			Activity: activityFromRow(row.LiveActivity),
 			RideContext: push.RideContext{
-				Status:      string(row.Status),
-				VehicleName: row.VehicleName,
-				Destination: row.DropoffLabel,
-				ETAMinutes:  row.ETAMinutes,
+				Status:             string(row.Status),
+				VehicleName:        row.VehicleName,
+				Destination:        row.DropoffLabel,
+				ETAMinutes:         row.ETAMinutes,
+				TripMilesRemaining: row.TripMilesRemaining,
+				NavUpdatedAt:       row.NavUpdatedAt,
 			},
 		})
 	}
@@ -217,5 +239,11 @@ func activityFromRow(row store.LiveActivity) push.Activity {
 		UserID:        row.UserID,
 		Token:         row.ActivityPushToken,
 		Sandbox:       row.Sandbox,
+		Progress: push.ProgressAnchor{
+			Leg:      push.ProgressLeg(row.Progress.Leg),
+			Source:   push.ProgressSource(row.Progress.Source),
+			Baseline: row.Progress.Baseline,
+			Value:    row.Progress.Value,
+		},
 	}
 }

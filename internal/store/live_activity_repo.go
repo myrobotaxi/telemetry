@@ -39,6 +39,9 @@ type LiveActivity struct {
 	// Sandbox is true when the token was minted by a development or TestFlight
 	// build and is therefore only valid against the APNs sandbox gateway.
 	Sandbox bool
+	// Progress is this Activity's leg-progress anchor (MYR-398, migration
+	// 0027). Zero value means no anchor yet.
+	Progress LiveActivityProgress
 }
 
 // LiveActivityKey is the natural key of one registration — the pair the table
@@ -128,10 +131,15 @@ SET ended_at = NOW(), updated_at = NOW()
 WHERE ride_request_id = $1 AND ended_at IS NULL`
 
 // queryListLiveActivitiesForRide is the fan-out for one ride's lifecycle push.
+//
+// Aliased `a` only so it can share progressColumns with the ticker's read
+// (live_activity_progress.go): one spelling of the anchor projection, so the
+// two send paths cannot drift into disagreeing about what a track means.
 const queryListLiveActivitiesForRide = `
-SELECT ride_request_id, user_id, activity_push_token, sandbox
-FROM go_live_activities
-WHERE ride_request_id = $1 AND ended_at IS NULL`
+SELECT a.ride_request_id, a.user_id, a.activity_push_token, a.sandbox,
+       ` + progressColumns + `
+FROM go_live_activities a
+WHERE a.ride_request_id = $1 AND a.ended_at IS NULL`
 
 // queryDeleteRejectedActivity removes a token APNs has permanently rejected
 // (410 Unregistered / 400 BadDeviceToken). Deliberately NOT caller-scoped, for
@@ -370,9 +378,13 @@ func (r *LiveActivityRepo) ActivitiesForRide(ctx context.Context, rideRequestID 
 	var out []LiveActivity
 	for rows.Next() {
 		var a LiveActivity
-		if err := rows.Scan(&a.RideRequestID, &a.UserID, &a.ActivityPushToken, &a.Sandbox); err != nil {
+		var leg, source *string
+		var baseline, value *float64
+		if err := rows.Scan(&a.RideRequestID, &a.UserID, &a.ActivityPushToken, &a.Sandbox,
+			&leg, &source, &baseline, &value); err != nil {
 			return nil, fmt.Errorf("store.ActivitiesForRide(ride=%s): scan: %w", rideRequestID, err)
 		}
+		a.Progress = scanProgress(leg, source, baseline, value)
 		out = append(out, a)
 	}
 	if err := rows.Err(); err != nil {

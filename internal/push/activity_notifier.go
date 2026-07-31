@@ -33,6 +33,11 @@ type Activity struct {
 	// Token is the ActivityKit update token. P1 — never log in full.
 	Token   string
 	Sandbox bool
+	// Progress is this Activity's leg-progress anchor as last DELIVERED to the
+	// phone (MYR-398). Per-Activity rather than per-ride because the
+	// monotonicity rule it enforces is a promise made to one client about the
+	// sequence of values that client has seen.
+	Progress ProgressAnchor
 }
 
 // RideContext is everything a content-state needs that is not the token.
@@ -46,6 +51,14 @@ type RideContext struct {
 	// ETAMinutes is the car's carried navigation ETA in whole minutes, nil when
 	// the car has no active route.
 	ETAMinutes *int
+	// TripMilesRemaining is the car's carried remaining distance on that route,
+	// in miles (Tesla's tripDistanceRemaining), nil when it reports none. The
+	// preferred progress input — see activity_progress.go.
+	TripMilesRemaining *float64
+	// NavUpdatedAt is when the car's row was last written, i.e. how old the two
+	// readings above are. Nil for a car we have never heard from. Used ONLY to
+	// gate progress; `eta` keeps its existing ungated behaviour.
+	NavUpdatedAt *time.Time
 }
 
 // ActivityStore is the send path's view of the registry.
@@ -61,6 +74,9 @@ type ActivityStore interface {
 	// RideIDsWithActivitiesForVehicle lists the rides of one vehicle that
 	// still have a live Activity registered against them.
 	RideIDsWithActivitiesForVehicle(ctx context.Context, vehicleID string) ([]string, error)
+	// SaveProgress records the leg-progress anchor one Activity was just shown.
+	// Called ONLY after APNs accepted the push (MYR-398).
+	SaveProgress(ctx context.Context, key ActivityKey, anchor ProgressAnchor) error
 }
 
 // terminalStatuses maps a terminal ride status onto how long its Activity

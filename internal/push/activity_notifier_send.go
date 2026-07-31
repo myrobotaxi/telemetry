@@ -120,10 +120,17 @@ func (a *ActivityNotifier) fanOut(
 	}
 
 	now := a.now()
-	state := contentState(rc, now)
 
 	var delivered int
+	var hasETA, hasProgress bool
 	for _, act := range activities {
+		// Built per Activity rather than once per ride, because the progress
+		// anchor is per Activity: two phones watching one ride may have been
+		// delivered different fractions, and the monotonicity promise is made
+		// to each of them separately. Every other field is identical across
+		// the loop; v1 registers exactly one Activity per ride anyway.
+		state, anchor := contentState(rc, act.Progress, now)
+		hasETA, hasProgress = state.ETA != nil, state.Progress != nil
 		// MYR-349 / MYR-194 decision 7 — the recipient's own switch. A rider
 		// who muted ride updates gets no Activity pushes; the Activity itself
 		// still runs, started locally by the app, and falls back to its own
@@ -134,6 +141,7 @@ func (a *ActivityNotifier) fanOut(
 		}
 		if a.send(ctx, act, state, event, dismissAt, lowPriority, now) {
 			delivered++
+			a.saveProgress(ctx, act, anchor)
 		}
 	}
 
@@ -141,10 +149,41 @@ func (a *ActivityNotifier) fanOut(
 		slog.String("ride_id", rideRequestID),
 		slog.String("event", string(event)),
 		slog.String("status", rc.Status),
-		slog.Bool("has_eta", state.ETA != nil),
+		slog.Bool("has_eta", hasETA),
+		slog.Bool("has_progress", hasProgress),
 		slog.Int("activities", len(activities)),
 		slog.Int("delivered", delivered),
 	)
+}
+
+// saveProgress persists the anchor an Activity was just shown, AFTER the send
+// and only on a delivery Apple accepted.
+//
+// The order is the monotonicity promise. `Value` is the floor the next push
+// clamps to, so it must record what the phone HAS SEEN, not what we hoped to
+// show it: writing before the send would advance the floor past a push that
+// never arrived, and the client's next value could then be lower than its
+// previous one — the one thing the clamp exists to prevent.
+//
+// Best-effort and detached from the caller's deadline, which the send may have
+// consumed. A lost write costs one leg's worth of anchor precision: the next
+// push re-derives from the older baseline, which is a slightly stale fraction
+// and never a wrong direction.
+func (a *ActivityNotifier) saveProgress(ctx context.Context, act Activity, anchor ProgressAnchor) {
+	if anchor == act.Progress {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deleteTimeout)
+	defer cancel()
+
+	key := ActivityKey{RideRequestID: act.RideRequestID, UserID: act.UserID}
+	if err := a.store.SaveProgress(ctx, key, anchor); err != nil {
+		a.logger.Warn("live activity: save progress anchor failed",
+			slog.String("ride_id", act.RideRequestID),
+			slog.String("error", err.Error()),
+		)
+	}
 }
 
 // allowed applies the ride_lifecycle preference gate, failing open exactly as
@@ -229,14 +268,17 @@ func (a *ActivityNotifier) dropActivity(ctx context.Context, token string) {
 	)
 }
 
-// contentState projects a ride into what the Activity renders.
+// contentState projects a ride into what the Activity renders, and returns the
+// progress anchor to persist if the push is delivered.
 //
-// The ETA conversion is the one piece of arithmetic on this path: the car
-// reports a DURATION in whole minutes (Tesla's minutesToArrival, persisted
-// verbatim) and the Activity needs an INSTANT, because an instant survives the
-// gap between pushes and a duration does not. A negative or absent value means
-// no route, and the key is omitted rather than guessed.
-func contentState(rc RideContext, now time.Time) ActivityContentState {
+// The ETA conversion is the simpler of the two pieces of arithmetic on this
+// path: the car reports a DURATION in whole minutes (Tesla's minutesToArrival,
+// persisted verbatim) and the Activity needs an INSTANT, because an instant
+// survives the gap between pushes and a duration does not. A negative or absent
+// value means no route, and the key is omitted rather than guessed. The other
+// is computeProgress, which turns "how far is left" into "how far along" and is
+// documented where it lives.
+func contentState(rc RideContext, prev ProgressAnchor, now time.Time) (ActivityContentState, ProgressAnchor) {
 	state := ActivityContentState{
 		Version:     ActivityContentStateVersion,
 		Status:      rc.Status,
@@ -247,5 +289,7 @@ func contentState(rc RideContext, now time.Time) ActivityContentState {
 		eta := now.Add(time.Duration(*rc.ETAMinutes) * time.Minute).Unix()
 		state.ETA = &eta
 	}
-	return state
+	progress, anchor := computeProgress(rc, prev, now)
+	state.Progress = progress
+	return state, anchor
 }

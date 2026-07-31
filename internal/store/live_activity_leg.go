@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -45,6 +46,19 @@ type LiveActivityLeg struct {
 	// an absent ETA and the Activity renders no time at all rather than a
 	// number we made up.
 	ETAMinutes *int
+	// TripMilesRemaining is the car's own remaining distance on that route, in
+	// miles (Tesla's milesToArrival, stored as tripDistanceRemaining), nil when
+	// it reports none. The preferred input to the progress track (MYR-398):
+	// a track depicts distance, and distance to a fixed point falls as the car
+	// drives rather than being re-estimated in both directions the way minutes
+	// are.
+	TripMilesRemaining *float64
+	// NavUpdatedAt is when the car's row was last written — how OLD the two
+	// readings above are. Nil for a car we have never heard from. It gates the
+	// progress fraction only: a stale fraction is indistinguishable from a
+	// fresh one on a lock screen, whereas a stale ETA visibly slides into the
+	// past.
+	NavUpdatedAt *time.Time
 }
 
 // ActiveLegStatuses is the set of ride statuses that keep an Activity ticking.
@@ -81,7 +95,10 @@ SELECT a.ride_request_id,
        r.vehicle_id,
        COALESCE(v."name", ''),
        r.dropoff_label,
-       v."etaMinutes"
+       v."etaMinutes",
+       v."tripDistanceRemaining",
+       v."lastUpdated",
+       ` + progressColumns + `
 FROM go_live_activities a
 JOIN go_ride_requests r ON r.id = a.ride_request_id
 LEFT JOIN "Vehicle" v ON v."id" = r.vehicle_id
@@ -114,6 +131,8 @@ func (r *LiveActivityRepo) ListActiveLegActivities(ctx context.Context, limit in
 	var out []LiveActivityLeg
 	for rows.Next() {
 		var leg LiveActivityLeg
+		var pLeg, pSource *string
+		var pBaseline, pValue *float64
 		if err := rows.Scan(
 			&leg.RideRequestID,
 			&leg.UserID,
@@ -124,9 +143,13 @@ func (r *LiveActivityRepo) ListActiveLegActivities(ctx context.Context, limit in
 			&leg.VehicleName,
 			&leg.DropoffLabel,
 			&leg.ETAMinutes,
+			&leg.TripMilesRemaining,
+			&leg.NavUpdatedAt,
+			&pLeg, &pSource, &pBaseline, &pValue,
 		); err != nil {
 			return nil, fmt.Errorf("store.ListActiveLegActivities: scan: %w", err)
 		}
+		leg.Progress = scanProgress(pLeg, pSource, pBaseline, pValue)
 		out = append(out, leg)
 	}
 	if err := rows.Err(); err != nil {
@@ -144,7 +167,9 @@ SELECT r.status,
        r.vehicle_id,
        COALESCE(v."name", ''),
        r.dropoff_label,
-       v."etaMinutes"
+       v."etaMinutes",
+       v."tripDistanceRemaining",
+       v."lastUpdated"
 FROM go_ride_requests r
 LEFT JOIN "Vehicle" v ON v."id" = r.vehicle_id
 WHERE r.id = $1`
@@ -157,6 +182,10 @@ type RideActivityContext struct {
 	VehicleName  string
 	DropoffLabel string
 	ETAMinutes   *int
+	// TripMilesRemaining and NavUpdatedAt feed the progress track and its
+	// freshness gate (MYR-398); see the LiveActivityLeg fields of the same name.
+	TripMilesRemaining *float64
+	NavUpdatedAt       *time.Time
 }
 
 // ActivityContextForRide reads the content-state inputs for one ride.
@@ -172,6 +201,8 @@ func (r *LiveActivityRepo) ActivityContextForRide(ctx context.Context, rideReque
 		&out.VehicleName,
 		&out.DropoffLabel,
 		&out.ETAMinutes,
+		&out.TripMilesRemaining,
+		&out.NavUpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RideActivityContext{}, fmt.Errorf("store.ActivityContextForRide(%s): %w", rideRequestID, ErrRideRequestNotFound)
