@@ -163,12 +163,13 @@ func (r *VehicleShareRepo) alreadyRedeemed(ctx context.Context, tx pgx.Tx, code,
 	return grants, nil
 }
 
-// scanGrants reads (vehicle_id, owner_user_id, permission) triples.
+// scanGrants reads (vehicle_id, owner_user_id, allow_rides) triples — the FLAGS
+// the redemption wrote, not the preset that produced them (MYR-369).
 func scanGrants(rows pgx.Rows) ([]ShareGrant, error) {
 	var out []ShareGrant
 	for rows.Next() {
 		var g ShareGrant
-		if err := rows.Scan(&g.VehicleID, &g.OwnerUserID, &g.Permission); err != nil {
+		if err := rows.Scan(&g.VehicleID, &g.OwnerUserID, &g.AllowRides); err != nil {
 			return nil, fmt.Errorf("scan share grant: %w", err)
 		}
 		out = append(out, g)
@@ -203,20 +204,41 @@ func (r *VehicleShareRepo) SharedVehicleIDs(ctx context.Context, userID string) 
 	return out, nil
 }
 
-// SharePermissionFor resolves the tier one person holds over one vehicle.
-// Returns ErrShareNotFound when there is no accepted grant — callers MUST treat
-// that as "no access" and MUST NOT substitute a default tier.
-func (r *VehicleShareRepo) SharePermissionFor(ctx context.Context, userID, vehicleID string) (string, error) {
-	var permission string
-	err := r.pool.QueryRow(ctx, queryAcceptedSharePermission, vehicleID, userID).Scan(&permission)
+// ShareGrantFor resolves the CAPABILITY FLAGS one person holds over one vehicle
+// (MYR-369). Returns ErrShareNotFound when there is no accepted grant OR when
+// the grant is suspended — callers MUST treat both as "no access", and the two
+// are deliberately indistinguishable.
+//
+// The bool is the ride capability. It is only ever true for a LIVE grant, since
+// the statement returns no row for a suspended one, so a caller cannot read a
+// capability off a paused grant even by mistake.
+func (r *VehicleShareRepo) ShareGrantFor(ctx context.Context, userID, vehicleID string) (bool, error) {
+	var allowRides bool
+	err := r.pool.QueryRow(ctx, queryAcceptedShareGrant, vehicleID, userID).Scan(&allowRides)
 	switch {
 	case err == nil:
-		return permission, nil
+		return allowRides, nil
 	case errors.Is(err, pgx.ErrNoRows):
-		return "", ErrShareNotFound
+		return false, ErrShareNotFound
 	default:
-		return "", fmt.Errorf("store.SharePermissionFor(user=%s, vehicle=%s): %w", userID, vehicleID, err)
+		return false, fmt.Errorf("store.ShareGrantFor(user=%s, vehicle=%s): %w", userID, vehicleID, err)
 	}
+}
+
+// RiderMayRequestRides reports whether riderID may still ride in vehicleID
+// (MYR-369): true when they OWN the car, or hold a LIVE accepted grant carrying
+// the ride capability.
+//
+// The reservation sweeper's seam. Returns a real error on a transport failure
+// rather than false, so the sweeper can HOLD the reservation — "unknown" and
+// "not permitted" must not collapse into the same answer on a path where the
+// alternative to holding is an irreversible claim.
+func (r *VehicleShareRepo) RiderMayRequestRides(ctx context.Context, riderID, vehicleID string) (bool, error) {
+	var permitted bool
+	if err := r.pool.QueryRow(ctx, queryRiderMayRequestRides, riderID, vehicleID).Scan(&permitted); err != nil {
+		return false, fmt.Errorf("store.RiderMayRequestRides(rider=%s, vehicle=%s): %w", riderID, vehicleID, err)
+	}
+	return permitted, nil
 }
 
 // OwnerFirstName resolves the sharing owner's FIRST NAME for the redeemer's

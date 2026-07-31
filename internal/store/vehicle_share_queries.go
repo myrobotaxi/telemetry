@@ -22,7 +22,7 @@ package store
 // path can accidentally carry an accepted grant's code out of the database:
 // ShareInvite.code is contractually present only while status is 'pending'.
 const shareColumns = `
-	id, vehicle_id, owner_user_id, label, permission,
+	id, vehicle_id, owner_user_id, label, permission, allow_rides, suspended_at,
 	CASE WHEN status = 'pending' THEN code ELSE '' END AS code,
 	status, created_at, expires_at, accepted_at,
 	COALESCE(accepted_by_user_id, '') AS accepted_by_user_id, revoked_at`
@@ -56,10 +56,13 @@ const shareInviteTTLInterval = `INTERVAL '7 days'`
 // RETURNING hands back the timestamps the database actually wrote, so the row
 // the caller returns to the client is the row on disk — not a Go-side
 // approximation that drifts from it by however long the round trip took.
+// $7 is the preset's allow_rides projection, seeded at INSERT rather than left
+// to the column default so a pending row and the grant it becomes never
+// disagree. It is inert until redemption, which re-asserts it anyway.
 const queryInsertShare = `
 INSERT INTO go_vehicle_shares
-	(id, vehicle_id, owner_user_id, label, permission, code, status, created_at, expires_at)
-VALUES ($1, $2, $3, $4, $5, $6, 'pending', NOW(), NOW() + ` + shareInviteTTLInterval + `)
+	(id, vehicle_id, owner_user_id, label, permission, code, allow_rides, status, created_at, expires_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', NOW(), NOW() + ` + shareInviteTTLInterval + `)
 RETURNING created_at, expires_at`
 
 // queryListSharesByVehicle is the owner's sharing screen: pending invites and
@@ -160,36 +163,45 @@ FOR UPDATE`
 // even though the rows are already locked (belt and braces: the predicate, not
 // the lock, is the contract). RETURNING gives the caller exactly the rows it
 // actually changed.
+//
+// TIER-AT-REDEEM (MYR-369). `allow_rides` is computed FROM THE ROW'S OWN
+// `permission` inside this UPDATE rather than passed in by the caller. That is
+// what makes a pending invite minted before this change redeem to exactly the
+// capabilities its preset always implied — including one minted at the retired
+// live_history, which maps to false along with 'live'. Doing it in SQL keeps the
+// mapping atomic with the accept: there is no window in which a row is accepted
+// but not yet capability-stamped, and no Go-side value that could be computed
+// from a stale read of `permission`.
+//
+// `suspended_at = NULL` is asserted too. A pending row cannot be suspended, so
+// this is belt and braces against a row that somehow carried the column — a
+// freshly accepted grant must never be born paused, because nobody would know
+// to un-pause it.
 const queryAcceptSharesByID = `
 UPDATE go_vehicle_shares
-SET status = 'accepted', accepted_at = NOW(), accepted_by_user_id = $2
+SET status = 'accepted', accepted_at = NOW(), accepted_by_user_id = $2,
+    allow_rides = (permission = 'rides'), suspended_at = NULL
 WHERE id = ANY($1) AND status = 'pending' AND expires_at > NOW()
-RETURNING vehicle_id, owner_user_id, permission`
+RETURNING vehicle_id, owner_user_id, allow_rides`
 
 // queryAcceptedSharesByCodeAndUser is the IDEMPOTENT re-redeem lookup: rows
 // this same person already accepted under this same code. A retried request
 // after a dropped response lands here and returns 200 with the same grants
 // instead of 404 or a duplicate row.
+//
+// SUSPENDED ROWS ARE EXCLUDED (MYR-369), which makes re-redeeming a code whose
+// grant the owner has since suspended answer 404 — the same answer an unknown
+// or expired code gets. That is the suspension invariant holding on one more
+// surface: a suspended grant conveys nothing, so it must not be re-servable as a
+// successful join, and the 404 keeps it indistinguishable from every other dead
+// code rather than announcing "you were suspended" to somebody the owner chose
+// to cut off. The row is untouched and un-suspending restores the re-redeem
+// along with everything else.
 const queryAcceptedSharesByCodeAndUser = `
-SELECT vehicle_id, owner_user_id, permission
+SELECT vehicle_id, owner_user_id, allow_rides
 FROM go_vehicle_shares
-WHERE code = $1 AND status = 'accepted' AND accepted_by_user_id = $2`
-
-// queryAcceptedShareVehicleIDs is the VIEWER ACCESS SET — the vehicles a person
-// may see because somebody shared them, unioned with their own cars by the
-// authenticator. Served by the leading column of the partial-unique
-// accepted-grant index.
-const queryAcceptedShareVehicleIDs = `
-SELECT vehicle_id FROM go_vehicle_shares
-WHERE accepted_by_user_id = $1 AND status = 'accepted'`
-
-// queryAcceptedSharePermission resolves the tier one person holds over one
-// vehicle. Returns no row when there is no accepted grant, which the caller
-// MUST treat as "no access" — never as a default tier.
-const queryAcceptedSharePermission = `
-SELECT permission FROM go_vehicle_shares
-WHERE vehicle_id = $1 AND accepted_by_user_id = $2 AND status = 'accepted'
-LIMIT 1`
+WHERE code = $1 AND status = 'accepted' AND accepted_by_user_id = $2
+  AND suspended_at IS NULL`
 
 // queryOwnerFirstNameSources resolves the sharing owner's display identity from
 // the three identity sources, in the same precedence order as

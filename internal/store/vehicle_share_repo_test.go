@@ -309,8 +309,10 @@ func TestVehicleShareRepo_RedeemCode(t *testing.T) {
 			t.Fatalf("granted %d vehicles, want 2 — one code, one atomic redemption", len(grants))
 		}
 		for _, g := range grants {
-			if g.Permission != store.SharePermissionRides {
-				t.Errorf("vehicle %s granted %q, want rides", g.VehicleID, g.Permission)
+			// MYR-369: the redemption reports the FLAGS it wrote, mapped
+			// from the invite's preset inside the accept UPDATE.
+			if !g.AllowRides {
+				t.Errorf("vehicle %s granted allowRides=false, want true from the rides preset", g.VehicleID)
 			}
 			if g.OwnerUserID != shareOwnerA {
 				t.Errorf("vehicle %s reports owner %q", g.VehicleID, g.OwnerUserID)
@@ -507,19 +509,19 @@ func TestVehicleShareRepo_AccessLookups(t *testing.T) {
 		}
 	})
 
-	t.Run("permission lookup", func(t *testing.T) {
-		tier, err := repo.SharePermissionFor(ctx, shareViewer1, vehA1)
+	t.Run("grant lookup", func(t *testing.T) {
+		allowRides, err := repo.ShareGrantFor(ctx, shareViewer1, vehA1)
 		if err != nil {
-			t.Fatalf("SharePermissionFor: %v", err)
+			t.Fatalf("ShareGrantFor: %v", err)
 		}
-		if tier != store.SharePermissionLiveHistory {
-			t.Errorf("tier = %q, want live_history", tier)
+		if allowRides {
+			t.Error("allowRides = true, want false — this grant was created at the live preset")
 		}
 		// No grant on a different car, and no grant for a different person.
-		if _, err := repo.SharePermissionFor(ctx, shareViewer1, vehA2); !errors.Is(err, sdk.ErrNotFound) {
+		if _, err := repo.ShareGrantFor(ctx, shareViewer1, vehA2); !errors.Is(err, sdk.ErrNotFound) {
 			t.Errorf("ungranted vehicle: err = %v, want not-found", err)
 		}
-		if _, err := repo.SharePermissionFor(ctx, shareViewer2, vehA1); !errors.Is(err, sdk.ErrNotFound) {
+		if _, err := repo.ShareGrantFor(ctx, shareViewer2, vehA1); !errors.Is(err, sdk.ErrNotFound) {
 			t.Errorf("ungranted user: err = %v, want not-found", err)
 		}
 	})
@@ -532,8 +534,8 @@ func TestVehicleShareRepo_AccessLookups(t *testing.T) {
 		if viewerID != shareViewer1 {
 			t.Errorf("revoke reported viewer %q, want %q — the caller needs it to bust that person's cache", viewerID, shareViewer1)
 		}
-		if _, err := repo.SharePermissionFor(ctx, shareViewer1, vehA1); !errors.Is(err, sdk.ErrNotFound) {
-			t.Errorf("a revoked viewer still resolves a tier: err = %v", err)
+		if _, err := repo.ShareGrantFor(ctx, shareViewer1, vehA1); !errors.Is(err, sdk.ErrNotFound) {
+			t.Errorf("a revoked viewer still resolves a grant: err = %v", err)
 		}
 		ids, err := repo.SharedVehicleIDs(ctx, shareViewer1)
 		if err != nil {
@@ -645,7 +647,7 @@ func TestVehicleShareRepo_TeardownRevokesGrants(t *testing.T) {
 	if _, err := shares.RedeemCode(ctx, invite.Code, shareViewer1); err != nil {
 		t.Fatalf("redeem: %v", err)
 	}
-	if _, err := shares.SharePermissionFor(ctx, shareViewer1, vehA1); err != nil {
+	if _, err := shares.ShareGrantFor(ctx, shareViewer1, vehA1); err != nil {
 		t.Fatalf("precondition — the viewer should hold a grant: %v", err)
 	}
 
@@ -653,7 +655,7 @@ func TestVehicleShareRepo_TeardownRevokesGrants(t *testing.T) {
 		t.Fatalf("RemoveVehicle: %v", err)
 	}
 
-	if _, err := shares.SharePermissionFor(ctx, shareViewer1, vehA1); !errors.Is(err, sdk.ErrNotFound) {
+	if _, err := shares.ShareGrantFor(ctx, shareViewer1, vehA1); !errors.Is(err, sdk.ErrNotFound) {
 		t.Errorf("the viewer still holds a grant on an offboarded car: err = %v", err)
 	}
 	ids, err := shares.SharedVehicleIDs(ctx, shareViewer1)

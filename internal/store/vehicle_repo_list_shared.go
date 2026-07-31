@@ -20,11 +20,20 @@ import (
 // survive, so there is no way for the projection to emit a vehicle the caller
 // was not granted. `status = 'accepted'` excludes both unredeemed invites and
 // revoked tombstones.
+//
+// `s.suspended_at IS NULL` excludes SUSPENDED grants (MYR-369), and it belongs
+// in the JOIN rather than the WHERE for a reason that is not stylistic: this
+// join IS the access check, so every predicate that decides access must sit in
+// it. A suspended grant therefore produces no catalog row at all — the vehicle
+// vanishes from the viewer's list exactly as if the grant had been revoked,
+// which is the specified behaviour. There is deliberately no "suspended" marker
+// on the wire for a viewer to render: the row is absent, not decorated.
 const sharedSummaryJoin = `
 JOIN go_vehicle_shares s
   ON s.vehicle_id = "Vehicle"."id"
  AND s.accepted_by_user_id = $1
- AND s.status = 'accepted'`
+ AND s.status = 'accepted'
+ AND s.suspended_at IS NULL`
 
 // sharedSummaryColumns is vehicleListSummaryColumns with every name qualified
 // to the vehicle relation.
@@ -40,8 +49,15 @@ const sharedSummaryColumns = `"Vehicle"."id", "Vehicle"."userId", "Vehicle"."vin
 	"Vehicle"."chargeLevel", "Vehicle"."estimatedRange", "Vehicle"."lastUpdated"`
 
 // queryVehiclesSharedWithUser is the viewer-side companion of
-// queryVehiclesByUserList: identical lean projection plus the grant's tier, so
-// the handler can stamp VehicleSummary.sharePermission without a second lookup.
+// queryVehiclesByUserList: identical lean projection plus the grant's RIDE
+// CAPABILITY, from which the handler DERIVES VehicleSummary.sharePermission
+// without a second lookup (MYR-369).
+//
+// It selects `s.allow_rides`, NOT `s.permission`. The stored preset is not what
+// the grant conveys — an owner may have patched the capability since, and a
+// legacy row may still carry the retired live_history — so projecting the preset
+// would emit a tier the server no longer enforces and, for that legacy row, one
+// it no longer recognizes.
 //
 // $2 is an OPTIONAL id filter. NULL means "every vehicle shared with me" (the
 // catalog list); a non-null array narrows to a specific set (the redeem
@@ -52,19 +68,19 @@ const queryVehiclesSharedWithUser = `SELECT ` + sharedSummaryColumns + `,
 	` + vehicleListHasActiveRideExpr + `,
 	gcs.service_etc, gcs.service_expected_end_at,
 	` + rideShareEnabledExpr + `,
-	s.permission
+	s.allow_rides
 FROM "Vehicle"` + sharedSummaryJoin + `
 LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"
 WHERE ($2::text[] IS NULL OR "Vehicle"."id" = ANY($2))
 ORDER BY "Vehicle"."name", "Vehicle"."vin"`
 
 // SharedVehicleSummary is a catalog row the caller sees as a VIEWER, carrying
-// the tier the grant conveys. Permission is always one of the three tiers —
-// the join guarantees a grant row exists — so the handler never has to invent
-// a default.
+// the ride capability the grant conveys. The join guarantees the grant exists
+// AND is live, so the handler never has to invent a default and never has to
+// re-check suspension: a suspended grant produced no row to begin with.
 type SharedVehicleSummary struct {
 	VehicleSummary
-	Permission string
+	AllowRides bool
 }
 
 // ListSharedSummariesByUser returns every vehicle shared with the caller, as
@@ -120,7 +136,8 @@ func (r *VehicleRepo) listSharedSummaries(ctx context.Context, userID string, ve
 	return out, nil
 }
 
-// scanSharedVehicleSummaryRow reads the lean catalog columns plus the tier.
+// scanSharedVehicleSummaryRow reads the lean catalog columns plus the grant's
+// ride capability.
 func scanSharedVehicleSummaryRow(row rowScanner) (SharedVehicleSummary, error) {
 	var (
 		v      SharedVehicleSummary
@@ -143,7 +160,7 @@ func scanSharedVehicleSummaryRow(row rowScanner) (SharedVehicleSummary, error) {
 		&v.ServiceETC,
 		&v.ServiceExpectedEndAt,
 		&v.RideShareEnabled,
-		&v.Permission,
+		&v.AllowRides,
 	); err != nil {
 		return SharedVehicleSummary{}, fmt.Errorf("scan shared vehicle summary: %w", err)
 	}
