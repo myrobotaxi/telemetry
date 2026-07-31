@@ -171,65 +171,9 @@ WHERE owner_id = $1 AND status = $2 AND (created_at, id) < ($3, $4)
 ORDER BY created_at DESC, id DESC
 LIMIT $5`
 
-// queryRideRequestUpdateStatus persists a lifecycle transition with its
-// timestamp side-effects in one statement: entering 'accepted' stamps
-// accepted_at, entering 'arrived' stamps picked_up_at (the owner-confirmed
-// pickup instant — MYR-270), entering 'enroute' stamps enroute_at (the
-// rider-started leg-2 instant), entering 'completed' stamps completed_at (each
-// only on first entry — re-updates never move an already-set stamp), and every
-// transition touches updated_at.
-const queryRideRequestUpdateStatus = `UPDATE go_ride_requests SET
-	status = $2,
-	accepted_at = CASE
-		WHEN $2 = 'accepted' AND accepted_at IS NULL THEN NOW()
-		ELSE accepted_at
-	END,
-	enroute_at = CASE
-		WHEN $2 = 'enroute' AND enroute_at IS NULL THEN NOW()
-		ELSE enroute_at
-	END,
-	picked_up_at = CASE
-		WHEN $2 = 'arrived' AND picked_up_at IS NULL THEN NOW()
-		ELSE picked_up_at
-	END,
-	completed_at = CASE
-		WHEN $2 = 'completed' AND completed_at IS NULL THEN NOW()
-		ELSE completed_at
-	END,
-	updated_at = NOW()
-WHERE id = $1
-RETURNING ` + rideRequestColumns
-
-// queryRideRequestUpdateStatusFrom is the GUARDED transition variant
-// (MYR-174/175 check-then-write race fix): identical timestamp-stamping
-// semantics to queryRideRequestUpdateStatus, but the row only matches when
-// its CURRENT status is in the caller's allowed-from set ($3, text[]).
-// Concurrent conflicting transitions therefore serialize in the database —
-// exactly one UPDATE matches; the loser affects zero rows and the repo maps
-// that to ErrRideRequestConflict (or ErrRideRequestNotFound when the id is
-// unknown). This guard is what makes the ride.accepted dispatch event
-// exactly-once per accept: only the winning write's caller publishes.
-const queryRideRequestUpdateStatusFrom = `UPDATE go_ride_requests SET
-	status = $2,
-	accepted_at = CASE
-		WHEN $2 = 'accepted' AND accepted_at IS NULL THEN NOW()
-		ELSE accepted_at
-	END,
-	enroute_at = CASE
-		WHEN $2 = 'enroute' AND enroute_at IS NULL THEN NOW()
-		ELSE enroute_at
-	END,
-	picked_up_at = CASE
-		WHEN $2 = 'arrived' AND picked_up_at IS NULL THEN NOW()
-		ELSE picked_up_at
-	END,
-	completed_at = CASE
-		WHEN $2 = 'completed' AND completed_at IS NULL THEN NOW()
-		ELSE completed_at
-	END,
-	updated_at = NOW()
-WHERE id = $1 AND status = ANY($3)
-RETURNING ` + rideRequestColumns
+// The lifecycle-transition statements (plain, guarded, and dormancy-guarded)
+// live in ride_request_status_queries.go — they share one stamping clause and
+// differ only in their WHERE.
 
 // queryRideRequestProposeReschedule opens (or replaces) a reschedule
 // negotiation: records the rider's proposed pickup time and flips the

@@ -289,6 +289,13 @@ func (s *racingDeclineStore) UpdateStatusFrom(_ context.Context, _ string, from 
 	return RideRequestData{}, fmt.Errorf("update ride request status: %w", ErrRideStatusConflict)
 }
 
+// UpdateStatusFromDispatched is unused by the decline race (decline is not the
+// pickup path) but keeps the store surface complete; it delegates so the fake
+// can never diverge on the shared guard semantics.
+func (s *racingDeclineStore) UpdateStatusFromDispatched(ctx context.Context, id string, from []string, to string) (RideRequestData, error) {
+	return s.UpdateStatusFrom(ctx, id, from, to)
+}
+
 func (s *racingDeclineStore) Create(context.Context, RideRequestCreateInput) (RideRequestData, error) {
 	return RideRequestData{}, errors.New("not used")
 }

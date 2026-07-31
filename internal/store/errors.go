@@ -29,6 +29,22 @@ var (
 	// NOT wrap sdk.ErrNotFound.
 	ErrRideRequestConflict = errors.New("ride request status conflict")
 
+	// ErrRideRequestReservationDormant is returned by UpdateStatusFromDispatched
+	// when the guarded write matched no row because the ride is a RESERVATION
+	// THAT IS NEITHER DISPATCHED NOR YET DUE (MYR-376): `scheduled_for IS NOT
+	// NULL`, `dispatch_status` is anything other than `'sent'`, AND
+	// `scheduled_for` is still in the future. A reservation is DORMANT between
+	// accept and the earlier of its dispatch and its due instant — before then
+	// the car has been told nothing — so the owner pickup transition refuses it.
+	// At/after due the refusal lifts even without a dispatch, which is what keeps
+	// §7.8's "may still cancel or proceed manually" expiry promise true.
+	//
+	// The HTTP layer maps it to the SAME `409 conflict` code as
+	// ErrRideRequestConflict (rest-api.md §7.8 — no new error code); the two are
+	// separate sentinels only so the 409 can NAME the real reason instead of
+	// blaming the status. Deliberately does NOT wrap sdk.ErrNotFound.
+	ErrRideRequestReservationDormant = errors.New("ride request reservation not yet dispatched")
+
 	// ErrRideRequestActive is returned by Create when the rider already has
 	// an OPEN instant ride request and the partial unique index
 	// (uq_go_ride_requests_active_instant_rider, migration 0004) rejects the
