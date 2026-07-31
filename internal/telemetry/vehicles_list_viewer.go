@@ -22,8 +22,9 @@ import (
 
 // SharedVehicleLister returns the caller's viewer-shaped catalog rows.
 // Implementations apply the accepted-grant join themselves, so an id the
-// caller has no grant on yields no row: the id list narrows an access-checked
-// query and never substitutes for the check.
+// caller has no grant on — or holds only a SUSPENDED grant on (MYR-369) —
+// yields no row: the id list narrows an access-checked query and never
+// substitutes for the check.
 type SharedVehicleLister interface {
 	// ListSharedByUser returns every vehicle shared with the caller.
 	ListSharedByUser(ctx context.Context, userID string) ([]SharedVehicleRow, error)
@@ -32,12 +33,13 @@ type SharedVehicleLister interface {
 	ListSharedByIDs(ctx context.Context, userID string, vehicleIDs []string) ([]SharedVehicleRow, error)
 }
 
-// SharedVehicleRow is a catalog row plus the tier the caller holds over it.
-// Permission is always one of the three tiers: the row only exists because an
-// accepted grant produced it, so there is no default to invent.
+// SharedVehicleRow is a catalog row plus the RIDE CAPABILITY the caller holds
+// over it (MYR-369). The row only exists because a LIVE accepted grant produced
+// it — the lister's join excludes suspended grants — so there is no default to
+// invent and no suspension to re-check here.
 type SharedVehicleRow struct {
 	VehicleCatalogRow
-	Permission string
+	AllowRides bool
 }
 
 // WithSharedVehicles enables the viewer merge on the list handler. Omitting it
@@ -78,7 +80,7 @@ func (h *VehiclesListHandler) appendSharedRows(ctx context.Context, userID strin
 	for i := range rows {
 		resp.Items = append(resp.Items, viewerSummaryMap(
 			rows[i].VehicleCatalogRow,
-			auth.SharePermission(rows[i].Permission),
+			auth.ShareGrant{AllowRides: rows[i].AllowRides},
 		))
 	}
 	return resp
@@ -99,8 +101,8 @@ func (h *VehiclesListHandler) appendSharedRows(ctx context.Context, userID strin
 // vehicle-summary.schema.json marks `required` must survive this projection, or
 // the rows this function emits are invalid against the shape their own consumer
 // decodes. Asserted in vehicles_list_viewer_schema_test.go.
-func viewerSummaryMap(row VehicleCatalogRow, tier auth.SharePermission) map[string]any {
-	summary := newVehicleSummary(&row, auth.RoleViewer, tier)
+func viewerSummaryMap(row VehicleCatalogRow, grant auth.ShareGrant) map[string]any {
+	summary := newVehicleSummary(&row, auth.RoleViewer, grant)
 	projected, _ := mask.Apply(
 		summary.toMaskMap(),
 		mask.For(mask.ResourceVehicleSummary, auth.RoleViewer),

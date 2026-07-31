@@ -359,11 +359,15 @@ var vehicleSummaryOwnerFields = []string{
 //
 // MYR-184 added `sharePermission`, and it is the first field that is
 // VIEWER-ONLY rather than owner-only — the asymmetry runs the other way for
-// once. It describes the tier the caller holds over a car they do NOT own, so
-// it is meaningless on an owner row (an owner is not on a tier) and is
+// once. It describes the access the caller holds over a car they do NOT own, so
+// it is meaningless on an owner row (an owner holds no grant) and is
 // deliberately absent from the owner list above rather than being emitted
-// empty. P0: an authorization tier describing a relationship, not identifying
+// empty. P0: an authorization value describing a relationship, not identifying
 // data — the same classification as its sibling `role`.
+//
+// MYR-369 made it DERIVED from the grant's flags rather than a stored tier, and
+// a SUSPENDED grant produces no viewer row at all — so this allow-list never
+// projects one, and there is no "suspended" field here to add.
 //
 // The owner list is COPIED before the append: appending straight onto it would
 // share backing array with vehicleSummaryOwnerFields and could overwrite an
@@ -480,6 +484,14 @@ var inviteOwnerFields = []string{
 	"label",
 	"permission",
 	"status",
+	// allowRides / suspended are the MYR-369 per-grant flags — accepted rows
+	// only, and P0 (an authorization capability and an authorization state,
+	// the same tier as `permission` and `status` beside them). Owner-only by
+	// construction like every field here: the viewer role has no entry in
+	// this resource at all, and a viewer must not be able to read the
+	// controls their own access is governed by.
+	"allowRides",
+	"suspended",
 	// code is P1 and BEARER. Present only on pending rows (enforced in the
 	// handler and again in SQL); never logged, never echoed into an error.
 	"code",
