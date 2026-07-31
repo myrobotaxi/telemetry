@@ -158,6 +158,7 @@ const rideWindowHalfWidthExpr = `make_interval(secs => $4::float8)`
 // surface most needs to inherit from the gate: the endpoints are EXCLUSIVE, so
 // two rides exactly W apart are ALLOWED, and a picker that dimmed the endpoints
 // would refuse a slot the server would have taken.
+//
 // `lower` happens to be $2 at both call sites today; it stays an explicit
 // parameter (//nolint:unparam) because the two bounds are what DISTINGUISHES the
 // gate from the read — the gate passes one instant as both, the read passes a
