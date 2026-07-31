@@ -32,6 +32,11 @@ type fakeActivityStore struct {
 	// pushed records every MarkPushed key in call order, which is what the
 	// anti-starvation test asserts the rotation against.
 	pushed []ActivityKey
+	// progress records every SaveProgress call in order, keyed by (ride, user),
+	// so the leg-progress tests can assert what was PERSISTED as well as what
+	// was sent — the two are the same promise seen from either end (MYR-398).
+	progress    []savedProgress
+	progressErr error
 
 	contextErr error
 	listErr    error
@@ -96,6 +101,47 @@ func (f *fakeActivityStore) ActiveLegs(_ context.Context, limit int) ([]Activity
 		return append([]ActivityLeg(nil), f.legs[:limit]...), nil
 	}
 	return append([]ActivityLeg(nil), f.legs...), nil
+}
+
+// savedProgress is one SaveProgress call.
+type savedProgress struct {
+	key    ActivityKey
+	anchor ProgressAnchor
+}
+
+func (f *fakeActivityStore) SaveProgress(_ context.Context, key ActivityKey, anchor ProgressAnchor) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.progressErr != nil {
+		return f.progressErr
+	}
+	f.progress = append(f.progress, savedProgress{key: key, anchor: anchor})
+	// Mimic the real row: the anchor the next push reads is the one this write
+	// stored, on both the lifecycle and the ticker read paths.
+	for i := range f.byRide[key.RideRequestID] {
+		if f.byRide[key.RideRequestID][i].UserID == key.UserID {
+			f.byRide[key.RideRequestID][i].Progress = anchor
+		}
+	}
+	for i := range f.legs {
+		if f.legs[i].RideRequestID == key.RideRequestID && f.legs[i].UserID == key.UserID {
+			f.legs[i].Progress = anchor
+		}
+	}
+	return nil
+}
+
+// savedProgressFor returns the anchors persisted for one (ride, user), in order.
+func (f *fakeActivityStore) savedProgressFor(rideID, userID string) []ProgressAnchor {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []ProgressAnchor
+	for _, p := range f.progress {
+		if p.key.RideRequestID == rideID && p.key.UserID == userID {
+			out = append(out, p.anchor)
+		}
+	}
+	return out
 }
 
 func (f *fakeActivityStore) RideIDsWithActivitiesForVehicle(_ context.Context, vehicleID string) ([]string, error) {
