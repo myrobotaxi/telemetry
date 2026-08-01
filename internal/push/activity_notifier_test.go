@@ -587,3 +587,44 @@ func TestActivityNotifierSubscribesToStatusTopic(t *testing.T) {
 	}
 	t.Fatal("no Live Activity update delivered through the bus")
 }
+
+// TestActivityNotifierWaitDrainsConcurrentSends pins MYR-398.
+//
+// Wait always runs on a different goroutine from the one starting workers — in
+// production the bus's delivery goroutine, stood in for here — and nothing
+// orders the two. So a send may be registered at the very moment a drain
+// begins, and Wait must still cover it. A sync.WaitGroup did not: its counter
+// may be read empty in that window, which is a shutdown returning before the
+// last push, and -race caught it on main.
+func TestActivityNotifierWaitDrainsConcurrentSends(t *testing.T) {
+	n, sender, _ := newTestActivityNotifier(t, nil)
+
+	const sends = 200
+	handled := make(chan struct{})
+	go func() {
+		defer close(handled)
+		for i := 0; i < sends; i++ {
+			n.handleStatusChanged(events.NewEvent(events.RideStatusChangedEvent{
+				RideRequestID: activityRideID,
+				RiderID:       testRiderID,
+				Status:        "accepted",
+			}))
+		}
+	}()
+
+	// Drain repeatedly against the live producer, the way shutdown races it.
+	for draining := true; draining; {
+		n.Wait()
+		select {
+		case <-handled:
+			draining = false
+		default:
+		}
+	}
+
+	// Every worker is registered by now, so this drain is the whole set.
+	n.Wait()
+	if got := len(sender.Sent()); got != sends {
+		t.Errorf("Wait() returned with %d of %d updates sent — a drain that ends early drops the rider's last state", got, sends)
+	}
+}

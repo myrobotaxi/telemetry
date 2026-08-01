@@ -123,10 +123,15 @@ type ActivityNotifier struct {
 	now func() time.Time
 
 	sem  chan struct{}
-	wg   sync.WaitGroup
 	mu   sync.Mutex
 	subs []events.Subscription
 	bus  events.Bus
+	// inflight counts the detached workers async has started and not yet
+	// retired; idle broadcasts when the last one leaves. Both are guarded by
+	// mu — see activity_drain.go for why a sync.WaitGroup cannot hold this
+	// job (MYR-398).
+	inflight int
+	idle     *sync.Cond
 }
 
 // NewActivityNotifier builds the Live Activity consumer.
@@ -146,7 +151,7 @@ func NewActivityNotifier(
 		logger = slog.New(slog.NewTextHandler(discardWriter{}, nil))
 	}
 	cfg = cfg.withDefaults()
-	return &ActivityNotifier{
+	a := &ActivityNotifier{
 		sender: sender,
 		store:  store,
 		prefs:  prefs,
@@ -155,6 +160,8 @@ func NewActivityNotifier(
 		now:    time.Now,
 		sem:    make(chan struct{}, cfg.MaxConcurrent),
 	}
+	a.idle = sync.NewCond(&a.mu)
+	return a
 }
 
 // active reports whether a send would actually reach Apple.
@@ -202,9 +209,6 @@ func (a *ActivityNotifier) Unsubscribe() {
 		}
 	}
 }
-
-// Wait blocks until every in-flight update finishes.
-func (a *ActivityNotifier) Wait() { a.wg.Wait() }
 
 // handleStatusChanged pushes a new content-state for every transition.
 //
@@ -282,19 +286,4 @@ func (a *ActivityNotifier) EndForVehicleTeardown(ctx context.Context, vehicleID 
 		slog.String("vehicle_id", vehicleID),
 		slog.Int("rides", len(rideIDs)),
 	)
-}
-
-// async runs fn on a bounded worker with its own timeout, detached from the
-// bus so a slow APNs round-trip never backs up event delivery.
-func (a *ActivityNotifier) async(fn func(context.Context)) {
-	a.wg.Add(1)
-	go func() {
-		defer a.wg.Done()
-		a.sem <- struct{}{}
-		defer func() { <-a.sem }()
-
-		ctx, cancel := context.WithTimeout(context.Background(), a.cfg.Timeout)
-		defer cancel()
-		fn(ctx)
-	}()
 }
