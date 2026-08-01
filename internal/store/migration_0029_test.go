@@ -275,6 +275,76 @@ func TestMigration0029_ReadPathsCarryTheMark(t *testing.T) {
 	}
 }
 
+// TestMigration0029_DownDropsOnlyTheMark rolls back through the real
+// golang-migrate files.
+//
+// A server rolled back past 0029 stops attaching alert dictionaries and the
+// islands stop expanding; the cards themselves keep updating exactly as before,
+// because the mark is rendering memory rather than a fact about a ride.
+//
+// The roll FORWARD is the part worth pinning, and it is why this test goes back
+// up rather than stopping at the drop: the re-applied migration's backfill
+// re-seeds the marks from ride status, so an Activity mid-pickup gets at most
+// one more expansion than it strictly earned. One extra island opening on a
+// subset of in-flight rides is the whole cost of this being reversible, and the
+// assertion below is that the column and its seeding both come back.
+func TestMigration0029_DownDropsOnlyTheMark(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping migration integration test")
+	}
+	mustApplyGoMigrations(t)
+	cleanGoLiveActivities(t)
+	seedActivityRide(t, "cride0029d")
+	ctx := context.Background()
+	repo := store.NewLiveActivityRepo(testPool, nil)
+
+	if err := repo.RegisterActivity(ctx, "cride0029d", "crider0029d", "abcdef01", false); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	m := newTestMigrator(t)
+	defer func() { _, _ = m.Close() }()
+
+	t.Cleanup(func() {
+		if err := store.RunMigrations(context.Background(), testConnStr, testLogger()); err != nil {
+			t.Fatalf("restore migrations to head: %v", err)
+		}
+	})
+
+	// Version-targeted, not Steps(-1): a relative step would silently become a
+	// test of whatever migration lands next.
+	if err := m.Migrate(28); err != nil {
+		t.Fatalf("migrate down to 28: %v", err)
+	}
+	cols := liveActivityColumnTypes(t)
+	if _, present := cols["alerted_phase"]; present {
+		t.Error("alerted_phase survived the down-migration")
+	}
+	// Surgical: 0025's registry and 0027's anchor must be untouched.
+	if _, present := cols["activity_push_token"]; !present {
+		t.Fatal("the down-migration took the registry's own columns with it")
+	}
+	for _, col := range progress0027Columns {
+		if _, present := cols[col]; !present {
+			t.Errorf("the 0029 rollback dropped 0027's %s; the down must be surgical", col)
+		}
+	}
+
+	if err := m.Migrate(29); err != nil {
+		t.Fatalf("migrate back up to 29: %v", err)
+	}
+	if _, present := liveActivityColumnTypes(t)["alerted_phase"]; !present {
+		t.Fatal("alerted_phase missing after re-applying the up-migration")
+	}
+	// The backfill ran on the way back up: the surviving row's ride is
+	// `accepted`, so its mark is re-seeded at Enroute rather than left at the
+	// column default. That is what stops a roll-forward from opening every live
+	// island at once.
+	if got := alertedPhaseFor(t, "cride0029d", "crider0029d"); got != 2 {
+		t.Errorf("alerted_phase = %d after re-applying, want the backfilled 2 (Enroute)", got)
+	}
+}
+
 // TestMigration0029_TickerListsARequestedRide is the Dispatch-phase widening
 // (MYR-398): the v3 card starts the Activity at REQUEST, so a ride awaiting the
 // owner's answer must keep receiving pushes.
