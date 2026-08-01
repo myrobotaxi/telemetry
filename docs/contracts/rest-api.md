@@ -3868,13 +3868,15 @@ Two rider-scoped operations on one path, letting the rider's phone say "here is 
 
 **RIDER-ONLY in v1, deliberately.** The vehicle owner is a party to the ride and may READ it (§7.8), but this surface answers a `403` to an owner. An endpoint that accepted an owner's token would quietly create rows the sender then pushes RIDER content to — including the P1 `destination` label, which is on a rider's own lock screen by design and on an owner's by accident. The owner-side Activity is an explicit [MYR-172](https://linear.app/myrobotaxi/issue/MYR-172) follow-up and will arrive with its own content-state; the `(ride, party)` key already admits it without a migration.
 
-**Storage.** Go-owned `go_live_activities` (migration **0025**, plus the four leg-progress columns of migration **0027**), `UNIQUE (ride_request_id, user_id)`, swept 24 hours after the last write. `ride_request_id` is the **first genuine foreign key in the `go_` namespace** — CG-DL-9 bars references to the Prisma-owned schema, but `go_ride_requests` is Go-owned, and the ride's hard-delete paths (owner teardown, account deletion) make `ON DELETE CASCADE` the choice that cannot strand a token addressing a ride that no longer exists. `user_id` remains an unenforced pointer, as CG-DL-9 requires.
+**Storage.** Go-owned `go_live_activities` (migration **0025**, plus the six leg-progress columns of migration **0027** and the island-expand high-water mark of migration **0029**), `UNIQUE (ride_request_id, user_id)`, swept 24 hours after the last write. `ride_request_id` is the **first genuine foreign key in the `go_` namespace** — CG-DL-9 bars references to the Prisma-owned schema, but `go_ride_requests` is Go-owned, and the ride's hard-delete paths (owner teardown, account deletion) make `ON DELETE CASCADE` the choice that cannot strand a token addressing a ride that no longer exists. `user_id` remains an unenforced pointer, as CG-DL-9 requires.
 
 **Classification.** `activityToken` is **P1** — a capability: whoever holds it plus the team's APNs key can write to that phone's lock screen. Stored raw and protected by log redaction rather than app-level encryption, the same posture and the same rationale as `go_push_devices.device_token`; see [`data-classification.md`](data-classification.md) §1.18 and §3.2. Consequences that show up in this contract: **neither response echoes the token**, no error envelope repeats it, and only an 8-character prefix ever reaches a log line.
 
 **No §5.2 mask entry**, for the same reason §7.19 and §7.20 have none: the resource is self-scoped — the JWT subject must BE the ride's rider, and the token is projected onto no wire field at all, since both responses return only booleans — so there is no role dimension to mask across (**Rule CG-DC-5** satisfied by this statement).
 
-**Contract:** [`schemas/live-activity.schema.json`](schemas/live-activity.schema.json) (contracts **v0.27.0** — `LiveActivityContentState.progress` added additively by MYR-398; every other field is byte-identical to **v0.24.0**) — `RegisterLiveActivityRequest`, `LiveActivityRegistrationResponse`, `EndLiveActivityResponse`, `LiveActivityContentState`, `LiveActivityEvent`, `LiveActivityRideStatus`.
+**Contract:** [`schemas/live-activity.schema.json`](schemas/live-activity.schema.json) (contracts **v0.28.0** — `LiveActivityContentState.progress` added additively by MYR-398 in v0.27.0 and `asOf` by the same issue's v3 wave here; every other field is byte-identical to **v0.24.0**) — `RegisterLiveActivityRequest`, `LiveActivityRegistrationResponse`, `EndLiveActivityResponse`, `LiveActivityContentState`, `LiveActivityEvent`, `LiveActivityRideStatus`.
+
+**Three things the v3 card changed on this surface, all of them additive.** One new content-state field (`asOf`, §7.21.3); an **`aps.alert` dictionary on six pushes**, which is what makes the Dynamic Island expand (§7.21.4); and the Activity now starting at **REQUEST** rather than at accept, which widens what registers and what ticks but changes no shape (§7.21.5). The card's plate, colour and model are **not** on the wire and never will be — they are static for the life of a ride and belong to the Activity's own `ActivityAttributes`, by the same rule that kept the pickup label off it in r16.
 
 #### 7.21.1 `POST /api/ride-requests/{id}/activity-token`
 
@@ -3989,10 +3991,11 @@ What the Activity DISPLAYS is delivered over APNs, addressed by the registered t
 |-------|------|----------------|-------|
 | `v` | `integer` | P0 | Content-state schema version, currently **`1`**. Carried explicitly because the Swift `ContentState` is compiled into an app a rider may not update for months, so the wire shape freezes the moment a build ships. When a field's MEANING changes the server keeps sending `v1` to installed clients while `v2` goes to new ones — the alternative is a lock screen full of wrong numbers on every phone that has not updated. |
 | `status` | `enum` | P0 | `requested` \| `accepted` \| `declined` \| `enroute` \| `arrived` \| `completed` \| `cancelled` \| `reservation_expired`. The first seven mirror `RideRequestStatus` exactly. **`reservation_expired` is the one member that is NOT a ride status**: the reservation sweeper gives up on a late scheduled ride by recording a dispatch failure and leaving the row at `accepted`, so without a distinct value the lock screen would sit on "your car is on its way" forever. Append-only; a client MUST tolerate an unrecognised member rather than fail to decode. The server sends the enum and **never prose** — all copy is the client's, so wording changes in an app update, not a deploy. |
-| `eta` | `integer` (unix seconds) | P0 | The car's arrival time as an **ABSOLUTE instant**. **OMITTED ENTIRELY when unknown** — never `null`, never `0`, never a guess. |
+| `eta` | `integer` (unix seconds) | P0 | The car's arrival time as an **ABSOLUTE instant**. **OMITTED ENTIRELY when unknown** — never `null`, never `0`, never a guess. Also omitted on `requested`, where no car has been assigned yet; see "The Dispatch phase" in §7.21.5. |
 | `vehicleName` | `string` | P0 | The owner-chosen nickname, e.g. `"Blue Whale"`. `""` when the car has no name, in which case the client renders its own generic fallback rather than a blank. **At most 128 characters**, truncated as `destination` is. |
 | `destination` | `string` | **P1** | The dropoff's short label — the name the RIDER chose when booking, e.g. `"Home"`. **At most 128 characters**, truncated server-side with an ellipsis (`…`) when longer. See the notes below. |
 | `progress` | `number` (0..1) | P0 | How far along the **current leg** the car is — what the r16 progress track draws ([MYR-398](https://linear.app/myrobotaxi/issue/MYR-398)). **OMITTED ENTIRELY when the server cannot say** — never `null`, never `0`. Monotone per leg by construction. See "The progress track" below. |
+| `asOf` | `integer` (unix seconds) | P0 | When this content-state's **data** was true. The v3 card renders it as the stale presentation's subline, `Last updated {h:mm A}`. **NOT `aps.timestamp`** — that one is when the push was SENT and must always be `now`; this one is when the server last LEARNED something, and it is meant to lag. Always sent. See "`asOf` and the freshness it finally admits to" below. |
 
 **`eta` is absolute, and that is the central decision ([MYR-194](https://linear.app/myrobotaxi/issue/MYR-194)).** A duration decays silently on a screen the server cannot repaint — "4 min" stays "4 min" for an hour — whereas an instant stays true however late it is read, and the phone counts down on its own between pushes. It is what lets a ~60–90s cadence look continuous.
 
@@ -4047,7 +4050,31 @@ That last row is the one honesty bound worth naming out loud: `progress` is the 
 
 **`progress` is P0, and it is the one field on this surface that could ride an owner-side Activity unchanged.** Its neighbour `destination` is P1 because it is a PLACE. This is a unitless fraction of an unnamed journey: no coordinate, no place name, no distance, and no duration. "62% of the way" locates the car only for somebody who already knows both ends of the trip — which on this surface is the rider whose trip it is.
 
-**`v` stays `1`.** A new OPTIONAL field is not a meaning change: Swift's `Codable` ignores unknown keys, so an installed pre-r16 build decodes a payload carrying `progress` exactly as it always did, and a post-r16 build reading a payload without one gets `nil` and draws no track. Both directions are safe, which is the whole test for whether the version discriminator has to move.
+**`v` stays `1`.** A new OPTIONAL field is not a meaning change: Swift's `Codable` ignores unknown keys, so an installed pre-r16 build decodes a payload carrying `progress` exactly as it always did, and a post-r16 build reading a payload without one gets `nil` and draws no track. Both directions are safe, which is the whole test for whether the version discriminator has to move. The v3 wave's `asOf` passes the same test and `v` stays `1` again — and note that neither the island alert nor the Dispatch phase touches this question at all: the alert is an envelope key the `ContentState` never sees, and `requested` has been a member of the status enum since v0.24.0.
+
+##### `asOf` and the freshness this surface finally admits to ([MYR-398](https://linear.app/myrobotaxi/issue/MYR-398))
+
+**`asOf` is when the DATA was true. `aps.timestamp` is when the PUSH was sent. They are different instants and a client must not conflate them.** ActivityKit uses `aps.timestamp` to discard an update older than the one it is already showing, so that field must always be `now` — back-dating it to signal staleness would make the card's own ordering defence reject fresher updates, which is why the progress-track note above already ruled that approach out in as many words. `asOf` is the separate explicit stale-at that note said the honest implementation would need.
+
+**It exists because of a blind spot this document already confessed to.** The ETA ticker pushes unconditionally; `stale-date` is `timestamp + 3 min` and is therefore *re-armed by the push itself*; and `eta` is rebuilt from each push's own `now`, so a car frozen at "7 minutes" keeps producing a fresh arrival instant seven minutes out, tick after tick. The result, stated plainly in the progress-track note above: **a car that has gone quiet mid-leg renders a held track beside a perpetually renewed ETA, with no staleness signal on the card.** ActivityKit will never mark that card stale, because from ActivityKit's point of view it is not. `asOf` is the one value on the payload that stops moving when the data does, and the client's `Last updated {h:mm A}` is the sentence that follows from it.
+
+**It therefore MUST NOT re-stamp to `now` on a pass that computed nothing new.** This is the whole contract of the field, and it is the one way to implement it wrongly while passing every obvious test: a server that stamped `asOf` from the send clock would be correct on every healthy push and useless on exactly the pushes the rider needs it for.
+
+**Derivation, exhaustively.** One rule: if the push rests on a **nav reading**, `asOf` is when that reading was first seen to hold; otherwise the push rests on the **ride record**, which is asserting something as of now.
+
+| Situation | `asOf` |
+|---|---|
+| Fresh nav reading, newly changed | now (the reading was first seen this pass) |
+| Nav reading unchanged since an earlier pass (car at a red light) | the **earlier** instant it was first seen |
+| Progress HELD — car quiet, route cleared mid-leg, or reading stalled | the **old** instant, unmoved, while `timestamp` and `stale-date` move on |
+| Lifecycle transition (`accepted`, `arrived`, `enroute`, `completed`, an ending) | now — the ride record just changed |
+| `requested`, a dormant reservation, a leg with no telemetry at all | now — there is no reading, and the status is true as of now |
+
+Note the second row is not a defect: an unchanged reading genuinely is older than this pass, the card is not stale so nothing renders `asOf`, and the instant it *would* render is the honest "when the car last told us something new". It also follows that `asOf ≤ aps.timestamp` always, and that the two are equal on most pushes.
+
+**Always present, and P0.** Unlike `eta` and `progress` there is no case in which the server cannot say when it computed a state, so there is no honest-omission branch and no reason for one. It is nonetheless **optional in the schema**, so a payload minted by a pre-v0.28.0 server still validates and a build compiled before the field decodes unchanged. On the wire it is a **pointer in the sender**, deliberately: the zero value of a unix timestamp is not a neutral placeholder but the claim "this was true in January 1970", and a card reading `Last updated 12:00 AM` is worse than one reading nothing. P0 on the same test `progress` passes — a clock reading about the rider's own ride names no place and locates no car.
+
+**What it does NOT do.** It does not gate `eta`. A client can now *detect* the stale case (`now − asOf` past the three-minute horizon) and render accordingly, which is a strictly better position than before, but the server still sends a renewed arrival instant on a frozen reading. Withholding `eta` on a stale reading remains its own issue, for the reason given above: it would omit a key every installed build renders today.
 
 ##### Why the "Meet at {pickup}" line is NOT on the wire
 
@@ -4059,17 +4086,21 @@ The r16 design adds a pickup line to the card, and the deliberate decision is th
 
 **And it is P1.** `destination` is on this surface as a **narrow, deliberate exception** to the alert-copy policy, and the argument for it was necessity: a ride card that cannot say where the car is taking you is not the feature, and the server is the only party that knows the label at push time. Necessity is precisely what fails for the pickup. Adding it would put a second P1 place label into ~40 pushes per ride, through APNs, into every proxy trace and every debug log that ever captures a payload — to deliver a string the receiving device typed in itself. **A field that can be answered on-device is not a field this payload should carry**, and this is the rule to apply to the next one as well.
 
+**The v3 card is the next one, and the rule holds.** Its pickup-leg subline reads `7SRJ294 · Silver Model Y`, so the obvious reading is that the wire owes it a plate, a colour and a model. It does not. All three are **static for the life of a ride** — the ride names one vehicle at creation and no endpoint reallocates it — and all three are already in the `RideRequest` the app was holding when it started the Activity, exactly as `pickup.label` is. They belong in `ActivityAttributes` beside it. Repeating three constants in every one of ~40 pushes to save the client a field it already has would be the same mistake in three new places.
+
+**The one thing the v3 card genuinely needed from the server was `asOf`**, and it passes the test the plate fails: it is not constant, it changes on every push, and it is a fact only the server holds.
+
 #### 7.21.4 The APNs envelope (informative)
 
 ```
 POST /3/device/{activityPushToken}
 apns-topic:       app.myrobotaxi.ios.push-type.liveactivity
 apns-push-type:   liveactivity
-apns-priority:    10          # 5 for an ETA tick
+apns-priority:    10          # 5 for an ETA tick — but always 10 when aps.alert is present
 apns-expiration:  1785535140  # == aps.stale-date on an `update`; now + 24h on an `end`
 ```
 
-A routine ETA update:
+A routine ETA update. Note `asOf` sitting **thirty seconds behind** `timestamp`: the car's last new reading arrived half a minute before this push, which is the ordinary healthy shape rather than a problem.
 
 ```json
 {
@@ -4082,14 +4113,15 @@ A routine ETA update:
       "eta": 1785535200,
       "vehicleName": "Blue Whale",
       "destination": "Home",
-      "progress": 0.62
+      "progress": 0.62,
+      "asOf": 1785534930
     },
     "stale-date": 1785535140
   }
 }
 ```
 
-A car with no active navigation route — the same ride, honestly degraded. Both `eta` and `progress` are **absent keys**, not zeros, and the card renders a headline with no time and no track rather than a car that has not moved:
+A car with no active navigation route — the same ride, honestly degraded. Both `eta` and `progress` are **absent keys**, not zeros, and the card renders a headline with no time and no track rather than a car that has not moved. `asOf` is `now`, because nothing here rests on a nav reading:
 
 ```json
 {
@@ -4100,14 +4132,60 @@ A car with no active navigation route — the same ride, honestly degraded. Both
       "v": 1,
       "status": "accepted",
       "vehicleName": "Blue Whale",
-      "destination": "Home"
+      "destination": "Home",
+      "asOf": 1785534960
     },
     "stale-date": 1785535140
   }
 }
 ```
 
-The final update on a completed ride — note the omitted `eta` (the car has arrived, so there is no route), the `progress` of exactly `1` (asserted by the ride record, not estimated) and the `dismissal-date`:
+**A car that has gone quiet mid-leg — the case `asOf` exists for.** The ticker pushed anyway, so `timestamp` and `stale-date` are fresh and ActivityKit will not mark this card stale; `eta` was rebuilt from this push's own `now` and looks current; `progress` is the last delivered fraction, held. **Only `asOf` says what happened** — it is more than seven minutes behind the push, and the client renders `Last updated 3:31 PM` in the subline instead of the destination:
+
+```json
+{
+  "aps": {
+    "timestamp": 1785535380,
+    "event": "update",
+    "content-state": {
+      "v": 1,
+      "status": "enroute",
+      "eta": 1785535620,
+      "vehicleName": "Blue Whale",
+      "destination": "Home",
+      "progress": 0.62,
+      "asOf": 1785534930
+    },
+    "stale-date": 1785535560
+  }
+}
+```
+
+**An alerting update — the car reaching the pickup.** Identical in every other respect to the ones above; the `alert` dictionary is the only difference, and it is what makes iOS expand the Dynamic Island for about three seconds. Sent at priority 10 even though the Arriving variant of it originates on the ticker's conserving path:
+
+```json
+{
+  "aps": {
+    "timestamp": 1785535080,
+    "event": "update",
+    "content-state": {
+      "v": 1,
+      "status": "arrived",
+      "vehicleName": "Blue Whale",
+      "destination": "Home",
+      "progress": 1,
+      "asOf": 1785535080
+    },
+    "stale-date": 1785535260,
+    "alert": {
+      "title": "Your ride",
+      "body": "Your ride is here"
+    }
+  }
+}
+```
+
+The final update on a completed ride — note the omitted `eta` (the car has arrived, so there is no route), the `progress` of exactly `1` (asserted by the ride record, not estimated), the `dismissal-date`, and the alert that carries the sixth and last island expansion:
 
 ```json
 {
@@ -4119,13 +4197,51 @@ The final update on a completed ride — note the omitted `eta` (the car has arr
       "status": "completed",
       "vehicleName": "Blue Whale",
       "destination": "Home",
-      "progress": 1
+      "progress": 1,
+      "asOf": 1785535380
     },
     "stale-date": 1785535560,
-    "dismissal-date": 1785536280
+    "dismissal-date": 1785535680,
+    "alert": {
+      "title": "Your ride",
+      "body": "You've arrived"
+    }
   }
 }
 ```
+
+##### `aps.alert` — the island auto-expand ([MYR-398](https://linear.app/myrobotaxi/issue/MYR-398))
+
+**An update carrying an `alert` dictionary makes iOS expand the Dynamic Island for ~3 seconds and then collapse it itself.** That expansion is the mechanism the v3 design asks for and the dictionary is the only way to ask: the compact island is a figure or a glyph, and a phase changing underneath a figure that happens to look the same is a state change nobody sees.
+
+**Six pushes carry one, and nothing else does.** `requested` (Dispatch), `accepted` (Enroute), **Arriving**, `arrived`, `enroute` (On trip), `completed`. The design forbids the rest in as many words — not on ETA ticks, not on the stale flip — because an island that opens every 75 seconds for the length of a ride is a widget the rider turns off. The unhappy endings (`declined`, `cancelled`, `reservation_expired`) are deliberately outside the six: their content-state still lands, but an island opening to deliver bad news the card is already showing is not a kindness.
+
+**Arriving is the one that is not a ride status,** and it is the whole reason this needs state. It is the **pickup leg's ETA at or under two minutes**, which the ticker re-evaluates every pass — so once it is true it stays true for every remaining tick of the leg. It fires **exactly once per Activity**, enforced by a persisted high-water mark rather than by hoping.
+
+**The mechanism: a monotone ladder plus a persisted mark.** The six phases are numbered `1..6` in the order a ride passes through them (`go_live_activities.alerted_phase`, migration 0029; `0` means none yet). A push may attach an alert only when its phase is **strictly above** the mark, and the mark is raised only after Apple accepts the push. Three properties follow, each of which had to be bought:
+
+- **Once per phase, per Activity.** The `>` is the guarantee.
+- **A duplicated or out-of-order `ride.status.changed` alerts nothing.** Replaying `accepted` after `arrived` compares 2 > 4 and stops. An equality test against "the last phase sent" would happily re-alert.
+- **Two replicas cannot both alert.** The ticker is not sharded, so every process lists every live Activity; the mark is in the database and the write refuses to lower it, exactly as the progress floor's does.
+
+**A fresh registration is SEEDED at the ride's current phase, not at zero.** The app starts the Activity locally and draws the current state itself, so the island has just been in front of the rider — expanding it to announce the phase they are already looking at would be an unearned interruption at the very start of every ride. Migration 0029 backfills existing rows the same way, so the deploy that ships this does not open every live island at once. Seeding is done from the **status alone** and therefore cannot express Arriving, which is the right way round: a rider who registers while the car is already ninety seconds out has genuinely not seen that expansion and gets it on the next tick. A **token rotation preserves the mark**, like the progress anchor, because it is the same Activity.
+
+**Priority 10 whenever an alert is attached, overriding the conserving flag.** Priority 5 exists so a periodic ETA refresh does not compete with "your car is here" for Apple's per-Activity budget — and a push whose entire purpose is to open the island for three seconds is not a refresh that can afford to be coalesced. The combination is not hypothetical: Arriving is a ticker-computed threshold, so the one alert in the design that does not ride a lifecycle transition originates on exactly the path that sets priority 5.
+
+**No `sound`.** The design asks for an expansion, not an interruption. Six beeps per ride from a surface whose whole premise is that it replaces eleven notifications would undo the feature; an alert dictionary with no sound expands the island silently.
+
+**Title and body are FIXED CONSTANTS, and this is the one place this surface sends prose.** §7.21.3's rule is that the server sends the enum and never prose, so all copy can change in an app update rather than a deploy. APNs offers no way to honour that here: an alert dictionary is a title and a body. The localised form (`title-loc-key` / `loc-key`) would keep the strings in the app, and it was rejected because a key the installed build's string table lacks renders as **the raw key** on the lock screen — and a server that ships ahead of the app is this project's normal state. So the copy is deliberately bland and deliberately **not** the card's copy, which stays the client's:
+
+| Phase | Trigger | `title` | `body` |
+|---|---|---|---|
+| 1 · Dispatch | `requested` | `Your ride` | `Finding your ride` |
+| 2 · Enroute | `accepted` | `Your ride` | `Your ride is on the way` |
+| 3 · Arriving | pickup ETA ≤ 2 min | `Your ride` | `Your ride is almost here` |
+| 4 · Arrived | `arrived` | `Your ride` | `Your ride is here` |
+| 5 · On trip | `enroute` | `Your ride` | `You're on your way` |
+| 6 · Completed | `completed` (on the `end` push) | `Your ride` | `You've arrived` |
+
+**The P1 copy policy applies to these in full, and that is a stricter rule than the content-state's.** An alert dictionary renders as an ordinary banner on a device with no Dynamic Island and on a paired watch — a locked screen, to whoever is holding it — so it is governed by `internal/push/copy.go`'s payload policy rather than by the narrow exception that lets `destination` onto the content-state. **No place, no address, no vehicle nickname, no name.** Note also "almost here" rather than "arriving": *Arriving* is an engineering phase name, and the v3 copy rules retire the word from rider-facing text because it was the word the field report was about.
 
 **The topic is DERIVED, not configured.** It is `APNS_TOPIC` + `.push-type.liveactivity`, so there is no second environment variable and no way for the two topics to drift apart in an environment file. Apple requires the suffix on the topic **and** the matching `apns-push-type` header; either alone is rejected as `TopicDisallowed`, a `403` that reads like a credential problem and is not one.
 
@@ -4153,7 +4269,27 @@ It is deliberately **not** pinned to the `dismissal-date`, which is the tempting
 
 **Lifecycle transitions** are pushed as they happen: the notifier subscribes to the same `ride.status.changed` topic §7.17 does, so every transition the service already publishes is covered without a call site being edited. **Nothing is filtered out** — unlike an alert, where a rider's own cancellation would be noise, a Live Activity still showing "on its way" after the rider cancelled is simply a WRONG lock screen.
 
-**ETA ticks** re-push the current content-state every **60–90 seconds** (75s ± 20% jitter) while the ride is in `accepted`, `arrived` or `enroute`. The ETA is the one thing on the Activity that goes wrong by SITTING STILL — the status changes only when something happens, but "arrives at 4:12" stops being true the moment traffic does. The jitter also de-synchronises replicas so they do not push Apple in a burst.
+**ETA ticks** re-push the current content-state every **60–90 seconds** (75s ± 20% jitter) while the ride is in `requested`, `accepted`, `arrived` or `enroute`. The ETA is the one thing on the Activity that goes wrong by SITTING STILL — the status changes only when something happens, but "arrives at 4:12" stops being true the moment traffic does. The jitter also de-synchronises replicas so they do not push Apple in a burst.
+
+**Two of those four statuses have no ETA to refresh, and tick anyway.** A stationary `arrived` car reports no nav route, and a `requested` ride has no car assigned at all. What each tick still moves is the `timestamp` and the `stale-date` — and that is the point, because an Activity nobody pushes to slides into ActivityKit's own "as of X min ago" rendering after three minutes. For `arrived` that would be a card apologising for being out of date while the rider stands next to the car it describes; for `requested` it would be "Finding your ride" accusing itself of a fault while the search is genuinely still running.
+
+##### The Dispatch phase — the Activity now starts at REQUEST ([MYR-398](https://linear.app/myrobotaxi/issue/MYR-398))
+
+The v3 card opens on **Dispatch** ("Finding your ride"), which means the app starts the Activity when the rider taps request rather than when the owner accepts. Three consequences on this surface, and **no new shape** among them:
+
+**Registration already accepted a `requested` ride and still does.** §7.21.1 refuses exactly two things — a terminal status and a lapsed reservation — and `requested` is neither. Both the handler's read and the guard inside the upsert are unchanged.
+
+**The ticker was widened**, because it was not: `requested` joined `accepted` / `arrived` / `enroute` in the active-leg query, so the Dispatch card stays fresh while the rider waits for an answer.
+
+**`eta` is withheld on `requested`, and that is a new rule.** The projection reads navigation from the ride's vehicle, and before the owner accepts, that car has been assigned to nobody — it may be driving the owner somewhere else with navigation on. "Finding your ride" beside an arrival time computed from an errand is not a degraded ETA, it is a fabricated one. This is the same defect the dormancy gate closes for the progress track, and the fix is the same shape: **no key**. It is scoped narrowly to `requested`; the wider question of whether a *stale* `eta` should be withheld on statuses that do have a car assigned is still the open one named above, and still needs its own issue — this arm is about a leg with no driver, not about a reading with no age.
+
+`progress` needs no new rule: a status with no leg has never produced a fraction (`legForStatus`), so a Dispatch card is trackless by the mechanism that was already there.
+
+**Reservations are unaffected.** A scheduled ride is `accepted` from the moment it is booked and gets no Activity until it is due — that rule lives in the dormancy predicate, not in this list, and the Dispatch phase is about **instant** rides awaiting an answer.
+
+**Both endings of a `requested` ride are already covered.** A rider cancel (`requested → cancelled`) and an owner decline (`requested → declined`) both go through the guarded status write that publishes `ride.status.changed`, so the lifecycle notifier delivers the terminal `event: "end"` with its dismissal-date and tombstones the rows, exactly as it does from `accepted`. Neither carries an island alert: both are outside the design's six.
+
+**Alerts are attached by the phase ladder, not by the cadence.** A lifecycle push and a ticker pass compute the same phase from the same state, so which of the two happens to run first after a transition cannot change how many times the island opens — see §7.21.4.
 
 **Kill-switch: `LIVE_ACTIVITY_TICKER_ENABLED`, default `true`.** Turning it off stops **only** the periodic ETA refresh; lifecycle transitions keep updating the Activity, and the Activity's own stale-date does the rest. That intermediate state is the one an operator actually wants when Apple starts throttling — degraded and honest rather than dark. `PUSH_ENABLED=false` (or a keyless deployment) silences the whole channel instead; in every such state the endpoints stay mounted and registrations still persist. See [`docs/deployment.md`](../deployment.md).
 
@@ -4165,11 +4301,15 @@ It is deliberately **not** pinned to the `dismissal-date`, which is the tempting
 
 **A capped pass ROTATES; it does not shed the same rows every tick.** The per-pass cap (`MaxPerPass`, 200) exists as a guard rail rather than a routine truncation, but when it does bite, the Activities it sheds must not be the same ones forever. The pass reads least-recently-pushed first and **stamps `updated_at` on every Activity it successfully delivered to**, so the next pass reaches the ones it missed. An Activity Apple refused is deliberately NOT stamped — a permanently failing row must not hold the front of the queue. The same column is what the 24-hour sweep keys on, which is why a long ride is never swept out from under a live Activity: a row still being pushed to is by definition not stale.
 
-**Observability.** Registration lines carry the P0 `ride_request_id`, `user_id` and `sandbox` plus the **8-character token prefix only** — never a whole token ([`data-classification.md`](data-classification.md) §3.2). The send line carries `ride_id`, `event`, `status`, `has_eta` and `has_progress` booleans and delivery counts, and deliberately **not** the content-state, which embeds the P1 `destination`. The two booleans are the operational question this surface actually gets asked — "why is the rider's card blank?" — answered without logging a value: `has_progress: false` on a mid-leg ride says the car's navigation is absent or stale, which is the diagnosis. The fraction itself is P0 and could be logged; it is not, because a per-push number that nobody reads is noise in a line that is read on every incident. Handler:
+**Observability.** Registration lines carry the P0 `ride_request_id`, `user_id` and `sandbox` plus the **8-character token prefix only** — never a whole token ([`data-classification.md`](data-classification.md) §3.2). The send line carries `ride_id`, `event`, `status`, `has_eta` and `has_progress` booleans, `alerted` and `alert_phase`, and delivery counts — and deliberately **not** the content-state, which embeds the P1 `destination`. The two booleans are the operational question this surface actually gets asked — "why is the rider's card blank?" — answered without logging a value: `has_progress: false` on a mid-leg ride says the car's navigation is absent or stale, which is the diagnosis. The fraction itself is P0 and could be logged; it is not, because a per-push number that nobody reads is noise in a line that is read on every incident. The two alert fields answer the other question this surface gets asked — "why did the island open again?" — and are the exception to that economy: `alerted` is nonzero on six pushes per ride and never on the other forty, so a line reporting it twice for one phase is the bug report. A ladder position names nothing and is P0. Handler:
 [`internal/telemetry/ride_activity_token_handler.go`](../../internal/telemetry/ride_activity_token_handler.go);
 sender `internal/push/{activity,activity_apns}.go`; consumers
 `internal/push/{activity_notifier,activity_notifier_send}.go`; progress
 derivation [`internal/push/activity_progress.go`](../../internal/push/activity_progress.go);
+island-expand ladder
+[`internal/push/activity_alert.go`](../../internal/push/activity_alert.go);
+content-state projection and `asOf`
+[`internal/push/activity_content_state.go`](../../internal/push/activity_content_state.go);
 ETA ticker
 `internal/push/activity_ticker.go`; store
 [`internal/store/live_activity_repo.go`](../../internal/store/live_activity_repo.go)
