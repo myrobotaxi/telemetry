@@ -1,7 +1,7 @@
 -- 0027_live_activity_progress.up.sql
 --
--- MYR-398: the four columns that let a Live Activity draw a PROGRESS TRACK
--- without lying on it.
+-- MYR-398: the six columns that let a Live Activity draw a PROGRESS TRACK
+-- without lying on it — four that define the measurement, two that date it.
 --
 -- The redesigned lock-screen card shows the car moving along a track toward the
 -- pickup (leg 1) and then toward the dropoff (leg 2). What the server pushes for
@@ -38,7 +38,7 @@
 -- send path advanced. It also keeps the ride row free of rendering state and
 -- costs the ticker no join: 0025's read already selects from this table.
 --
--- ALL FOUR ARE NULLABLE, AND NULL IS THE ORDINARY STATE.
+-- ALL SIX ARE NULLABLE, AND NULL IS THE ORDINARY STATE.
 --
 -- No anchor means no progress key on the wire, which renders a card with a
 -- headline and no track. Every degraded path in the sender resolves to that:
@@ -51,7 +51,7 @@
 --
 -- A TOKEN ROTATION MUST NOT RESET THE TRACK. 0025's upsert names its SET list
 -- explicitly (activity_push_token, sandbox, updated_at, ended_at), so these
--- four survive a re-registration untouched — which is correct: ActivityKit
+-- six survive a re-registration untouched — which is correct: ActivityKit
 -- rotating the token mid-ride is the same Activity on the same leg, and the
 -- rider would see the arrow snap back to the start of the journey for no reason
 -- they could ever discover.
@@ -95,4 +95,34 @@ ALTER TABLE go_live_activities
     -- becomes a property of the sequence the CLIENT observes rather than an
     -- aspiration about the car.
     ADD COLUMN IF NOT EXISTS progress_value DOUBLE PRECISION
-        CHECK (progress_value >= 0 AND progress_value <= 1);
+        CHECK (progress_value >= 0 AND progress_value <= 1),
+
+    -- The raw observation `progress_value` was derived from, in the unit named
+    -- by progress_source, and the instant that observation was first SEEN TO
+    -- HOLD. Together they are the freshness horizon's real clock.
+    --
+    -- WHY THE CAR'S OWN TIMESTAMP IS NOT ENOUGH. The sender's honesty rule is
+    -- that a nav reading older than three minutes must not move the arrow, and
+    -- the only timestamp available on the car is `Vehicle."lastUpdated"` —
+    -- which is stamped by EVERY telemetry write of ANY column, not by a change
+    -- to the two nav fields. A car that streamed a route and then went quiet on
+    -- nav while something else keeps writing its row (MYR-394's active-ride
+    -- position polling is the concrete case: it writes drive_state position,
+    -- speed and heading, and never etaMinutes or tripDistanceRemaining) would
+    -- present an arbitrarily old distance behind a perpetually fresh row stamp,
+    -- and the gate would pass it forever.
+    --
+    -- The car's row cannot carry the honest stamp: "Vehicle" is Prisma-owned
+    -- and read-only to this service (CG-DL-9), so a per-field nav timestamp is
+    -- not ours to add. Recording the reading we ACTED ON, beside the anchor it
+    -- produced, answers the same question from the Go-owned side: if the next
+    -- reading is byte-identical to the one already recorded and that recording
+    -- is older than the horizon, the nav data has not moved, whatever the row
+    -- stamp says.
+    --
+    -- Nullable and independent of the four columns above. Absent, the sender
+    -- falls back to the row-stamp pre-filter alone, which is a weaker gate and
+    -- never a wrong fraction: an unchanged reading yields an unchanged
+    -- fraction either way.
+    ADD COLUMN IF NOT EXISTS progress_reading DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS progress_reading_at TIMESTAMPTZ;

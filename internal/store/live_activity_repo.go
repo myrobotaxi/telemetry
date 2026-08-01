@@ -379,12 +379,13 @@ func (r *LiveActivityRepo) ActivitiesForRide(ctx context.Context, rideRequestID 
 	for rows.Next() {
 		var a LiveActivity
 		var leg, source *string
-		var baseline, value *float64
+		var baseline, value, reading *float64
+		var readingAt *time.Time
 		if err := rows.Scan(&a.RideRequestID, &a.UserID, &a.ActivityPushToken, &a.Sandbox,
-			&leg, &source, &baseline, &value); err != nil {
+			&leg, &source, &baseline, &value, &reading, &readingAt); err != nil {
 			return nil, fmt.Errorf("store.ActivitiesForRide(ride=%s): scan: %w", rideRequestID, err)
 		}
-		a.Progress = scanProgress(leg, source, baseline, value)
+		a.Progress = scanProgress(leg, source, baseline, value, reading, readingAt)
 		out = append(out, a)
 	}
 	if err := rows.Err(); err != nil {

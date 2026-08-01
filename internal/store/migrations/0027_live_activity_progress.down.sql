@@ -13,4 +13,6 @@ ALTER TABLE go_live_activities
     DROP COLUMN IF EXISTS progress_leg,
     DROP COLUMN IF EXISTS progress_source,
     DROP COLUMN IF EXISTS progress_baseline,
-    DROP COLUMN IF EXISTS progress_value;
+    DROP COLUMN IF EXISTS progress_value,
+    DROP COLUMN IF EXISTS progress_reading,
+    DROP COLUMN IF EXISTS progress_reading_at;

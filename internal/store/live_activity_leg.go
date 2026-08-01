@@ -53,12 +53,22 @@ type LiveActivityLeg struct {
 	// drives rather than being re-estimated in both directions the way minutes
 	// are.
 	TripMilesRemaining *float64
-	// NavUpdatedAt is when the car's row was last written — how OLD the two
-	// readings above are. Nil for a car we have never heard from. It gates the
-	// progress fraction only: a stale fraction is indistinguishable from a
-	// fresh one on a lock screen, whereas a stale ETA visibly slides into the
-	// past.
+	// NavUpdatedAt is when the car's ROW was last written — an upper bound on
+	// how old the two readings above are, not a stamp on the readings
+	// themselves. Nil for a car we have never heard from. It gates the progress
+	// fraction only, as a cheap pre-filter; see RideContext.NavUpdatedAt in
+	// internal/push for why the sender does not trust it on its own.
 	NavUpdatedAt *time.Time
+	// DispatchUnderway is MYR-376's reservation-dormancy predicate, evaluated
+	// in SQL: false while a reservation is still sleeping between accept and
+	// the earlier of dispatch and its due instant.
+	//
+	// The progress track needs it because ride status alone cannot tell a car
+	// that is DRIVING TO THE RIDER from a reservation accepted for tomorrow —
+	// both read `accepted` — and the owner's private errands in between would
+	// otherwise anchor and advance a track toward a pickup a day away
+	// (MYR-398). See computeProgress.
+	DispatchUnderway bool
 }
 
 // ActiveLegStatuses is the set of ride statuses that keep an Activity ticking.
@@ -86,7 +96,7 @@ var ActiveLegStatuses = []RideRequestStatus{
 // Ordered by updated_at so the least recently pushed Activity goes first: when
 // a pass is capped by the per-pass limit, the cap sheds the Activities that
 // were updated most recently rather than starving the ones that most need it.
-const queryListActiveLegActivities = `
+var queryListActiveLegActivities = `
 SELECT a.ride_request_id,
        a.user_id,
        a.activity_push_token,
@@ -98,6 +108,7 @@ SELECT a.ride_request_id,
        v."etaMinutes",
        v."tripDistanceRemaining",
        v."lastUpdated",
+       ` + dispatchUnderwaySelect + `,
        ` + progressColumns + `
 FROM go_live_activities a
 JOIN go_ride_requests r ON r.id = a.ride_request_id
@@ -106,6 +117,16 @@ WHERE a.ended_at IS NULL
   AND r.status = ANY($1)
 ORDER BY a.updated_at ASC
 LIMIT $2`
+
+// dispatchUnderwaySelect renders the shared dormancy predicate as a selectable
+// boolean over the ride aliased `r`.
+//
+// COALESCE is load-bearing rather than defensive: for the undispatched
+// reservation the gate exists for, `r.dispatch_status = 'sent'` is NULL and the
+// OR chain evaluates to NULL, which would fail the scan into a bool. Folding
+// NULL to FALSE reproduces exactly what the same predicate means in a WHERE
+// clause — unknown dispatch is not proof of dispatch.
+var dispatchUnderwaySelect = `COALESCE(` + fmt.Sprintf(rideNotDormantPredicate, "r.") + `, FALSE)`
 
 // ListActiveLegActivities returns up to limit live Activities whose ride is
 // mid-leg, least recently updated first.
@@ -132,7 +153,8 @@ func (r *LiveActivityRepo) ListActiveLegActivities(ctx context.Context, limit in
 	for rows.Next() {
 		var leg LiveActivityLeg
 		var pLeg, pSource *string
-		var pBaseline, pValue *float64
+		var pBaseline, pValue, pReading *float64
+		var pReadingAt *time.Time
 		if err := rows.Scan(
 			&leg.RideRequestID,
 			&leg.UserID,
@@ -145,11 +167,12 @@ func (r *LiveActivityRepo) ListActiveLegActivities(ctx context.Context, limit in
 			&leg.ETAMinutes,
 			&leg.TripMilesRemaining,
 			&leg.NavUpdatedAt,
-			&pLeg, &pSource, &pBaseline, &pValue,
+			&leg.DispatchUnderway,
+			&pLeg, &pSource, &pBaseline, &pValue, &pReading, &pReadingAt,
 		); err != nil {
 			return nil, fmt.Errorf("store.ListActiveLegActivities: scan: %w", err)
 		}
-		leg.Progress = scanProgress(pLeg, pSource, pBaseline, pValue)
+		leg.Progress = scanProgress(pLeg, pSource, pBaseline, pValue, pReading, pReadingAt)
 		out = append(out, leg)
 	}
 	if err := rows.Err(); err != nil {
@@ -162,14 +185,15 @@ func (r *LiveActivityRepo) ListActiveLegActivities(ctx context.Context, limit in
 // lifecycle fan-out: a status transition already knows the ride id, but still
 // needs the car's nickname, the destination label and the carried ETA to build
 // the content-state it is about to send.
-const queryRideActivityContext = `
+var queryRideActivityContext = `
 SELECT r.status,
        r.vehicle_id,
        COALESCE(v."name", ''),
        r.dropoff_label,
        v."etaMinutes",
        v."tripDistanceRemaining",
-       v."lastUpdated"
+       v."lastUpdated",
+       ` + dispatchUnderwaySelect + `
 FROM go_ride_requests r
 LEFT JOIN "Vehicle" v ON v."id" = r.vehicle_id
 WHERE r.id = $1`
@@ -182,10 +206,12 @@ type RideActivityContext struct {
 	VehicleName  string
 	DropoffLabel string
 	ETAMinutes   *int
-	// TripMilesRemaining and NavUpdatedAt feed the progress track and its
-	// freshness gate (MYR-398); see the LiveActivityLeg fields of the same name.
+	// TripMilesRemaining, NavUpdatedAt and DispatchUnderway feed the progress
+	// track and its two gates (MYR-398); see the LiveActivityLeg fields of the
+	// same name.
 	TripMilesRemaining *float64
 	NavUpdatedAt       *time.Time
+	DispatchUnderway   bool
 }
 
 // ActivityContextForRide reads the content-state inputs for one ride.
@@ -203,6 +229,7 @@ func (r *LiveActivityRepo) ActivityContextForRide(ctx context.Context, rideReque
 		&out.ETAMinutes,
 		&out.TripMilesRemaining,
 		&out.NavUpdatedAt,
+		&out.DispatchUnderway,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RideActivityContext{}, fmt.Errorf("store.ActivityContextForRide(%s): %w", rideRequestID, ErrRideRequestNotFound)
