@@ -42,10 +42,16 @@ type LiveActivityProgress struct {
 	ReadingAt time.Time
 }
 
-// progressColumns is the anchor's projection, appended to every read that
-// feeds a send path. Listed once so the two readers cannot drift apart.
+// progressColumns is the anchor's projection plus the island-expand high-water
+// mark, appended to every read that feeds a send path. Listed once so the two
+// readers cannot drift apart.
+//
+// `alerted_phase` rides here rather than in a projection of its own because it
+// answers the same class of question as the six beside it — what has this ONE
+// PHONE already been shown — and because a second shared string is a second
+// thing one of the two readers can forget to select.
 const progressColumns = `a.progress_leg, a.progress_source, a.progress_baseline, a.progress_value,
-       a.progress_reading, a.progress_reading_at`
+       a.progress_reading, a.progress_reading_at, a.alerted_phase`
 
 // scanProgress normalises the nullable columns into the value type.
 //
@@ -152,6 +158,57 @@ func (r *LiveActivityRepo) SaveActivityProgress(ctx context.Context, key LiveAct
 		key.RideRequestID, key.UserID, leg, source, baseline, value, reading, readingAt,
 	); err != nil {
 		return fmt.Errorf("store.SaveActivityProgress(ride=%s, user=%s): %w",
+			key.RideRequestID, key.UserID, err)
+	}
+	return nil
+}
+
+// querySaveLiveActivityAlertedPhase raises one Activity's island-expand
+// high-water mark (MYR-398, migration 0029).
+//
+// `alerted_phase < $3` IS THE GUARD AND IT IS THE SAME SHAPE AS THE PROGRESS
+// FLOOR'S, for the same unsharded-ticker reason: two replicas can list the same
+// Activity seconds apart, and whichever APNs call returns last wins the write.
+// If that is the one that computed the LOWER phase, an unguarded write would
+// lower the mark and the higher phase would alert a second time — the island
+// opening twice for one state change, which is the exact failure this column
+// exists to prevent. A losing write is silently a no-op, which is correct: the
+// phone has already been shown a further phase than the one it wants to record.
+//
+// Scoped to live rows, like its neighbour, so a write racing the ride's
+// terminal end cannot resurrect rendering state onto a tombstoned Activity.
+//
+// It deliberately does NOT touch updated_at: that column is the ticker's
+// least-recently-pushed ordering key and MarkActivitiesPushed owns it in one
+// batched statement per pass.
+const querySaveLiveActivityAlertedPhase = `
+UPDATE go_live_activities
+SET alerted_phase = $3
+WHERE ride_request_id = $1 AND user_id = $2 AND ended_at IS NULL
+  AND alerted_phase < $3`
+
+// SaveActivityAlertedPhase records that this Activity's island has been
+// expanded for `phase`, refusing to lower an existing mark.
+//
+// A miss (no live row, or a mark already at or above `phase`) is not an error:
+// both are ordinary races on an unsharded ticker, and both mean the same thing
+// to the caller — the phone is not owed this expansion.
+func (r *LiveActivityRepo) SaveActivityAlertedPhase(ctx context.Context, key LiveActivityKey, phase int16) error {
+	if strings.TrimSpace(key.RideRequestID) == "" || strings.TrimSpace(key.UserID) == "" {
+		return fmt.Errorf("store.SaveActivityAlertedPhase: empty ride request id or user id")
+	}
+	if phase <= 0 {
+		// Zero is "never alerted" and is only ever a starting value; a negative
+		// is a caller bug. Neither is something to write, and the CHECK
+		// constraint would refuse the negative on the send path.
+		return fmt.Errorf("store.SaveActivityAlertedPhase(ride=%s, user=%s): non-positive phase %d",
+			key.RideRequestID, key.UserID, phase)
+	}
+
+	if _, err := r.pool.Exec(ctx, querySaveLiveActivityAlertedPhase,
+		key.RideRequestID, key.UserID, phase,
+	); err != nil {
+		return fmt.Errorf("store.SaveActivityAlertedPhase(ride=%s, user=%s): %w",
 			key.RideRequestID, key.UserID, err)
 	}
 	return nil

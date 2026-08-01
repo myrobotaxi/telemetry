@@ -42,6 +42,10 @@ type LiveActivity struct {
 	// Progress is this Activity's leg-progress anchor (MYR-398, migration
 	// 0027). Zero value means no anchor yet.
 	Progress LiveActivityProgress
+	// AlertedPhase is the highest island-expand phase this Activity has already
+	// been alerted at (MYR-398, migration 0029). 0 means none yet, which is
+	// what a row registered before the ride's first transition carries.
+	AlertedPhase int16
 }
 
 // LiveActivityKey is the natural key of one registration — the pair the table
@@ -96,10 +100,35 @@ type LiveActivityKey struct {
 // dispatch failure: a nav push that failed for any other reason leaves a ride
 // that is still genuinely happening (the owner can drive it manually), and its
 // Activity must keep rotating tokens.
+// A FRESH REGISTRATION IS SEEDED AT THE RIDE'S CURRENT PHASE, not at zero
+// (MYR-398, migration 0029). The app starts the Activity locally and draws the
+// current state itself, so the island has just been in front of the rider —
+// expanding it to announce the phase they are already looking at would be an
+// unearned interruption at the very start of every ride. Seeding says "that one
+// has happened"; the first genuine transition after it is what earns the first
+// expansion.
+//
+// Seeded from the STATUS ALONE, so it cannot express Arriving (which needs the
+// car's ETA). That is the right way round: a rider who registers while the car
+// is already ninety seconds out has genuinely not seen an Arriving expansion,
+// and gets it on the next tick.
+//
+// The CONFLICT branch deliberately leaves the mark alone, exactly as it leaves
+// the progress anchor alone and for the same reason: a token rotation is the
+// same Activity mid-ride, and re-seeding it would be harmless while re-zeroing
+// it would run the whole ladder again.
 const queryUpsertLiveActivity = `
 INSERT INTO go_live_activities
-    (id, ride_request_id, user_id, activity_push_token, sandbox, created_at, updated_at)
-SELECT $1, r.id, $3, $4, $5, NOW(), NOW()
+    (id, ride_request_id, user_id, activity_push_token, sandbox, alerted_phase, created_at, updated_at)
+SELECT $1, r.id, $3, $4, $5,
+       CASE r.status
+           WHEN 'requested' THEN 1
+           WHEN 'accepted'  THEN 2
+           WHEN 'arrived'   THEN 4
+           WHEN 'enroute'   THEN 5
+           ELSE 0
+       END,
+       NOW(), NOW()
 FROM go_ride_requests r
 WHERE r.id = $2
   AND r.status NOT IN ('completed', 'declined', 'cancelled')
@@ -382,7 +411,7 @@ func (r *LiveActivityRepo) ActivitiesForRide(ctx context.Context, rideRequestID 
 		var baseline, value, reading *float64
 		var readingAt *time.Time
 		if err := rows.Scan(&a.RideRequestID, &a.UserID, &a.ActivityPushToken, &a.Sandbox,
-			&leg, &source, &baseline, &value, &reading, &readingAt); err != nil {
+			&leg, &source, &baseline, &value, &reading, &readingAt, &a.AlertedPhase); err != nil {
 			return nil, fmt.Errorf("store.ActivitiesForRide(ride=%s): scan: %w", rideRequestID, err)
 		}
 		a.Progress = scanProgress(leg, source, baseline, value, reading, readingAt)

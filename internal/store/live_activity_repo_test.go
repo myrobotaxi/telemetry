@@ -189,7 +189,18 @@ func TestLiveActivityRepo_ActiveLegsSelectsOnlyLiveMidRideActivities(t *testing.
 		{"cride0025L2", "arrived", true},
 		{"cride0025L3", "enroute", true},
 		{"cride0025L4", "completed", false},
-		{"cride0025L5", "requested", false},
+		// `requested` JOINED THE SET with MYR-398's v3 card, which starts the
+		// Activity at REQUEST rather than at accept. It has nothing to refresh
+		// — no car is assigned, so there is no ETA and no track — and it ticks
+		// anyway, because what a tick moves is the timestamp and the
+		// stale-date. Without that the Dispatch card goes stale three minutes
+		// in and "Finding your ride" starts apologising for being out of date
+		// while the search is genuinely still running.
+		{"cride0025L5", "requested", true},
+		// Both terminal endings of a `requested` ride still drop out, which is
+		// what stops the widening from keeping a dead Dispatch card ticking.
+		{"cride0025L7", "declined", false},
+		{"cride0025L8", "cancelled", false},
 	}
 	for _, c := range cases {
 		seedActivityRide(t, c.ride)
