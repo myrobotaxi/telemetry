@@ -99,11 +99,13 @@ func sameAnchor(a, b ProgressAnchor) bool {
 		a.ReadingAt.Equal(b.ReadingAt)
 }
 
-// The two ride statuses this file needs that copy.go's alert-worthy set does
-// not carry. Spelled out here rather than imported from internal/store, which
-// internal/push must not depend on; `statusAccepted` and `statusArrived` are
-// reused from copy.go for the same reason one spelling is better than two.
+// The ride statuses the Live Activity surface needs that copy.go's
+// alert-worthy set does not carry. Spelled out here rather than imported from
+// internal/store, which internal/push must not depend on; `statusAccepted` and
+// `statusArrived` are reused from copy.go for the same reason one spelling is
+// better than two.
 const (
+	statusRequested = "requested"
 	statusEnroute   = "enroute"
 	statusCompleted = "completed"
 )

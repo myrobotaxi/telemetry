@@ -216,12 +216,34 @@ func (t *ActivityTicker) RunPass(ctx context.Context) {
 			continue
 		}
 		state, anchor := contentState(leg.RideContext, leg.Progress, now)
-		// lowPriority: an ETA tick rides apns-priority 5 so it never competes
+		// THE ONE ALERT THAT ORIGINATES HERE. Arriving is a threshold on the
+		// ETA rather than a ride status, so no transition announces it and the
+		// ticker is the only thing that evaluates it — which also means it is
+		// true on every remaining pass of the pickup leg once it is true at
+		// all. alertFor's high-water comparison against the row is what turns
+		// "true forty times" into "sent once"; without it this loop is the
+		// strobing island the design forbids by name.
+		phase := alertPhaseFor(leg.RideContext)
+		alert := alertFor(phase, leg.AlertedPhase)
+		// LowPriority: an ETA tick rides apns-priority 5 so it never competes
 		// with a lifecycle transition for Apple's per-Activity budget
-		// (MYR-194 decision 3).
-		if t.notifier.send(ctx, leg.Activity, state, ActivityEventUpdate, nil, true, now) {
+		// (MYR-194 decision 3). An alerting tick is promoted back to 10 by
+		// ActivityNotification.priority — the flag is a statement about a
+		// routine refresh, and this push is not one.
+		if t.notifier.send(ctx, leg.Activity, ActivityNotification{
+			ActivityToken: leg.Token,
+			Sandbox:       leg.Sandbox,
+			Event:         ActivityEventUpdate,
+			ContentState:  state,
+			Timestamp:     now,
+			LowPriority:   true,
+			Alert:         alert,
+		}) {
 			pushed = append(pushed, ActivityKey{RideRequestID: leg.RideRequestID, UserID: leg.UserID})
 			t.notifier.saveProgress(ctx, leg.Activity, anchor)
+			if alert != nil {
+				t.notifier.saveAlertedPhase(ctx, leg.Activity, phase, ActivityEventUpdate)
+			}
 		}
 	}
 

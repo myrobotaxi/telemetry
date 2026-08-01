@@ -38,6 +38,11 @@ type Activity struct {
 	// monotonicity rule it enforces is a promise made to one client about the
 	// sequence of values that client has seen.
 	Progress ProgressAnchor
+	// AlertedPhase is the highest phase this Activity's island has already been
+	// expanded for (MYR-398, migration 0029). Per-Activity for the same reason
+	// Progress is: it records what one client has been shown, and the "at most
+	// once" promise is made to that client. See activity_alert.go.
+	AlertedPhase AlertPhase
 }
 
 // RideContext is everything a content-state needs that is not the token.
@@ -84,6 +89,9 @@ type ActivityStore interface {
 	// SaveProgress records the leg-progress anchor one Activity was just shown.
 	// Called ONLY after APNs accepted the push (MYR-398).
 	SaveProgress(ctx context.Context, key ActivityKey, anchor ProgressAnchor) error
+	// SaveAlertedPhase raises one Activity's island-expand high-water mark.
+	// Called ONLY after APNs accepted an alerting push (MYR-398).
+	SaveAlertedPhase(ctx context.Context, key ActivityKey, phase AlertPhase) error
 }
 
 // terminalStatuses maps a terminal ride status onto how long its Activity

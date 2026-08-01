@@ -25,6 +25,10 @@ var fixedNow = time.Date(2026, 7, 30, 18, 4, 5, 0, time.UTC)
 
 func testActivityNotification() ActivityNotification {
 	eta := fixedNow.Add(7 * time.Minute).Unix()
+	// asOf lags the send instant by ninety seconds — the ordinary shape of a
+	// push whose nav reading is a minute and a half old, and a value no test
+	// here can confuse with `aps.timestamp` by accident (MYR-398).
+	asOf := fixedNow.Add(-90 * time.Second).Unix()
 	return ActivityNotification{
 		ActivityToken: testActivityValue,
 		Event:         ActivityEventUpdate,
@@ -35,6 +39,7 @@ func testActivityNotification() ActivityNotification {
 			ETA:         &eta,
 			VehicleName: "Blue Whale",
 			Destination: "Home",
+			AsOf:        &asOf,
 		},
 	}
 }
@@ -174,9 +179,25 @@ func TestActivityPayloadRawJSONKeys(t *testing.T) {
 	if !ok {
 		t.Fatalf("aps.content-state is %T, want object", aps["content-state"])
 	}
-	wantKeys := []string{"v", "status", "eta", "vehicleName", "destination"}
+	wantKeys := []string{"v", "status", "eta", "vehicleName", "destination", "asOf"}
 	if got := keysOf(state); !sameSet(got, wantKeys) {
 		t.Errorf("content-state keys = %v, want %v", got, wantKeys)
+	}
+	// asOf and aps.timestamp are DIFFERENT INSTANTS and the payload must show
+	// it. Asserting the gap rather than the value is the point: a refactor that
+	// stamped asOf from the send clock would satisfy any equality test written
+	// against `now` and would silently destroy the field's only job.
+	if got, want := state["asOf"], float64(fixedNow.Add(-90*time.Second).Unix()); got != want {
+		t.Errorf("content-state.asOf = %v, want %v (when the DATA was true)", got, want)
+	}
+	if state["asOf"] == aps["timestamp"] {
+		t.Error("content-state.asOf equals aps.timestamp; the two must be able to differ, " +
+			"or a card whose data has frozen can never say so")
+	}
+	// No alert on a routine update — the island stays shut (MYR-398).
+	if _, present := aps["alert"]; present {
+		t.Errorf("aps.alert = %v on a routine update; the island must expand only on "+
+			"the six phase changes", aps["alert"])
 	}
 	if got, want := state["v"], float64(ActivityContentStateVersion); got != want {
 		t.Errorf("content-state.v = %v, want %v", got, want)

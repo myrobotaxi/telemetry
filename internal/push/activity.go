@@ -113,6 +113,36 @@ type ActivityContentState struct {
 	// dispatch. The client renders the card with no track. See
 	// activity_progress.go for the derivation and its honesty bounds.
 	Progress *float64 `json:"progress,omitempty"`
+
+	// AsOf is when the DATA in this content-state was true, in unix seconds
+	// (MYR-398, the v3 card). The client renders it as the stale presentation's
+	// subline, "Last updated {h:mm A}".
+	//
+	// IT IS NOT ActivityNotification.Timestamp, and keeping the two apart is the
+	// entire reason the field exists. `aps.timestamp` is when the push was SENT
+	// and is what ActivityKit uses to discard an out-of-order update, so it must
+	// always be `now`. `AsOf` is when the server last LEARNED something, and it
+	// is meant to lag.
+	//
+	// THE CASE IT EXISTS FOR is the one activity_progress.go's ProgressFreshFor
+	// and rest-api.md §7.21.3 already confess to. The ticker pushes
+	// unconditionally; the stale-date is `timestamp + 3 min` and is therefore
+	// re-armed by the push itself; `eta` is rebuilt from each push's own `now`.
+	// So a car that goes quiet mid-leg renders a HELD track beside a
+	// perpetually renewed arrival time, ActivityKit never marks the card stale,
+	// and nothing on it explains the freeze. This is that missing sentence —
+	// which is also exactly why it MUST NOT re-stamp to `now` on a pass that
+	// computed nothing new. See contentState for the derivation.
+	//
+	// Every content-state contentState builds carries one, unlike its two
+	// optional neighbours: there is no case in which the server cannot say when
+	// it computed a state. It is a POINTER anyway, and that is a deliberate
+	// application of `progress`'s own rule rather than symmetry for its own
+	// sake — the zero value of an int64 unix timestamp is not a neutral
+	// placeholder, it is the claim "this data was true in January 1970", and a
+	// card rendering "Last updated 12:00 AM" is worse than one rendering
+	// nothing. An absent key is the only safe way for this field to be unset.
+	AsOf *int64 `json:"asOf,omitempty"`
 }
 
 // MaxContentStateLabel bounds the free-text labels in a content-state, in
@@ -183,8 +213,13 @@ type ActivityNotification struct {
 	// from the lock screen. Nil on an end event means "dismiss immediately".
 	DismissalDate *time.Time
 	// LowPriority sends at apns-priority 5 instead of 10. Set for ETA ticks;
-	// left false for ride-lifecycle transitions, per MYR-194.
+	// left false for ride-lifecycle transitions, per MYR-194. Ignored when
+	// Alert is set — see priority().
 	LowPriority bool
+	// Alert, when set, adds an `aps.alert` dictionary that makes iOS expand the
+	// Dynamic Island for ~3s (MYR-398). Nil on all but the six phase changes;
+	// see activity_alert.go for why "nil" is the overwhelmingly common case.
+	Alert *ActivityAlert
 }
 
 // ActivitySender delivers ActivityKit remote updates.
@@ -201,8 +236,17 @@ func (n ActivityNotification) StaleDate() time.Time {
 }
 
 // priority renders the apns-priority header for this update.
+//
+// AN ALERTING UPDATE IS ALWAYS IMMEDIATE, whatever the caller asked for. The
+// conserving priority exists so a periodic ETA refresh does not compete with
+// "your car is here" for Apple's per-Activity budget (MYR-194 decision 3) — and
+// a push whose entire purpose is to open the island for three seconds is not a
+// refresh that can afford to be dropped or coalesced. The combination is not
+// hypothetical: Arriving is a threshold the TICKER evaluates, so the one alert
+// in the design that does not ride a lifecycle transition originates on exactly
+// the path that sets LowPriority.
 func (n ActivityNotification) priority() string {
-	if n.LowPriority {
+	if n.LowPriority && n.Alert == nil {
 		return priorityConserving
 	}
 	return priorityImmediate

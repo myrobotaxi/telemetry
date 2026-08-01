@@ -37,6 +37,10 @@ type fakeActivityStore struct {
 	// was sent — the two are the same promise seen from either end (MYR-398).
 	progress    []savedProgress
 	progressErr error
+	// alerts records every SaveAlertedPhase call in order, so the island-expand
+	// tests can assert what was PERSISTED as well as what was sent (MYR-398).
+	alerts   []savedAlert
+	alertErr error
 
 	contextErr error
 	listErr    error
@@ -129,6 +133,57 @@ func (f *fakeActivityStore) SaveProgress(_ context.Context, key ActivityKey, anc
 		}
 	}
 	return nil
+}
+
+// savedAlert is one SaveAlertedPhase call.
+type savedAlert struct {
+	key   ActivityKey
+	phase AlertPhase
+}
+
+// SaveAlertedPhase mimics the real guarded UPDATE, including the guard: a write
+// that would LOWER the mark is a silent no-op. Reproducing the refusal here and
+// not merely the write is what lets a test drive two passes over one leg and
+// see the second one decline to alert, which is the whole once-per-ride
+// promise (MYR-398).
+func (f *fakeActivityStore) SaveAlertedPhase(_ context.Context, key ActivityKey, phase AlertPhase) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.alertErr != nil {
+		return f.alertErr
+	}
+	f.alerts = append(f.alerts, savedAlert{key: key, phase: phase})
+
+	for i := range f.byRide[key.RideRequestID] {
+		if f.byRide[key.RideRequestID][i].UserID == key.UserID &&
+			f.byRide[key.RideRequestID][i].AlertedPhase < phase {
+			f.byRide[key.RideRequestID][i].AlertedPhase = phase
+		}
+	}
+	for i := range f.legs {
+		if f.legs[i].RideRequestID == key.RideRequestID && f.legs[i].UserID == key.UserID &&
+			f.legs[i].AlertedPhase < phase {
+			f.legs[i].AlertedPhase = phase
+		}
+	}
+	return nil
+}
+
+// savedAlertsFor returns the phases persisted for one (ride, user), in order.
+//
+//nolint:unparam // rideID is the same fixture in every current caller, but the
+// twin savedProgressFor next door takes the pair and a helper that filtered on
+// only half the natural key would quietly pass the day a second ride is added.
+func (f *fakeActivityStore) savedAlertsFor(rideID, userID string) []AlertPhase {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []AlertPhase
+	for _, a := range f.alerts {
+		if a.key.RideRequestID == rideID && a.key.UserID == userID {
+			out = append(out, a.phase)
+		}
+	}
+	return out
 }
 
 // savedProgressFor returns the anchors persisted for one (ride, user), in order.
