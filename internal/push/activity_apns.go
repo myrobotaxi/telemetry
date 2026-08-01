@@ -154,10 +154,20 @@ func activityExpiration(n ActivityNotification) time.Time {
 // removes it.
 //
 // MYR-194: the rider should get to look at the arrival state rather than have
-// it vanish the instant the owner taps "Dropped off". Fifteen minutes is long
-// enough to check the fare-free summary after walking away and short enough
-// that it is gone by the next ride.
-const DismissAfter = 15 * time.Minute
+// it vanish the instant the owner taps "Dropped off".
+//
+// MYR-406 shortened it from fifteen minutes to five, to match the client's own
+// completed linger (MYR-405 ends the Activity locally at five). The client's
+// timer wins whenever the app is alive; this date is the FALLBACK for a phone
+// whose app is dead, so the two disagreeing meant the same ride lingered for
+// five minutes or fifteen depending on something the rider cannot see. Five is
+// still a long enough look at the arrival state to be worth having, and it is
+// gone well before the next ride.
+//
+// It is deliberately NOT shared with DismissPromptly: the two are separate
+// decisions about separate endings, and a shared constant is how one of them
+// silently moves the other.
+const DismissAfter = 5 * time.Minute
 
 // DismissPromptly is the linger for the unhappy terminal states — declined,
 // cancelled, and a reservation that expired.
