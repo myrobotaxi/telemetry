@@ -246,10 +246,16 @@ func TestListActiveRidePollTargets_TerminalTransitionRemovesTarget(t *testing.T)
 	}
 }
 
-// TestListActiveRidePollTargets_OrdersOldestFirst — when a pass is truncated by
-// the cap it must shed the most recently touched rides, never the most
-// neglected.
-func TestListActiveRidePollTargets_OrdersOldestFirst(t *testing.T) {
+// TestListActiveRidePollTargets_OrdersFreshestFirst — when a pass is truncated
+// by the cap it must shed the most NEGLECTED rides and keep the freshest.
+//
+// This is the opposite of what the query originally did, and the inversion
+// mattered. The most recently updated ride is the one that just transitioned —
+// the rider has the tracking map open right now. The least recently updated is
+// the one most likely to have been abandoned, since a live ride's every step
+// writes the row. Ordering oldest-first meant a truncated page was filled with
+// precisely the rides whose pollers matter least (MYR-394).
+func TestListActiveRidePollTargets_OrdersFreshestFirst(t *testing.T) {
 	repo, _ := setupRideRequestRepo(t)
 	ctx := context.Background()
 	seedVehicle(t, testPool, pollVehicleA, pollVINA)
@@ -267,8 +273,80 @@ func TestListActiveRidePollTargets_OrdersOldestFirst(t *testing.T) {
 	if len(targets) != 2 {
 		t.Fatalf("targets = %d, want 2", len(targets))
 	}
-	if targets[0].RideRequestID != older.ID || targets[1].RideRequestID != newer.ID {
-		t.Fatalf("order = [%s %s], want oldest-updated first [%s %s]",
-			targets[0].RideRequestID, targets[1].RideRequestID, older.ID, newer.ID)
+	if targets[0].RideRequestID != newer.ID || targets[1].RideRequestID != older.ID {
+		t.Fatalf("order = [%s %s], want freshest-updated first [%s %s]",
+			targets[0].RideRequestID, targets[1].RideRequestID, newer.ID, older.ID)
+	}
+
+	// And the cap sheds the neglected one, not the fresh one.
+	capped, err := repo.ListActiveRidePollTargets(ctx, 1)
+	if err != nil {
+		t.Fatalf("ListActiveRidePollTargets(1): %v", err)
+	}
+	if len(capped) != 1 || capped[0].RideRequestID != newer.ID {
+		t.Fatalf("truncated page = %+v, want only the freshest ride %s", capped, newer.ID)
+	}
+}
+
+// TestListActiveRidePollTargets_ExcludesStaleRides is the poll-lifetime
+// ceiling, and it is the only thing in this system that ever stops polling an
+// abandoned ride.
+//
+// Every other clause of the predicate is about STATUS, and no status expires on
+// its own: there is no automatic terminal transition anywhere in the repo, and
+// the reservation sweeper's expire() only reaches rows with dispatched_at IS
+// NULL. So a rider no-show leaves the row at `arrived` and a dispatched
+// reservation nobody cancels stays `accepted`/`sent` — matching a purely
+// status-based predicate for the rest of the database's life, re-adopted after
+// every restart, at ~3,500 Fleet API GETs a day each.
+func TestListActiveRidePollTargets_ExcludesStaleRides(t *testing.T) {
+	repo, _ := setupRideRequestRepo(t)
+	ctx := context.Background()
+	seedVehicle(t, testPool, pollVehicleA, pollVINA)
+	seedVehicle(t, testPool, pollVehicleB, pollVINB)
+	t.Cleanup(func() { _, _ = testPool.Exec(ctx, `DELETE FROM "Vehicle"`) })
+
+	// Two rides that a status-only predicate cannot tell apart.
+	abandoned := seedPollRide(t, repo, pollVehicleA, "clrider9999999999999999", false, store.RideRequestStatusArrived)
+	live := seedPollRide(t, repo, pollVehicleB, "clridera000000000000000", false, store.RideRequestStatusArrived)
+
+	tests := []struct {
+		name string
+		age  time.Duration
+		want bool
+	}{
+		{name: "just transitioned", age: time.Minute, want: true},
+		{name: "five hours ago, inside the ceiling", age: 5 * time.Hour, want: true},
+		{name: "five hours fifty-nine, still inside", age: 5*time.Hour + 59*time.Minute, want: true},
+		{name: "six hours one minute, past the ceiling", age: 6*time.Hour + time.Minute},
+		{name: "abandoned two days ago", age: 48 * time.Hour},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// updated_at is the anchor because it is frozen at the row's last
+			// REAL transition: a live ride's every step writes the row, while
+			// an abandoned one stops being written the moment it is abandoned.
+			if _, err := testPool.Exec(ctx,
+				`UPDATE go_ride_requests SET updated_at = NOW() - $2::interval WHERE id = $1`,
+				abandoned.ID, tt.age.String(),
+			); err != nil {
+				t.Fatalf("age the ride: %v", err)
+			}
+
+			targets, err := repo.ListActiveRidePollTargets(ctx, 50)
+			if err != nil {
+				t.Fatalf("ListActiveRidePollTargets: %v", err)
+			}
+			byID := pollTargetIDs(targets)
+			if _, listed := byID[abandoned.ID]; listed != tt.want {
+				t.Fatalf("ride updated %s ago listed = %v, want %v", tt.age, listed, tt.want)
+			}
+			// The control never moves: the ceiling must bound neglect, not
+			// status. A ride touched a moment ago is always polled.
+			if _, listed := byID[live.ID]; !listed {
+				t.Fatal("the freshly-updated ride stopped being listed; the ceiling is bounding the wrong thing")
+			}
+		})
 	}
 }
