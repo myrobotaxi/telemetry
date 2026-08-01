@@ -114,10 +114,24 @@ type LiveActivityKey struct {
 // is already ninety seconds out has genuinely not seen an Arriving expansion,
 // and gets it on the next tick.
 //
-// The CONFLICT branch deliberately leaves the mark alone, exactly as it leaves
+// The CONFLICT branch leaves the mark alone on a LIVE row, exactly as it leaves
 // the progress anchor alone and for the same reason: a token rotation is the
-// same Activity mid-ride, and re-seeding it would be harmless while re-zeroing
-// it would run the whole ladder again.
+// same Activity mid-ride, and re-zeroing it would run the whole ladder again.
+// Leaving it alone is also what keeps a phase the phone is still OWED — one
+// whose APNs send failed, so the mark was deliberately not raised — available
+// for the next attempt.
+//
+// ON A TOMBSTONED ROW IT RE-SEEDS, and the asymmetry is the point. Re-registering
+// after an end is a supported flow (the handler documents it: a client that
+// re-registers is telling us it has a live Activity again), and it means a NEW
+// Activity — started locally by the app, which has just drawn the current state
+// itself. Clearing the tombstone while leaving a mark of 1 from the `requested`
+// registration would let the next push announce `enroute` as On trip (5 > 1) and
+// expand an island over a card the app drew a moment ago: precisely the unearned
+// interruption the INSERT-side seeding exists to prevent. GREATEST rather than a
+// plain assignment because the status can only express the status: an Activity
+// that had genuinely earned Arriving (3) must not be pulled back to the
+// status-only Enroute (2) and made to earn it twice.
 const queryUpsertLiveActivity = `
 INSERT INTO go_live_activities
     (id, ride_request_id, user_id, activity_push_token, sandbox, alerted_phase, created_at, updated_at)
@@ -139,6 +153,11 @@ ON CONFLICT (ride_request_id, user_id) DO UPDATE
 SET activity_push_token = EXCLUDED.activity_push_token,
     sandbox             = EXCLUDED.sandbox,
     updated_at          = NOW(),
+    alerted_phase       = CASE
+        WHEN go_live_activities.ended_at IS NOT NULL
+            THEN GREATEST(go_live_activities.alerted_phase, EXCLUDED.alerted_phase)
+        ELSE go_live_activities.alerted_phase
+    END,
     ended_at            = NULL`
 
 // queryEndLiveActivity tombstones one party's Activity for one ride.

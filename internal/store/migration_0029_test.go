@@ -38,6 +38,20 @@ func alertedPhaseFor(t *testing.T, rideID, userID string) int16 {
 	return phase
 }
 
+// endedAtIsNull reports whether one row is live rather than tombstoned, which
+// is how the re-registration tests tell "the flow is supported" from "the row
+// was left for dead".
+func endedAtIsNull(t *testing.T, rideID, userID string) bool {
+	t.Helper()
+	var live bool
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT ended_at IS NULL FROM go_live_activities
+		  WHERE ride_request_id = $1 AND user_id = $2`, rideID, userID).Scan(&live); err != nil {
+		t.Fatalf("read ended_at for (%s, %s): %v", rideID, userID, err)
+	}
+	return live
+}
+
 // TestMigration0029_MarkIsNotNullAndBoundedToTheLadder.
 //
 // Unlike the progress anchor beside it, there is no honest-unknown state here:
@@ -156,6 +170,121 @@ func TestMigration0029_TokenRotationPreservesTheMark(t *testing.T) {
 	if got := alertedPhaseFor(t, "cride0029r", "crider0029r"); got != 5 {
 		t.Errorf("alerted_phase = %d after a token rotation, want the preserved 5", got)
 	}
+}
+
+// TestMigration0029_ReRegistrationAfterAnEndReSeedsTheMark is the tombstone
+// arm of the same upsert, and it wants the OPPOSITE of the rotation above.
+//
+// A rider dismisses the card, or the app calls DELETE …/activity-token, and the
+// row is tombstoned. Later, mid-trip, the app creates a new Activity and
+// re-registers — a flow the handler documents as supported, because the client
+// is telling us it has a live Activity again. That new Activity was drawn
+// LOCALLY by the app at the ride's current state, so it is a fresh registration
+// in every sense that matters to the ladder: leaving the mark at the 1 the
+// `requested` registration seeded would let the next push announce On trip
+// (5 > 1) and expand an island over a card the rider is already looking at.
+//
+// GREATEST, not assignment, is the other half. Re-seeding is done from the
+// status alone and cannot express Arriving, so an Activity that had genuinely
+// earned rung 3 must not be pulled back to the status-only 2 and made to earn
+// it twice.
+func TestMigration0029_ReRegistrationAfterAnEndReSeedsTheMark(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping migration integration test")
+	}
+	mustApplyGoMigrations(t)
+	ctx := context.Background()
+
+	t.Run("a tombstoned row is re-seeded at the ride's current phase", func(t *testing.T) {
+		cleanGoLiveActivities(t)
+		seedActivityRide(t, "cride0029x")
+		setRideStatus(t, "cride0029x", "requested")
+		repo := store.NewLiveActivityRepo(testPool, nil)
+
+		if err := repo.RegisterActivity(ctx, "cride0029x", "crider0029x", "abcdef01", false); err != nil {
+			t.Fatalf("register at requested: %v", err)
+		}
+		if got := alertedPhaseFor(t, "cride0029x", "crider0029x"); got != 1 {
+			t.Fatalf("alerted_phase = %d after registering on a requested ride, want the seeded 1", got)
+		}
+
+		// The rider dismisses the card; the client ends its Activity.
+		if _, err := repo.EndActivity(ctx, "cride0029x", "crider0029x"); err != nil {
+			t.Fatalf("end: %v", err)
+		}
+		// The ride runs on, and mid-trip the app re-creates the Activity.
+		setRideStatus(t, "cride0029x", "enroute")
+		if err := repo.RegisterActivity(ctx, "cride0029x", "crider0029x", "beefcafe", false); err != nil {
+			t.Fatalf("re-register after an end: %v", err)
+		}
+
+		if got := alertedPhaseFor(t, "cride0029x", "crider0029x"); got != 5 {
+			t.Errorf("alerted_phase = %d after re-registering mid-trip, want the re-seeded 5 (On trip) "+
+				"— at %d the next push expands the island to announce a state the app has just drawn",
+				got, got)
+		}
+		// The tombstone really was cleared, so this is the supported flow and
+		// not a row the ticker will now ignore.
+		if ended := endedAtIsNull(t, "cride0029x", "crider0029x"); !ended {
+			t.Error("re-registration left the row tombstoned")
+		}
+	})
+
+	t.Run("an earned Arriving survives the re-seed", func(t *testing.T) {
+		cleanGoLiveActivities(t)
+		seedActivityRide(t, "cride0029y")
+		repo := store.NewLiveActivityRepo(testPool, nil)
+		key := store.LiveActivityKey{RideRequestID: "cride0029y", UserID: "crider0029y"}
+
+		// The ride is `accepted` and the car came within two minutes, so the
+		// island has been expanded for Arriving — a rung the status alone can
+		// never express.
+		if err := repo.RegisterActivity(ctx, "cride0029y", "crider0029y", "abcdef01", false); err != nil {
+			t.Fatalf("register: %v", err)
+		}
+		if err := repo.SaveActivityAlertedPhase(ctx, key, 3); err != nil {
+			t.Fatalf("save Arriving: %v", err)
+		}
+		if _, err := repo.EndActivity(ctx, "cride0029y", "crider0029y"); err != nil {
+			t.Fatalf("end: %v", err)
+		}
+		if err := repo.RegisterActivity(ctx, "cride0029y", "crider0029y", "beefcafe", false); err != nil {
+			t.Fatalf("re-register: %v", err)
+		}
+
+		if got := alertedPhaseFor(t, "cride0029y", "crider0029y"); got != 3 {
+			t.Errorf("alerted_phase = %d, want the earned 3 held — re-seeding from the `accepted` "+
+				"status would pull it back to 2 and make the rider earn Arriving twice", got)
+		}
+	})
+
+	t.Run("a live rotation is still left alone", func(t *testing.T) {
+		// The guard on the CASE. A rotation of a LIVE row must not re-seed:
+		// a mark deliberately left low because the last APNs send failed is a
+		// phase the phone is still owed, and re-seeding would spend it.
+		cleanGoLiveActivities(t)
+		seedActivityRide(t, "cride0029z")
+		setRideStatus(t, "cride0029z", "enroute")
+		repo := store.NewLiveActivityRepo(testPool, nil)
+
+		if err := repo.RegisterActivity(ctx, "cride0029z", "crider0029z", "abcdef01", false); err != nil {
+			t.Fatalf("register: %v", err)
+		}
+		// Wind it back to what it would read if the On trip push had failed.
+		if _, err := testPool.Exec(ctx,
+			`UPDATE go_live_activities SET alerted_phase = 2
+			  WHERE ride_request_id = $1 AND user_id = $2`, "cride0029z", "crider0029z"); err != nil {
+			t.Fatalf("set the owed mark: %v", err)
+		}
+
+		if err := repo.RegisterActivity(ctx, "cride0029z", "crider0029z", "beefcafe", false); err != nil {
+			t.Fatalf("rotate token: %v", err)
+		}
+		if got := alertedPhaseFor(t, "cride0029z", "crider0029z"); got != 2 {
+			t.Errorf("alerted_phase = %d after a LIVE rotation, want the untouched 2 — the rider is "+
+				"still owed that expansion", got)
+		}
+	})
 }
 
 // TestMigration0029_SaveRefusesToLowerTheMark is the unsharded-ticker guard.
