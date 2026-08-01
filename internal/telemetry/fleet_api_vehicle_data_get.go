@@ -40,20 +40,27 @@ type VehicleData struct {
 }
 
 // VehicleDataDriveState is the drive_state sub-object subset: where the car is,
-// how fast it is going, and which way it points.
+// how fast it is going, which way it points, and what gear it is in.
 //
-// All four are P1 GPS data (data-classification.md §1.4) — encrypted at rest by
-// the existing writer path and never logged, here or anywhere downstream.
+// All of these are P1 GPS/motion data (data-classification.md §1.4) — encrypted
+// at rest by the existing writer path and never logged, here or anywhere
+// downstream.
 //
 // Speed is null whenever the car is stationary, and heading is an integer on
 // the wire; both decode to nil-skipped pointers so a parked car contributes
 // position only, rather than a misleading `speed: 0` that would read as a live
 // measurement.
+//
+// ShiftState is Tesla's gear letter ("P"/"D"/"R"/"N"), and it is NULL for a
+// parked or asleep car rather than "P" — the mapper must skip nil rather than
+// coerce it, because "we were not told" and "the car is in Park" are different
+// claims and only one of them may end a drive.
 type VehicleDataDriveState struct {
-	Latitude  *float64 `json:"latitude"`
-	Longitude *float64 `json:"longitude"`
-	Speed     *float64 `json:"speed"`   // mph, null when stationary
-	Heading   *int     `json:"heading"` // degrees, 0-359
+	Latitude   *float64 `json:"latitude"`
+	Longitude  *float64 `json:"longitude"`
+	Speed      *float64 `json:"speed"`       // mph, null when stationary
+	Heading    *int     `json:"heading"`     // degrees, 0-359
+	ShiftState *string  `json:"shift_state"` // "P"/"D"/"R"/"N", null when parked/asleep
 }
 
 // VehicleDataVehicleState is the vehicle_state sub-object subset: lock state,

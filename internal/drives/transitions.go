@@ -13,6 +13,41 @@ func isDriveGear(gear string) bool {
 	return gear == "D" || gear == "R"
 }
 
+// restDisplacementMiles is how far a NON-STREAMED position fix must sit from
+// the previous one before it counts as movement. It is the STREAM's own
+// Location filter — `MinimumDelta: 10` metres in DefaultFieldConfig
+// (internal/telemetry/fleet_api_fields.go) — restated in the miles that
+// haversine returns.
+//
+// WHY THIS THRESHOLD EXISTS AT ALL (MYR-394). Before REST position polling, the
+// only source of `location` was the stream, and Tesla applied that 10m delta
+// filter on the CAR: a parked, streaming vehicle sent gear and speed but not a
+// repeated Location, so handleDriving's location branch never ran and the
+// MYR-160 stall watchdog could see a motionless drive and close it. A REST
+// vehicle_data read has no such filter — it returns the car's cached fix on
+// every poll, byte-identical for a car that has not moved. Taking each of those
+// as "movement" would refresh lastMovementAt every ~25s forever, so StallTimeout
+// could never fire, and an open drive on a parked car would accumulate an
+// identical route point (and broadcast a DriveUpdatedEvent) every cycle until
+// MaxDriveDuration's 12h backstop. Matching the stream's own delta means the
+// two sources agree on what "moved" means.
+const restDisplacementMiles = 0.0062137 // 10 metres
+
+// displacedEnough reports whether te's location is far enough from the drive's
+// previous fix to count as real motion.
+//
+// A STREAMED frame is taken at face value: Tesla already applied the 10m
+// MinimumDelta on the car, so its arrival IS the movement signal, and
+// re-deriving the same judgement from sparse GPS here would risk discarding
+// genuine points at the boundary. Only the REST-backfilled frames — which carry
+// no delta filter of their own — are measured.
+func displacedEnough(te events.VehicleTelemetryEvent, prev, next events.Location) bool {
+	if te.Streamed() {
+		return true
+	}
+	return haversine(prev.Latitude, prev.Longitude, next.Latitude, next.Longitude) >= restDisplacementMiles
+}
+
 // handleIdle processes a telemetry event when the vehicle is in StatusIdle.
 // It transitions to StatusDriving when the gear shifts to D or R.
 // The caller must hold state.mu.
@@ -40,25 +75,32 @@ func (d *Detector) handleDriving(state *vehicleState, vin string, te events.Vehi
 	// for StallTimeout is a parked car whose gear=P frame was missed.
 	moved := accumulateDriveCounters(drive, te)
 
-	// Accumulate route point if location is present.
+	// Accumulate route point if location is present AND the car has actually
+	// moved since the last fix.
 	if loc := extractLocation(te.Fields); loc != nil {
-		heading, _ := extractFloatField(te.Fields, telemetry.FieldHeading)
-		speed, _ := extractFloatField(te.Fields, telemetry.FieldSpeed)
-
-		rp := events.RoutePoint{
-			Latitude:  loc.Latitude,
-			Longitude: loc.Longitude,
-			Speed:     speed,
-			Heading:   heading,
-			Timestamp: te.CreatedAt,
-		}
-		drive.routePoints = append(drive.routePoints, rp)
-		drive.lastLocation = *loc
+		// The drive's clock advances on EVERY located frame, moved or not:
+		// calculateStats derives duration from lastTimestamp, and a stationary
+		// car still has an honest end time.
 		drive.lastTimestamp = te.CreatedAt
-		moved = true
 
-		// Publish DriveUpdatedEvent for each location-bearing tick.
-		d.publishDriveUpdated(vin, drive.id, rp)
+		if displacedEnough(te, drive.lastLocation, *loc) {
+			heading, _ := extractFloatField(te.Fields, telemetry.FieldHeading)
+			speed, _ := extractFloatField(te.Fields, telemetry.FieldSpeed)
+
+			rp := events.RoutePoint{
+				Latitude:  loc.Latitude,
+				Longitude: loc.Longitude,
+				Speed:     speed,
+				Heading:   heading,
+				Timestamp: te.CreatedAt,
+			}
+			drive.routePoints = append(drive.routePoints, rp)
+			drive.lastLocation = *loc
+			moved = true
+
+			// Publish DriveUpdatedEvent for each location-bearing tick.
+			d.publishDriveUpdated(vin, drive.id, rp)
+		}
 	}
 
 	if moved {

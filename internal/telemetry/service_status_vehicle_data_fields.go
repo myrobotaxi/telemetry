@@ -188,6 +188,24 @@ func addDriveStateFields(fields map[string]events.TelemetryValue, ds *VehicleDat
 		h := float64(*ds.Heading)
 		fields[string(FieldHeading)] = events.TelemetryValue{FloatVal: &h}
 	}
+	// shift_state completes the position frame: WHERE the car is, and whether
+	// it is going anywhere. Without it a REST-polled ride delivers a stream of
+	// located, gearless frames, and the drive state machine has to infer the
+	// gear from a cache that no REST frame can ever correct — the phantom
+	// drive-start path resetToIdle now closes from the other end.
+	//
+	// NULL IS NOT PARK. Tesla answers shift_state=null for a car that is parked
+	// or asleep, so a nil is skipped rather than coerced: writing "P" would be
+	// this server inventing a gear change, and a fabricated "P" ends a real
+	// drive through startDebounce. Only a gear Tesla actually reported travels.
+	//
+	// FieldGear is a STREAMED field (fieldMap: Field_Gear), so it lands in
+	// streamSourcedFields and the MYR-300 gate deletes it whenever the car is
+	// streaming — a cached REST gear can never out-rank the live one.
+	if ds.ShiftState != nil && *ds.ShiftState != "" {
+		gear := *ds.ShiftState
+		fields[string(FieldGear)] = events.TelemetryValue{StringVal: &gear}
+	}
 }
 
 // hvacPowerFromBool renders is_climate_on as the capitalized hvacPower enum
