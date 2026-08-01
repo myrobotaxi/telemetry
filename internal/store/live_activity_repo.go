@@ -100,6 +100,7 @@ type LiveActivityKey struct {
 // dispatch failure: a nav push that failed for any other reason leaves a ride
 // that is still genuinely happening (the owner can drive it manually), and its
 // Activity must keep rotating tokens.
+//
 // A FRESH REGISTRATION IS SEEDED AT THE RIDE'S CURRENT PHASE, not at zero
 // (MYR-398, migration 0029). The app starts the Activity locally and draws the
 // current state itself, so the island has just been in front of the rider —
