@@ -171,9 +171,12 @@ func (f *fakeActivityStore) SaveAlertedPhase(_ context.Context, key ActivityKey,
 
 // savedAlertsFor returns the phases persisted for one (ride, user), in order.
 //
-//nolint:unparam // rideID is the same fixture in every current caller, but the
-// twin savedProgressFor next door takes the pair and a helper that filtered on
-// only half the natural key would quietly pass the day a second ride is added.
+// rideID is the same fixture in every current caller, which unparam objects to.
+// It is taken anyway because the twin savedProgressFor next door takes the pair,
+// and a helper that filtered on only half the natural key would quietly pass the
+// day a second ride is added.
+//
+//nolint:unparam // deliberate — see the note above
 func (f *fakeActivityStore) savedAlertsFor(rideID, userID string) []AlertPhase {
 	f.mu.Lock()
 	defer f.mu.Unlock()
