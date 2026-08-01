@@ -23,6 +23,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"time"
 )
 
@@ -37,28 +38,55 @@ func (p *RidePositionPoller) Reconcile(ctx context.Context) (adopted, reaped int
 		return 0, 0, nil
 	}
 
+	// Ask for ONE MORE ROW than the registry can hold. That extra row carries
+	// no poller; it is the truncation detector. Reaping is a decision made
+	// against the ABSENCE of a vehicle from this list, and an absence only
+	// means "the ride ended" when the list is complete — see below.
 	listCtx, cancel := context.WithTimeout(ctx, p.cfg.ReconcileTimeout)
-	targets, err := p.deps.Rides.ListActiveRideTargets(listCtx, p.cfg.MaxActive)
+	targets, err := p.deps.Rides.ListActiveRideTargets(listCtx, p.cfg.MaxActive+1)
 	cancel()
 	if err != nil {
 		return 0, 0, fmt.Errorf("ride position poller: list active rides: %w", err)
 	}
-
-	wanted := make(map[string]ActiveRideTarget, len(targets))
-	for _, t := range targets {
-		if t.VehicleID == "" {
-			continue
-		}
-		// First row wins. The list is ordered oldest-updated first, and the
-		// per-vehicle accept guard means a second open ride on one car is
-		// close to impossible — but if it ever happens, polling the older one
-		// is both deterministic and the one more likely to be under way.
-		if _, dup := wanted[t.VehicleID]; !dup {
-			wanted[t.VehicleID] = t
-		}
+	truncated := len(targets) > p.cfg.MaxActive
+	if truncated {
+		targets = targets[:p.cfg.MaxActive]
 	}
 
-	reaped = p.reapOrphans(wanted)
+	// Vehicle -> the SET of rides currently justifying a poller for it. Not
+	// first-row-wins: a car legitimately carrying two open rides must keep its
+	// poller when the first of them ends, and collapsing to one row here was
+	// the mirror image of the teardown gap startPoll/stopPoll now close — the
+	// pass would cancel the newer ride's poller and re-adopt the older one.
+	wanted := make(map[string]map[string]struct{}, len(targets))
+	for _, t := range targets {
+		if t.VehicleID == "" || t.RideRequestID == "" {
+			continue
+		}
+		if wanted[t.VehicleID] == nil {
+			wanted[t.VehicleID] = make(map[string]struct{}, 1)
+		}
+		wanted[t.VehicleID][t.RideRequestID] = struct{}{}
+	}
+
+	// A TRUNCATED LIST IS NOT AUTHORITATIVE, for exactly the reason a failed
+	// LIST is not: an incomplete answer must never be read as "these rides
+	// ended". The pass becomes adopt-only.
+	//
+	// The failure this prevents is not hypothetical. Nothing terminates an
+	// abandoned ride, so never-ending rows accumulate and — with the six-hour
+	// age bound as the only thing draining them — could still fill MaxActive
+	// during a bad enough spell. Once they do, every pass returns a full page,
+	// and reaping against it would stop the pollers that the ride.accepted /
+	// ride.due seams had just started for genuinely live rides, five minutes
+	// after each one began, with no cap headroom left to re-adopt them.
+	if truncated {
+		p.logger.Warn("ride position poll: active-ride list hit the cap, reaping skipped this pass",
+			slog.Int("max_active", p.cfg.MaxActive),
+			slog.Int("active", p.ActiveCount()))
+	} else {
+		reaped = p.reapOrphans(wanted)
+	}
 	adopted = p.adoptMissing(wanted)
 
 	if adopted > 0 || reaped > 0 {
@@ -71,13 +99,20 @@ func (p *RidePositionPoller) Reconcile(ctx context.Context) (adopted, reaped int
 }
 
 // reapOrphans stops every poller whose vehicle is no longer mid-ride, and every
-// poller now running for the WRONG ride on a car that is.
+// poller running for a set of rides that has NOTHING in common with what the
+// database says is live on that car.
 //
 // The second case matters: if a car finished ride A and started ride B while
 // this process missed both events, the registry would hold a poller keyed to a
 // completed ride. Reaping it lets adoptMissing put the right one back, so the
 // registry converges in one pass rather than staying subtly wrong until restart.
-func (p *RidePositionPoller) reapOrphans(wanted map[string]ActiveRideTarget) int {
+//
+// DISJOINT, not unequal. Where the two sets merely disagree — the car is
+// carrying rides {A, B}, the handle remembers {A} — the poller is still
+// justified by A, so cancelling and immediately re-adopting it would open a gap
+// in a live rider's tracking to fix a bookkeeping difference. The set is
+// re-synced in place instead.
+func (p *RidePositionPoller) reapOrphans(wanted map[string]map[string]struct{}) int {
 	type orphan struct {
 		vehicleID string
 		reason    string
@@ -85,16 +120,23 @@ func (p *RidePositionPoller) reapOrphans(wanted map[string]ActiveRideTarget) int
 
 	p.mu.Lock()
 	orphans := make([]orphan, 0, len(p.active))
+	resync := make(map[string]map[string]struct{})
 	for vehicleID, handle := range p.active {
-		target, stillWanted := wanted[vehicleID]
+		wantedRides, stillWanted := wanted[vehicleID]
 		switch {
 		case !stillWanted:
 			orphans = append(orphans, orphan{vehicleID, "reconcile.ride_ended"})
-		case target.RideRequestID != handle.rideRequestID:
+		case !ridesOverlap(wantedRides, handle.rides):
 			orphans = append(orphans, orphan{vehicleID, "reconcile.ride_replaced"})
+		default:
+			resync[vehicleID] = wantedRides
 		}
 	}
 	p.mu.Unlock()
+
+	for vehicleID, rides := range resync {
+		p.syncRides(vehicleID, rides)
+	}
 
 	// Cancellation happens OUTSIDE the lock, via the ordinary stopPoll path, so
 	// the identity checks that protect against a concurrent start apply here
@@ -105,22 +147,46 @@ func (p *RidePositionPoller) reapOrphans(wanted map[string]ActiveRideTarget) int
 	return len(orphans)
 }
 
-// adoptMissing starts a poller for every wanted vehicle that has none.
-func (p *RidePositionPoller) adoptMissing(wanted map[string]ActiveRideTarget) int {
-	adopted := 0
-	for vehicleID, target := range wanted {
-		if _, running := p.PollingRide(vehicleID); running {
-			continue
+// ridesOverlap reports whether the two ride sets share at least one id.
+func ridesOverlap(a, b map[string]struct{}) bool {
+	for id := range a {
+		if _, ok := b[id]; ok {
+			return true
 		}
+	}
+	return false
+}
+
+// adoptMissing starts a poller for every wanted vehicle that has none, and adds
+// any ride the database knows about that an existing poller does not.
+func (p *RidePositionPoller) adoptMissing(wanted map[string]map[string]struct{}) int {
+	adopted := 0
+	for vehicleID, rides := range wanted {
+		_, running := p.PollingRides(vehicleID)
 		before := p.ActiveCount()
-		p.startPoll(vehicleID, target.RideRequestID, "reconcile.adopt")
+		for _, rideRequestID := range sortedRideIDs(rides) {
+			p.startPoll(vehicleID, rideRequestID, "reconcile.adopt")
+		}
 		// startPoll refuses silently when the cap is hit or the component is
-		// stopping, so the count — not the call — is what proves adoption.
-		if p.ActiveCount() > before {
+		// stopping, so the count — not the call — is what proves adoption. A
+		// car that was already being polled has joined rides to an existing
+		// handle, which is a correction rather than an adoption.
+		if !running && p.ActiveCount() > before {
 			adopted++
 		}
 	}
 	return adopted
+}
+
+// sortedRideIDs makes adoption order deterministic, so which ride id lands in
+// the "started" log line does not depend on map iteration.
+func sortedRideIDs(rides map[string]struct{}) []string {
+	ids := make([]string, 0, len(rides))
+	for id := range rides {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // RunReconcileLoop re-runs Reconcile on a jittered cadence until ctx is

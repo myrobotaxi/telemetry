@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"slices"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -27,9 +29,11 @@ const (
 
 // --- fakes ---------------------------------------------------------------
 
-// fakeBackfill records every RefreshFromVehicleData call. It is the ONLY Tesla
-// seam the poller has, which is also how these tests prove no wake can happen:
-// there is no other method to call.
+// fakeBackfill records every RefreshPositionFromVehicleData call. It is the
+// ONLY Tesla seam the poller has, which is also how these tests prove no wake
+// can happen: there is no other method to call. The narrow interface is load
+// bearing — the poller cannot reach RefreshFromVehicleData and therefore cannot
+// trigger its second /release_notes GET.
 type fakeBackfill struct {
 	mu    sync.Mutex
 	calls []string // VINs, in order
@@ -37,13 +41,18 @@ type fakeBackfill struct {
 	// gate, when non-nil, is signalled on each call so a test can observe a
 	// cycle without racing a timer.
 	gate chan struct{}
+	// block, when non-nil, holds the call open until it is closed. It is what
+	// lets the leak test have a cycle PROVABLY in flight when Stop is called,
+	// so the difference between a join and a signal becomes observable.
+	block chan struct{}
 }
 
-func (f *fakeBackfill) RefreshFromVehicleData(_ context.Context, vin, _ string) error {
+func (f *fakeBackfill) RefreshPositionFromVehicleData(_ context.Context, vin, _ string) error {
 	f.mu.Lock()
 	f.calls = append(f.calls, vin)
 	err := f.err
 	gate := f.gate
+	block := f.block
 	f.mu.Unlock()
 
 	if gate != nil {
@@ -51,6 +60,9 @@ func (f *fakeBackfill) RefreshFromVehicleData(_ context.Context, vin, _ string) 
 		case gate <- struct{}{}:
 		default:
 		}
+	}
+	if block != nil {
+		<-block
 	}
 	return err
 }
@@ -101,21 +113,31 @@ func (f *fakeRideVehicles) ResolveVIN(_ context.Context, vehicleID string) (stri
 }
 
 type fakeRideLister struct {
-	mu      sync.Mutex
-	targets []ActiveRideTarget
-	err     error
-	calls   int
+	mu        sync.Mutex
+	targets   []ActiveRideTarget
+	err       error
+	calls     int
+	lastLimit int
 }
 
-func (f *fakeRideLister) ListActiveRideTargets(_ context.Context, _ int) ([]ActiveRideTarget, error) {
+// ListActiveRideTargets HONOURS the limit, because the reconcile's truncation
+// detection depends on it: the caller asks for MaxActive+1 rows and treats an
+// over-full answer as "this page is incomplete, do not reap against it". A fake
+// that ignored the limit could never exercise that branch.
+func (f *fakeRideLister) ListActiveRideTargets(_ context.Context, limit int) ([]ActiveRideTarget, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
+	f.lastLimit = limit
 	if f.err != nil {
 		return nil, f.err
 	}
-	out := make([]ActiveRideTarget, len(f.targets))
-	copy(out, f.targets)
+	n := len(f.targets)
+	if limit > 0 && limit < n {
+		n = limit
+	}
+	out := make([]ActiveRideTarget, n)
+	copy(out, f.targets[:n])
 	return out, nil
 }
 
@@ -199,6 +221,41 @@ func (h *ridePollHarness) awaitActive(t *testing.T, want int) {
 	t.Fatalf("active pollers = %d, want %d", h.poller.ActiveCount(), want)
 }
 
+// assertPollingRides asserts the exact ride set a vehicle is polled for. The
+// registry holds a SET because one car can carry two open rides, so every
+// assertion about it has to name all of them.
+//
+//nolint:unparam // vehicleID is the subject of the assertion; fixing it to one car would hide which registry key is checked.
+func assertPollingRides(t *testing.T, p *RidePositionPoller, vehicleID string, want ...string) {
+	t.Helper()
+	got, ok := p.PollingRides(vehicleID)
+	if !ok {
+		t.Fatalf("vehicle %s is not being polled; want rides %v", vehicleID, want)
+	}
+	sort.Strings(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("PollingRides(%s) = %v, want %v", vehicleID, got, want)
+	}
+}
+
+// awaitPollingRides waits for the registry to converge on a ride set, so a test
+// never races the bus's asynchronous delivery.
+//
+//nolint:unparam // as assertPollingRides.
+func awaitPollingRides(t *testing.T, p *RidePositionPoller, vehicleID string, want ...string) {
+	t.Helper()
+	sort.Strings(want)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got, ok := p.PollingRides(vehicleID); ok && slices.Equal(got, want) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	got, _ := p.PollingRides(vehicleID)
+	t.Fatalf("PollingRides(%s) = %v, want %v", vehicleID, got, want)
+}
+
 func (h *ridePollHarness) publish(t *testing.T, payload events.EventPayload) {
 	t.Helper()
 	if err := h.bus.Publish(context.Background(), events.NewEvent(payload)); err != nil {
@@ -242,9 +299,7 @@ func TestRidePoller_StartsOnAccept(t *testing.T) {
 	if !h.awaitPoll(t) {
 		t.Fatal("no vehicle_data read after accept; the first cycle must not wait for the interval")
 	}
-	if got, ok := h.poller.PollingRide(ridePollVehicle); !ok || got != ridePollRide {
-		t.Fatalf("PollingRide = (%q, %v), want (%q, true)", got, ok, ridePollRide)
-	}
+	assertPollingRides(t, h.poller, ridePollVehicle, ridePollRide)
 }
 
 // TestRidePoller_IgnoresScheduledAccept guards the rate budget: a reservation
@@ -321,9 +376,7 @@ func TestRidePoller_TerminalForAnotherRideIsIgnored(t *testing.T) {
 	h.publish(t, stale)
 
 	time.Sleep(50 * time.Millisecond)
-	if got, ok := h.poller.PollingRide(ridePollVehicle); !ok || got != ridePollRide {
-		t.Fatalf("PollingRide = (%q, %v) after a stale terminal event; want the live ride still polled", got, ok)
-	}
+	assertPollingRides(t, h.poller, ridePollVehicle, ridePollRide)
 }
 
 // TestRidePoller_YieldsToFreshStream is the MYR-300 interaction from this side:
@@ -458,9 +511,25 @@ func TestRidePoller_DisabledStartsNothing(t *testing.T) {
 	}
 }
 
-// TestRidePoller_NoGoroutineLeakOnShutdown — Stop must be a real join, not a
+// TestRidePoller_NoGoroutineLeakOnShutdown — Stop must be a real JOIN, not a
 // signal. A poller that survives its server is the same class of bug as one
-// that survives its ride.
+// that survives its ride: it keeps issuing Fleet API reads, now against a
+// closed pool.
+//
+// WHY THIS TEST IS SHAPED THE WAY IT IS. The obvious version — count goroutines
+// before, Stop, sleep, count again — cannot fail. A cancelled poller exits its
+// select in microseconds, so by the time any settling sleep has finished, the
+// count has recovered whether Stop joined or merely signalled. The earlier
+// version of this test did fail when `wg.Wait()` was commented out, but on the
+// REGISTRY assertion below, not on the goroutine count; delete that one line
+// and a signal-only Stop passed 3/3. The join was not under test.
+//
+// So the join is made OBSERVABLE instead. Both pollers are parked inside a
+// blocked Tesla call, the goroutine count is sampled with them provably in
+// flight, the block is released 50ms in the future, and the count is re-sampled
+// on the line immediately after Stop returns — before any sleep. A real join
+// cannot return until both blocked cycles drain and both goroutines exit; a
+// signal-only Stop returns instantly and the sample catches both still alive.
 func TestRidePoller_NoGoroutineLeakOnShutdown(t *testing.T) {
 	settle := func() int {
 		for i := 0; i < 50; i++ {
@@ -472,7 +541,9 @@ func TestRidePoller_NoGoroutineLeakOnShutdown(t *testing.T) {
 	before := settle()
 
 	bus := events.NewChannelBus(events.BusConfig{BufferSize: 16}, events.NoopBusMetrics{}, discardLogger())
-	backfill := &fakeBackfill{gate: make(chan struct{}, 64)}
+	// gate is buffered for both pollers' first cycle; block holds those cycles
+	// open until the test releases them.
+	backfill := &fakeBackfill{gate: make(chan struct{}, 64), block: make(chan struct{})}
 	p := NewRidePositionPoller(
 		bus,
 		NewRidePositionPollerDeps(
@@ -484,7 +555,9 @@ func TestRidePoller_NoGoroutineLeakOnShutdown(t *testing.T) {
 			&fakeTokenResolver{tok: TeslaToken{AccessToken: "tok"}},
 			&fakeRideLister{},
 		),
-		RidePositionPollConfig{Enabled: true, Interval: 5 * time.Millisecond},
+		// One hour, so the only cycles that ever run are the two immediate
+		// first ones the test parks inside the fake.
+		RidePositionPollConfig{Enabled: true, Interval: time.Hour},
 		discardLogger(),
 	)
 	if err := p.Start(context.Background()); err != nil {
@@ -504,17 +577,48 @@ func TestRidePoller_NoGoroutineLeakOnShutdown(t *testing.T) {
 	if p.ActiveCount() != 2 {
 		t.Fatalf("active pollers = %d, want 2", p.ActiveCount())
 	}
-	<-backfill.gate // at least one cycle is genuinely in flight
 
-	p.Stop()
+	// Both pollers are now inside RefreshPositionFromVehicleData and blocked.
+	<-backfill.gate
+	<-backfill.gate
+
+	// THE JOIN ASSERTION. Stop runs on its own goroutine so the test can watch
+	// whether it RETURNS while two cycles are still in flight. A join cannot;
+	// a signal returns at once. Nothing here depends on a goroutine count or on
+	// how long any particular call takes — only on the ordering, which is the
+	// property being claimed.
+	stopped := make(chan struct{})
+	go func() {
+		p.Stop()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while two poll cycles were still in flight — " +
+			"it signalled its pollers instead of joining them")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Let the two blocked cycles finish; a real join returns now and not before.
+	close(backfill.block)
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not return after its in-flight cycles drained")
+	}
+
+	// A good assertion in its own right, but it is no longer carrying the test:
+	// it runs AFTER the join assertion above, which is what makes that one
+	// provably load bearing.
 	if n := p.ActiveCount(); n != 0 {
 		t.Fatalf("registry holds %d pollers after Stop, want 0", n)
 	}
+
 	_ = bus.Close(context.Background())
 
 	after := settle()
-	// Two pollers plus the bus's per-subscription delivery goroutines is the
-	// budget; anything beyond a small slack means a loop outlived Stop.
+	// Belt and braces on the steady state: nothing at all is left behind.
 	if after > before+2 {
 		t.Fatalf("goroutines: before=%d after=%d — Stop did not join its pollers", before, after)
 	}

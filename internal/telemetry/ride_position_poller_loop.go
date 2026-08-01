@@ -41,6 +41,12 @@ func (p *RidePositionPoller) run(ctx context.Context, vehicleID string, handle *
 			return
 		case <-timer.C:
 		}
+		if p.lifetimeExceeded(handle, p.clock()) {
+			p.logger.Warn("ride position poll: lifetime ceiling reached, stopping (ride never terminated)",
+				slog.String("ride_request_id", p.rideLabel(handle)),
+				slog.Duration("max_lifetime", p.cfg.MaxLifetime))
+			return
+		}
 		p.pollOnce(ctx, vehicleID, handle)
 	}
 }
@@ -57,7 +63,9 @@ func (p *RidePositionPoller) pollOnce(ctx context.Context, vehicleID string, han
 		return
 	}
 
-	vin, ok := p.resolveVIN(ctx, vehicleID, handle)
+	rides := p.rideLabel(handle)
+
+	vin, ok := p.resolveVIN(ctx, vehicleID, rides, handle)
 	if !ok {
 		return
 	}
@@ -70,7 +78,7 @@ func (p *RidePositionPoller) pollOnce(ctx context.Context, vehicleID string, han
 	if p.pollStreamFresh(vin) {
 		p.logger.Debug("ride position poll: yielding to live stream",
 			slog.String("vin", redactVIN(vin)),
-			slog.String("ride_request_id", handle.rideRequestID))
+			slog.String("ride_request_id", rides))
 		return
 	}
 
@@ -82,31 +90,33 @@ func (p *RidePositionPoller) pollOnce(ctx context.Context, vehicleID string, han
 	callCtx, cancel := context.WithTimeout(ctx, p.cfg.CallTimeout)
 	defer cancel()
 
-	if err := p.deps.Backfill.RefreshFromVehicleData(callCtx, vin, token); err != nil {
-		p.logPollFailure(vin, handle.rideRequestID, err)
+	if err := p.deps.Backfill.RefreshPositionFromVehicleData(callCtx, vin, token); err != nil {
+		p.logPollFailure(vin, rides, err)
 		return
 	}
 
 	p.logger.Debug("ride position poll: position refreshed",
 		slog.String("vin", redactVIN(vin)),
-		slog.String("ride_request_id", handle.rideRequestID))
+		slog.String("ride_request_id", rides))
 }
 
 // resolveVIN maps the ride's vehicle to its VIN, caching the answer on the
 // handle. The mapping is immutable for the lifetime of a vehicle row, so this
 // costs one lookup per ride rather than one per cycle.
 //
-// The handle is only ever touched by its own goroutine — startPoll publishes it
-// to the registry before this runs, but every reader of the registry uses only
-// rideRequestID and cancel — so no lock is needed for the cached VIN.
-func (p *RidePositionPoller) resolveVIN(ctx context.Context, vehicleID string, handle *activePoll) (string, bool) {
+// The handle's vin field is only ever touched by its own goroutine — startPoll
+// publishes the handle to the registry before this runs, but every other reader
+// uses only the (lock-guarded) ride set and cancel — so no lock is needed here.
+func (p *RidePositionPoller) resolveVIN(
+	ctx context.Context, vehicleID, rides string, handle *activePoll,
+) (string, bool) {
 	if handle.vin != "" {
 		return handle.vin, true
 	}
 	vin, err := p.deps.Vehicles.ResolveVIN(ctx, vehicleID)
 	if err != nil {
 		p.logger.Warn("ride position poll: cannot resolve VIN (non-fatal)",
-			slog.String("ride_request_id", handle.rideRequestID),
+			slog.String("ride_request_id", rides),
 			slog.String("error", err.Error()))
 		return "", false
 	}

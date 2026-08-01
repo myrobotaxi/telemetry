@@ -88,10 +88,7 @@ func TestRidePollReconcile_ReplacesPollerForANewRide(t *testing.T) {
 	if adopted != 1 || reaped != 1 {
 		t.Fatalf("Reconcile = (adopted %d, reaped %d), want (1, 1)", adopted, reaped)
 	}
-	got, ok := h.poller.PollingRide(ridePollVehicle)
-	if !ok || got != "ride-next" {
-		t.Fatalf("PollingRide = (%q, %v), want (\"ride-next\", true)", got, ok)
-	}
+	assertPollingRides(t, h.poller, ridePollVehicle, "ride-next")
 }
 
 // TestRidePollReconcile_ListFailureChangesNothing — a database blip must never

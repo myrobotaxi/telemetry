@@ -28,6 +28,8 @@ import (
 // restPollEvent is the frame the MYR-394 poller produces: a position, no gear
 // (Tesla answers shift_state=null for a parked car), no speed (null when
 // stationary), and — critically — Source=SourceRESTBackfill.
+//
+//nolint:unparam // lng is fixed by the current fixtures; the pair belongs together.
 func restPollEvent(vin string, ts time.Time, lat, lng float64) events.VehicleTelemetryEvent {
 	te := telemetryEvent(vin, ts, map[string]events.TelemetryValue{
 		string(telemetry.FieldLocation): {LocationVal: &events.Location{Latitude: lat, Longitude: lng}},

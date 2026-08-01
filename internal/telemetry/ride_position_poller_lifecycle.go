@@ -21,6 +21,7 @@ package telemetry
 import (
 	"context"
 	"log/slog"
+	"strings"
 
 	"github.com/myrobotaxi/telemetry/internal/events"
 )
@@ -94,13 +95,17 @@ func (p *RidePositionPoller) handleStatusChanged(event events.Event) {
 	}
 }
 
-// startPoll registers and launches a poller for one vehicle, unless one is
-// already running for it, the component is stopping, or the cap is reached.
+// startPoll registers and launches a poller for one vehicle, or — if the car is
+// already being polled — records that one more ride now depends on it.
 //
-// Idempotent by VEHICLE. If a poller is already running for the car under a
-// DIFFERENT ride, the existing one is kept: it is polling the same VIN on the
-// same cadence, so replacing it would buy nothing and would open a window in
-// which the car is polled twice or not at all.
+// Idempotent by VEHICLE, and that is why the ride id is ADDED to the handle's
+// set rather than dropped on the floor. The poll itself is per-vehicle (same
+// VIN, same cadence, so a second loop would buy nothing), but the STOP is
+// per-ride, and the two have to agree about who is depending on this poller.
+// When they did not, a car carrying two open rides lost its poller the moment
+// the FIRST of them ended — while the second rider was watching the map — and
+// got it back only when the next reconcile ran, up to five minutes of exactly
+// the frozen-marker defect this feature exists to fix.
 func (p *RidePositionPoller) startPoll(vehicleID, rideRequestID, reason string) {
 	if vehicleID == "" {
 		return
@@ -115,7 +120,20 @@ func (p *RidePositionPoller) startPoll(vehicleID, rideRequestID, reason string) 
 		p.mu.Unlock()
 		return
 	case p.active[vehicleID] != nil:
+		handle := p.active[vehicleID]
+		joined := rideRequestID != "" && !handle.hasRide(rideRequestID)
+		if joined {
+			handle.rides[rideRequestID] = struct{}{}
+			// A newly live ride is fresh justification, so the ceiling starts
+			// again from here rather than from whenever the first ride began.
+			handle.deadline = p.now().Add(p.cfg.MaxLifetime)
+		}
 		p.mu.Unlock()
+		if joined {
+			p.logger.Info("ride position poll: second ride joined an existing poller",
+				slog.String("ride_request_id", rideRequestID),
+				slog.String("reason", reason))
+		}
 		return
 	case len(p.active) >= p.cfg.MaxActive:
 		p.mu.Unlock()
@@ -130,7 +148,11 @@ func (p *RidePositionPoller) startPoll(vehicleID, rideRequestID, reason string) 
 	// is released on every exit path including a parent cancellation.
 	// #nosec G118 -- cancel is stored on the handle and invoked by stopPoll / run's defer, not dropped.
 	ctx, cancel := context.WithCancel(p.ctx)
-	handle := &activePoll{rideRequestID: rideRequestID, cancel: cancel}
+	handle := &activePoll{
+		rides:    map[string]struct{}{rideRequestID: {}},
+		deadline: p.now().Add(p.cfg.MaxLifetime),
+		cancel:   cancel,
+	}
 	p.active[vehicleID] = handle
 	p.wg.Add(1)
 	p.mu.Unlock()
@@ -140,12 +162,19 @@ func (p *RidePositionPoller) startPoll(vehicleID, rideRequestID, reason string) 
 	p.logger.Info("ride position poll started",
 		slog.String("ride_request_id", rideRequestID),
 		slog.String("reason", reason),
-		slog.Duration("interval", p.cfg.Interval))
+		slog.Duration("interval", p.cfg.Interval),
+		slog.Duration("max_lifetime", p.cfg.MaxLifetime))
 }
 
-// stopPoll cancels the poller for a vehicle, but only if it belongs to the ride
-// named. An empty rideRequestID matches unconditionally — that is the
-// reconcile's orphan-reaping path, where the ride is by definition gone.
+// stopPoll removes one ride from a vehicle's poller, and cancels the poller
+// only when no ride is left to justify it. An empty rideRequestID reaps
+// unconditionally — that is the reconcile's orphan path, where the whole
+// vehicle is by definition no longer wanted.
+//
+// The per-ride removal is what makes the teardown symmetric with startPoll's
+// per-ride join: a terminal event for ride A must not cancel the poller that
+// live ride B on the same car is depending on, and a late or duplicated
+// terminal event for a ride that already ended must not cancel anything at all.
 //
 // It does NOT wait for the goroutine: this runs on a bus handler, and the bus
 // delivers serially per subscription, so blocking here would stall every later
@@ -158,20 +187,53 @@ func (p *RidePositionPoller) stopPoll(vehicleID, rideRequestID, reason string) {
 		p.mu.Unlock()
 		return
 	}
-	if rideRequestID != "" && handle.rideRequestID != rideRequestID {
-		p.mu.Unlock()
-		p.logger.Debug("ride position poll: terminal event for a ride we are not polling",
-			slog.String("ride_request_id", rideRequestID),
-			slog.String("polling_ride_request_id", handle.rideRequestID))
-		return
+	if rideRequestID != "" {
+		if !handle.hasRide(rideRequestID) {
+			remaining := handle.rideIDs()
+			p.mu.Unlock()
+			p.logger.Debug("ride position poll: terminal event for a ride we are not polling",
+				slog.String("ride_request_id", rideRequestID),
+				slog.String("polling_ride_request_ids", strings.Join(remaining, ",")))
+			return
+		}
+		delete(handle.rides, rideRequestID)
+		if len(handle.rides) > 0 {
+			remaining := handle.rideIDs()
+			p.mu.Unlock()
+			p.logger.Info("ride position poll: ride ended, vehicle still carrying another",
+				slog.String("ride_request_id", rideRequestID),
+				slog.String("polling_ride_request_ids", strings.Join(remaining, ",")),
+				slog.String("reason", reason))
+			return
+		}
 	}
+	stopped := handle.rideIDs()
 	delete(p.active, vehicleID)
 	p.mu.Unlock()
 
 	handle.cancel()
 	p.logger.Info("ride position poll stopped",
-		slog.String("ride_request_id", handle.rideRequestID),
+		slog.String("ride_request_id", rideRequestID),
+		slog.String("remaining_ride_request_ids", strings.Join(stopped, ",")),
 		slog.String("reason", reason))
+}
+
+// syncRides replaces a handle's ride set with the database's view of it, used
+// by the reconcile when the two overlap but do not match: the poller is still
+// justified, so cancelling and re-adopting it would be a needless gap, but the
+// set it holds must not keep naming a ride that has ended.
+func (p *RidePositionPoller) syncRides(vehicleID string, wanted map[string]struct{}) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	handle, ok := p.active[vehicleID]
+	if !ok || len(wanted) == 0 {
+		return
+	}
+	rides := make(map[string]struct{}, len(wanted))
+	for id := range wanted {
+		rides[id] = struct{}{}
+	}
+	handle.rides = rides
 }
 
 // release removes a vehicle's registry entry on the way out of run, but ONLY if

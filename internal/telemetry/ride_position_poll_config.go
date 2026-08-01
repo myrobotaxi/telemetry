@@ -17,8 +17,28 @@ type RidePositionPollConfig struct {
 	// rate limiting.
 	Enabled bool
 	// Interval is the poll cadence (RIDE_POSITION_POLL_INTERVAL). At the ~25s
-	// default one active ride costs ~2.4 vehicle_data GETs per minute.
+	// default one active ride costs ~2.4 vehicle_data GETs per minute — ONE
+	// Tesla request per cycle, which is a property of the interface the poller
+	// holds (ridePositionRefresher) rather than of this comment: the two
+	// MYR-320 enrichers that would make it two GETs are not reachable from it.
 	Interval time.Duration
+	// MaxLifetime is the ceiling on how long ONE vehicle's poller may run
+	// before it stops itself, however open the ride still looks.
+	//
+	// It exists because "the ride is still open" is not a promise that anything
+	// will ever close it. There is no automatic terminal transition anywhere in
+	// this system — a rider no-show leaves the row at `arrived`, and a
+	// dispatched reservation nobody cancels stays `accepted` with
+	// dispatch_status='sent' — so a purely status-based gate is unbounded, and
+	// one abandoned ride would spend Fleet API budget every 25 seconds until
+	// the process restarted (~3,500 GETs/day, forever).
+	//
+	// This is the DEFENSIVE half. The authoritative half is the matching age
+	// bound in store.pollableRidePredicate, which stops the reconcile from
+	// re-adopting a ride this stale; without it, this deadline would only be
+	// honoured until the next reconcile pass handed the poller straight back.
+	// Keep the two horizons in step.
+	MaxLifetime time.Duration
 	// JitterFraction spreads each wait so that N simultaneous rides — and N
 	// replicas after a rolling deploy — do not align into a burst.
 	JitterFraction float64
@@ -61,6 +81,11 @@ const (
 	// would let one slow request straddle two cycles, and a position fix that
 	// arrives half a minute late is not worth waiting for — the next cycle is
 	// closer than the answer.
+	//
+	// It bounds ONE GET and its retries, and the retry count that matters here
+	// is now zero for the case that dominates: 503 (Tesla's "this vehicle is
+	// not answering") is no longer retryable, so an asleep car costs one
+	// request per cycle rather than four inside this same budget.
 	defaultRidePollCallTimeout = 15 * time.Second
 	// defaultRideReconcileInterval is the safety-net cadence. Five minutes is
 	// chosen against what it bounds: the worst case it repairs is a poller that
@@ -73,6 +98,19 @@ const (
 	// plausible number of simultaneous rides at this scale, so the cap is a
 	// guard rail rather than a routine truncation.
 	defaultRideMaxActive = 50
+
+	// defaultRideMaxLifetime is the poll-lifetime ceiling, and it MUST match
+	// the horizon in store.pollableRidePredicate (six hours) — see MaxLifetime
+	// on why one without the other does nothing.
+	//
+	// Six hours is chosen to be far outside any real ride and just inside the
+	// waste it bounds. A leg long enough to reach it is a car driving for six
+	// straight hours, which means a car that is ONLINE AND STREAMING — and a
+	// streaming car's poll cycles are already no-ops, because layer 1 of the
+	// stream yield skips the REST call entirely. So the ride that loses its
+	// poller at the ceiling is, with high confidence, the one that was never
+	// going anywhere.
+	defaultRideMaxLifetime = 6 * time.Hour
 )
 
 func (c RidePositionPollConfig) withDefaults() RidePositionPollConfig {
@@ -93,6 +131,9 @@ func (c RidePositionPollConfig) withDefaults() RidePositionPollConfig {
 	}
 	if c.MaxActive <= 0 {
 		c.MaxActive = defaultRideMaxActive
+	}
+	if c.MaxLifetime <= 0 {
+		c.MaxLifetime = defaultRideMaxLifetime
 	}
 	return c
 }

@@ -59,8 +59,11 @@ func applyRidePollEnvOverrides(fc *fileConfig) error {
 	fc.ridePollEnabled = enabled
 
 	// RIDE_POSITION_POLL_INTERVAL tunes the cadence. It is the only lever on the
-	// resulting Fleet API request rate (one vehicle_data GET per active ride per
-	// interval), so it is worth being able to widen without a deploy.
+	// resulting Fleet API request rate — one vehicle_data GET per active ride
+	// per interval, and exactly one: the poller holds the narrow
+	// telemetry.ridePositionRefresher interface, which cannot reach the MYR-320
+	// /release_notes enricher that makes the connectivity-edge refresh two GETs.
+	// So it is worth being able to widen without a deploy.
 	interval, err := parseDurationEnv(
 		"RIDE_POSITION_POLL_INTERVAL", "RIDE_POSITION_POLL_ENABLED", defaultRidePollInterval)
 	if err != nil {

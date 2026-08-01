@@ -30,23 +30,43 @@ package telemetry
 //     stream-sourceable field anyway. A poll can never out-rank live data, and
 //     because noteStreamFrame ignores non-streamed frames it can never stamp
 //     the freshness clock and latch itself into looking live.
-//   - ONE VEHICLE PER RIDE. The registry is keyed by VEHICLE, so two rides on
-//     one car cannot double the request rate, and MaxActive bounds the
-//     fleet-wide worst case.
+//   - ONE POLLER PER VEHICLE. The registry is keyed by VEHICLE, so two rides on
+//     one car cannot double the request rate; the handle holds the SET of rides
+//     justifying it and the poller stops when that set empties. MaxActive
+//     bounds the fleet-wide worst case.
+//   - BOUNDED IN TIME AS WELL AS IN SCOPE. Nothing in this system automatically
+//     terminates a ride, so "the ride is still open" is not on its own a
+//     promise that anything will ever stop the loop. MaxLifetime and the
+//     matching age bound in pollableRidePredicate are what turn it into one.
 //
 // It introduces NO new read path, NO new WS message and NO contract change:
-// RefreshFromVehicleData already publishes a SourceRESTBackfill frame, and
-// latitude / longitude / speed / heading are already on the wire, already on
-// the owner mask, and already persisted.
+// RefreshPositionFromVehicleData publishes the same SourceRESTBackfill frame
+// the MYR-260 backfill always has, and latitude / longitude / speed / heading
+// are already on the wire, already on the owner mask, and already persisted.
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/events"
 )
+
+// ridePositionRefresher performs ONE vehicle_data read per call and
+// republishes it through the MYR-260 backfill mapping. Satisfied by
+// *ServiceStatusMonitor.RefreshPositionFromVehicleData.
+//
+// It is deliberately NOT vehicleDataPublisher (the connectivity-edge
+// interface): that method chases a second /release_notes GET and rewrites the
+// Prisma colour column on every call, which is correct on an edge and pure
+// waste on a 25-second loop. Naming the narrower method here is what makes
+// "one active ride costs one Tesla GET per interval" a property of the type
+// rather than of a comment.
+type ridePositionRefresher interface {
+	RefreshPositionFromVehicleData(ctx context.Context, vin, token string) error
+}
 
 // RideVehicleResolver maps a ride's vehicleID onto the VIN the Fleet API is
 // keyed by. Declared at the consumer site; satisfied in cmd/ by an adapter over
@@ -68,14 +88,6 @@ type ActiveRideTarget struct {
 // authority the reconcile trusts OVER its own in-memory registry.
 type ActiveRideLister interface {
 	ListActiveRideTargets(ctx context.Context, limit int) ([]ActiveRideTarget, error)
-}
-
-// activePoll is one running poller's handle: what it polls, and the lever that
-// stops it.
-type activePoll struct {
-	rideRequestID string
-	vin           string
-	cancel        context.CancelFunc
 }
 
 // RidePositionPoller owns the set of per-vehicle position pollers and the
@@ -110,6 +122,11 @@ type RidePositionPoller struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	// now is the clock the MaxLifetime ceiling is measured against. Injectable
+	// so the ceiling can be tested in milliseconds rather than hours, matching
+	// drives.Detector.setNow.
+	now func() time.Time
 }
 
 // RidePollDeps bundles the six collaborators so the poller struct stays under
@@ -117,8 +134,8 @@ type RidePositionPoller struct {
 // decomposition) and so cmd/ wiring names each one at the call site.
 type RidePollDeps struct {
 	// Backfill is the MYR-260 read+publish path — the ONLY way this component
-	// talks to Tesla, and the reason it cannot wake a car.
-	Backfill vehicleDataPublisher
+	// talks to Tesla, and the reason it cannot wake a car. ONE GET per call.
+	Backfill ridePositionRefresher
 	// Streams is the MYR-300 per-VIN stream-recency reader the poll yields to.
 	Streams streamRecencyReader
 	// Vehicles resolves a ride's vehicleID to a VIN.
@@ -149,6 +166,7 @@ func NewRidePositionPoller(
 		cfg:    cfg.withDefaults(),
 		logger: logger,
 		active: make(map[string]*activePoll),
+		now:    time.Now,
 	}
 }
 
@@ -156,7 +174,7 @@ func NewRidePositionPoller(
 // constructor as well as a struct so cmd/ names every collaborator positionally
 // and cannot silently leave one nil when a new one is added.
 func NewRidePositionPollerDeps(
-	backfill vehicleDataPublisher,
+	backfill ridePositionRefresher,
 	streams streamRecencyReader,
 	vehicles RideVehicleResolver,
 	owners VehicleOwnerLookup,
@@ -257,34 +275,4 @@ func (p *RidePositionPoller) unsubscribeAll() {
 				slog.String("error", err.Error()))
 		}
 	}
-}
-
-// ActiveCount reports how many vehicles are currently being polled.
-func (p *RidePositionPoller) ActiveCount() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return len(p.active)
-}
-
-// PollingRide reports which ride a vehicle is currently polled for, if any.
-// Exported so the reconcile's callers and the tests can observe the registry;
-// there is no other way in from outside.
-func (p *RidePositionPoller) PollingRide(vehicleID string) (string, bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	h, ok := p.active[vehicleID]
-	if !ok {
-		return "", false
-	}
-	return h.rideRequestID, true
-}
-
-// pollStreamFresh reports whether the car is streaming right now, per the
-// MYR-300 per-VIN recency window. The poll yields when it is.
-func (p *RidePositionPoller) pollStreamFresh(vin string) bool {
-	if p.deps.Streams == nil {
-		return false
-	}
-	_, fresh := p.deps.Streams.LastStreamAt(vin)
-	return fresh
 }

@@ -37,7 +37,33 @@ import (
 //
 // Terminal states (completed / cancelled / declined) and `requested` are
 // excluded: nothing is under way, so there is nothing to track.
+//
+// THE AGE BOUND IS NOT AN OPTIMISATION (MYR-394). Every clause above is about
+// STATUS, and no status ever expires on its own: there is no automatic terminal
+// transition anywhere in this repo (ride_request_status_update.go documents
+// that even a `reservation_expired` ride stays `accepted`), and the reservation
+// sweeper's expire() only reaches rows with dispatched_at IS NULL. So a rider
+// no-show leaves the row at `arrived` and a dispatched reservation nobody
+// cancels stays `accepted` with dispatch_status='sent' — both matching this
+// predicate for the rest of the database's life, both faithfully re-adopting a
+// poller after every restart, each costing ~3,500 Fleet API GETs a day for a
+// ride that ended in someone's mind hours ago.
+//
+// updated_at is the right anchor because it is frozen at the row's last REAL
+// transition: a live ride's every step (accept, dispatch, enroute, arrived)
+// writes the row, while an abandoned one stops being written the moment it is
+// abandoned. Six hours is far outside any real leg and matches
+// telemetry.defaultRideMaxLifetime — the two must move together, since the
+// in-memory ceiling only holds until the next reconcile would hand the poller
+// straight back.
+//
+// Written against the BARE column so it stays SARGable against
+// idx_go_ride_requests_active_poll (migration 0028): `updated_at > NOW() - W`,
+// never `updated_at + W > NOW()`, which would make the indexed column an
+// expression and drop the range out of Index Cond. Same lesson as MYR-383's
+// window predicate.
 const pollableRidePredicate = `r.status IN ('accepted', 'enroute', 'arrived')
+		  AND r.updated_at > NOW() - INTERVAL '6 hours'
 		  AND (
 		    r.scheduled_for IS NULL
 		    OR r.status IN ('enroute', 'arrived')
@@ -53,15 +79,30 @@ const pollableRidePredicate = `r.status IN ('accepted', 'enroute', 'arrived')
 // provisioning INSERT can seed a placeholder row before Tesla has supplied a
 // VIN, and there is nothing to read from the Fleet API for one.
 //
-// Ordered oldest-updated first so that when a pass is truncated by the limit it
-// sheds the most recently touched rides, never the most neglected.
+// Ordered MOST-RECENTLY-UPDATED FIRST, so that when a pass is truncated by the
+// limit it sheds the most neglected rides and keeps the freshest.
+//
+// This is the opposite of what it originally said, and the inversion was a real
+// hazard rather than a matter of taste. The most recently touched ride is the
+// one that just transitioned — the rider has the tracking map open right now.
+// The least recently touched is, by the age reasoning above, the one most
+// likely to be abandoned. Ordering oldest-first meant that if the caller's cap
+// were ever reached, the page would be filled with precisely the rides whose
+// pollers matter least, while the reconcile read that page as the complete
+// picture and reaped the live ones. (The reconcile no longer reaps against a
+// truncated page at all, and the six-hour bound drains the zombies — this is
+// the third of the three independent guards.)
+//
+// updated_at DESC is served by the same plain btree as ASC would be
+// (idx_go_ride_requests_active_poll, migration 0028), scanned backwards, so the
+// LIMIT still stops after ~50 qualifying rows rather than sorting the table.
 const queryActiveRidePollTargets = `
 SELECT r.id, r.vehicle_id, v."vin"
 FROM go_ride_requests r
 JOIN "Vehicle" v ON v."id" = r.vehicle_id
 WHERE ` + pollableRidePredicate + `
   AND v."vin" <> ''
-ORDER BY r.updated_at ASC
+ORDER BY r.updated_at DESC
 LIMIT $1`
 
 // ActiveRidePollTarget is one vehicle that should be position-polled, together
