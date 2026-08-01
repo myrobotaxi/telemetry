@@ -27,6 +27,18 @@ var migration0025Columns = map[string]string{
 	"created_at":          "timestamp with time zone",
 	"updated_at":          "timestamp with time zone",
 	"ended_at":            "timestamp with time zone",
+	// Migration 0027 (MYR-398) — the leg-progress anchor. Listed here rather
+	// than in a map of their own because the undocumented-column check below
+	// walks the whole table, and a second map would let the two drift.
+	"progress_leg":      "text",
+	"progress_source":   "text",
+	"progress_baseline": "double precision",
+	"progress_value":    "double precision",
+	// The reading pair dates the observation the fraction came from, which the
+	// car's own row stamp cannot: `Vehicle."lastUpdated"` moves on every
+	// telemetry write of any column, nav or not.
+	"progress_reading":    "double precision",
+	"progress_reading_at": "timestamp with time zone",
 }
 
 // liveActivityColumnTypes introspects the installed go_live_activities columns.

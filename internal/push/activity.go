@@ -47,11 +47,13 @@ const ActivityContentStateVersion = 1
 
 // ActivityContentState is what the rider's Live Activity renders.
 //
-// Deliberately four fields. Apple caps the whole payload at 4KB and throttles
-// high-frequency Activity pushes by budget, and every field here has to survive
-// being wrong for up to three minutes (see StaleAfter) — so the bar for
-// inclusion is "the rider would misread the screen without it", not "we have
-// the value handy".
+// Apple caps the whole payload at 4KB and throttles high-frequency Activity
+// pushes by budget, and every field here has to survive being wrong for up to
+// three minutes (see StaleAfter) — so the bar for inclusion is "the rider would
+// misread the screen without it", not "we have the value handy". That bar is
+// also why the r16 redesign added ONE field: the "Meet at {pickup}" line it
+// introduced needs no push, because the pickup cannot change for the life of a
+// ride and the app already holds it (rest-api.md §7.21.3).
 type ActivityContentState struct {
 	// Version is the content-state schema version. Always
 	// ActivityContentStateVersion on send.
@@ -91,6 +93,26 @@ type ActivityContentState struct {
 	// the car is taking you is not the feature. It is never sent to the owner's
 	// Activity, and never appears in an alert body.
 	Destination string `json:"destination"`
+
+	// Progress is how far along the CURRENT leg the car is, 0..1, omitted
+	// entirely when we cannot say (MYR-398).
+	//
+	// Which leg is not carried: `Status` already says it (`accepted` is the car
+	// coming to the rider, `enroute` is the car taking them onward), and a
+	// second copy of one fact is a second thing that can disagree with itself.
+	//
+	// P0 and worth saying why, since its neighbour `Destination` is not: this is
+	// a unitless fraction of an unnamed journey. It carries no coordinate, no
+	// place name, and no distance — "62% of the way" locates the car only for
+	// somebody who already knows both ends of the trip, which on this surface is
+	// the rider whose trip it is. It is therefore the one field here that could
+	// ride an owner-side Activity unchanged, if one is ever started.
+	//
+	// Absent is a first-class value and the common one: a car with no active nav
+	// route, a car whose telemetry has gone quiet, an Activity registered before
+	// dispatch. The client renders the card with no track. See
+	// activity_progress.go for the derivation and its honesty bounds.
+	Progress *float64 `json:"progress,omitempty"`
 }
 
 // MaxContentStateLabel bounds the free-text labels in a content-state, in

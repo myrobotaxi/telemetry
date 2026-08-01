@@ -207,15 +207,21 @@ func (t *ActivityTicker) RunPass(ctx context.Context) {
 
 	now := t.notifier.now()
 	pushed := make([]ActivityKey, 0, len(legs))
-	for _, leg := range legs {
+	// Indexed rather than ranged by value: ActivityLeg grew a progress anchor
+	// with MYR-398 and gocritic now flags the per-iteration copy, which runs
+	// once per live Activity on every 60-90s pass.
+	for i := range legs {
+		leg := &legs[i]
 		if !t.notifier.allowed(ctx, leg.UserID, leg.RideRequestID) {
 			continue
 		}
+		state, anchor := contentState(leg.RideContext, leg.Progress, now)
 		// lowPriority: an ETA tick rides apns-priority 5 so it never competes
 		// with a lifecycle transition for Apple's per-Activity budget
 		// (MYR-194 decision 3).
-		if t.notifier.send(ctx, leg.Activity, contentState(leg.RideContext, now), ActivityEventUpdate, nil, true, now) {
+		if t.notifier.send(ctx, leg.Activity, state, ActivityEventUpdate, nil, true, now) {
 			pushed = append(pushed, ActivityKey{RideRequestID: leg.RideRequestID, UserID: leg.UserID})
+			t.notifier.saveProgress(ctx, leg.Activity, anchor)
 		}
 	}
 

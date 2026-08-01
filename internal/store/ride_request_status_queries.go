@@ -6,6 +6,26 @@
 
 package store
 
+import "fmt"
+
+// rideNotDormantPredicate is MYR-376's reservation-dormancy predicate, written
+// ONCE and rendered with the caller's table prefix — `%[1]s` is "" for the
+// unaliased UPDATE target below and "r." for a join.
+//
+// It exists as a template rather than as two literals because MYR-398's Live
+// Activity progress gate asks the SAME question from a different query
+// (live_activity_leg.go): "has this ride's pickup leg actually started, or is
+// it a reservation still sleeping until its due instant?". Two spellings of one
+// safety predicate are two predicates that drift, and the drift would be silent
+// — each query would keep passing its own tests while disagreeing about whether
+// a car is on its way.
+//
+// NOTE FOR SELECT CALLERS: `dispatch_status = 'sent'` is NULL, not FALSE, for
+// the undispatched reservation that is the production case, so the whole OR
+// chain evaluates to NULL there. A WHERE clause treats that as false and is
+// safe; a SELECTED column is not, and must wrap this in COALESCE(..., FALSE).
+const rideNotDormantPredicate = `(%[1]sscheduled_for IS NULL OR %[1]sdispatch_status = 'sent' OR %[1]sscheduled_for <= NOW())`
+
 // rideRequestStatusStamp is the SET clause every lifecycle transition shares.
 // One statement, all of the timestamp side-effects: entering 'accepted' stamps
 // accepted_at, entering 'arrived' stamps picked_up_at (the owner-confirmed
@@ -99,7 +119,11 @@ RETURNING ` + rideRequestColumns
 // dispatching concurrently with a pickup tap is arbitrated by the database
 // exactly like two racing transitions: no pickup can ever commit against a row
 // that is dormant at the instant of the write, whatever any earlier read saw.
-const queryRideRequestUpdateStatusFromDispatched = rideRequestStatusStamp + `
+//
+// The predicate itself is rideNotDormantPredicate, rendered unaliased. It is a
+// var rather than a const only because that template is shared with the
+// progress gate's SELECT; the SQL text it produces is unchanged.
+var queryRideRequestUpdateStatusFromDispatched = rideRequestStatusStamp + `
 WHERE id = $1 AND status = ANY($3)
-  AND (scheduled_for IS NULL OR dispatch_status = 'sent' OR scheduled_for <= NOW())
+  AND ` + fmt.Sprintf(rideNotDormantPredicate, "") + `
 RETURNING ` + rideRequestColumns
