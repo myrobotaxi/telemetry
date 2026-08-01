@@ -20,6 +20,9 @@ import (
 // outranks Enroute on the same status, and that the unhappy endings are outside
 // the six.
 func TestAlertPhaseForMapsTheDesignsSixPhases(t *testing.T) {
+	fresh := fixedNow.Add(-30 * time.Second)
+	stale := fixedNow.Add(-ProgressFreshFor - time.Second)
+
 	tests := []struct {
 		name string
 		rc   RideContext
@@ -28,27 +31,33 @@ func TestAlertPhaseForMapsTheDesignsSixPhases(t *testing.T) {
 		{"dispatch", RideContext{Status: statusRequested}, AlertPhaseDispatch},
 		{
 			"enroute, car far away",
-			RideContext{Status: statusAccepted, ETAMinutes: intPtr(9), DispatchUnderway: true},
+			RideContext{Status: statusAccepted, ETAMinutes: intPtr(9), NavUpdatedAt: &fresh, DispatchUnderway: true},
 			AlertPhaseEnroute,
 		},
 		{
 			"enroute, no eta at all",
-			RideContext{Status: statusAccepted, DispatchUnderway: true},
+			RideContext{Status: statusAccepted, NavUpdatedAt: &fresh, DispatchUnderway: true},
 			AlertPhaseEnroute,
 		},
 		{
 			"arriving at the threshold",
-			RideContext{Status: statusAccepted, ETAMinutes: intPtr(ArrivingWithinMinutes), DispatchUnderway: true},
+			RideContext{
+				Status: statusAccepted, ETAMinutes: intPtr(ArrivingWithinMinutes),
+				NavUpdatedAt: &fresh, DispatchUnderway: true,
+			},
 			AlertPhaseArriving,
 		},
 		{
 			"arriving under the threshold",
-			RideContext{Status: statusAccepted, ETAMinutes: intPtr(1), DispatchUnderway: true},
+			RideContext{Status: statusAccepted, ETAMinutes: intPtr(1), NavUpdatedAt: &fresh, DispatchUnderway: true},
 			AlertPhaseArriving,
 		},
 		{
 			"one minute above the threshold is still Enroute",
-			RideContext{Status: statusAccepted, ETAMinutes: intPtr(ArrivingWithinMinutes + 1), DispatchUnderway: true},
+			RideContext{
+				Status: statusAccepted, ETAMinutes: intPtr(ArrivingWithinMinutes + 1),
+				NavUpdatedAt: &fresh, DispatchUnderway: true,
+			},
 			AlertPhaseEnroute,
 		},
 		{
@@ -58,7 +67,24 @@ func TestAlertPhaseForMapsTheDesignsSixPhases(t *testing.T) {
 			// two minutes from home would tell the rider their ride was almost
 			// here, a day early, with a notification attached.
 			"dormant reservation never reaches Arriving",
-			RideContext{Status: statusAccepted, ETAMinutes: intPtr(1), DispatchUnderway: false},
+			RideContext{Status: statusAccepted, ETAMinutes: intPtr(1), NavUpdatedAt: &fresh, DispatchUnderway: false},
+			AlertPhaseEnroute,
+		},
+		{
+			// THE DEFECT THE FRESHNESS GATE CLOSES, and note that
+			// DispatchUnderway is TRUE here: for an instant ride
+			// `scheduled_for IS NULL` makes it unconditionally true, so the
+			// dormancy gate contributes nothing on this path. The reading is a
+			// leftover from the car's previous trip.
+			"a stale reading never reaches Arriving",
+			RideContext{Status: statusAccepted, ETAMinutes: intPtr(1), NavUpdatedAt: &stale, DispatchUnderway: true},
+			AlertPhaseEnroute,
+		},
+		{
+			// A car we have never heard from is exactly the case the guard is
+			// for; an absent stamp is not fresh.
+			"an undated reading never reaches Arriving",
+			RideContext{Status: statusAccepted, ETAMinutes: intPtr(1), DispatchUnderway: true},
 			AlertPhaseEnroute,
 		},
 		{"arrived", RideContext{Status: statusArrived}, AlertPhaseArrived},
@@ -72,7 +98,7 @@ func TestAlertPhaseForMapsTheDesignsSixPhases(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := alertPhaseFor(tc.rc); got != tc.want {
+			if got := alertPhaseFor(tc.rc, fixedNow); got != tc.want {
 				t.Errorf("alertPhaseFor(%+v) = %d, want %d", tc.rc, got, tc.want)
 			}
 		})
@@ -331,42 +357,175 @@ func TestOrdinaryTicksNeverAlert(t *testing.T) {
 // TestStaleFlipNeverAlerts is the design's other named prohibition. A car going
 // quiet changes what the card SAYS — the subline flips to "Last updated" — but
 // it is not a phase change, so the island must stay shut.
+//
+// RUN ON A RUNG WHERE AN ALERT COULD ACTUALLY FIRE, which is the whole
+// difference between this test and a tautology. Its previous form sat on
+// `enroute` at a mark of On trip, where alertFor(5, 5) is nil whatever the
+// staleness does — it asserted that nothing happened in a situation where
+// nothing could. Here the ride is mid-PICKUP at a mark of Enroute, so rung 3 is
+// live and unspent, and the car's last streamed reading is UNDER the two-minute
+// threshold: an implementation that read the ETA without dating it would alert
+// Arriving on this pass. The second half then shows the same reading, freshly
+// stamped, doing exactly that — so the first half is about staleness and not
+// about some other reason the island stayed shut.
 func TestStaleFlipNeverAlerts(t *testing.T) {
-	fresh := fixedNow.Add(-30 * time.Second)
+	// The car's last word was "90 seconds out", said half an hour ago and never
+	// revised — the shape a car leaves behind when it parks and goes quiet.
+	quiet := fixedNow.Add(-30 * time.Minute)
 	n, sender, store := newTestActivityNotifier(t, nil)
 	store.legs = []ActivityLeg{{
 		Activity: Activity{
 			RideRequestID: activityRideID, UserID: testRiderID, Token: riderToken,
-			AlertedPhase: AlertPhaseOnTrip,
+			AlertedPhase: AlertPhaseEnroute,
 		},
 		RideContext: RideContext{
-			Status:             statusEnroute,
-			VehicleName:        "Blue Whale",
-			Destination:        "Home",
-			ETAMinutes:         intPtr(9),
-			TripMilesRemaining: miles(4),
-			NavUpdatedAt:       &fresh,
+			Status:           statusAccepted,
+			VehicleName:      "Blue Whale",
+			Destination:      "Home",
+			ETAMinutes:       intPtr(1),
+			NavUpdatedAt:     &quiet,
+			DispatchUnderway: true,
 		},
 	}}
 
 	ticker := NewActivityTicker(n, store, TickerConfig{Enabled: true}, discardLogger())
 	ticker.RunPass(t.Context())
 
-	// The car goes quiet; the next pass is well past the horizon and holds.
-	n.now = func() time.Time { return fixedNow.Add(30 * time.Minute) }
+	sent := sender.Sent()
+	if len(sent) != 1 {
+		t.Fatalf("sends = %d, want 1", len(sent))
+	}
+	if sent[0].Alert != nil {
+		t.Errorf("the stale pass alerted (%+v); the design forbids it by name, and the reading it "+
+			"alerted on is half an hour old", *sent[0].Alert)
+	}
+	if got := store.savedAlertsFor(activityRideID, testRiderID); len(got) != 0 {
+		t.Errorf("persisted alert phases = %v, want none — a stale reading may not burn a rung", got)
+	}
+
+	// THE CONTROL. The same 1 minute, now freshly stamped, is the real thing and
+	// must alert — otherwise the assertion above would pass for the wrong reason.
+	fresh := fixedNow.Add(-30 * time.Second)
+	store.legs[0].NavUpdatedAt = &fresh
 	ticker.RunPass(t.Context())
 
-	sent := sender.Sent()
+	sent = sender.Sent()
 	if len(sent) != 2 {
 		t.Fatalf("sends = %d, want 2", len(sent))
 	}
-	if sent[1].Alert != nil {
-		t.Errorf("the stale pass alerted (%+v); the design forbids it by name", *sent[1].Alert)
+	if sent[1].Alert == nil {
+		t.Fatal("a fresh sub-threshold reading did not alert; the gate is refusing the real Arriving too")
 	}
-	// Sanity: the pass really did go stale, so the assertion above is about
-	// the case it claims to be about.
-	if a, b := sent[0].ContentState.AsOf, sent[1].ContentState.AsOf; a == nil || b == nil || *a != *b {
-		t.Errorf("asOf moved (%s → %s); this pass was meant to be a held one", fmtPtr(a), fmtPtr(b))
+	if got, want := sent[1].Alert.Body, alertBodies[AlertPhaseArriving]; got != want {
+		t.Errorf("alert body = %q, want %q", got, want)
+	}
+}
+
+// TestStaleETAAtAcceptDoesNotBurnTheLadder is the ordinary instant ride, and
+// the durable defect it pins is the reason the freshness gate exists.
+//
+// The owner's car has just finished a previous trip, so `minutesToArrival` still
+// reads 1 — the column keeps the last value a route produced. The rider requests
+// an instant ride and the owner accepts. `ride.status.changed` fires at once and
+// the fan-out reads the ride BEFORE the dispatched route has streamed back, so
+// the ETA in hand belongs to a journey that is over. DispatchUnderway is no help
+// whatsoever here: `scheduled_for IS NULL` on an instant ride makes it
+// unconditionally true.
+//
+// Ungated, the accept push expands the island with "your ride is almost here"
+// for a car twenty minutes away AND persists the mark at Arriving(3) — spending
+// rungs 2 and 3 together, so the rider is never told a car is on its way and
+// never gets the real Arriving when the car genuinely is two minutes out. Unlike
+// a wrong `eta`, which the next reading corrects, that is in the database for
+// the life of the ride. So the accept push must yield Enroute, and Arriving must
+// wait for a reading dated after the dispatch.
+func TestStaleETAAtAcceptDoesNotBurnTheLadder(t *testing.T) {
+	n, sender, store := newTestActivityNotifier(t, nil)
+	// A v3 registration made at `requested`, seeded at Dispatch.
+	store.byRide[activityRideID] = []Activity{{
+		RideRequestID: activityRideID, UserID: testRiderID, Token: riderToken,
+		AlertedPhase: AlertPhaseDispatch,
+	}}
+	// The leftover: one minute, last streamed before the accept and never since.
+	leftover := fixedNow.Add(-ProgressFreshFor - time.Minute)
+	store.context[activityRideID] = RideContext{
+		Status:           statusAccepted,
+		VehicleName:      "Blue Whale",
+		Destination:      "Home",
+		ETAMinutes:       intPtr(1),
+		NavUpdatedAt:     &leftover,
+		DispatchUnderway: true,
+	}
+
+	n.handleStatusChanged(events.NewEvent(events.RideStatusChangedEvent{
+		RideRequestID: activityRideID, RiderID: testRiderID, Status: statusAccepted,
+	}))
+	n.Wait()
+
+	sent := sender.Sent()
+	if len(sent) != 1 {
+		t.Fatalf("sends on accept = %d, want 1", len(sent))
+	}
+	if sent[0].Alert == nil {
+		t.Fatal("the accept push carried no alert; a car being on its way is a phase change")
+	}
+	if got, want := sent[0].Alert.Body, alertBodies[AlertPhaseEnroute]; got != want {
+		t.Errorf("accept alert body = %q, want %q — the ETA in hand at accept describes the trip "+
+			"the car just finished, not this one", got, want)
+	}
+	if got := store.savedAlertsFor(activityRideID, testRiderID); len(got) != 1 || got[0] != AlertPhaseEnroute {
+		t.Fatalf("persisted alert phases after accept = %v, want exactly [%d]; a mark of %d here "+
+			"spends the real Arriving as well as Enroute",
+			got, AlertPhaseEnroute, AlertPhaseArriving)
+	}
+
+	// THE CAR IS DISPATCHED AND DRIVES THE REAL PICKUP. Twenty minutes later it
+	// is genuinely ninety seconds out, and this reading is its own.
+	arrivingAt := fixedNow.Add(20 * time.Minute)
+	n.now = func() time.Time { return arrivingAt }
+	dispatched := arrivingAt.Add(-20 * time.Second)
+	store.legs = []ActivityLeg{{
+		Activity: Activity{
+			RideRequestID: activityRideID, UserID: testRiderID, Token: riderToken,
+			// The mark the accept push left behind.
+			AlertedPhase: AlertPhaseEnroute,
+		},
+		RideContext: RideContext{
+			Status:           statusAccepted,
+			VehicleName:      "Blue Whale",
+			Destination:      "Home",
+			ETAMinutes:       intPtr(1),
+			NavUpdatedAt:     &dispatched,
+			DispatchUnderway: true,
+		},
+	}}
+
+	sender.Reset()
+	ticker := NewActivityTicker(n, store, TickerConfig{Enabled: true}, discardLogger())
+	ticker.RunPass(t.Context())
+	// And again, because Arriving is a threshold rather than a transition: it is
+	// true on every remaining pass of the leg and must be sent on exactly one.
+	ticker.RunPass(t.Context())
+
+	ticks := sender.Sent()
+	if len(ticks) != 2 {
+		t.Fatalf("ticker sends = %d, want 2", len(ticks))
+	}
+	if ticks[0].Alert == nil {
+		t.Fatal("the first post-dispatch pass did not alert; the rider never learns the car is close")
+	}
+	if got, want := ticks[0].Alert.Body, alertBodies[AlertPhaseArriving]; got != want {
+		t.Errorf("post-dispatch alert body = %q, want %q", got, want)
+	}
+	if ticks[1].Alert != nil {
+		t.Errorf("the second pass alerted again (%+v); Arriving is once per Activity", *ticks[1].Alert)
+	}
+
+	want := []AlertPhase{AlertPhaseEnroute, AlertPhaseArriving}
+	got := store.savedAlertsFor(activityRideID, testRiderID)
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("persisted alert phases = %v, want %v — the ladder climbed 2 then 3, in that order "+
+			"and once each", got, want)
 	}
 }
 
@@ -543,6 +702,91 @@ func TestUnhappyEndingsNeverAlert(t *testing.T) {
 				t.Errorf("alerted on %s (%+v); it is outside the design's six", status, *sent[0].Alert)
 			}
 		})
+	}
+}
+
+// TestStaleSnapshotAlertIsBoundedAndCannotLowerTheMark pins the bound the
+// contract states rather than the guarantee it would be nice to have.
+//
+// The ticker is unsharded: every replica lists every live Activity at the top of
+// its pass and raises the mark only after Apple accepts, so two replicas can
+// hold the same snapshot and both attach the same alert. Worse, one replica's
+// snapshot AGES across a pass of up to MaxPerPass sends, so it can send a lower
+// rung's banner after another process has already sent a higher one.
+//
+// Neither is eliminated and this test does not pretend otherwise — it pins what
+// IS true: the guarded write refuses to lower the mark, so the damage stops at
+// one duplicate per replica per phase and the out-of-order case self-heals on
+// the very next pass. Writing the mark BEFORE the send would close it, and is
+// the worse trade: a phase burnt on a push APNs never accepted is an expansion
+// the rider never gets at all. See saveAlertedPhase.
+func TestStaleSnapshotAlertIsBoundedAndCannotLowerTheMark(t *testing.T) {
+	fresh := fixedNow.Add(-30 * time.Second)
+	n, sender, store := newTestActivityNotifier(t, nil)
+	leg := ActivityLeg{
+		Activity: Activity{
+			RideRequestID: activityRideID, UserID: testRiderID, Token: riderToken,
+			AlertedPhase: AlertPhaseEnroute,
+		},
+		RideContext: RideContext{
+			Status:           statusAccepted,
+			VehicleName:      "Blue Whale",
+			Destination:      "Home",
+			ETAMinutes:       intPtr(1),
+			NavUpdatedAt:     &fresh,
+			DispatchUnderway: true,
+		},
+	}
+	store.legs = []ActivityLeg{leg}
+
+	ticker := NewActivityTicker(n, store, TickerConfig{Enabled: true}, discardLogger())
+	// Replica A's pass: Arriving is unspent, so it alerts and raises the mark.
+	ticker.RunPass(t.Context())
+	// Replica B was holding the SAME pre-write snapshot. Restoring it is exactly
+	// what a second process listing the row before A's UPDATE landed would see.
+	store.legs = []ActivityLeg{leg}
+	ticker.RunPass(t.Context())
+
+	sent := sender.Sent()
+	if len(sent) != 2 {
+		t.Fatalf("sends = %d, want 2", len(sent))
+	}
+	var alerting int
+	for i := range sent {
+		if sent[i].Alert != nil {
+			alerting++
+		}
+	}
+	// THE HONEST NUMBER. Two replicas over one stale snapshot means two
+	// expansions, and the contract says so in as many words.
+	if alerting != 2 {
+		t.Fatalf("alerting sends = %d, want 2 — the bound is one duplicate per replica per phase, "+
+			"and a test claiming fewer would be pinning a guarantee this design does not make",
+			alerting)
+	}
+
+	// THE PART THAT IS GUARANTEED. The second write cannot lower the mark, and
+	// the next pass — reading the raised row rather than the stale snapshot —
+	// alerts nothing. That is what makes the duplication bounded instead of
+	// permanent.
+	ticker.RunPass(t.Context())
+	if third := sender.Sent(); len(third) != 3 || third[2].Alert != nil {
+		t.Fatalf("the pass after the snapshot caught up alerted again; the duplication is unbounded")
+	}
+
+	// And the out-of-order banner: a straggler still holding Arriving reaches
+	// the row after a lifecycle push has already alerted Arrived. Its write is
+	// refused, so the mark stays at the higher rung.
+	key := ActivityKey{RideRequestID: activityRideID, UserID: testRiderID}
+	if err := store.SaveAlertedPhase(t.Context(), key, AlertPhaseArrived); err != nil {
+		t.Fatalf("save Arrived: %v", err)
+	}
+	if err := store.SaveAlertedPhase(t.Context(), key, AlertPhaseArriving); err != nil {
+		t.Fatalf("a losing write is a silent no-op, not an error: %v", err)
+	}
+	if got := store.legs[0].AlertedPhase; got != AlertPhaseArrived {
+		t.Errorf("mark = %d after a straggler wrote %d, want the higher %d to have held",
+			got, AlertPhaseArriving, AlertPhaseArrived)
 	}
 }
 
