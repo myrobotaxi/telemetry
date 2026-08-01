@@ -55,10 +55,17 @@ type RideContext struct {
 	// in miles (Tesla's tripDistanceRemaining), nil when it reports none. The
 	// preferred progress input — see activity_progress.go.
 	TripMilesRemaining *float64
-	// NavUpdatedAt is when the car's row was last written, i.e. how old the two
-	// readings above are. Nil for a car we have never heard from. Used ONLY to
-	// gate progress; `eta` keeps its existing ungated behaviour.
+	// NavUpdatedAt is when the car's ROW was last written — an upper bound on
+	// the age of the two readings above, not a stamp on them. Nil for a car we
+	// have never heard from. Used ONLY to gate progress, and only as the cheap
+	// half of that gate (see navFresh / readingStalled); `eta` keeps its
+	// existing ungated behaviour.
 	NavUpdatedAt *time.Time
+	// DispatchUnderway is MYR-376's reservation-dormancy predicate as evaluated
+	// by the store: false while a reservation sleeps between accept and the
+	// earlier of its dispatch and its due instant. It gates the PICKUP leg's
+	// track — see legUnderway for what happens without it.
+	DispatchUnderway bool
 }
 
 // ActivityStore is the send path's view of the registry.

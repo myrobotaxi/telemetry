@@ -123,7 +123,11 @@ func (a *ActivityNotifier) fanOut(
 
 	var delivered int
 	var hasETA, hasProgress bool
-	for _, act := range activities {
+	// Indexed rather than ranged by value: Activity carries the progress anchor
+	// (MYR-398) and gocritic flags the per-iteration copy, exactly as it does on
+	// the ticker's twin of this loop.
+	for i := range activities {
+		act := activities[i]
 		// Built per Activity rather than once per ride, because the progress
 		// anchor is per Activity: two phones watching one ride may have been
 		// delivered different fractions, and the monotonicity promise is made
@@ -166,11 +170,26 @@ func (a *ActivityNotifier) fanOut(
 // previous one — the one thing the clamp exists to prevent.
 //
 // Best-effort and detached from the caller's deadline, which the send may have
-// consumed. A lost write costs one leg's worth of anchor precision: the next
-// push re-derives from the older baseline, which is a slightly stale fraction
-// and never a wrong direction.
+// consumed.
+//
+// A LOST WRITE CAN REGRESS THE DELIVERED FLOOR BY ONE STEP, and the honest
+// statement of the bound is worth more than the comfortable one. If APNs
+// accepts a push and this UPDATE never lands — the process dies on a deploy or
+// an OOM, or the statement errors and is logged and dropped — the next pass
+// reads back the PREVIOUS floor. Where the clamp was load-bearing, the phone
+// can then be shown a lower value than it already has: a leg that delivered
+// 0.99 from the all-but-arrived branch and lost the write can follow it with
+// the 0.93 the next reading recomputes. Bounded to one step and self-healing,
+// because the next successful write records whatever was actually delivered.
+//
+// The only alternative is to write BEFORE the send, which advances the floor
+// past pushes that never arrived and is strictly worse — it turns a rare
+// regression after a crash into a routine one after every dropped push. The
+// process-death window is not closable from this side; the database-error half
+// of it is bounded by the guarded UPDATE in store.SaveActivityProgress, which
+// also refuses a write that would LOWER the floor across two replicas.
 func (a *ActivityNotifier) saveProgress(ctx context.Context, act Activity, anchor ProgressAnchor) {
-	if anchor == act.Progress {
+	if sameAnchor(anchor, act.Progress) {
 		return
 	}
 
@@ -266,30 +285,4 @@ func (a *ActivityNotifier) dropActivity(ctx context.Context, token string) {
 	a.logger.Info("live activity: deleted unregistered activity",
 		slog.String("activity_token_prefix", tokenPrefix(token)),
 	)
-}
-
-// contentState projects a ride into what the Activity renders, and returns the
-// progress anchor to persist if the push is delivered.
-//
-// The ETA conversion is the simpler of the two pieces of arithmetic on this
-// path: the car reports a DURATION in whole minutes (Tesla's minutesToArrival,
-// persisted verbatim) and the Activity needs an INSTANT, because an instant
-// survives the gap between pushes and a duration does not. A negative or absent
-// value means no route, and the key is omitted rather than guessed. The other
-// is computeProgress, which turns "how far is left" into "how far along" and is
-// documented where it lives.
-func contentState(rc RideContext, prev ProgressAnchor, now time.Time) (ActivityContentState, ProgressAnchor) {
-	state := ActivityContentState{
-		Version:     ActivityContentStateVersion,
-		Status:      rc.Status,
-		VehicleName: truncateLabel(rc.VehicleName),
-		Destination: truncateLabel(rc.Destination),
-	}
-	if rc.ETAMinutes != nil && *rc.ETAMinutes >= 0 {
-		eta := now.Add(time.Duration(*rc.ETAMinutes) * time.Minute).Unix()
-		state.ETA = &eta
-	}
-	progress, anchor := computeProgress(rc, prev, now)
-	state.Progress = progress
-	return state, anchor
 }

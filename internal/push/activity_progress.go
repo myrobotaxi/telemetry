@@ -1,7 +1,6 @@
 package push
 
 import (
-	"math"
 	"time"
 )
 
@@ -19,6 +18,9 @@ import (
 // along is describing a car that has barely left. So every branch below that
 // cannot justify a number returns nil, and the two that CAN return 1.0 do it on
 // the authority of the ride record rather than of an estimate.
+//
+// The input selection, the two gates and the arithmetic helpers live next door
+// in activity_progress_input.go.
 
 // ProgressLeg names which leg of the ride an anchor was cut for.
 //
@@ -70,6 +72,31 @@ type ProgressAnchor struct {
 	// push, so it records what the phone has seen rather than what we meant it
 	// to see.
 	Value float64
+	// Reading is the raw observation Value was derived from, in Source's unit,
+	// and ReadingAt is when that observation was first seen to hold.
+	//
+	// They date the NAV DATA rather than the car's row, which is the only way
+	// the freshness horizon means what it says — see navFresh and
+	// readingStalled. ReadingAt is the zero time when nothing has been recorded
+	// yet, which disables the gate rather than failing it.
+	Reading   float64
+	ReadingAt time.Time
+}
+
+// sameAnchor reports whether two anchors record the same memory.
+//
+// Written out rather than `==` because ReadingAt is a time.Time: one side comes
+// from time.Now() carrying a monotonic reading and the other from a TIMESTAMPTZ
+// round trip that has none, and `==` compares those representations rather than
+// the instants. The send path uses this to skip a write that would change
+// nothing, so a false "different" is a wasted UPDATE per push per Activity.
+func sameAnchor(a, b ProgressAnchor) bool {
+	return a.Leg == b.Leg &&
+		a.Source == b.Source &&
+		a.Baseline == b.Baseline &&
+		a.Value == b.Value &&
+		a.Reading == b.Reading &&
+		a.ReadingAt.Equal(b.ReadingAt)
 }
 
 // The two ride statuses this file needs that copy.go's alert-worthy set does
@@ -93,16 +120,20 @@ const (
 const MaxInFlightProgress = 0.99
 
 // ProgressFreshFor is how old the car's navigation reading may be and still
-// move the arrow. Deliberately the same horizon as StaleAfter: past it
-// ActivityKit is already telling the rider the card is out of date, and a
-// server that kept advancing the track on data the phone has been told not to
-// trust would be contradicting its own honesty mechanism.
+// move the arrow. Deliberately the same horizon as StaleAfter: past it the
+// reading is older than the window the card itself claims to be good for, and a
+// server that kept advancing the track on data it has already declared past its
+// own trust horizon would be contradicting itself.
 //
-// It gates PROGRESS ONLY, not `eta`, and the asymmetry is deliberate. `eta` is
-// an absolute instant: a stale one visibly slides into the past, and the rider
-// can see that for themselves. A stale fraction looks exactly like a fresh one.
-// (Applying the gate to `eta` as well would change what every installed build
-// renders today, which is not an additive change and not this issue's.)
+// It gates PROGRESS ONLY, not `eta`, and the asymmetry is a SCOPE decision
+// rather than a claim that a stale `eta` is harmless. Applying the gate to
+// `eta` would omit a key that every installed build already renders, which is
+// not an additive change and not this issue's. Be clear about what that leaves:
+// `eta` is rebuilt from `now` on every push (contentState), so a car whose
+// telemetry froze at "7 minutes" keeps producing a fresh arrival instant seven
+// minutes out, tick after tick — the ETA does not decay into the past on its
+// own. The honest version of this gate is its own issue; see the note in
+// rest-api.md §7.21.3.
 const ProgressFreshFor = StaleAfter
 
 // progressPrecision rounds the emitted fraction to three decimals. Enough to
@@ -112,20 +143,6 @@ const ProgressFreshFor = StaleAfter
 // keeps the monotonicity comparison working on exactly the numbers the client
 // saw.
 const progressPrecision = 1000
-
-// legForStatus maps a ride status onto the leg whose track is running.
-func legForStatus(status string) ProgressLeg {
-	switch status {
-	case statusAccepted:
-		return ProgressLegPickup
-	case statusEnroute:
-		return ProgressLegDropoff
-	default:
-		// `arrived` and every terminal status are handled before this is
-		// reached; `requested` and anything unrecognised genuinely have no leg.
-		return ProgressLegNone
-	}
-}
 
 // computeProgress derives the fraction to send and the anchor to persist if the
 // send succeeds.
@@ -148,6 +165,14 @@ func computeProgress(rc RideContext, prev ProgressAnchor, now time.Time) (*float
 		// track on a cancellation card is noise on top of bad news.
 		return nil, ProgressAnchor{}
 	}
+	if !legUnderway(leg, rc) {
+		// The ride exists but the leg has not started — a reservation still
+		// dormant between accept and its due instant. Whatever the car is doing
+		// is the OWNER'S own driving, and measuring a track against it is the
+		// worst failure this feature has: see legUnderway. No key, and no
+		// anchor, so the real leg starts from nothing when it starts.
+		return nil, ProgressAnchor{}
+	}
 
 	// An anchor cut for the other leg is not a weaker anchor, it is a different
 	// measurement. Discard it and keep only the leg.
@@ -156,7 +181,7 @@ func computeProgress(rc RideContext, prev ProgressAnchor, now time.Time) (*float
 		anchor = ProgressAnchor{Leg: leg}
 	}
 
-	value, source := progressInput(rc, now)
+	value, source := progressInput(rc, anchor, now)
 	if source == ProgressSourceNone {
 		// Nothing trustworthy: the car has no route, or has gone quiet. HOLD
 		// what this phone already has — the car did not teleport, and the last
@@ -173,6 +198,11 @@ func computeProgress(rc RideContext, prev ProgressAnchor, now time.Time) (*float
 		return &held, anchor
 	}
 
+	// Date the observation before anything derives from it, so the freshness
+	// gate above measures the NAV DATA's age on the next pass rather than the
+	// car row's.
+	anchor = noteReading(anchor, value, source, now)
+
 	// The car is at the end of its route but the ride record has not caught up
 	// (the owner has not tapped "picked up" yet). Report all-but-arrived: the
 	// distance is real, the leg's end is not ours to declare.
@@ -184,11 +214,11 @@ func computeProgress(rc RideContext, prev ProgressAnchor, now time.Time) (*float
 	}
 
 	// Re-anchor when the anchor cannot describe this reading: none yet, a
-	// different unit, or a route that is now longer than it has ever been (a
-	// reroute, or the car's nav destination changing under us). The new baseline
-	// is chosen so THIS reading means exactly the fraction already delivered, so
-	// a route change moves the ground under the arrow without moving the arrow.
-	if anchor.Source != source || anchor.Baseline <= 0 || value > anchor.Baseline {
+	// different unit, or — on the DISTANCE source only — a route that is now
+	// longer than it has ever been. The new baseline is chosen so THIS reading
+	// means exactly the fraction already delivered, so a route change moves the
+	// ground under the arrow without moving the arrow.
+	if anchor.Source != source || anchor.Baseline <= 0 || rerouted(source, value, anchor.Baseline) {
 		anchor.Source = source
 		anchor.Baseline = reanchor(value, anchor.Value)
 	}
@@ -207,68 +237,4 @@ func computeProgress(rc RideContext, prev ProgressAnchor, now time.Time) (*float
 	anchor.Value = roundProgress(clampUnit(raw))
 	sent := anchor.Value
 	return &sent, anchor
-}
-
-// progressInput picks the reading to measure this leg with, preferring the
-// car's remaining DISTANCE and falling back to its remaining minutes.
-func progressInput(rc RideContext, now time.Time) (float64, ProgressSource) {
-	if !navFresh(rc, now) {
-		return 0, ProgressSourceNone
-	}
-	if v := rc.TripMilesRemaining; v != nil && isFinite(*v) && *v >= 0 {
-		return *v, ProgressSourceNavDistance
-	}
-	if v := rc.ETAMinutes; v != nil && *v >= 0 {
-		return float64(*v), ProgressSourceETA
-	}
-	return 0, ProgressSourceNone
-}
-
-// navFresh reports whether the car's navigation reading is recent enough to
-// move the arrow.
-//
-// An unknown timestamp is not fresh — a car we have never heard from is exactly
-// the case this guard exists for. A timestamp in the FUTURE is treated as
-// fresh: it means the database clock and ours disagree, which is a fact about
-// our infrastructure and not a reason to blank a rider's track.
-func navFresh(rc RideContext, now time.Time) bool {
-	return rc.NavUpdatedAt != nil && now.Sub(*rc.NavUpdatedAt) <= ProgressFreshFor
-}
-
-// reanchor returns the baseline that makes `value` mean exactly `sent`.
-//
-// With nothing delivered yet this is just `value` — the leg opens at zero. With
-// a fraction already on the phone it is value/(1-sent), which is the arithmetic
-// spelling of "keep the arrow where it is and re-scale what is left".
-func reanchor(value, sent float64) float64 {
-	if sent <= 0 {
-		return value
-	}
-	if sent > MaxInFlightProgress {
-		sent = MaxInFlightProgress
-	}
-	return value / (1 - sent)
-}
-
-// clampUnit bounds a fraction to [0, MaxInFlightProgress].
-func clampUnit(v float64) float64 {
-	if !isFinite(v) || v < 0 {
-		return 0
-	}
-	if v > MaxInFlightProgress {
-		return MaxInFlightProgress
-	}
-	return v
-}
-
-// roundProgress cuts the fraction to progressPrecision decimals.
-func roundProgress(v float64) float64 {
-	return math.Round(v*progressPrecision) / progressPrecision
-}
-
-// isFinite rejects the NaN and ±Inf a float column can hold. A NaN reaching
-// encoding/json is not a bad number on a lock screen, it is a marshalling error
-// that takes out the whole push.
-func isFinite(v float64) bool {
-	return !math.IsNaN(v) && !math.IsInf(v, 0)
 }
