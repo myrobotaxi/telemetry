@@ -3,14 +3,24 @@ package store_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/store"
 )
 
+// progress0027Columns is every column this migration adds, named once so the
+// nullability check and the down-migration check cannot disagree about which
+// ones belong to it.
+var progress0027Columns = []string{
+	"progress_leg", "progress_source", "progress_baseline", "progress_value",
+	"progress_reading", "progress_reading_at",
+}
+
 // MYR-398 migration 0027: the Live Activity leg-progress anchor.
 //
-// Four nullable columns on go_live_activities that remember what a progress
-// fraction is a fraction OF. The column TYPES and the undocumented-column sweep
+// Six nullable columns on go_live_activities: four that remember what a
+// progress fraction is a fraction OF, and two that date the reading it came
+// from. The column TYPES and the undocumented-column sweep
 // live with the rest of the table's shape in migration_0025_test.go; what is
 // asserted here is everything the fraction's honesty depends on.
 
@@ -36,20 +46,25 @@ func TestMigration0027_AnchorColumnsAreBornEmpty(t *testing.T) {
 	}
 
 	var leg, source *string
-	var baseline, value *float64
+	var baseline, value, reading *float64
+	var readingAt *time.Time
 	if err := testPool.QueryRow(ctx,
-		`SELECT progress_leg, progress_source, progress_baseline, progress_value
+		`SELECT progress_leg, progress_source, progress_baseline, progress_value,
+		        progress_reading, progress_reading_at
 		 FROM go_live_activities WHERE id = 'cact0027a'`,
-	).Scan(&leg, &source, &baseline, &value); err != nil {
+	).Scan(&leg, &source, &baseline, &value, &reading, &readingAt); err != nil {
 		t.Fatalf("read back: %v", err)
 	}
 	if leg != nil || source != nil || baseline != nil || value != nil {
 		t.Errorf("a fresh registration carries an anchor (%v, %v, %v, %v); it must be born empty",
 			leg, source, baseline, value)
 	}
+	if reading != nil || readingAt != nil {
+		t.Errorf("a fresh registration carries a reading (%v at %v); it must be born empty", reading, readingAt)
+	}
 
 	nullable := liveActivityNullability(t)
-	for _, col := range []string{"progress_leg", "progress_source", "progress_baseline", "progress_value"} {
+	for _, col := range progress0027Columns {
 		if nullable[col] != "YES" {
 			t.Errorf("%s is NOT NULL; absent progress is the ordinary state and must be representable", col)
 		}
@@ -156,7 +171,7 @@ func TestMigration0027_DownDropsOnlyTheAnchor(t *testing.T) {
 		t.Fatalf("migrate down to 26: %v", err)
 	}
 	cols := liveActivityColumnTypes(t)
-	for _, col := range []string{"progress_leg", "progress_source", "progress_baseline", "progress_value"} {
+	for _, col := range progress0027Columns {
 		if _, present := cols[col]; present {
 			t.Errorf("%s survived the down-migration", col)
 		}
@@ -171,7 +186,7 @@ func TestMigration0027_DownDropsOnlyTheAnchor(t *testing.T) {
 		t.Fatalf("migrate back up to 27: %v", err)
 	}
 	cols = liveActivityColumnTypes(t)
-	for _, col := range []string{"progress_leg", "progress_source", "progress_baseline", "progress_value"} {
+	for _, col := range progress0027Columns {
 		if _, present := cols[col]; !present {
 			t.Errorf("%s missing after re-applying the up-migration", col)
 		}

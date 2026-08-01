@@ -50,10 +50,10 @@ func TestContractPrintedExampleDecodes(t *testing.T) {
 		t.Errorf("status = %q, want enroute", state.Status)
 	}
 	if state.ETA == nil || *state.ETA != 1785535200 {
-		t.Errorf("eta = %v, want 1785535200", state.ETA)
+		t.Errorf("eta = %s, want 1785535200", fmtPtr(state.ETA))
 	}
 	if state.Progress == nil || *state.Progress != 0.62 {
-		t.Errorf("progress = %v, want 0.62", state.Progress)
+		t.Errorf("progress = %s, want 0.62", fmtPtr(state.Progress))
 	}
 
 	// And back out again unchanged — the field is on the wire in both
@@ -134,6 +134,7 @@ func TestActivityNotifierPersistsProgressOnlyAfterDelivery(t *testing.T) {
 		ETAMinutes:         intPtr(6),
 		TripMilesRemaining: miles(4),
 		NavUpdatedAt:       &fresh,
+		DispatchUnderway:   true,
 	}
 
 	t.Run("delivered", func(t *testing.T) {
@@ -152,8 +153,13 @@ func TestActivityNotifierPersistsProgressOnlyAfterDelivery(t *testing.T) {
 		if len(saved) != 1 {
 			t.Fatalf("persisted anchors = %d, want 1", len(saved))
 		}
-		want := ProgressAnchor{Leg: ProgressLegPickup, Source: ProgressSourceNavDistance, Baseline: 4}
-		if saved[0] != want {
+		// Reading/ReadingAt date the observation the fraction came from, so
+		// the next push can tell a car that is quiet from a row that is busy.
+		want := ProgressAnchor{
+			Leg: ProgressLegPickup, Source: ProgressSourceNavDistance,
+			Baseline: 4, Reading: 4, ReadingAt: fixedNow,
+		}
+		if !sameAnchor(saved[0], want) {
 			t.Errorf("anchor = %+v, want %+v", saved[0], want)
 		}
 	})
@@ -204,9 +210,9 @@ func TestActivityTickerAdvancesTheTrack(t *testing.T) {
 		t.Fatalf("sends = %d, want 2", len(sent))
 	}
 	if sent[0].ContentState.Progress == nil || *sent[0].ContentState.Progress != 0 {
-		t.Errorf("first tick progress = %v, want 0", sent[0].ContentState.Progress)
+		t.Errorf("first tick progress = %s, want 0", fmtPtr(sent[0].ContentState.Progress))
 	}
 	if sent[1].ContentState.Progress == nil || *sent[1].ContentState.Progress != 0.6 {
-		t.Errorf("second tick progress = %v, want 0.6", sent[1].ContentState.Progress)
+		t.Errorf("second tick progress = %s, want 0.6", fmtPtr(sent[1].ContentState.Progress))
 	}
 }

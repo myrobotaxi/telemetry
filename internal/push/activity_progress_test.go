@@ -1,6 +1,7 @@
 package push
 
 import (
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -15,10 +16,40 @@ import (
 
 func miles(v float64) *float64 { return &v }
 
-// legRC builds a ride context with a nav reading that is fresh as of fixedNow.
+// fmtPtr renders an optional value for a FAILURE MESSAGE.
+//
+// It exists because `%v` on a *float64 prints a heap address, which tells the
+// reader of a CI-only failure nothing at all — and a progress assertion that
+// cannot say which number it got is the one diagnostic this package most needs.
+func fmtPtr[T any](p *T) string {
+	if p == nil {
+		return "omitted"
+	}
+	return fmt.Sprintf("%v", *p)
+}
+
+// legRC builds a ride context for a leg that is genuinely UNDERWAY, with a nav
+// reading that is fresh as of fixedNow.
+//
+// DispatchUnderway is true here because that is the ordinary case every one of
+// these assertions is about — a car actually driving. The dormant reservation
+// it excludes has its own cases below; see legUnderway for why the distinction
+// is not cosmetic.
 func legRC(status string, dist *float64, eta *int) RideContext {
 	fresh := fixedNow.Add(-30 * time.Second)
-	return RideContext{Status: status, ETAMinutes: eta, TripMilesRemaining: dist, NavUpdatedAt: &fresh}
+	return RideContext{
+		Status: status, ETAMinutes: eta, TripMilesRemaining: dist,
+		NavUpdatedAt: &fresh, DispatchUnderway: true,
+	}
+}
+
+// dormantRC is a reservation accepted but not yet dispatched — status
+// `accepted`, exactly like a car on its way, with the owner's own live nav
+// reading attached because that is what the ticker actually reads.
+func dormantRC(dist *float64, eta *int) RideContext {
+	rc := legRC(statusAccepted, dist, eta)
+	rc.DispatchUnderway = false
+	return rc
 }
 
 func TestComputeProgress(t *testing.T) {
@@ -64,17 +95,17 @@ func TestComputeProgress(t *testing.T) {
 		},
 		{
 			name: "no nav data at all and no history sends nothing",
-			rc:   RideContext{Status: statusAccepted},
+			rc:   RideContext{Status: statusAccepted, DispatchUnderway: true},
 			want: nil,
 		},
 		{
 			name: "a stale reading with no history sends nothing",
-			rc:   RideContext{Status: statusAccepted, TripMilesRemaining: miles(4), NavUpdatedAt: &stale},
+			rc:   RideContext{Status: statusAccepted, TripMilesRemaining: miles(4), NavUpdatedAt: &stale, DispatchUnderway: true},
 			want: nil,
 		},
 		{
 			name:     "a stale reading HOLDS the fraction already delivered",
-			rc:       RideContext{Status: statusAccepted, TripMilesRemaining: miles(1), NavUpdatedAt: &stale},
+			rc:       RideContext{Status: statusAccepted, TripMilesRemaining: miles(1), NavUpdatedAt: &stale, DispatchUnderway: true},
 			prev:     ProgressAnchor{Leg: ProgressLegPickup, Source: ProgressSourceNavDistance, Baseline: 10, Value: 0.4},
 			want:     miles(0.4),
 			wantLeg:  ProgressLegPickup,
@@ -183,6 +214,49 @@ func TestComputeProgress(t *testing.T) {
 			wantBase: 3,
 			wantVal:  0.667,
 		},
+		{
+			// The dormancy gate. The reading is real and fresh — it is the
+			// owner's own car, mid-errand, the day before the reservation.
+			name: "a dormant reservation has no track, whatever the owner's car is doing",
+			rc:   dormantRC(miles(5), intPtr(11)),
+			want: nil,
+		},
+		{
+			// ... and it must not merely omit the key: an anchor persisted here
+			// would become the real leg's floor, since the status never changes.
+			name: "a dormant reservation stores no anchor to poison the real leg with",
+			rc:   dormantRC(miles(0), intPtr(0)),
+			prev: ProgressAnchor{Leg: ProgressLegPickup, Source: ProgressSourceNavDistance, Baseline: 5, Value: 0.6},
+			want: nil,
+		},
+		{
+			// §7.21.3's traffic row, on the source that actually needs it. 20
+			// minutes against a 12-minute baseline is TRAFFIC, not a reroute:
+			// the baseline must not move, or the leg is silently redefined as
+			// 40 minutes long and every later reading renders inflated.
+			name:     "traffic past the eta baseline holds the fraction and leaves the baseline alone",
+			rc:       legRC(statusEnroute, nil, intPtr(20)),
+			prev:     ProgressAnchor{Leg: ProgressLegDropoff, Source: ProgressSourceETA, Baseline: 12, Value: 0.5},
+			want:     miles(0.5),
+			wantLeg:  ProgressLegDropoff,
+			wantSrc:  ProgressSourceETA,
+			wantBase: 12,
+			wantVal:  0.5,
+		},
+		{
+			// The row §7.21.3 now prints as its own: a car still streaming, with
+			// a fraction already delivered, that CLEARS its nav route. The
+			// readings go absent while the row stays fresh, and the server holds
+			// rather than withdrawing the track.
+			name:     "a nav route cleared mid-leg holds the last delivered fraction",
+			rc:       legRC(statusEnroute, nil, nil),
+			prev:     ProgressAnchor{Leg: ProgressLegDropoff, Source: ProgressSourceNavDistance, Baseline: 20, Value: 0.35},
+			want:     miles(0.35),
+			wantLeg:  ProgressLegDropoff,
+			wantSrc:  ProgressSourceNavDistance,
+			wantBase: 20,
+			wantVal:  0.35,
+		},
 	}
 
 	for _, tt := range tests {
@@ -244,16 +318,16 @@ func TestProgressLegFlipResetsTheTrack(t *testing.T) {
 
 	p, anchor := computeProgress(legRC(statusAccepted, miles(10), nil), anchor, fixedNow)
 	if p == nil || *p != 0 {
-		t.Fatalf("leg 1 opening progress = %v, want 0", p)
+		t.Fatalf("leg 1 opening progress = %s, want 0", fmtPtr(p))
 	}
 	p, anchor = computeProgress(legRC(statusAccepted, miles(2), nil), anchor, fixedNow)
 	if p == nil || *p != 0.8 {
-		t.Fatalf("leg 1 progress = %v, want 0.8", p)
+		t.Fatalf("leg 1 progress = %s, want 0.8", fmtPtr(p))
 	}
 
 	p, anchor = computeProgress(legRC(statusArrived, miles(0), nil), anchor, fixedNow)
 	if p == nil || *p != 1 {
-		t.Fatalf("arrived progress = %v, want 1", p)
+		t.Fatalf("arrived progress = %s, want 1", fmtPtr(p))
 	}
 	if anchor != (ProgressAnchor{}) {
 		t.Errorf("arrived left anchor %+v; leg 2 must start from nothing", anchor)
@@ -261,7 +335,7 @@ func TestProgressLegFlipResetsTheTrack(t *testing.T) {
 
 	p, anchor = computeProgress(legRC(statusEnroute, miles(30), nil), anchor, fixedNow)
 	if p == nil || *p != 0 {
-		t.Fatalf("leg 2 opening progress = %v, want 0", p)
+		t.Fatalf("leg 2 opening progress = %s, want 0", fmtPtr(p))
 	}
 	if anchor.Leg != ProgressLegDropoff || anchor.Baseline != 30 {
 		t.Errorf("leg 2 anchor = %+v, want the dropoff leg baselined at 30", anchor)
@@ -285,10 +359,10 @@ func TestProgressFreshnessBoundary(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			at := fixedNow.Add(-tc.age)
-			rc := RideContext{Status: statusAccepted, TripMilesRemaining: miles(5), NavUpdatedAt: &at}
+			rc := RideContext{Status: statusAccepted, TripMilesRemaining: miles(5), NavUpdatedAt: &at, DispatchUnderway: true}
 			got, _ := computeProgress(rc, prev, fixedNow)
 			if got == nil || *got != tc.want {
-				t.Fatalf("progress = %v, want %v", got, tc.want)
+				t.Fatalf("progress = %s, want %v", fmtPtr(got), tc.want)
 			}
 		})
 	}

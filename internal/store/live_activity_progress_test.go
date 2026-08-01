@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/store"
 )
@@ -23,7 +24,11 @@ func TestLiveActivityRepo_ProgressRoundTripsAndClears(t *testing.T) {
 	}
 	key := store.LiveActivityKey{RideRequestID: ride, UserID: rider}
 
-	want := store.LiveActivityProgress{Leg: "dropoff", Source: "eta", Baseline: 18, Value: 0.375}
+	readingAt := time.Now().UTC().Truncate(time.Millisecond)
+	want := store.LiveActivityProgress{
+		Leg: "dropoff", Source: "eta", Baseline: 18, Value: 0.375,
+		Reading: 11, ReadingAt: readingAt,
+	}
 	if err := repo.SaveActivityProgress(ctx, key, want); err != nil {
 		t.Fatalf("SaveActivityProgress: %v", err)
 	}
@@ -31,8 +36,16 @@ func TestLiveActivityRepo_ProgressRoundTripsAndClears(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ActivitiesForRide: %v", err)
 	}
-	if len(rows) != 1 || rows[0].Progress != want {
-		t.Fatalf("anchor = %+v, want %+v", rows, want)
+	if len(rows) != 1 {
+		t.Fatalf("activities = %d, want 1", len(rows))
+	}
+	// Compared field by field because ReadingAt is a TIMESTAMPTZ round trip:
+	// `==` on time.Time compares representations, not instants.
+	got := rows[0].Progress
+	if got.Leg != want.Leg || got.Source != want.Source ||
+		got.Baseline != want.Baseline || got.Value != want.Value ||
+		got.Reading != want.Reading || !got.ReadingAt.Equal(want.ReadingAt) {
+		t.Fatalf("anchor = %+v, want %+v", got, want)
 	}
 
 	// A leg boundary clears it. Reading back a PARTIAL anchor would be worse

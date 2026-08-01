@@ -34,6 +34,11 @@ var migration0025Columns = map[string]string{
 	"progress_source":   "text",
 	"progress_baseline": "double precision",
 	"progress_value":    "double precision",
+	// The reading pair dates the observation the fraction came from, which the
+	// car's own row stamp cannot: `Vehicle."lastUpdated"` moves on every
+	// telemetry write of any column, nav or not.
+	"progress_reading":    "double precision",
+	"progress_reading_at": "timestamp with time zone",
 }
 
 // liveActivityColumnTypes introspects the installed go_live_activities columns.
