@@ -120,10 +120,21 @@ func (a *ActivityNotifier) fanOut(
 	}
 
 	now := a.now()
-	state := contentState(rc, now)
 
 	var delivered int
-	for _, act := range activities {
+	var hasETA, hasProgress bool
+	// Indexed rather than ranged by value: Activity carries the progress anchor
+	// (MYR-398) and gocritic flags the per-iteration copy, exactly as it does on
+	// the ticker's twin of this loop.
+	for i := range activities {
+		act := activities[i]
+		// Built per Activity rather than once per ride, because the progress
+		// anchor is per Activity: two phones watching one ride may have been
+		// delivered different fractions, and the monotonicity promise is made
+		// to each of them separately. Every other field is identical across
+		// the loop; v1 registers exactly one Activity per ride anyway.
+		state, anchor := contentState(rc, act.Progress, now)
+		hasETA, hasProgress = state.ETA != nil, state.Progress != nil
 		// MYR-349 / MYR-194 decision 7 — the recipient's own switch. A rider
 		// who muted ride updates gets no Activity pushes; the Activity itself
 		// still runs, started locally by the app, and falls back to its own
@@ -134,6 +145,7 @@ func (a *ActivityNotifier) fanOut(
 		}
 		if a.send(ctx, act, state, event, dismissAt, lowPriority, now) {
 			delivered++
+			a.saveProgress(ctx, act, anchor)
 		}
 	}
 
@@ -141,10 +153,56 @@ func (a *ActivityNotifier) fanOut(
 		slog.String("ride_id", rideRequestID),
 		slog.String("event", string(event)),
 		slog.String("status", rc.Status),
-		slog.Bool("has_eta", state.ETA != nil),
+		slog.Bool("has_eta", hasETA),
+		slog.Bool("has_progress", hasProgress),
 		slog.Int("activities", len(activities)),
 		slog.Int("delivered", delivered),
 	)
+}
+
+// saveProgress persists the anchor an Activity was just shown, AFTER the send
+// and only on a delivery Apple accepted.
+//
+// The order is the monotonicity promise. `Value` is the floor the next push
+// clamps to, so it must record what the phone HAS SEEN, not what we hoped to
+// show it: writing before the send would advance the floor past a push that
+// never arrived, and the client's next value could then be lower than its
+// previous one — the one thing the clamp exists to prevent.
+//
+// Best-effort and detached from the caller's deadline, which the send may have
+// consumed.
+//
+// A LOST WRITE CAN REGRESS THE DELIVERED FLOOR BY ONE STEP, and the honest
+// statement of the bound is worth more than the comfortable one. If APNs
+// accepts a push and this UPDATE never lands — the process dies on a deploy or
+// an OOM, or the statement errors and is logged and dropped — the next pass
+// reads back the PREVIOUS floor. Where the clamp was load-bearing, the phone
+// can then be shown a lower value than it already has: a leg that delivered
+// 0.99 from the all-but-arrived branch and lost the write can follow it with
+// the 0.93 the next reading recomputes. Bounded to one step and self-healing,
+// because the next successful write records whatever was actually delivered.
+//
+// The only alternative is to write BEFORE the send, which advances the floor
+// past pushes that never arrived and is strictly worse — it turns a rare
+// regression after a crash into a routine one after every dropped push. The
+// process-death window is not closable from this side; the database-error half
+// of it is bounded by the guarded UPDATE in store.SaveActivityProgress, which
+// also refuses a write that would LOWER the floor across two replicas.
+func (a *ActivityNotifier) saveProgress(ctx context.Context, act Activity, anchor ProgressAnchor) {
+	if sameAnchor(anchor, act.Progress) {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deleteTimeout)
+	defer cancel()
+
+	key := ActivityKey{RideRequestID: act.RideRequestID, UserID: act.UserID}
+	if err := a.store.SaveProgress(ctx, key, anchor); err != nil {
+		a.logger.Warn("live activity: save progress anchor failed",
+			slog.String("ride_id", act.RideRequestID),
+			slog.String("error", err.Error()),
+		)
+	}
 }
 
 // allowed applies the ride_lifecycle preference gate, failing open exactly as
@@ -227,25 +285,4 @@ func (a *ActivityNotifier) dropActivity(ctx context.Context, token string) {
 	a.logger.Info("live activity: deleted unregistered activity",
 		slog.String("activity_token_prefix", tokenPrefix(token)),
 	)
-}
-
-// contentState projects a ride into what the Activity renders.
-//
-// The ETA conversion is the one piece of arithmetic on this path: the car
-// reports a DURATION in whole minutes (Tesla's minutesToArrival, persisted
-// verbatim) and the Activity needs an INSTANT, because an instant survives the
-// gap between pushes and a duration does not. A negative or absent value means
-// no route, and the key is omitted rather than guessed.
-func contentState(rc RideContext, now time.Time) ActivityContentState {
-	state := ActivityContentState{
-		Version:     ActivityContentStateVersion,
-		Status:      rc.Status,
-		VehicleName: truncateLabel(rc.VehicleName),
-		Destination: truncateLabel(rc.Destination),
-	}
-	if rc.ETAMinutes != nil && *rc.ETAMinutes >= 0 {
-		eta := now.Add(time.Duration(*rc.ETAMinutes) * time.Minute).Unix()
-		state.ETA = &eta
-	}
-	return state
 }

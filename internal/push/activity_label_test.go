@@ -92,11 +92,11 @@ func TestTruncateLabelIsRuneSafe(t *testing.T) {
 // only one that also covers labels already in the database from before the
 // bound existed.
 func TestContentStateBoundsBothLabels(t *testing.T) {
-	state := contentState(RideContext{
+	state, _ := contentState(RideContext{
 		Status:      "enroute",
 		VehicleName: strings.Repeat("v", 500),
 		Destination: strings.Repeat("d", 500),
-	}, fixedNow)
+	}, ProgressAnchor{}, fixedNow)
 
 	if n := utf8.RuneCountInString(state.Destination); n != MaxContentStateLabel {
 		t.Errorf("destination = %d runes, want %d", n, MaxContentStateLabel)
@@ -113,13 +113,13 @@ func TestActivityPayloadStaysUnderApplesCap(t *testing.T) {
 	const applePayloadCap = 4096
 
 	n := testActivityNotification()
-	n.ContentState = contentState(RideContext{
+	n.ContentState, _ = contentState(RideContext{
 		Status: "enroute",
 		// Multi-byte on purpose: the cap is in runes, so the worst case in
 		// BYTES is the cap times the widest rune JSON will emit.
 		VehicleName: strings.Repeat("東", 500),
 		Destination: strings.Repeat("東", 500),
-	}, fixedNow)
+	}, ProgressAnchor{}, fixedNow)
 
 	body, err := buildActivityPayload(n)
 	if err != nil {
