@@ -223,7 +223,30 @@ func (t *ActivityTicker) RunPass(ctx context.Context) {
 		// all. alertFor's high-water comparison against the row is what turns
 		// "true forty times" into "sent once"; without it this loop is the
 		// strobing island the design forbids by name.
-		phase := alertPhaseFor(leg.RideContext)
+		//
+		// THE HONEST BOUND, because "sent once" is a promise this loop cannot
+		// quite make. The mark is read from a snapshot (ActiveLegs, at the top
+		// of the pass) and raised only AFTER Apple accepts — see
+		// saveAlertedPhase for why that ordering is the right one — so the
+		// window between the read and the write is real and two things fit
+		// through it. Two replicas can list the same leg at the same mark and
+		// both attach the same alert. And one replica's snapshot AGES across a
+		// pass of up to MaxPerPass sends, so a leg listed at Arriving can be
+		// reached after another process has already alerted Arrived, putting
+		// "almost here" on the rider's screen seconds after "your ride is
+		// here".
+		//
+		// Both are bounded rather than eliminated: at most ONE duplicate
+		// expansion per replica per phase, because the guarded UPDATE refuses
+		// to lower the mark and the next pass reads the raised one — the
+		// out-of-order case self-heals on that refusal, having already shown
+		// its banner. The alternative is a claim-then-send latch (the repo has
+		// the primitive — ClaimReservationDispatch), and it is the wrong trade
+		// here: it burns a phase on every push APNs never accepts, and a
+		// process that dies mid-send makes that unrecoverable. Between "the
+		// island opened once more than it had to" and "a state change went
+		// unseen", the first is the one to choose. Contract: §7.21.4.
+		phase := alertPhaseFor(leg.RideContext, now)
 		alert := alertFor(phase, leg.AlertedPhase)
 		// LowPriority: an ETA tick rides apns-priority 5 so it never competes
 		// with a lifecycle transition for Apple's per-Activity budget

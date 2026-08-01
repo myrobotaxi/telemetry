@@ -1,5 +1,7 @@
 package push
 
+import "time"
+
 // Island auto-expand alerts (MYR-398, the v3 card).
 //
 // A Live Activity update carrying an `aps.alert` dictionary makes iOS expand
@@ -134,12 +136,15 @@ var alertBodies = map[AlertPhase]string{
 // the two send paths agree: the lifecycle notifier and the ETA ticker compute
 // the identical phase for identical state, so which one happens to run first
 // after a transition cannot change how many times the island opens.
-func alertPhaseFor(rc RideContext) AlertPhase {
+//
+// `now` is here for the freshness half of the Arriving gate; every other rung is
+// a pure function of the status.
+func alertPhaseFor(rc RideContext, now time.Time) AlertPhase {
 	switch rc.Status {
 	case statusRequested:
 		return AlertPhaseDispatch
 	case statusAccepted:
-		if arrivingSoon(rc) {
+		if arrivingSoon(rc, now) {
 			return AlertPhaseArriving
 		}
 		return AlertPhaseEnroute
@@ -158,16 +163,44 @@ func alertPhaseFor(rc RideContext) AlertPhase {
 
 // arrivingSoon reports whether the PICKUP leg is inside the Arriving threshold.
 //
-// GATED ON DispatchUnderway, and the gate is not defensive. `accepted` covers a
-// dispatched car driving to the rider AND a reservation accepted for tomorrow
-// that is dormant until its due instant (MYR-376), and the car this reads
-// navigation from is the OWNER'S, which in between is running the owner's own
-// errands. Without the gate, an owner parking two minutes from home would open
-// the rider's island with "your ride is almost here" a day before the pickup —
-// the same defect legUnderway closes for the progress track, with a
-// notification attached to it.
-func arrivingSoon(rc RideContext) bool {
-	if !rc.DispatchUnderway {
+// TWO GATES, and neither is defensive.
+//
+// DispatchUnderway, because `accepted` covers a dispatched car driving to the
+// rider AND a reservation accepted for tomorrow that is dormant until its due
+// instant (MYR-376), and the car this reads navigation from is the OWNER'S,
+// which in between is running the owner's own errands. Without it, an owner
+// parking two minutes from home would open the rider's island with "your ride is
+// almost here" a day before the pickup — the same defect legUnderway closes for
+// the progress track, with a notification attached to it.
+//
+// navFresh, because THE REST OF THIS PACKAGE ALREADY REFUSES TO TRUST AN UNDATED
+// ETA and this rung was the one place that did. `ETAMinutes` is the car's last
+// streamed `minutesToArrival`, a column that keeps its value after the route
+// that produced it ends, so a car that has just finished a previous trip reads 0
+// or 1 until it says otherwise. On an INSTANT ride `scheduled_for IS NULL` makes
+// DispatchUnderway unconditionally true, and the accept push fans out before the
+// dispatched route has streamed back — so ungated, the moment a rider's ride was
+// accepted their island would expand with "almost here" for a car twenty minutes
+// away, and the mark would persist at Arriving(3). That last part is why this is
+// worth a gate rather than a shrug: a wrong `eta` self-corrects on the next
+// reading, but a burnt rung is DURABLE. Rungs 2 and 3 would both be spent, so
+// the rider would never be told the car was on its way and never get the real
+// Arriving expansion when it genuinely was two minutes out — the next thing they
+// saw would be Arrived.
+//
+// WHAT THIS GATE DOES NOT CLOSE, stated because the difference matters. NavFresh
+// is the cheap half — `NavUpdatedAt` is `Vehicle."lastUpdated"`, a ROW stamp, so
+// a car that is awake and streaming speed and position carries a "fresh" row
+// over a `minutesToArrival` of any age. The arm this closes is the common one (a
+// car that finished its errand, parked and went quiet: its row ages out of the
+// horizon and the accept push correctly yields Enroute). The arm still open is a
+// car actively navigating somewhere else at the instant its owner accepts an
+// instant ride. Closing that one needs the reading's own age relative to the
+// ride's dispatch, which no column carries today — `readingStalled` next door is
+// keyed on an anchor this rung does not have at accept, since the anchor is only
+// opened by a delivered push. A follow-up issue, not a silent omission.
+func arrivingSoon(rc RideContext, now time.Time) bool {
+	if !rc.DispatchUnderway || !navFresh(rc, now) {
 		return false
 	}
 	return rc.ETAMinutes != nil && *rc.ETAMinutes >= 0 && *rc.ETAMinutes <= ArrivingWithinMinutes

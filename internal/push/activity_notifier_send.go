@@ -120,10 +120,11 @@ func (a *ActivityNotifier) fanOut(
 	}
 
 	now := a.now()
-	// One phase per ride: it is a function of the ride's state, not of who is
-	// watching. Which Activities actually ALERT on it still differs per row,
-	// because each carries its own high-water mark.
-	phase := alertPhaseFor(rc)
+	// One phase per ride: it is a function of the ride's state and of the age of
+	// the reading that state was projected from, not of who is watching. Which
+	// Activities actually ALERT on it still differs per row, because each
+	// carries its own high-water mark.
+	phase := alertPhaseFor(rc, now)
 
 	var delivered, alerted int
 	var hasETA, hasProgress bool
