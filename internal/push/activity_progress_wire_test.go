@@ -32,8 +32,31 @@ const contractExampleWithProgress = `{
     "eta": 1785535200,
     "vehicleName": "Blue Whale",
     "destination": "Home",
-    "progress": 0.62
+    "progress": 0.62,
+    "asOf": 1785534930
   }`
+
+// contractExampleGoneQuiet is §7.21.4's "car that has gone quiet mid-leg"
+// example, copied byte for byte.
+//
+// It is here as well as its healthy sibling because it is the one printed
+// payload whose numbers a client author has to read AGAINST each other: the
+// timestamp is fresh, the eta is fresh, the progress is a held value that looks
+// like any other, and only the gap between asOf and the envelope says the card
+// has stopped learning. A document that got those four numbers mutually
+// consistent by accident would teach exactly the wrong lesson.
+const contractExampleGoneQuiet = `{
+      "v": 1,
+      "status": "enroute",
+      "eta": 1785535620,
+      "vehicleName": "Blue Whale",
+      "destination": "Home",
+      "progress": 0.62,
+      "asOf": 1785534930
+    }`
+
+// contractExampleGoneQuietTimestamp is that example's `aps.timestamp`.
+const contractExampleGoneQuietTimestamp = 1785535380
 
 func TestContractPrintedExampleDecodes(t *testing.T) {
 	var state ActivityContentState
@@ -54,6 +77,9 @@ func TestContractPrintedExampleDecodes(t *testing.T) {
 	}
 	if state.Progress == nil || *state.Progress != 0.62 {
 		t.Errorf("progress = %s, want 0.62", fmtPtr(state.Progress))
+	}
+	if state.AsOf == nil || *state.AsOf != 1785534930 {
+		t.Errorf("asOf = %s, want 1785534930", fmtPtr(state.AsOf))
 	}
 
 	// And back out again unchanged — the field is on the wire in both
@@ -89,7 +115,7 @@ func TestActivityPayloadCarriesProgressKey(t *testing.T) {
 		t.Fatalf("content-state is not an object")
 	}
 
-	wantKeys := []string{"v", "status", "eta", "vehicleName", "destination", "progress"}
+	wantKeys := []string{"v", "status", "eta", "vehicleName", "destination", "progress", "asOf"}
 	if got := keysOf(state); !sameSet(got, wantKeys) {
 		t.Errorf("content-state keys = %v, want %v", got, wantKeys)
 	}
@@ -100,9 +126,14 @@ func TestActivityPayloadCarriesProgressKey(t *testing.T) {
 
 // TestActivityPayloadOmitsUnknownProgress is the byte-stability assertion an
 // old installed build depends on: with nothing to say about the car's position
-// the payload is EXACTLY the five fields that shipped before r16, with no
-// `progress: null` and no `progress: 0` — either of which the redesigned widget
-// would render as a car that has not moved.
+// the payload carries no `progress` key at all — no `progress: null` and no
+// `progress: 0`, either of which the redesigned widget would render as a car
+// that has not moved.
+//
+// The v3 card added `asOf` beside it, so the "nothing to say" payload is six
+// keys rather than five now. The claim the test is making is unchanged and is
+// the one that matters to an installed build: the five that shipped before r16
+// are all present, all unmoved, and nothing among them changed type.
 func TestActivityPayloadOmitsUnknownProgress(t *testing.T) {
 	got := captureActivity(t, testActivityNotification())
 
@@ -115,9 +146,35 @@ func TestActivityPayloadOmitsUnknownProgress(t *testing.T) {
 	if _, present := state["progress"]; present {
 		t.Errorf("content-state.progress = %v, want the key absent entirely", state["progress"])
 	}
-	wantKeys := []string{"v", "status", "eta", "vehicleName", "destination"}
+	wantKeys := []string{"v", "status", "eta", "vehicleName", "destination", "asOf"}
 	if got := keysOf(state); !sameSet(got, wantKeys) {
-		t.Errorf("content-state keys = %v, want the pre-MYR-398 five %v", got, wantKeys)
+		t.Errorf("content-state keys = %v, want %v", got, wantKeys)
+	}
+}
+
+// TestActivityPayloadOmitsUnsetAsOf applies `progress`'s own honesty rule to
+// the new field: a content-state that was never stamped must omit the key
+// rather than serialise the zero value.
+//
+// A pointer is what buys this, and it is worth a test rather than a comment.
+// The zero of an int64 unix timestamp is not a neutral placeholder — it is a
+// claim that the data was true in January 1970 — and the client renders `asOf`
+// as a wall-clock time, so the failure would reach a rider's lock screen as
+// "Last updated 12:00 AM" on an otherwise healthy card.
+func TestActivityPayloadOmitsUnsetAsOf(t *testing.T) {
+	n := testActivityNotification()
+	n.ContentState.AsOf = nil
+
+	got := captureActivity(t, n)
+
+	var payload map[string]any
+	if err := json.Unmarshal(got.body, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	state := payload["aps"].(map[string]any)["content-state"].(map[string]any)
+
+	if _, present := state["asOf"]; present {
+		t.Errorf("content-state.asOf = %v, want the key absent entirely", state["asOf"])
 	}
 }
 

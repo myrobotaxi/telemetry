@@ -159,6 +159,20 @@ func (a *liveActivityStoreAdapter) SaveProgress(ctx context.Context, key push.Ac
 	return nil
 }
 
+// SaveAlertedPhase raises the island-expand high-water mark after an alerting
+// push Apple accepted (MYR-398). The push package owns the ladder; the store
+// owns the guard that stops a losing replica from lowering it.
+func (a *liveActivityStoreAdapter) SaveAlertedPhase(ctx context.Context, key push.ActivityKey, phase push.AlertPhase) error {
+	err := a.repo.SaveActivityAlertedPhase(ctx,
+		store.LiveActivityKey{RideRequestID: key.RideRequestID, UserID: key.UserID},
+		int16(phase),
+	)
+	if err != nil {
+		return fmt.Errorf("live activity: save alerted phase: %w", err)
+	}
+	return nil
+}
+
 func (a *liveActivityStoreAdapter) ActiveLegs(ctx context.Context, limit int) ([]push.ActivityLeg, error) {
 	rows, err := a.repo.ListActiveLegActivities(ctx, limit)
 	if err != nil {
@@ -253,5 +267,6 @@ func activityFromRow(row *store.LiveActivity) push.Activity {
 			Reading:   row.Progress.Reading,
 			ReadingAt: row.Progress.ReadingAt,
 		},
+		AlertedPhase: push.AlertPhase(row.AlertedPhase),
 	}
 }

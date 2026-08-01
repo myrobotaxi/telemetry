@@ -292,6 +292,13 @@ func TestActivityToken_TerminalRideIsConflict(t *testing.T) {
 
 // TestActivityToken_NonTerminalRidesAccepted is the mirror of the above, and
 // guards the statuses most easily mistaken for endings.
+//
+// The `requested` row became load-bearing with MYR-398's v3 card, which starts
+// the Activity at REQUEST rather than at accept. It passed before that change
+// and passes after it — the registration guard refuses exactly two things, a
+// terminal status and a lapsed reservation, and `requested` was never either —
+// so this is the test that says the Dispatch phase needed no widening HERE, as
+// opposed to in the ticker's active-leg query, where it did.
 func TestActivityToken_NonTerminalRidesAccepted(t *testing.T) {
 	for _, status := range []string{rideStatusRequested, rideStatusAccepted, rideStatusArrived, rideStatusEnroute} {
 		t.Run(status, func(t *testing.T) {

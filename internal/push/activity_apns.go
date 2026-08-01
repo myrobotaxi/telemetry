@@ -38,6 +38,34 @@ type activityAPS struct {
 	// DismissalDate is `aps.dismissal-date` in unix seconds, present only on an
 	// end event. Omitted means iOS dismisses the Activity immediately.
 	DismissalDate *int64 `json:"dismissal-date,omitempty"`
+
+	// Alert is `aps.alert`, present only on the six phase changes (MYR-398).
+	// Its PRESENCE is the whole mechanism — iOS expands the Dynamic Island for
+	// ~3s on an update that carries one — so an empty dictionary would be an
+	// unintended expansion rather than a harmless default, and the pointer is
+	// nil on every other push.
+	//
+	// Last in the struct, so the four keys that shipped before it hold their
+	// positions in a packet capture.
+	Alert *activityAlert `json:"alert,omitempty"`
+}
+
+// activityAlert is the `aps.alert` dictionary.
+//
+// Deliberately title/body LITERALS rather than `title-loc-key`/`loc-key`. The
+// localised form would keep the copy in the app where §7.21.3 says copy
+// belongs, but a key the installed build's string table does not carry renders
+// as the RAW KEY on the lock screen — and a server that ships ahead of the app
+// is the normal state of this project, not the exceptional one. See
+// ActivityAlert for the payload-policy rules the strings obey.
+//
+// No `sound`. The design asks for an EXPANSION, not an interruption: six
+// beeps per ride from a surface whose whole premise is that it replaces eleven
+// notifications would undo the feature. An alert dictionary with no sound
+// expands the island silently.
+type activityAlert struct {
+	Title string `json:"title"`
+	Body  string `json:"body"`
 }
 
 // activityPayload is the whole APNs body.
@@ -61,6 +89,9 @@ func buildActivityPayload(n ActivityNotification) ([]byte, error) {
 	if n.Event == ActivityEventEnd && n.DismissalDate != nil {
 		dismiss := n.DismissalDate.Unix()
 		aps.DismissalDate = &dismiss
+	}
+	if n.Alert != nil {
+		aps.Alert = &activityAlert{Title: n.Alert.Title, Body: n.Alert.Body}
 	}
 
 	body, err := json.Marshal(activityPayload{APS: aps})

@@ -39,6 +39,9 @@ var migration0025Columns = map[string]string{
 	// telemetry write of any column, nav or not.
 	"progress_reading":    "double precision",
 	"progress_reading_at": "timestamp with time zone",
+	// Migration 0029 (MYR-398, the v3 card) — the island auto-expand
+	// high-water mark. Same reason it is in this map and not its own.
+	"alerted_phase": "smallint",
 }
 
 // liveActivityColumnTypes introspects the installed go_live_activities columns.

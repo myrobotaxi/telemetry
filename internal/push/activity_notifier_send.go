@@ -120,8 +120,13 @@ func (a *ActivityNotifier) fanOut(
 	}
 
 	now := a.now()
+	// One phase per ride: it is a function of the ride's state and of the age of
+	// the reading that state was projected from, not of who is watching. Which
+	// Activities actually ALERT on it still differs per row, because each
+	// carries its own high-water mark.
+	phase := alertPhaseFor(rc, now)
 
-	var delivered int
+	var delivered, alerted int
 	var hasETA, hasProgress bool
 	// Indexed rather than ranged by value: Activity carries the progress anchor
 	// (MYR-398) and gocritic flags the per-iteration copy, exactly as it does on
@@ -143,9 +148,23 @@ func (a *ActivityNotifier) fanOut(
 		if !a.allowed(ctx, act.UserID, rideRequestID) {
 			continue
 		}
-		if a.send(ctx, act, state, event, dismissAt, lowPriority, now) {
+		alert := alertFor(phase, act.AlertedPhase)
+		if a.send(ctx, act, ActivityNotification{
+			ActivityToken: act.Token,
+			Sandbox:       act.Sandbox,
+			Event:         event,
+			ContentState:  state,
+			Timestamp:     now,
+			DismissalDate: dismissAt,
+			LowPriority:   lowPriority,
+			Alert:         alert,
+		}) {
 			delivered++
 			a.saveProgress(ctx, act, anchor)
+			if alert != nil {
+				alerted++
+				a.saveAlertedPhase(ctx, act, phase, event)
+			}
 		}
 	}
 
@@ -157,6 +176,12 @@ func (a *ActivityNotifier) fanOut(
 		slog.Bool("has_progress", hasProgress),
 		slog.Int("activities", len(activities)),
 		slog.Int("delivered", delivered),
+		// The operational question this surface gets asked about the island is
+		// "why did it open again?", so the count of alerting pushes is on the
+		// line and the phase ordinal beside it. Both are P0 — a ladder position
+		// names no place and no person.
+		slog.Int("alerted", alerted),
+		slog.Int("alert_phase", int(phase)),
 	)
 }
 
@@ -205,6 +230,44 @@ func (a *ActivityNotifier) saveProgress(ctx context.Context, act Activity, ancho
 	}
 }
 
+// saveAlertedPhase raises this Activity's island-expand high-water mark, AFTER
+// the send and only on a delivery Apple accepted.
+//
+// Same ordering as saveProgress and for the same reason, with the sign of the
+// failure reversed and worth stating: the mark records what the phone HAS BEEN
+// SHOWN, so writing before the send would burn a phase on a push that never
+// arrived and the rider would never get that expansion at all. Written after,
+// the failure mode is one EXTRA expansion on a phase the next push re-evaluates
+// — a lost write costs an island opening twice, not a phase change the rider
+// misses. Between "a state change went unseen" and "the island opened once
+// more than it had to", the second is the one to choose.
+//
+// SKIPPED ON AN `end`, which is not an optimisation: the rows are tombstoned
+// immediately after, the ticker will never look at them again, and the write
+// would race that tombstone to become a guaranteed no-op. `completed` is the
+// only phase that rides an end push, and there is no phase seven for the mark
+// to protect.
+//
+// Best-effort and detached from the caller's deadline, which the send may have
+// consumed.
+func (a *ActivityNotifier) saveAlertedPhase(ctx context.Context, act Activity, phase AlertPhase, event ActivityEvent) {
+	if event == ActivityEventEnd {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deleteTimeout)
+	defer cancel()
+
+	key := ActivityKey{RideRequestID: act.RideRequestID, UserID: act.UserID}
+	if err := a.store.SaveAlertedPhase(ctx, key, phase); err != nil {
+		a.logger.Warn("live activity: save alerted phase failed",
+			slog.String("ride_id", act.RideRequestID),
+			slog.Int("alert_phase", int(phase)),
+			slog.String("error", err.Error()),
+		)
+	}
+}
+
 // allowed applies the ride_lifecycle preference gate, failing open exactly as
 // the alert notifier's twin does.
 func (a *ActivityNotifier) allowed(ctx context.Context, userID, rideRequestID string) bool {
@@ -232,25 +295,17 @@ func (a *ActivityNotifier) allowed(ctx context.Context, userID, rideRequestID st
 	return false
 }
 
-// send delivers one update and handles APNs's permanent rejections.
-func (a *ActivityNotifier) send(
-	ctx context.Context,
-	act Activity,
-	state ActivityContentState,
-	event ActivityEvent,
-	dismissAt *time.Time,
-	lowPriority bool,
-	now time.Time,
-) bool {
-	err := a.sender.SendActivity(ctx, ActivityNotification{
-		ActivityToken: act.Token,
-		Sandbox:       act.Sandbox,
-		Event:         event,
-		ContentState:  state,
-		Timestamp:     now,
-		DismissalDate: dismissAt,
-		LowPriority:   lowPriority,
-	})
+// send delivers one already-assembled update and handles APNs's permanent
+// rejections.
+//
+// The notification is built by the caller rather than from a parameter list
+// here: the two send paths now differ in six fields, and a seventh positional
+// bool is how a low-priority alert (a contradiction — see
+// ActivityNotification.priority) gets sent by accident. `act` is still taken
+// separately because the rejection paths log the ride, which the notification
+// does not carry.
+func (a *ActivityNotifier) send(ctx context.Context, act Activity, n ActivityNotification) bool {
+	err := a.sender.SendActivity(ctx, n)
 	if err == nil {
 		return true
 	}

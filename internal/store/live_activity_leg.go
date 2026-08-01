@@ -73,13 +73,35 @@ type LiveActivityLeg struct {
 
 // ActiveLegStatuses is the set of ride statuses that keep an Activity ticking.
 //
-// All three are "the ride is happening": accepted is leg 1 (car driving to the
-// pickup), arrived is the handshake at the kerb, enroute is leg 2 (car driving
-// to the dropoff). arrived is included even though a stationary car reports no
-// nav ETA — the tick still refreshes the timestamp and the stale-date, which is
-// what stops the Activity from drifting into its own "as of X min ago" state
-// while the rider is standing next to the car it is describing.
+// All four are "the ride is happening": requested is the rider waiting for an
+// answer, accepted is leg 1 (car driving to the pickup), arrived is the
+// handshake at the kerb, enroute is leg 2 (car driving to the dropoff).
+//
+// TWO OF THE FOUR HAVE NOTHING TO REFRESH, AND ARE HERE ANYWAY. A stationary
+// `arrived` car reports no nav ETA and a `requested` ride has no car assigned
+// at all, so neither tick changes a number. What each tick DOES change is the
+// timestamp and the stale-date, and that is the point: an Activity nobody
+// pushes to slides into ActivityKit's own "as of X min ago" rendering after
+// three minutes. For `arrived` that means a card apologising for being out of
+// date while the rider stands next to the car it describes; for `requested` it
+// means "Finding your ride" going stale while the search is genuinely still
+// running, which is the v3 Dispatch state accusing itself of a fault it does
+// not have.
+//
+// `requested` JOINED WITH THE v3 CARD (MYR-398), which starts the Activity at
+// REQUEST rather than at accept. Nothing else about it is special-cased: the
+// progress track already returns no key for a status with no leg
+// (push.legForStatus), and `eta` is withheld because the car the projection
+// reads navigation from has not been assigned to this ride yet
+// (push.etaKnown). What the rider sees is a Dispatch card that stays fresh
+// until the owner answers.
+//
+// SCHEDULED RIDES ARE UNAFFECTED. A reservation is `accepted` from the moment
+// it is booked, and its dormancy is handled where it always was — by the
+// DispatchUnderway predicate gating the track, not by this list. `requested` is
+// the INSTANT-ride case: a rider who has just asked, waiting on an answer.
 var ActiveLegStatuses = []RideRequestStatus{
+	RideRequestStatusRequested,
 	RideRequestStatusAccepted,
 	RideRequestStatusArrived,
 	RideRequestStatusEnroute,
@@ -169,6 +191,7 @@ func (r *LiveActivityRepo) ListActiveLegActivities(ctx context.Context, limit in
 			&leg.NavUpdatedAt,
 			&leg.DispatchUnderway,
 			&pLeg, &pSource, &pBaseline, &pValue, &pReading, &pReadingAt,
+			&leg.AlertedPhase,
 		); err != nil {
 			return nil, fmt.Errorf("store.ListActiveLegActivities: scan: %w", err)
 		}
