@@ -774,15 +774,46 @@ func TestIsRetryable(t *testing.T) {
 		{401, false},
 		{403, false},
 		{404, false},
+		{408, false},
 		{429, true},
 		{500, true},
 		{502, true},
-		{503, true},
+		// 503 is Tesla saying the VEHICLE is not answering (asleep / offline /
+		// transitioning), not that its servers are unwell — the sibling of 408,
+		// which this package already treats identically via
+		// isVehicleUnreachable. Retrying it four times over ~7s cannot make an
+		// unavailable car available; it just multiplies the request budget the
+		// ride poller spends on a sleeping car by four (MYR-394).
+		{503, false},
+		{504, true},
 	}
 
 	for _, tt := range tests {
 		if got := isRetryable(tt.code); got != tt.want {
 			t.Errorf("isRetryable(%d) = %v, want %v", tt.code, got, tt.want)
 		}
+	}
+}
+
+// TestFleetAPI_ServiceUnavailableCostsOneRequest is the budget assertion behind
+// the carve-out above: an asleep car answering 503 must cost the caller exactly
+// one Fleet API request per call, the same as a 408.
+func TestFleetAPI_ServiceUnavailableCostsOneRequest(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	client := NewFleetAPIClient(FleetAPIConfig{BaseURL: srv.URL}, fleetTestLogger())
+	_, err := client.GetVehicleData(context.Background(), "tok", "7SAYGDET7TA613795")
+	if err == nil {
+		t.Fatal("GetVehicleData: want an error for a 503")
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("Tesla requests for one 503 = %d, want 1 — a vehicle that is not answering must not be retried", got)
 	}
 }

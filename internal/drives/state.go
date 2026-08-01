@@ -134,6 +134,22 @@ type activeDrive struct {
 }
 
 // resetToIdle resets the vehicle state to idle. The caller must hold s.mu.
+//
+// lastGear is CLEARED, and that is not housekeeping — it is the guard against
+// phantom drive starts (MYR-394). handleIdle's only entry condition is
+// `isDriveGear(state.lastGear)`, so whatever gear is left here decides whether
+// the NEXT frame of any kind opens a new drive. Every non-gear-driven end —
+// watchdog silence, stall, the duration cap, a connectivity drop — leaves
+// lastGear at "D" precisely because no gear=P frame was ever seen; that is why
+// those end conditions exist. Leaving it set means the first subsequent frame
+// that carries any field at all re-enters handleIdle and mints a fresh drive
+// for a car that is parked. That was harmless while only the stream produced
+// frames (the next stream frame carried a real gear, correcting the cache), but
+// REST backfill frames arrive every ~25s during a ride and Tesla answers
+// shift_state=null for a parked car, so nothing would ever correct it.
+//
+// Clearing to "" is the honest value: we do not know the gear until a frame
+// tells us. isDriveGear("") is false, so no drive can start on a guess.
 func resetToIdle(s *vehicleState) {
 	if s.debounceTimer != nil {
 		s.debounceTimer.Stop()
@@ -141,4 +157,5 @@ func resetToIdle(s *vehicleState) {
 	}
 	s.status = StatusIdle
 	s.drive = nil
+	s.lastGear = ""
 }

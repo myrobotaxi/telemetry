@@ -44,6 +44,11 @@ type fileConfig struct {
 	serviceRepollEnabled  bool
 	serviceRepollInterval time.Duration
 
+	// MYR-394 ride-position poll knobs (RIDE_POSITION_POLL_ENABLED /
+	// RIDE_POSITION_POLL_INTERVAL). See load_ride_poll.go.
+	ridePollEnabled  bool
+	ridePollInterval time.Duration
+
 	// MYR-186 push-notification settings (PUSH_ENABLED, APNS_*). The key is
 	// P0 secret material; see load_push.go.
 	pushEnabled bool
@@ -386,5 +391,7 @@ func buildConfig(fc *fileConfig) *Config {
 		reservationDispatchEnabled: fc.reservationDispatchEnabled,
 		serviceRepollEnabled:       fc.serviceRepollEnabled,
 		serviceRepollInterval:      fc.serviceRepollInterval,
+		ridePollEnabled:            fc.ridePollEnabled,
+		ridePollInterval:           fc.ridePollInterval,
 	}
 }

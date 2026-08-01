@@ -1,0 +1,56 @@
+-- 0028_ride_active_poll_index.up.sql
+--
+-- MYR-394: index the active-ride poll-target read (queryActiveRidePollTargets
+-- in internal/store/ride_request_active_poll.go). The read runs SYNCHRONOUSLY
+-- at startup — before the HTTP server accepts traffic — and then on every ~5m
+-- reconcile, on every replica, for the lifetime of the process.
+--
+-- Without an index Postgres seq-scans go_ride_requests and sorts every match,
+-- and go_ride_requests retains terminal rows (completed / cancelled / declined)
+-- indefinitely. That is monotonic degradation on a table that only grows with
+-- lifetime ride volume — exactly the failure migration 0016 was written to
+-- prevent for the 30s reservation sweep. It degrades quietly, too: when the
+-- pass eventually exceeds ReconcileTimeout the reconcile returns an error and,
+-- by design, changes nothing, so the safety net that reaps leaked pollers and
+-- re-adopts rides after a restart just silently stops working.
+--
+-- Why the existing indexes cannot serve this query:
+--   * 0002's three indexes lead on rider_id / owner_id / vehicle_id, none of
+--     which this query constrains at all.
+--   * 0004 and 0013's partial UNIQUE indexes are partial on
+--     `scheduled_for IS NULL` and keyed by rider / vehicle. That is one arm of
+--     this query's three-way OR, and the other two arms have no index, so no
+--     BitmapOr is possible.
+--   * 0016 is partial on `dispatched_at IS NULL`, which this predicate does not
+--     imply.
+--   * 0026 leads on vehicle_id.
+--   * Nothing indexes updated_at, so the LIMIT cannot short-circuit the sort.
+--
+-- SHAPE. The index predicate is exactly the query's only top-level status
+-- conjunct, so Postgres can prove it implied and match the index. The key is
+-- updated_at, which serves BOTH remaining pieces of the query:
+--
+--   * the six-hour age bound (`r.updated_at > NOW() - INTERVAL '6 hours'`,
+--     MYR-394's poll-lifetime ceiling) as an Index Cond range, and
+--   * the `ORDER BY r.updated_at DESC` as a backwards ordered scan that stops
+--     after the ~50 qualifying rows the LIMIT asks for.
+--
+-- The three-arm scheduled_for / dispatch_status OR and `v."vin" <> ''` stay as
+-- cheap rechecks on the nested-loop probe into "Vehicle". Making the index
+-- wider to cover them would not pay: the status predicate has already reduced
+-- the candidate set to open rides.
+--
+-- SELF-DRAINING. Because the predicate is partial on the OPEN statuses, a row
+-- LEAVES the index the moment its ride reaches a terminal state. The indexed
+-- set therefore tracks concurrent live rides, not lifetime ride volume — the
+-- same property that makes 0016 and 0026 cheap to carry.
+--
+-- Plain non-unique INDEX, IF NOT EXISTS, no data change: it cannot fail to
+-- install over existing rows and dropping it weakens performance, never
+-- correctness. Naming convention (CG-DL-9): Go-owned table, "go_" prefix,
+-- snake_case. Classification: no new columns; an index over existing P0
+-- columns, not exposed on the wire.
+
+CREATE INDEX IF NOT EXISTS idx_go_ride_requests_active_poll
+    ON go_ride_requests (updated_at)
+    WHERE status IN ('accepted', 'enroute', 'arrived');

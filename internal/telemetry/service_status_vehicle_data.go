@@ -109,6 +109,40 @@ const publishTimeout = 5 * time.Second
 // commands.Executor budget). Returned errors wrap the sentinels above and are
 // safe to log (redacted VIN + status; the P1 payload body is never surfaced).
 func (m *ServiceStatusMonitor) RefreshFromVehicleData(ctx context.Context, vin, token string) error {
+	return m.refreshVehicleData(ctx, vin, token, true)
+}
+
+// RefreshPositionFromVehicleData is the SAME read, mapping, MYR-300 gate and
+// publish as RefreshFromVehicleData with the two MYR-320 enrichers left out.
+// It is what the MYR-394 ride poller calls, and the reason it exists is
+// arithmetic (see the enrich flag on refreshVehicleData below).
+//
+// It is deliberately a thin selector over the shared body rather than a second
+// implementation: there is still exactly ONE vehicle_data read path, one field
+// mapping and one publish, so nothing can drift between the two callers.
+func (m *ServiceStatusMonitor) RefreshPositionFromVehicleData(ctx context.Context, vin, token string) error {
+	return m.refreshVehicleData(ctx, vin, token, false)
+}
+
+// refreshVehicleData is the shared body. `enrich` selects the two MYR-320
+// extras that ride along with a connectivity-edge or owner-triggered refresh.
+//
+// WHY A CALLER WOULD DECLINE THEM (MYR-394). Both are the right thing to do
+// ONCE, on an edge, and the wrong thing to do on a 25-second loop:
+//
+//   - addFSDVersionField is a SECOND Fleet API GET (/release_notes). It doubles
+//     the poller's request budget — the ~2.4 GETs/min a ride was documented to
+//     cost was really ~4.8 — to re-fetch a value that cannot change during a
+//     ride. It is also the one mapped field absent from fieldMap, so it
+//     survives the MYR-300 gate: a fully-gated cycle on a streaming car would
+//     still publish a frame and drive a control-state upsert every 25s purely
+//     to restate the FSD version.
+//   - syncVehicleColor is an owner lookup plus an UPDATE of the Prisma-owned
+//     "Vehicle" row. A car's paint does not change mid-ride either.
+//
+// So a ride cycle is one GET and nothing else, and the edge-triggered callers
+// keep the behaviour they were written for.
+func (m *ServiceStatusMonitor) refreshVehicleData(ctx context.Context, vin, token string, enrich bool) error {
 	data, err := m.reader.GetVehicleData(ctx, token, vin)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrVehicleDataRead, err)
@@ -122,14 +156,16 @@ func (m *ServiceStatusMonitor) RefreshFromVehicleData(ctx context.Context, vin, 
 	// vehicle_data carries nothing but a colour still gets it. A nil payload is
 	// tolerated the same way vehicleDataToFields tolerates it: Tesla can answer
 	// 200 with an empty body, and that must be a no-op, not a crash.
-	if data != nil {
+	if enrich && data != nil {
 		m.syncVehicleColor(ctx, vin, data.VehicleConfig)
 	}
 
 	// MYR-320: ONE additional non-waking GET on the same trigger, for the one
 	// value no vehicle_data field carries. Non-fatal: a failure or an empty list
 	// simply adds no field, leaving any stored fsdVersion alone.
-	m.addFSDVersionField(ctx, vin, token, fields)
+	if enrich {
+		m.addFSDVersionField(ctx, vin, token, fields)
+	}
 
 	if m.streamFresh(vin) {
 		dropped := dropStreamSourcedFields(fields)
@@ -198,6 +234,10 @@ func (m *ServiceStatusMonitor) RefreshFromVehicleData(ctx context.Context, vin, 
 //     (celsiusToFahrenheit), matching the stream's boundary conversion.
 //   - charging_state strings match the proto 179 DetailedChargeState enum, so
 //     chargeState passes through unchanged.
+//   - drive_state lat/lng become ONE LocationVal, matching Field_Location, and
+//     speed/heading become FloatVals (MYR-394). These are the only mapped fields
+//     the MYR-300 gate can drop, and dropping them is correct: see
+//     addDriveStateFields.
 func vehicleDataToFields(data *VehicleData) map[string]events.TelemetryValue {
 	fields := make(map[string]events.TelemetryValue)
 	if data == nil {
@@ -207,5 +247,6 @@ func vehicleDataToFields(data *VehicleData) map[string]events.TelemetryValue {
 	addClimateStateFields(fields, data.ClimateState)
 	addChargeStateFields(fields, data.ChargeState)
 	addVehicleConfigFields(fields, data.VehicleConfig)
+	addDriveStateFields(fields, data.DriveState)
 	return fields
 }

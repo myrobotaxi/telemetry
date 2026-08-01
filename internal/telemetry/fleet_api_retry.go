@@ -34,8 +34,29 @@ func defaultRetryPolicy() retryPolicy {
 }
 
 // isRetryable reports whether the HTTP status code warrants a retry.
-// We retry on 429 (rate limited) and 5xx (server errors).
+// We retry on 429 (rate limited) and 5xx (server errors) — with ONE carve-out.
+//
+// 503 IS NOT RETRIED (MYR-394). On the Fleet API, 503 is not "our server is
+// briefly unwell", it is Tesla's answer for a VEHICLE that is asleep, offline,
+// or transitioning between states — the sibling of 408, and this package
+// already treats the two as one condition (isVehicleUnreachable in
+// ride_position_poller_loop.go). No amount of backoff makes an unavailable
+// vehicle available: the car wakes when its driver gets in, not seven seconds
+// from now.
+//
+// The cost of getting this wrong is concentrated on exactly the cars this
+// codebase reads most. With MaxRetries=3 and 1s/2s/4s (±25%) backoff, all four
+// attempts fit inside the ride poller's 15s CallTimeout, so one asleep car on
+// an active ride cost FOUR vehicle_data GETs every 25s cycle — 9.6 GETs/min
+// against a car that had already said it was not answering — and every one of
+// them was invisible, because the poller logs 503 at Debug and the per-attempt
+// warning goes to the Fleet API client's own logger.
+//
+// 500 / 502 / 504 keep their retries: those really are transient server faults.
 func isRetryable(statusCode int) bool {
+	if statusCode == http.StatusServiceUnavailable {
+		return false
+	}
 	return statusCode == http.StatusTooManyRequests || statusCode >= 500
 }
 

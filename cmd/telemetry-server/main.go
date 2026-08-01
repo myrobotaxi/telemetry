@@ -443,6 +443,26 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 		return fmt.Errorf("setting up nav dispatcher: %w", err)
 	}
 
+	// --- Ride-scoped position polling (MYR-394) ---
+	// A car that is in service, asleep, or offline streams nothing, so while it
+	// carries out a ride the tracking map was rendering the last fix from
+	// before it went quiet. This polls Tesla's vehicle_data for position every
+	// ~25s for the DURATION OF THE RIDE ONLY, through the existing MYR-260
+	// backfill path — so the frame is tagged SourceRESTBackfill, the MYR-300
+	// recency gate makes it a no-op for a car that IS streaming, and nothing
+	// new appears on the wire. Never wakes a sleeping car. No-ops entirely when
+	// RIDE_POSITION_POLL_ENABLED=false.
+	//
+	// Started AFTER the nav dispatcher so that a reservation the dispatch
+	// reconcile has just resolved is already in its final state before the poll
+	// reconcile decides which rides are live.
+	ridePoller, err := setupRidePositionPoller(
+		ctx, cfg, bus, serviceStatusMonitor, vinCache, vehicleRepo, accountRepo, rideRepo, logger)
+	if err != nil {
+		return fmt.Errorf("setting up ride position poller: %w", err)
+	}
+	defer ridePoller.Stop()
+
 	// --- HTTP server + route registration ---
 	srv := server.New(cfg.Server(), logger, db, reg, cfg.TeslaPublicKey())
 	originPatterns := resolveWSOriginPatterns(cfg.WebSocket().AllowedOrigins, *devMode, logger)

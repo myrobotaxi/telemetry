@@ -40,25 +40,32 @@ func (d *Detector) handleDriving(state *vehicleState, vin string, te events.Vehi
 	// for StallTimeout is a parked car whose gear=P frame was missed.
 	moved := accumulateDriveCounters(drive, te)
 
-	// Accumulate route point if location is present.
+	// Accumulate route point if location is present AND the car has actually
+	// moved since the last fix.
 	if loc := extractLocation(te.Fields); loc != nil {
-		heading, _ := extractFloatField(te.Fields, telemetry.FieldHeading)
-		speed, _ := extractFloatField(te.Fields, telemetry.FieldSpeed)
-
-		rp := events.RoutePoint{
-			Latitude:  loc.Latitude,
-			Longitude: loc.Longitude,
-			Speed:     speed,
-			Heading:   heading,
-			Timestamp: te.CreatedAt,
-		}
-		drive.routePoints = append(drive.routePoints, rp)
-		drive.lastLocation = *loc
+		// The drive's clock advances on EVERY located frame, moved or not:
+		// calculateStats derives duration from lastTimestamp, and a stationary
+		// car still has an honest end time.
 		drive.lastTimestamp = te.CreatedAt
-		moved = true
 
-		// Publish DriveUpdatedEvent for each location-bearing tick.
-		d.publishDriveUpdated(vin, drive.id, rp)
+		if displacedEnough(te, drive.lastLocation, *loc) {
+			heading, _ := extractFloatField(te.Fields, telemetry.FieldHeading)
+			speed, _ := extractFloatField(te.Fields, telemetry.FieldSpeed)
+
+			rp := events.RoutePoint{
+				Latitude:  loc.Latitude,
+				Longitude: loc.Longitude,
+				Speed:     speed,
+				Heading:   heading,
+				Timestamp: te.CreatedAt,
+			}
+			drive.routePoints = append(drive.routePoints, rp)
+			drive.lastLocation = *loc
+			moved = true
+
+			// Publish DriveUpdatedEvent for each location-bearing tick.
+			d.publishDriveUpdated(vin, drive.id, rp)
+		}
 	}
 
 	if moved {
