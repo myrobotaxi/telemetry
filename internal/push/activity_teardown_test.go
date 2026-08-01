@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 // Owner-teardown end pushes (MYR-172 review).
@@ -75,14 +76,18 @@ func TestEndForVehicleTeardownEndsEveryRidersActivity(t *testing.T) {
 
 // TestEndForVehicleTeardownDismissesPromptly pins the linger. A car being
 // removed is an unhappy ending, so it gets the 30-second glance rather than the
-// 15-minute look reserved for an arrival.
+// five-minute look reserved for an arrival.
+//
+// The 30 seconds is a literal here rather than DismissPromptly, so that folding
+// the completed linger (MYR-406) and this one into one constant cannot move
+// this ending without a test saying so.
 func TestEndForVehicleTeardownDismissesPromptly(t *testing.T) {
 	n, sender, _ := newTeardownNotifier(t)
 
 	n.EndForVehicleTeardown(context.Background(), teardownVehicleID)
 
 	for _, s := range sender.Sent() {
-		if want := fixedNow.Add(DismissPromptly); !s.DismissalDate.Equal(want) {
+		if want := fixedNow.Add(30 * time.Second); !s.DismissalDate.Equal(want) {
 			t.Errorf("dismissal-date = %s, want %s", s.DismissalDate, want)
 		}
 	}

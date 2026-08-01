@@ -289,7 +289,7 @@ func TestActivityExpirationPerShape(t *testing.T) {
 			want:      fixedNow.Add(endPushRetention),
 		},
 		{
-			name:      "completed end outlives its 15m dismissal-date",
+			name:      "completed end outlives its 5m dismissal-date",
 			event:     ActivityEventEnd,
 			dismissAt: &linger,
 			want:      fixedNow.Add(endPushRetention),

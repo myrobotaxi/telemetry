@@ -274,15 +274,24 @@ func TestActivityNotifierUpdatesOnStatusChange(t *testing.T) {
 // TestActivityNotifierTerminalDismissal covers MYR-194 decision 5 across every
 // terminal status — including the linger asymmetry, which is the whole point:
 // completed gets a long look, the unhappy endings go promptly but not instantly.
+//
+// The wanted lingers are LITERAL DURATIONS, not the constants the code reads.
+// Written as DismissAfter / DismissPromptly this table would assert only that
+// the map is wired to some constant, and every value in it could be changed
+// without a single test failing — which is exactly how MYR-406's five minutes
+// could drift back to fifteen, or how folding the two constants into one would
+// move the unhappy endings by accident. Each number here is a product decision
+// (MYR-406 for completed, MYR-194 for the rest) and changing one must mean
+// changing this line and saying why.
 func TestActivityNotifierTerminalDismissal(t *testing.T) {
 	tests := []struct {
 		name       string
 		status     string
 		wantLinger time.Duration
 	}{
-		{"completed lingers so the rider sees the arrival", "completed", DismissAfter},
-		{"declined dismisses promptly", "declined", DismissPromptly},
-		{"cancelled dismisses promptly", "cancelled", DismissPromptly},
+		{"completed lingers five minutes, matching the client's own linger", "completed", 5 * time.Minute},
+		{"declined dismisses promptly", "declined", 30 * time.Second},
+		{"cancelled dismisses promptly", "cancelled", 30 * time.Second},
 	}
 
 	for _, tt := range tests {
@@ -461,8 +470,10 @@ func TestActivityNotifierReservationExpiryEnds(t *testing.T) {
 	if got, want := sent[0].ContentState.Status, "reservation_expired"; got != want {
 		t.Errorf("content-state status = %q, want %q — the row still reads accepted, but the lock screen must show the ending", got, want)
 	}
-	if sent[0].DismissalDate == nil || !sent[0].DismissalDate.Equal(fixedNow.Add(DismissPromptly)) {
-		t.Error("reservation expiry did not dismiss promptly")
+	// Literal, for the reason given on TestActivityNotifierTerminalDismissal:
+	// MYR-406 moved `completed` only, and this ending must not follow it.
+	if sent[0].DismissalDate == nil || !sent[0].DismissalDate.Equal(fixedNow.Add(30*time.Second)) {
+		t.Error("reservation expiry did not dismiss promptly (30s)")
 	}
 	if store.endCount() != 1 {
 		t.Error("reservation expiry did not tombstone the registry rows")
