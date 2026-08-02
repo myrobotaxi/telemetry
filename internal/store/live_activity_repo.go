@@ -242,17 +242,35 @@ WHERE ended_at IS NULL
   )`
 
 // queryLiveActivityRideIDsForVehicle lists the rides of one vehicle that still
-// have a live Activity registered against them.
+// have a live Activity registered against them, WITH each ride's status.
 //
 // Used by owner teardown (MYR-258): the teardown hard-DELETEs go_ride_requests
 // by vehicle and the FK cascade takes go_live_activities with it, silently. The
 // rows go away; the Live Activities on the riders' phones do not. This read
 // gives the teardown the set it must end-push BEFORE the delete.
+//
+// THE STATUS CAME WITH MYR-421, and it is not a convenience. The predicate is
+// `ended_at IS NULL`, which before the held `end` could never match a completed
+// ride — the tombstone went out with the transition. Now a completed ride's row
+// stays live for five minutes, so this read sees it, and the teardown was
+// ending it as `cancelled`: a rider who finished their trip and whose owner
+// then unlinked the car would watch their completion check overwritten with a
+// cancellation. The caller needs the status to tell the two apart, and the
+// alternative — filtering completed rides out here — is worse, because the
+// cascade is about to destroy the rows and the held-end pass would then never
+// fire for them at all.
 const queryLiveActivityRideIDsForVehicle = `
-SELECT DISTINCT a.ride_request_id
+SELECT DISTINCT a.ride_request_id, r.status
 FROM go_live_activities a
 JOIN go_ride_requests r ON r.id = a.ride_request_id
 WHERE r.vehicle_id = $1 AND a.ended_at IS NULL`
+
+// VehicleActivityRide is one ride caught by an owner teardown: which ride, and
+// the status that decides how its card must be ended.
+type VehicleActivityRide struct {
+	RideRequestID string
+	Status        RideRequestStatus
+}
 
 // ErrLiveActivityRideClosed is returned by RegisterActivity when the SQL guard
 // refuses the write: the ride has reached a terminal status, or its reservation
@@ -348,9 +366,10 @@ func (r *LiveActivityRepo) MarkActivitiesPushed(ctx context.Context, keys []Live
 }
 
 // ActivityRideIDsForVehicle lists the rides of one vehicle that still have a
-// live Activity, so a caller about to hard-delete those rides can end their
-// Activities first. An empty result is the ordinary case.
-func (r *LiveActivityRepo) ActivityRideIDsForVehicle(ctx context.Context, vehicleID string) ([]string, error) {
+// live Activity, with each ride's status, so a caller about to hard-delete
+// those rides can end their Activities first — and end each one as what it
+// actually is. An empty result is the ordinary case.
+func (r *LiveActivityRepo) ActivityRideIDsForVehicle(ctx context.Context, vehicleID string) ([]VehicleActivityRide, error) {
 	if strings.TrimSpace(vehicleID) == "" {
 		return nil, fmt.Errorf("store.ActivityRideIDsForVehicle: empty vehicle id")
 	}
@@ -361,13 +380,13 @@ func (r *LiveActivityRepo) ActivityRideIDsForVehicle(ctx context.Context, vehicl
 	}
 	defer rows.Close()
 
-	var out []string
+	var out []VehicleActivityRide
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var ride VehicleActivityRide
+		if err := rows.Scan(&ride.RideRequestID, &ride.Status); err != nil {
 			return nil, fmt.Errorf("store.ActivityRideIDsForVehicle(vehicle=%s): scan: %w", vehicleID, err)
 		}
-		out = append(out, id)
+		out = append(out, ride)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store.ActivityRideIDsForVehicle(vehicle=%s): iterate: %w", vehicleID, err)

@@ -325,8 +325,15 @@ func TestLiveActivityRepo_RideIDsForVehicle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ActivityRideIDsForVehicle: %v", err)
 	}
-	if len(ids) != 1 || ids[0] != rideA {
+	if len(ids) != 1 || ids[0].RideRequestID != rideA {
 		t.Errorf("ride ids = %v, want exactly [%s] (the ended one needs no end push)", ids, rideA)
+	}
+	// The STATUS travels with the id (MYR-421): the teardown ends a completed
+	// ride as completed and everything else as cancelled, and it cannot make
+	// that distinction from an id alone.
+	if len(ids) == 1 && ids[0].Status != store.RideRequestStatusAccepted {
+		t.Errorf("status = %q, want %q — the teardown decides the ending from it",
+			ids[0].Status, store.RideRequestStatusAccepted)
 	}
 
 	// A car with nothing in flight — the ordinary teardown — reads empty.

@@ -200,12 +200,19 @@ func (a *liveActivityStoreAdapter) ActiveLegs(ctx context.Context, limit int) ([
 	return out, nil
 }
 
-func (a *liveActivityStoreAdapter) RideIDsWithActivitiesForVehicle(ctx context.Context, vehicleID string) ([]string, error) {
-	ids, err := a.repo.ActivityRideIDsForVehicle(ctx, vehicleID)
+func (a *liveActivityStoreAdapter) RideIDsWithActivitiesForVehicle(ctx context.Context, vehicleID string) ([]push.VehicleRide, error) {
+	rides, err := a.repo.ActivityRideIDsForVehicle(ctx, vehicleID)
 	if err != nil {
 		return nil, fmt.Errorf("live activity: list vehicle rides: %w", err)
 	}
-	return ids, nil
+	out := make([]push.VehicleRide, 0, len(rides))
+	for _, ride := range rides {
+		out = append(out, push.VehicleRide{
+			RideRequestID: ride.RideRequestID,
+			Status:        string(ride.Status),
+		})
+	}
+	return out, nil
 }
 
 func (a *liveActivityStoreAdapter) MarkPushed(ctx context.Context, keys []push.ActivityKey) (int64, error) {
