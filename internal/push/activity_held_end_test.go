@@ -285,6 +285,208 @@ func TestHeldEndPassSurvivesAListFailure(t *testing.T) {
 	}
 }
 
+// TestHeldEndIsNotSingleShot is the retry rule, and it is the one that keeps
+// the crash-safety argument true for the second half of a pass as well as the
+// first.
+//
+// The tombstone is the receipt for a DELIVERED end, not for having tried. A row
+// ended after a failed push drops out of the due list forever — the ride is
+// terminal, so nothing else will ever look at it — and because this path is a
+// BATCH, one 30-second APNs blip overlapping a pass would do that to every card
+// in the pass at once.
+func TestHeldEndIsNotSingleShot(t *testing.T) {
+	tests := []struct {
+		name string
+		fail func(sender *FakeActivitySender, store *fakeActivityStore)
+		heal func(sender *FakeActivitySender, store *fakeActivityStore)
+	}{
+		{
+			// The ride-context read is the first thing endRide does, and it
+			// used to tombstone on failure with the comment "the ride is over
+			// whatever the read said" — true, and irrelevant: nothing had been
+			// sent.
+			name: "the ride-context read fails",
+			fail: func(_ *FakeActivitySender, store *fakeActivityStore) {
+				store.contextErr = errors.New("pool exhausted")
+			},
+			heal: func(_ *FakeActivitySender, store *fakeActivityStore) {
+				store.contextErr = nil
+			},
+		},
+		{
+			// An APNs 5xx or a timeout. fanOut is void no longer: it reports
+			// the rows still owed the push, and endRide refuses to tombstone
+			// while any remain.
+			name: "the end push fails",
+			fail: func(sender *FakeActivitySender, _ *fakeActivityStore) {
+				sender.Err = errors.New("apns 503")
+			},
+			heal: func(sender *FakeActivitySender, _ *fakeActivityStore) {
+				sender.Err = nil
+			},
+		},
+		{
+			// The registry read inside fanOut. The rows exist and were never
+			// reached, so "nothing owed" would be a lie told by a failed read.
+			name: "the registry read fails",
+			fail: func(_ *FakeActivitySender, store *fakeActivityStore) {
+				store.listErr = errors.New("db blip")
+			},
+			heal: func(_ *FakeActivitySender, store *fakeActivityStore) {
+				store.listErr = nil
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			n, sender, store := newTestActivityNotifier(t, nil)
+			completeAndAnnounce(t, n, store)
+
+			tt.fail(sender, store)
+			holdExpires(t, n, store)
+
+			if store.endCount() != 0 {
+				t.Fatal("the rows were tombstoned after a failed end; the card is stranded and " +
+					"nothing will ever look at this ride again")
+			}
+			// The spy records refused attempts too, so the baseline is taken
+			// after the failure rather than before it.
+			attempted := len(sender.Sent())
+
+			// The next pass retries and succeeds. The end push is idempotent,
+			// so a retry costs nothing even if the first attempt did land.
+			tt.heal(sender, store)
+			holdExpires(t, n, store)
+
+			sent := sender.Sent()
+			if len(sent) != attempted+1 {
+				t.Fatalf("sends after the retry = %d, want %d — the overdue row was not re-listed",
+					len(sent), attempted+1)
+			}
+			if sent[len(sent)-1].Event != ActivityEventEnd {
+				t.Errorf("last send event = %q, want end", sent[len(sent)-1].Event)
+			}
+			if store.endCount() != 1 {
+				t.Error("the successful retry did not tombstone")
+			}
+		})
+	}
+}
+
+// TestHeldEndTombstonesWhenNobodyIsOwedAPush guards the other side of the retry
+// rule, which is the one that would leak if it were written as "tombstone only
+// on a delivery".
+//
+// A rider who muted ride updates is a NORMAL, PERMANENT state: no push is sent,
+// and there is nothing to retry. Counted as a failure, that ride would be
+// re-listed and re-attempted every 75 seconds for as long as the row survived.
+func TestHeldEndTombstonesWhenNobodyIsOwedAPush(t *testing.T) {
+	prefs := newFakePrefStore()
+	muted := DefaultPrefs()
+	muted.RideLifecycle = false
+	prefs.byUser[testRiderID] = muted
+
+	n, sender, store := newTestActivityNotifier(t, prefs)
+	store.completeRide(activityRideID, fixedNow)
+	n.handleStatusChanged(events.NewEvent(events.RideStatusChangedEvent{
+		RideRequestID: activityRideID, RiderID: testRiderID, Status: statusCompleted,
+	}))
+	n.Wait()
+	holdExpires(t, n, store)
+
+	if got := len(sender.Sent()); got != 0 {
+		t.Errorf("sent %d pushes to a muted rider, want 0", got)
+	}
+	if store.endCount() != 1 {
+		t.Error("a muted rider's completed ride was not tombstoned; it would be retried forever")
+	}
+}
+
+// TestHeldEndPassStopsOnShutdown — SIGTERM mid-batch.
+//
+// The tombstone deliberately runs on a context.WithoutCancel, so a loop that
+// ploughed on through a cancelled context would keep tombstoning rides whose
+// pushes were failing precisely because the context was cancelled. The check is
+// at the TOP of each iteration rather than after the send, so a process on its
+// way out does not spend a doomed APNs round-trip per remaining ride.
+func TestHeldEndPassStopsOnShutdown(t *testing.T) {
+	n, sender, store := newTestActivityNotifier(t, nil)
+	for i := range 3 {
+		ride := string(rune('a'+i)) + "_done"
+		store.byRide[ride] = []Activity{{RideRequestID: ride, UserID: testRiderID, Token: ride + "_token"}}
+		store.context[ride] = RideContext{Status: statusCompleted, VehicleName: "Blue Whale"}
+		store.completeRide(ride, fixedNow)
+	}
+	store.advanceClock(DismissAfter + time.Minute)
+	n.now = func() time.Time { return store.clock() }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	NewActivityTicker(n, store, TickerConfig{Enabled: false}, discardLogger()).RunPass(ctx)
+
+	if got := len(sender.Sent()); got != 0 {
+		t.Errorf("sent %d pushes on a cancelled context, want 0", got)
+	}
+	if got := len(store.ended); got != 0 {
+		t.Errorf("tombstoned %d rides during shutdown, want 0 — the next process must find them", got)
+	}
+}
+
+// TestHeldEndIsCoveredByTheDrain is MYR-421's shutdown hole.
+//
+// endHeldCompletion runs on the TICKER's goroutine and never passes through
+// async, so until it was counted on the same inflight/Cond drain, Wait()
+// returned while its pushes — and the progress and phase-mark writes behind
+// them — were still going. The symptom at shutdown is a dropped end and a
+// half-written row; under `-race` it is a reported race.
+//
+// Asserted by blocking the sender inside the pass and proving Wait() does not
+// return until the send is released.
+func TestHeldEndIsCoveredByTheDrain(t *testing.T) {
+	n, sender, store := newTestActivityNotifier(t, nil)
+	completeAndAnnounce(t, n, store)
+	store.advanceClock(DismissAfter)
+	n.now = func() time.Time { return store.clock() }
+
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	sender.Before = func() {
+		close(entered)
+		<-release
+	}
+
+	passDone := make(chan struct{})
+	go func() {
+		NewActivityTicker(n, store, TickerConfig{Enabled: false}, discardLogger()).
+			RunPass(context.Background())
+		close(passDone)
+	}()
+	<-entered
+
+	waitReturned := make(chan struct{})
+	go func() {
+		n.Wait()
+		close(waitReturned)
+	}()
+
+	select {
+	case <-waitReturned:
+		t.Fatal("Wait() returned while a held-end push was still in flight; the drain does not " +
+			"cover the ticker's sweep and shutdown can drop the end")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-waitReturned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Wait() did not return after the send completed")
+	}
+	<-passDone
+}
+
 // TestHeldEndPassIsCapped bounds the backlog one pass can work through. After a
 // long outage the due list is every ride that completed while the process was
 // down, and the rest are re-listed on the next pass.

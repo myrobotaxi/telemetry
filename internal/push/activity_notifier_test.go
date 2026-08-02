@@ -24,8 +24,9 @@ type fakeActivityStore struct {
 	legs    []ActivityLeg
 
 	// ridesByVehicle backs RideIDsWithActivitiesForVehicle — the owner-teardown
-	// read (MYR-172).
-	ridesByVehicle map[string][]string
+	// read (MYR-172). Values carry the ride's STATUS as well as its id, because
+	// that is what decides how the teardown ends each card (MYR-421).
+	ridesByVehicle map[string][]VehicleRide
 
 	ended   map[string]int
 	deleted []string
@@ -66,7 +67,7 @@ func newFakeActivityStore() *fakeActivityStore {
 	return &fakeActivityStore{
 		byRide:         map[string][]Activity{},
 		context:        map[string]RideContext{},
-		ridesByVehicle: map[string][]string{},
+		ridesByVehicle: map[string][]VehicleRide{},
 		ended:          map[string]int{},
 		completedAt:    map[string]time.Time{},
 		clock:          func() time.Time { return fixedNow },
@@ -283,13 +284,13 @@ func (f *fakeActivityStore) savedProgressFor(rideID, userID string) []ProgressAn
 	return out
 }
 
-func (f *fakeActivityStore) RideIDsWithActivitiesForVehicle(_ context.Context, vehicleID string) ([]string, error) {
+func (f *fakeActivityStore) RideIDsWithActivitiesForVehicle(_ context.Context, vehicleID string) ([]VehicleRide, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.vehicleErr != nil {
 		return nil, f.vehicleErr
 	}
-	return append([]string(nil), f.ridesByVehicle[vehicleID]...), nil
+	return append([]VehicleRide(nil), f.ridesByVehicle[vehicleID]...), nil
 }
 
 // MarkPushed mimics the real UPDATE: it stamps the delivered rows and REORDERS
