@@ -136,6 +136,13 @@ issues:
   max-same-issues: 0
 
 formatters:
+  # gofmt is the one formatter CI enforces. It was added after MYR-413 merged a
+  # misformatted hunk that `golangci-lint run` could not see: the v2 config's
+  # `formatters:` section had only `exclusions:`, so no formatter ran at all and
+  # the next person to touch the file would have inherited the whitespace diff.
+  enable:
+    - gofmt
+
   exclusions:
     generated: lax
     paths:
