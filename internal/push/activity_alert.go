@@ -61,7 +61,12 @@ const (
 	AlertPhaseArrived AlertPhase = 4
 	// AlertPhaseOnTrip is `enroute` — leg two, the rider is in the car.
 	AlertPhaseOnTrip AlertPhase = 5
-	// AlertPhaseCompleted is `completed`, and rides on the `end` push.
+	// AlertPhaseCompleted is `completed`. Its expansion rides an alerting
+	// UPDATE sent immediately before the alert-free `end`, NOT the `end` itself
+	// (MYR-418): an `aps.alert` on an `end` is undocumented by Apple, accepted
+	// by APNs and honoured by nothing, so the completion is a pair — see
+	// endRide for the two sends, and buildActivityPayload for the renderer's
+	// refusal to write the key on an `end` at all.
 	AlertPhaseCompleted AlertPhase = 6
 )
 
