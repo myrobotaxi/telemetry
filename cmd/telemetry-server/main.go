@@ -410,7 +410,11 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 		return fmt.Errorf("setting up apns client: %w", err)
 	}
 
-	notifier, err := setupPushNotifier(cfg, bus, apnsClient, pushRepo, pushPrefsRepo, vehicleNameRepo, logger)
+		// liveActivityRepo is passed for the MYR-413 duplicate-banner gate: a
+		// lifecycle banner is skipped when the recipient already has a running
+		// Live Activity for that ride, whose island alert carries the same news.
+		notifier, err := setupPushNotifier(
+			cfg, bus, apnsClient, pushRepo, pushPrefsRepo, liveActivityRepo, vehicleNameRepo, logger)
 	if err != nil {
 		return fmt.Errorf("setting up push notifier: %w", err)
 	}

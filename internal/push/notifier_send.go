@@ -23,6 +23,13 @@ type delivery struct {
 	// category is the preference this notification answers to. Every fan-out
 	// site must name one; there is no unset value that means "always send".
 	category Category
+	// islandAlerts marks a delivery whose news the recipient's Live Activity
+	// is ALSO about to deliver, by expanding the Dynamic Island (MYR-413).
+	//
+	// False is the safe default and the common one: an unset field means "send
+	// the banner", so a new fan-out site that forgets this cannot accidentally
+	// silence itself. See notifier_activity_gate.go.
+	islandAlerts bool
 }
 
 // fanOut resolves one ride party's devices and sends the alert to each. Every
@@ -51,6 +58,15 @@ func (n *Notifier) fanOut(ctx context.Context, d delivery, a alert) {
 	// MYR-349 — the recipient's own switch, checked BEFORE the device lookup so
 	// a silenced category costs one point read instead of a fan-out.
 	if !n.allowed(ctx, userID, d.category, topic) {
+		return
+	}
+
+	// MYR-413 — is this news already on its way to a Dynamic Island the
+	// recipient is watching? Checked per RECIPIENT rather than per ride,
+	// because the owner and the rider both get pushes on one transition and
+	// only the rider has a card. Second rather than first, so a rider who
+	// muted the category costs one read instead of two.
+	if n.duplicatesLiveActivity(ctx, d) {
 		return
 	}
 

@@ -67,7 +67,7 @@ func notifierWithPrefs(t *testing.T, prefs PrefStore) (*Notifier, *FakeSender) {
 	devices.byUser[testRiderID] = []Device{{Token: riderDevice, Sandbox: true}}
 
 	sender := NewFakeSender()
-	n := NewNotifier(sender, devices, prefs, &fakeVehicleNamer{}, Config{Enabled: true}, discardLogger())
+	n := NewNotifier(sender, devices, prefs, nil, &fakeVehicleNamer{}, Config{Enabled: true}, discardLogger())
 	return n, sender
 }
 
@@ -361,7 +361,7 @@ func TestNotifier_SilencedCategorySkipsTheDeviceLookup(t *testing.T) {
 	prefs.byUser[testRiderID] = off
 
 	sender := NewFakeSender()
-	n := NewNotifier(sender, devices, prefs, &fakeVehicleNamer{}, Config{Enabled: true}, discardLogger())
+	n := NewNotifier(sender, devices, prefs, nil, &fakeVehicleNamer{}, Config{Enabled: true}, discardLogger())
 	n.handleStatusChanged(statusEvent("accepted"))
 	n.Wait()
 
