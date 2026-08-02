@@ -4187,13 +4187,13 @@ A car with no active navigation route — the same ride, honestly degraded. Both
 }
 ```
 
-The final update on a completed ride — note the omitted `eta` (the car has arrived, so there is no route), the `progress` of exactly `1` (asserted by the ride record, not estimated), the `dismissal-date`, and the alert that carries the sixth and last island expansion:
+**A completed ride is TWO pushes, in this order** ([MYR-418](https://linear.app/myrobotaxi/issue/MYR-418)). First an alerting `update` carrying the terminal content-state — note the omitted `eta` (the car has arrived, so there is no route), the `progress` of exactly `1` (asserted by the ride record, not estimated), and the alert that carries the sixth and last island expansion:
 
 ```json
 {
   "aps": {
     "timestamp": 1785535380,
-    "event": "end",
+    "event": "update",
     "content-state": {
       "v": 1,
       "status": "completed",
@@ -4203,7 +4203,6 @@ The final update on a completed ride — note the omitted `eta` (the car has arr
       "asOf": 1785535380
     },
     "stale-date": 1785535560,
-    "dismissal-date": 1785535680,
     "alert": {
       "title": "Your ride",
       "body": "You've arrived"
@@ -4212,11 +4211,52 @@ The final update on a completed ride — note the omitted `eta` (the car has arr
 }
 ```
 
+Then the `end` **one second later**, carrying the same final content-state, the `dismissal-date`, and **no alert**:
+
+```json
+{
+  "aps": {
+    "timestamp": 1785535381,
+    "event": "end",
+    "content-state": {
+      "v": 1,
+      "status": "completed",
+      "vehicleName": "Blue Whale",
+      "destination": "Home",
+      "progress": 1,
+      "asOf": 1785535381
+    },
+    "stale-date": 1785535561,
+    "dismissal-date": 1785535681
+  }
+}
+```
+
+An unhappy ending is a **single** push — outside the design's six phases there is no expansion to schedule — and it still carries its own terminal content-state, because a card that keeps saying "on its way" after a cancellation is the whole reason this surface pushes on every transition. `progress` is an absent key: a journey that did not happen has no fraction of itself completed.
+
+```json
+{
+  "aps": {
+    "timestamp": 1785535380,
+    "event": "end",
+    "content-state": {
+      "v": 1,
+      "status": "cancelled",
+      "vehicleName": "Blue Whale",
+      "destination": "Home",
+      "asOf": 1785535380
+    },
+    "stale-date": 1785535560,
+    "dismissal-date": 1785535410
+  }
+}
+```
+
 ##### `aps.alert` — the island auto-expand ([MYR-398](https://linear.app/myrobotaxi/issue/MYR-398))
 
 **An update carrying an `alert` dictionary makes iOS expand the Dynamic Island for ~3 seconds and then collapse it itself.** That expansion is the mechanism the v3 design asks for and the dictionary is the only way to ask: the compact island is a figure or a glyph, and a phase changing underneath a figure that happens to look the same is a state change nobody sees.
 
-**Six pushes carry one, and nothing else does.** `requested` (Dispatch), `accepted` (Enroute), **Arriving**, `arrived`, `enroute` (On trip), `completed`. The design forbids the rest in as many words — not on ETA ticks, not on the stale flip — because an island that opens every 75 seconds for the length of a ride is a widget the rider turns off. The unhappy endings (`declined`, `cancelled`, `reservation_expired`) are deliberately outside the six: their content-state still lands, but an island opening to deliver bad news the card is already showing is not a kindness.
+**Six pushes carry one, and nothing else does — and all six are `update` events.** `requested` (Dispatch), `accepted` (Enroute), **Arriving**, `arrived`, `enroute` (On trip), `completed`. The design forbids the rest in as many words — not on ETA ticks, not on the stale flip — because an island that opens every 75 seconds for the length of a ride is a widget the rider turns off. The unhappy endings (`declined`, `cancelled`, `reservation_expired`) are deliberately outside the six: their content-state still lands, but an island opening to deliver bad news the card is already showing is not a kindness.
 
 **Arriving is the one that is not a ride status,** and it is the whole reason this needs state. It is the **pickup leg's ETA at or under two minutes**, which the ticker re-evaluates every pass — so once it is true it stays true for every remaining tick of the leg. It fires **exactly once per Activity**, enforced by a persisted high-water mark rather than by hoping.
 
@@ -4243,9 +4283,23 @@ The final update on a completed ride — note the omitted `eta` (the car has arr
 | 3 · Arriving | pickup ETA ≤ 2 min | `Your ride` | `Your ride is almost here` |
 | 4 · Arrived | `arrived` | `Your ride` | `Your ride is here` |
 | 5 · On trip | `enroute` | `Your ride` | `You're on your way` |
-| 6 · Completed | `completed` (on the `end` push) | `Your ride` | `You've arrived` |
+| 6 · Completed | `completed` (on the alerting `update` that precedes the `end` — see below) | `Your ride` | `You've arrived` |
 
 **The P1 copy policy applies to these in full, and that is a stricter rule than the content-state's.** An alert dictionary renders as an ordinary banner on a device with no Dynamic Island and on a paired watch — a locked screen, to whoever is holding it — so it is governed by `internal/push/copy.go`'s payload policy rather than by the narrow exception that lets `destination` onto the content-state. **No place, no address, no vehicle nickname, no name.** Note also "almost here" rather than "arriving": *Arriving* is an engineering phase name, and the v3 copy rules retire the word from rider-facing text because it was the word the field report was about.
+
+##### The sixth expansion rides an `update`, not the `end` ([MYR-418](https://linear.app/myrobotaxi/issue/MYR-418))
+
+**No `end` push ever carries an `aps.alert`.** The rule is absolute and is enforced at the renderer, not merely at the callers: an alert set on an `end` is dropped before the bytes are built.
+
+**What it cost to learn.** Completed is both the sixth rung of the ladder *and* the transition that ends the Activity, so the expansion was originally asked for by hanging the alert on the `end` push itself. On a real ride that shape produced: a registration that worked, alerts sent and **accepted by Apple** through phase 5, the `end` delivered with the correct final content-state and the correct alert dictionary — and **no expansion, no check glyph, nothing** at the moment the ride completed. Apple's ActivityKit push documentation introduces the alert dictionary under `start` and `update`; of an `end` it says only to "include the final content state", and prints no `end` example carrying one. An alert there is undocumented, not rejected, and not honoured. **This surface has no failure signal** — no `400`, no reason string, no metric — so a dictionary that does nothing is indistinguishable, from the server and from the logs, from one that worked.
+
+**So the completion is a PAIR.** A terminal status that sits on the ladder — `completed` alone — sends an alerting `update` carrying the terminal content-state, then the `end` carrying the same content-state, its `dismissal-date`, and no alert. The update is an ordinary alerting update in every respect: priority 10, the 24-hour expiration floor, and the high-water mark raised on delivery.
+
+**The mark finally reaches 6, and that matters beyond tidiness.** The old `end`-borne alert could never raise it: the guarded `UPDATE` is scoped to `ended_at IS NULL` and the tombstone was already racing it, so a completed ride's row tombstoned at **5** no matter what happened — which is exactly the ambiguous evidence the defect was found from. Now the mark is written by the pair's first push, while the row is still live, and a completed ride whose row still reads 5 is a real signal that the expansion did not land.
+
+**The two pushes are stamped one second apart, and the `end` takes the later stamp.** `aps.timestamp` is rendered in whole seconds, so a pair built from one clock read would carry the identical integer; ActivityKit's documented rule is that it discards a push *older* than the one it is showing, and what it does with an equal stamp is written down nowhere. The push that must never be discarded is the `end` — the rows are tombstoned as it goes out, nothing retries, and a dropped `end` freezes the rider's card until ActivityKit's own multi-hour ceiling reaps it — so the ambiguity is resolved in its favour. Backdating the *update* instead would put the risk on the alert, and an alert whose stamp collides with an ETA tick sent a second earlier is the same silently-swallowed expansion, relocated. The `dismissal-date` is measured from the `end`'s own instant, so the rider's five minutes is five minutes regardless.
+
+**The unhappy endings are unchanged and remain a single push.** `declined`, `cancelled` and `reservation_expired` resolve to no phase at all, so no pre-end update is scheduled — but their `end` still carries their own final content-state, which Apple asks for and which is what the card renders for the seconds before it dismisses.
 
 **The topic is DERIVED, not configured.** It is `APNS_TOPIC` + `.push-type.liveactivity`, so there is no second environment variable and no way for the two topics to drift apart in an environment file. Apple requires the suffix on the topic **and** the matching `apns-push-type` header; either alone is rejected as `TopicDisallowed`, a `403` that reads like a credential problem and is not one.
 
@@ -4271,11 +4325,11 @@ It is deliberately **not** pinned to the `dismissal-date`, which is the tempting
 
 **`dismissal-date` policy.** A `completed` ride lingers **5 minutes** ([MYR-406](https://linear.app/myrobotaxi/issue/MYR-406), shortened from 15): the rider should get to look at the arrival state rather than have it vanish the instant the owner taps "Dropped off". The client ends a completed Activity locally at the same five minutes ([MYR-405](https://linear.app/myrobotaxi/issue/MYR-405)) and that timer wins whenever the app is alive, so this date is the FALLBACK for a phone whose app is dead — two different numbers meant the same ride lingered for five minutes or fifteen depending on something the rider cannot see. The unhappy endings — `declined`, `cancelled`, `reservation_expired` — dismiss after **30 seconds**. Not zero, deliberately: an Activity dismissed the same instant it is ended can disappear before the rider's eyes reach it, and "my ride vanished" is a worse experience than the bad news itself.
 
-**Ending is a send, THEN a tombstone, in that order.** A row ended first would be excluded from its own final push, leaving the lock screen on the last state it happened to receive — which for a declined ride is "your car is on its way".
+**Ending is a send, THEN a tombstone, in that order** — and on a completed ride, *both* sends come before it. A row ended first would be excluded from its own final push, leaving the lock screen on the last state it happened to receive — which for a declined ride is "your car is on its way". The same ordering is what lets the completion pair's alerting update raise the phase mark at all, since that write is scoped to live rows.
 
 #### 7.21.5 Update cadence and the preference gate
 
-**Lifecycle transitions** are pushed as they happen: the notifier subscribes to the same `ride.status.changed` topic §7.17 does, so every transition the service already publishes is covered without a call site being edited. **Nothing is filtered out** — unlike an alert, where a rider's own cancellation would be noise, a Live Activity still showing "on its way" after the rider cancelled is simply a WRONG lock screen.
+**Lifecycle transitions** are pushed as they happen: the notifier subscribes to the same `ride.status.changed` topic §7.17 does, so every transition the service already publishes is covered without a call site being edited. **Nothing is filtered out** — unlike an alert, where a rider's own cancellation would be noise, a Live Activity still showing "on its way" after the rider cancelled is simply a WRONG lock screen. Every transition is **one** push except `completed`, which is the pair described in §7.21.4.
 
 **ETA ticks** re-push the current content-state every **60–90 seconds** (75s ± 20% jitter) while the ride is in `requested`, `accepted`, `arrived` or `enroute`. The ETA is the one thing on the Activity that goes wrong by SITTING STILL — the status changes only when something happens, but "arrives at 4:12" stops being true the moment traffic does. The jitter also de-synchronises replicas so they do not push Apple in a burst.
 
