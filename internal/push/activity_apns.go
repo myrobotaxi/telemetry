@@ -142,14 +142,38 @@ func (c *Client) SendActivity(ctx context.Context, n ActivityNotification) error
 // an overnight flight, not to be precise.
 const endPushRetention = 24 * time.Hour
 
-// activityExpiration is the apns-expiration instant for one update, and the two
+// alertingUpdateRetention is the same day for an ALERTING update, and it is
+// deliberately its own constant rather than a reuse of endPushRetention: they
+// are two separate decisions about two separate shapes, and a shared constant is
+// how one of them silently moves the other.
+const alertingUpdateRetention = 24 * time.Hour
+
+// activityExpiration is the apns-expiration instant for one update, and the
 // shapes want OPPOSITE things from it.
 //
-// AN UPDATE EXPIRES AT ITS STALE-DATE. A queued ETA refresh that reaches the
-// phone after its content stopped being trustworthy is worse than one that
-// never arrives: it overwrites the Activity with a state ActivityKit was about
-// to mark stale anyway, resetting the staleness clock on expired information.
-// Late is worthless here, so we tell Apple to drop it.
+// AN ORDINARY UPDATE EXPIRES AT ITS STALE-DATE. A queued ETA refresh that
+// reaches the phone after its content stopped being trustworthy is worse than
+// one that never arrives: it overwrites the Activity with a state ActivityKit
+// was about to mark stale anyway, resetting the staleness clock on expired
+// information. Late is worthless here, so we tell Apple to drop it.
+//
+// AN ALERTING UPDATE IS THE EXCEPTION, and MYR-413 is what made it one. Since
+// the duplicate-banner gate (notifier_activity_gate.go), a rider watching a card
+// gets NO lifecycle banner on the phases the island alerts on — so the alerting
+// update is now the SOLE carrier of "your car is here" for that rider, and the
+// banner it replaced had no apns-expiration at all, which is to say APNs stored
+// and retried it. Pinned to a three-minute stale-date, an alerting update to a
+// phone in a tunnel is discarded by Apple and the rider reconnects to nothing;
+// that is the ordinary case a lock-screen notification exists for, not an edge.
+// It gets the same day's floor as an `end` for the same reason.
+//
+// A late alerting update is SAFE to deliver in a way a late ETA tick is not,
+// which is what makes the exception sound rather than merely necessary. The
+// stale-date travels IN THE PAYLOAD (buildActivityPayload writes aps.stale-date)
+// independent of this header, so an update delivered an hour late self-declares
+// as stale and ActivityKit applies its own staleness treatment instead of
+// presenting expired data as current; and aps.timestamp ordering means it can
+// never overwrite a newer tick that arrived first.
 //
 // AN `end` MUST OUTLIVE THE PHONE BEING OFFLINE. It is the only push in this
 // system with no successor — the rows are tombstoned the moment it is sent, the
@@ -172,7 +196,17 @@ const endPushRetention = 24 * time.Hour
 // the `aps.timestamp` and the stale-date in the body all describe one instant.
 func activityExpiration(n ActivityNotification) time.Time {
 	if n.Event != ActivityEventEnd {
-		return n.StaleDate()
+		if n.Alert == nil {
+			return n.StaleDate()
+		}
+		// A FLOOR, not a replacement: if StaleAfter is ever raised past a day
+		// the stale-date is the later of the two and still wins, exactly as the
+		// dismissal-date does below.
+		retainUntil := n.Timestamp.Add(alertingUpdateRetention)
+		if stale := n.StaleDate(); stale.After(retainUntil) {
+			return stale
+		}
+		return retainUntil
 	}
 	retainUntil := n.Timestamp.Add(endPushRetention)
 	if n.DismissalDate != nil && n.DismissalDate.After(retainUntil) {
