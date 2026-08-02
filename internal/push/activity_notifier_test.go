@@ -341,15 +341,22 @@ func TestActivityNotifierUpdatesOnStatusChange(t *testing.T) {
 // move the unhappy endings by accident. Each number here is a product decision
 // (MYR-406 for completed, MYR-194 for the rest) and changing one must mean
 // changing this line and saying why.
+//
+// The linger is measured from the END's own instant, which is the pair's second
+// push on a completed ride (MYR-418) and the only push on the others — hence
+// `wantPushes` and the offset applied below. Measuring it from the alerting
+// update instead would make the number the rider experiences depend on which
+// half of the pair the test happened to look at.
 func TestActivityNotifierTerminalDismissal(t *testing.T) {
 	tests := []struct {
 		name       string
 		status     string
+		wantPushes int
 		wantLinger time.Duration
 	}{
-		{"completed lingers five minutes, matching the client's own linger", "completed", 5 * time.Minute},
-		{"declined dismisses promptly", "declined", 30 * time.Second},
-		{"cancelled dismisses promptly", "cancelled", 30 * time.Second},
+		{"completed lingers five minutes, matching the client's own linger", "completed", 2, 5 * time.Minute},
+		{"declined dismisses promptly", "declined", 1, 30 * time.Second},
+		{"cancelled dismisses promptly", "cancelled", 1, 30 * time.Second},
 	}
 
 	for _, tt := range tests {
@@ -365,17 +372,22 @@ func TestActivityNotifierTerminalDismissal(t *testing.T) {
 			n.Wait()
 
 			sent := sender.Sent()
-			if len(sent) != 1 {
-				t.Fatalf("sent %d updates, want 1", len(sent))
+			if len(sent) != tt.wantPushes {
+				t.Fatalf("sent %d updates, want %d", len(sent), tt.wantPushes)
 			}
-			if sent[0].Event != ActivityEventEnd {
-				t.Fatalf("event = %q, want end for terminal status %q", sent[0].Event, tt.status)
+			end := sent[len(sent)-1]
+			if end.Event != ActivityEventEnd {
+				t.Fatalf("event = %q, want end for terminal status %q", end.Event, tt.status)
 			}
-			if sent[0].DismissalDate == nil {
+			if end.DismissalDate == nil {
 				t.Fatal("terminal send carries no dismissal-date")
 			}
-			if got, want := *sent[0].DismissalDate, fixedNow.Add(tt.wantLinger); !got.Equal(want) {
-				t.Errorf("dismissal-date = %s, want %s (linger %s)", got, want, tt.wantLinger)
+			// The end's own timestamp, which trails the alerting update by
+			// endAfterAlertGap on a completed ride and is `now` on the others.
+			wantAt := end.Timestamp.Add(tt.wantLinger)
+			if got := *end.DismissalDate; !got.Equal(wantAt) {
+				t.Errorf("dismissal-date = %s, want %s (linger %s past the end's own timestamp)",
+					got, wantAt, tt.wantLinger)
 			}
 			if store.endCount() != 1 {
 				t.Error("terminal send did not tombstone the registry rows")
