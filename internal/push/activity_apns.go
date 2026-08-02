@@ -39,7 +39,8 @@ type activityAPS struct {
 	// end event. Omitted means iOS dismisses the Activity immediately.
 	DismissalDate *int64 `json:"dismissal-date,omitempty"`
 
-	// Alert is `aps.alert`, present only on the six phase changes (MYR-398).
+	// Alert is `aps.alert`, present only on the six phase changes (MYR-398) and
+	// only ever on an `update` (MYR-418 — see buildActivityPayload).
 	// Its PRESENCE is the whole mechanism — iOS expands the Dynamic Island for
 	// ~3s on an update that carries one — so an empty dictionary would be an
 	// unintended expansion rather than a harmless default, and the pointer is
@@ -90,7 +91,22 @@ func buildActivityPayload(n ActivityNotification) ([]byte, error) {
 		dismiss := n.DismissalDate.Unix()
 		aps.DismissalDate = &dismiss
 	}
-	if n.Alert != nil {
+	// AN `end` NEVER RENDERS AN ALERT, whatever the caller asked for (MYR-418).
+	//
+	// Apple's ActivityKit push documentation introduces the alert dictionary
+	// under `start` and `update`; of an `end` it says only to "include the final
+	// content state". An alert there is undocumented — and, on the client's
+	// real-device ride, accepted by APNs and honoured by nothing: the island
+	// never expanded and the rider saw no arrival at all.
+	//
+	// Enforced HERE, at the one place the key is either written or not, rather
+	// than trusted to the callers. That is a deliberate answer to how this
+	// defect survived: there is no failure signal anywhere on this surface — no
+	// 400, no reason string, no metric — so an alert that does nothing looks
+	// exactly like an alert that worked, from the server all the way to the
+	// logs. A caller that wants the sixth expansion must send it on the alerting
+	// UPDATE that precedes the end, which is what endRide does.
+	if n.Alert != nil && n.Event != ActivityEventEnd {
 		aps.Alert = &activityAlert{Title: n.Alert.Title, Body: n.Alert.Body}
 	}
 
