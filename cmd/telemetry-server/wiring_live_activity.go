@@ -228,13 +228,23 @@ func (a *liveActivityStoreAdapter) MarkPushed(ctx context.Context, keys []push.A
 }
 
 // RidesAwaitingEnd surfaces the completed rides whose held-back `end` push has
-// come due (MYR-421).
-func (a *liveActivityStoreAdapter) RidesAwaitingEnd(ctx context.Context, heldFor time.Duration, limit int) ([]string, error) {
-	ids, err := a.repo.ListRidesAwaitingActivityEnd(ctx, heldFor, limit)
+// come due and is still inside its retry horizon (MYR-421).
+func (a *liveActivityStoreAdapter) RidesAwaitingEnd(ctx context.Context, heldFor, giveUpAfter time.Duration, limit int) ([]string, error) {
+	ids, err := a.repo.ListRidesAwaitingActivityEnd(ctx, heldFor, giveUpAfter, limit)
 	if err != nil {
 		return nil, fmt.Errorf("live activity: list rides awaiting end: %w", err)
 	}
 	return ids, nil
+}
+
+// AbandonHeldEnds retires the cards whose retry horizon has passed, sending
+// nothing — the held-end loop's terminator (MYR-421).
+func (a *liveActivityStoreAdapter) AbandonHeldEnds(ctx context.Context, giveUpAfter time.Duration) (int64, error) {
+	n, err := a.repo.AbandonExpiredHeldEnds(ctx, giveUpAfter)
+	if err != nil {
+		return 0, fmt.Errorf("live activity: abandon expired held ends: %w", err)
+	}
+	return n, nil
 }
 
 func (a *liveActivityStoreAdapter) SweepStale(ctx context.Context, olderThan time.Duration) (int64, error) {

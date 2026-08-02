@@ -41,10 +41,15 @@ type ActivityLegStore interface {
 	// MarkPushed records that these registrations were just delivered to, so
 	// the next pass orders them last.
 	MarkPushed(ctx context.Context, keys []ActivityKey) (int64, error)
-	// RidesAwaitingEnd lists up to limit rides that completed at least heldFor
-	// ago and still have a live Activity — the held `end` pushes now due
-	// (MYR-421). Oldest completion first.
-	RidesAwaitingEnd(ctx context.Context, heldFor time.Duration, limit int) ([]string, error)
+	// RidesAwaitingEnd lists up to limit rides that completed between heldFor
+	// and giveUpAfter ago and still have a live Activity — the held `end`
+	// pushes that are due and still worth attempting (MYR-421). Newest
+	// completion first.
+	RidesAwaitingEnd(ctx context.Context, heldFor, giveUpAfter time.Duration, limit int) ([]string, error)
+	// AbandonHeldEnds tombstones completed rides whose held `end` was never
+	// delivered within giveUpAfter of completion, sending nothing, and reports
+	// how many Activities it retired. The retry loop's terminator.
+	AbandonHeldEnds(ctx context.Context, giveUpAfter time.Duration) (int64, error)
 	// SweepStale deletes rows untouched for longer than olderThan.
 	SweepStale(ctx context.Context, olderThan time.Duration) (int64, error)
 }

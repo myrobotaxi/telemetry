@@ -3,6 +3,7 @@ package push
 import (
 	"context"
 	"log/slog"
+	"time"
 )
 
 // The held completion `end` (MYR-421).
@@ -43,6 +44,22 @@ import (
 // deletes the row. Without it the hold was single-shot and one 30-second APNs
 // blip overlapping a pass would strand every card in that pass at once.
 //
+// THE RETRY TERMINATES, which is the other half of that rule and does not
+// follow from it. Only 410 and 400 take a row out of the due list; a 403
+// TopicDisallowed, a 404 or a timeout all come back retryable, so a retry with
+// no ceiling would re-attempt one poisoned row every 75 seconds until the
+// 24-hour registration sweep deleted it — and even the ordering would work
+// against us, since a non-draining row sits at the head of a LIMITed list and
+// blocks newly completed rides behind it. Three bounds together make the loop
+// provably terminate and provably stay fair:
+//
+//   - heldEndGiveUpAfter — a horizon past which the card is abandoned in bulk,
+//     so the due set drains whatever APNs is doing;
+//   - newest-completion-first ordering — so a stuck row cannot hold the head of
+//     the queue against a ride that has just finished;
+//   - heldEndPassFraction and heldEndSendTimeout — so a saturated batch can
+//     never starve the ETA refresh of more than one tick.
+//
 // TWO REPLICAS CAN BOTH SEND ONE RIDE'S END, and that is ACCEPTED rather than
 // prevented. This service runs a single replica today; if it did not, both
 // would list the same due ride, both would push, and the loser's tombstone
@@ -55,6 +72,91 @@ import (
 // file was corrected for. Between one duplicate push and a card nobody ends,
 // this surface chooses the first — the same choice §7.21.4 makes about the
 // island opening once more than it had to.
+
+// heldEndGiveUpAfter is how long after COMPLETION the retry stops and the card
+// is abandoned — same origin as the hold, so the retry budget is the difference
+// between the two: five minutes to thirty, about twenty passes.
+//
+// A HORIZON IS REQUIRED, not a refinement. Only 410 and 400 take a row out of
+// the due list; every other failure — a 403 TopicDisallowed from a misconfigured
+// APNS_TOPIC, a 404, a timeout — comes back as retryable. Without a ceiling the
+// only terminator is the 24-hour registration sweep, which is ~1,150 doomed
+// pushes per row and then a DELETE with no `end` ever sent. That is worse than
+// giving up, because it is giving up eventually while pretending not to.
+//
+// THIRTY MINUTES, and the number is chosen from both directions. Long enough
+// that nothing recoverable is abandoned: it is six times the hold, and
+// comfortably outlasts a rolling deploy, a database failover, or any APNs
+// incident this service has seen — and note that reachability of the PHONE is
+// not what is being waited on, since an `end` Apple accepts is stored for 24
+// hours by its own apns-expiration. What this window is for is our ability to
+// hand the push to Apple at all. Short enough that a poisoned head of the list
+// drains within the half hour rather than the day, and short enough that the
+// value being given up on has genuinely decayed: the client's own five-minute
+// reaper (MYR-405) has removed the card on any phone whose app is alive, so
+// what remains after thirty minutes is a dead-app phone showing a ride that
+// finished half an hour ago.
+const heldEndGiveUpAfter = 30 * time.Minute
+
+// heldEndSendTimeout bounds ONE ride's end push.
+//
+// The APNs client allows 10 seconds per attempt and retries once on a network
+// error or 5xx, so an unbounded ride can hold this loop for ~20 seconds by
+// itself. Fifteen gives the first attempt a clean run and deliberately cuts the
+// INLINE retry short, because the inline retry is the expensive one: the pass is
+// already a retry, and a pass retry costs the loop nothing while an inline one
+// holds every ride behind it. The cost of cutting it is 75 seconds of latency on
+// a ride that had 25 minutes of budget.
+//
+// It cannot truncate a write. Both mark writes and the tombstone run on
+// contexts detached from this one (see saveProgress and tombstone), which is
+// what makes a deadline here safe rather than merely bounded.
+const heldEndSendTimeout = 15 * time.Second
+
+// heldEndPassFraction is the share of one tick interval the held-end pass may
+// spend before it yields.
+//
+// THE PASS MUST NOT STARVE THE ETA REFRESH. RunPass runs the refresh and then
+// the held ends serially on one goroutine, so a saturated batch does not delay
+// the refresh it already ran — it delays every subsequent one, by delaying the
+// loop's return to its timer. At MaxPerPass=200 with each send bounded at
+// heldEndSendTimeout, an unbounded batch is fifty minutes during which no live
+// ride's ETA is refreshed at all.
+//
+// A half of the interval, checked BEFORE each ride, gives the bound worth
+// stating: a pass can overshoot by at most one heldEndSendTimeout, so the
+// held-end work costs at most Interval/2 + 15s ≈ 52s at the default cadence —
+// under the 60-second floor of the jittered interval, and therefore never more
+// than one tick's delay to the refresh. A healthy full batch fits comfortably
+// inside it: 200 sends at a normal APNs round-trip is well under 37 seconds.
+const heldEndPassFraction = 0.5
+
+// abandonExpiredHeldEnds retires the cards whose horizon has passed.
+//
+// FIRST IN THE PASS, so the due list this pass reads is already free of rows
+// nothing will be done with — otherwise they would occupy slots in a LIMITed
+// query that the newest-first ordering puts them last in, and never leave.
+//
+// Logged at ERROR because an abandoned card is a real failure with a rider on
+// the other end of it: a completed ride whose Activity this service never
+// managed to end. It is bounded and honest rather than silent, which is the
+// most that can be said for it.
+func (t *ActivityTicker) abandonExpiredHeldEnds(ctx context.Context) {
+	abandonCtx, cancel := context.WithTimeout(ctx, t.cfg.ListTimeout)
+	defer cancel()
+
+	retired, err := t.legs.AbandonHeldEnds(abandonCtx, heldEndGiveUpAfter)
+	if err != nil {
+		t.logger.Error("live activity ticker: abandoning expired held ends failed",
+			slog.String("error", err.Error()))
+		return
+	}
+	if retired > 0 {
+		t.logger.Error("live activity: gave up on held ends; cards were never ended",
+			slog.Int64("activities", retired),
+			slog.Duration("after", heldEndGiveUpAfter))
+	}
+}
 
 // endHeldCompletions sends the `end` push for every completed ride whose hold
 // has expired.
@@ -72,8 +174,10 @@ import (
 // after a long outage this list is every ride that completed while the process
 // was down. Oldest completion first, so the cap sheds the least overdue.
 func (t *ActivityTicker) endHeldCompletions(ctx context.Context) {
+	t.abandonExpiredHeldEnds(ctx)
+
 	listCtx, cancel := context.WithTimeout(ctx, t.cfg.ListTimeout)
-	rides, err := t.legs.RidesAwaitingEnd(listCtx, DismissAfter, t.cfg.MaxPerPass)
+	rides, err := t.legs.RidesAwaitingEnd(listCtx, DismissAfter, heldEndGiveUpAfter, t.cfg.MaxPerPass)
 	cancel()
 	if err != nil {
 		t.logger.Error("live activity ticker: held-end list failed",
@@ -83,6 +187,11 @@ func (t *ActivityTicker) endHeldCompletions(ctx context.Context) {
 	if len(rides) == 0 {
 		return
 	}
+
+	// Read from the notifier's injectable clock, like every other instant on
+	// this surface, so a test can drive the budget deterministically rather
+	// than by sleeping.
+	yieldAt := t.notifier.now().Add(time.Duration(float64(t.cfg.Interval) * heldEndPassFraction))
 
 	var sent int
 	for _, rideID := range rides {
@@ -102,11 +211,27 @@ func (t *ActivityTicker) endHeldCompletions(ctx context.Context) {
 				slog.String("reason", err.Error()))
 			return
 		}
+		// YIELD BEFORE STARTING ANOTHER RIDE, never in the middle of one. The
+		// check is here rather than after the send so the overshoot is bounded
+		// by exactly one heldEndSendTimeout — see heldEndPassFraction for the
+		// arithmetic that keeps the whole pass inside one tick.
+		if !t.notifier.now().Before(yieldAt) {
+			t.logger.Warn("live activity ticker: held-end pass yielded on its time budget",
+				slog.Int("sent", sent),
+				slog.Int("deferred", len(rides)-sent))
+			break
+		}
 		// Serially, and on the pass context. Each ride is one fan-out over the
 		// (usually one) Activity registered against it, and completions arrive
 		// at human rates — a queue deep enough to need concurrency here is one
 		// the per-pass cap has already truncated.
-		t.notifier.endHeldCompletion(ctx, rideID)
+		//
+		// Under its own deadline, so one unreachable ride cannot own a quarter
+		// of the tick. The mark writes and the tombstone behind this call run on
+		// detached contexts, so the deadline bounds the PUSH and nothing else.
+		rideCtx, cancelRide := context.WithTimeout(ctx, heldEndSendTimeout)
+		t.notifier.endHeldCompletion(rideCtx, rideID)
+		cancelRide()
 		sent++
 	}
 
