@@ -41,18 +41,30 @@ type ActivityLegStore interface {
 	// MarkPushed records that these registrations were just delivered to, so
 	// the next pass orders them last.
 	MarkPushed(ctx context.Context, keys []ActivityKey) (int64, error)
+	// RidesAwaitingEnd lists up to limit rides that completed at least heldFor
+	// ago and still have a live Activity — the held `end` pushes now due
+	// (MYR-421). Oldest completion first.
+	RidesAwaitingEnd(ctx context.Context, heldFor time.Duration, limit int) ([]string, error)
 	// SweepStale deletes rows untouched for longer than olderThan.
 	SweepStale(ctx context.Context, olderThan time.Duration) (int64, error)
 }
 
 // TickerConfig tunes the ETA ticker. Zero values get defaults via withDefaults.
 type TickerConfig struct {
-	// Enabled is the kill-switch (LIVE_ACTIVITY_TICKER_ENABLED). False means
-	// Run returns immediately: lifecycle transitions still update Activities,
-	// and only the periodic ETA refresh stops. The Activity's own stale-date
-	// then does its job, which is exactly the degraded mode MYR-194 designed
-	// for — a safe place to stand while an operator investigates APNs
-	// throttling.
+	// Enabled is the kill-switch (LIVE_ACTIVITY_TICKER_ENABLED). False stops
+	// the periodic ETA REFRESH and nothing else: lifecycle transitions still
+	// update Activities, and the Activity's own stale-date then does its job,
+	// which is exactly the degraded mode MYR-194 designed for — a safe place to
+	// stand while an operator investigates APNs throttling.
+	//
+	// IT NO LONGER STOPS THE LOOP ITSELF (MYR-421), and that is what keeps its
+	// documented meaning true rather than changing it. Since the completion
+	// pair's `end` is held for five minutes, that end runs on this loop — and
+	// it is the second half of a LIFECYCLE TRANSITION, not a refresh. Left
+	// inside the switch, turning off the ETA ticker would silently strand every
+	// completed card on every rider's lock screen until ActivityKit's own
+	// multi-hour ceiling reaped it, which is a far worse degraded mode than the
+	// one the switch was built to offer.
 	Enabled bool
 	// Interval is the base cadence between passes.
 	Interval time.Duration
@@ -158,18 +170,23 @@ func NewActivityTicker(
 // cmd/ wiring, alongside the notifier's subscription, because it is a timer and
 // not a subscription.
 func (t *ActivityTicker) Run(ctx context.Context) {
-	if t.legs == nil || t.notifier == nil || !t.cfg.Enabled {
-		t.logger.Info("live activity ticker disabled",
-			slog.Bool("wired", t.legs != nil && t.notifier != nil),
-			slog.Bool("enabled", t.cfg.Enabled))
+	if t.legs == nil || t.notifier == nil {
+		t.logger.Info("live activity ticker not wired",
+			slog.Bool("legs", t.legs != nil),
+			slog.Bool("notifier", t.notifier != nil))
 		return
 	}
 
 	t.logger.Info("live activity ticker started",
+		// eta_refresh rather than "enabled": the loop runs either way now, and
+		// what the switch actually governs is the periodic refresh. See
+		// TickerConfig.Enabled.
+		slog.Bool("eta_refresh", t.cfg.Enabled),
 		slog.Duration("interval", t.cfg.Interval),
 		slog.Duration("startup_delay", t.cfg.StartupDelay),
 		slog.Float64("jitter_fraction", t.cfg.JitterFraction),
 		slog.Int("max_per_pass", t.cfg.MaxPerPass),
+		slog.Duration("held_end", DismissAfter),
 		slog.Duration("sweep_age", t.cfg.SweepAge))
 
 	wait := t.cfg.StartupDelay
@@ -187,8 +204,13 @@ func (t *ActivityTicker) Run(ctx context.Context) {
 	}
 }
 
-// RunPass performs ONE pass: refresh every active leg's Activity, then sweep if
-// the sweep is due.
+// RunPass performs ONE pass: refresh every active leg's Activity, send the
+// completion `end`s whose hold has expired, then sweep if the sweep is due.
+//
+// THE THREE STEPS ARE INDEPENDENT and run in that order because it reads as
+// what it is — refresh the living, end the finished, reap the dead. Only the
+// first is governed by the ETA kill-switch; see TickerConfig.Enabled for why the
+// held end must not be.
 //
 // Exported so tests drive a pass deterministically instead of racing a timer.
 func (t *ActivityTicker) RunPass(ctx context.Context) {
@@ -196,6 +218,16 @@ func (t *ActivityTicker) RunPass(ctx context.Context) {
 		return
 	}
 
+	if t.cfg.Enabled {
+		t.refreshActiveLegs(ctx)
+	}
+	t.endHeldCompletions(ctx)
+	t.sweepIfDue(ctx, t.notifier.now())
+}
+
+// refreshActiveLegs re-pushes the current content-state to every live Activity
+// whose ride is mid-leg.
+func (t *ActivityTicker) refreshActiveLegs(ctx context.Context) {
 	listCtx, cancel := context.WithTimeout(ctx, t.cfg.ListTimeout)
 	legs, err := t.legs.ActiveLegs(listCtx, t.cfg.MaxPerPass)
 	cancel()
@@ -278,8 +310,6 @@ func (t *ActivityTicker) RunPass(ctx context.Context) {
 			slog.Int("delivered", len(pushed)),
 			slog.Bool("capped", len(legs) == t.cfg.MaxPerPass))
 	}
-
-	t.sweepIfDue(ctx, now)
 }
 
 // markPushed stamps the delivered rows so the next pass sorts them last.

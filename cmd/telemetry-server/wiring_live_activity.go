@@ -220,6 +220,16 @@ func (a *liveActivityStoreAdapter) MarkPushed(ctx context.Context, keys []push.A
 	return n, nil
 }
 
+// RidesAwaitingEnd surfaces the completed rides whose held-back `end` push has
+// come due (MYR-421).
+func (a *liveActivityStoreAdapter) RidesAwaitingEnd(ctx context.Context, heldFor time.Duration, limit int) ([]string, error) {
+	ids, err := a.repo.ListRidesAwaitingActivityEnd(ctx, heldFor, limit)
+	if err != nil {
+		return nil, fmt.Errorf("live activity: list rides awaiting end: %w", err)
+	}
+	return ids, nil
+}
+
 func (a *liveActivityStoreAdapter) SweepStale(ctx context.Context, olderThan time.Duration) (int64, error) {
 	n, err := a.repo.SweepStaleActivities(ctx, olderThan)
 	if err != nil {
