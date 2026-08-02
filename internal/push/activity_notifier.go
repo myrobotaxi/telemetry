@@ -94,21 +94,24 @@ type ActivityStore interface {
 	SaveAlertedPhase(ctx context.Context, key ActivityKey, phase AlertPhase) error
 }
 
-// terminalStatuses maps a terminal ride status onto how long its Activity
-// lingers on the lock screen before iOS dismisses it (MYR-194 decision 5).
+// terminalStatuses maps a terminal ride status onto how its Activity ends —
+// how long the card lingers before iOS dismisses it (MYR-194 decision 5), and
+// since MYR-421 whether the `end` push waits.
 //
 // `completed` lingers because the arrival state is the thing the rider most
-// wants a moment with. The unhappy endings go promptly — but not instantly, so
-// the news is legible before it disappears.
+// wants a moment with, and it is the one ending whose `end` is HELD for that
+// linger: the push does not merely end the Activity, it takes the Dynamic
+// Island presence with it. The unhappy endings go promptly and immediately —
+// but not instantly, so the news is legible before it disappears.
 //
 // `arrived` and `enroute` are NOT here: `arrived` is the car reaching the
 // pickup (the ride is just beginning) and `enroute` is leg two. Both are the
 // most active moments of the ride, and reading either as terminal would end the
 // Activity exactly when the rider is looking at it.
-var terminalStatuses = map[string]time.Duration{
-	"completed": DismissAfter,
-	"declined":  DismissPromptly,
-	"cancelled": DismissPromptly,
+var terminalStatuses = map[string]activityEnding{
+	"completed": completedEnding,
+	"declined":  promptEnding,
+	"cancelled": promptEnding,
 }
 
 // ActivityNotifier pushes ActivityKit updates on ride lifecycle transitions.
@@ -239,7 +242,7 @@ func (a *ActivityNotifier) handleStatusChanged(evt events.Event) {
 // watch an Activity promise a pickup forever. Called synchronously by the
 // sweeper on a context it owns.
 func (a *ActivityNotifier) EndForReservationExpiry(ctx context.Context, rideRequestID string) {
-	a.endRide(ctx, rideRequestID, "reservation_expired", DismissPromptly)
+	a.endRide(ctx, rideRequestID, "reservation_expired", promptEnding)
 }
 
 // EndForVehicleTeardown ends every live Activity on a vehicle's rides, and is
@@ -279,7 +282,7 @@ func (a *ActivityNotifier) EndForVehicleTeardown(ctx context.Context, vehicleID 
 	}
 
 	for _, rideID := range rideIDs {
-		a.endRide(ctx, rideID, "cancelled", DismissPromptly)
+		a.endRide(ctx, rideID, "cancelled", promptEnding)
 	}
 
 	a.logger.Info("live activities ended for vehicle teardown",

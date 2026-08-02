@@ -33,8 +33,8 @@ func (a *ActivityNotifier) pushRide(ctx context.Context, rideRequestID, topic st
 		return
 	}
 
-	if linger, terminal := terminalStatuses[rc.Status]; terminal {
-		a.endRide(ctx, rideRequestID, rc.Status, linger)
+	if ending, terminal := terminalStatuses[rc.Status]; terminal {
+		a.endRide(ctx, rideRequestID, rc.Status, ending)
 		return
 	}
 

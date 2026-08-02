@@ -7,11 +7,62 @@ import (
 )
 
 // The terminal half of the Live Activity lifecycle (MYR-172; the completion
-// pair is MYR-418).
+// pair is MYR-418, and the delay between its halves is MYR-421).
 //
 // Split out of activity_notifier_send.go, which owns the ordinary fan-out. This
 // file owns the one moment that is not a state refresh: the push after which
 // there is no successor, no ticker pass, and no row left to push to.
+
+// activityEnding is how one terminal transition leaves a ride's Activities:
+// which halves of the completion pair this call sends, and how long the card
+// lingers after the `end`.
+//
+// A struct rather than three positional parameters for the reason activityFanOut
+// states next door: the difference between an ending that announces and holds,
+// one that announces and ends, and one that only ends is three booleans' worth
+// of meaning, and a positional bool is how the wrong one ships.
+type activityEnding struct {
+	// announce sends the alerting UPDATE carrying the final content-state
+	// BEFORE the end — the first half of MYR-418's pair. It is a permission,
+	// not an instruction: whether an update is actually alerting is still
+	// decided by alertPhaseFor and by each row's own high-water mark, so the
+	// unhappy endings set it and get nothing.
+	//
+	// False on the DELAYED end alone, where the announcement already went out
+	// five minutes earlier and re-sending the same content-state as a second,
+	// alert-free update would be a wasted push whose `aps.timestamp` collides
+	// with the end's.
+	announce bool
+
+	// hold stops after the announcement: no `end`, no tombstone, the rows left
+	// live for the ticker's held-end pass to finish (MYR-421).
+	hold bool
+
+	// linger is the dismissal-date's offset past the `end`'s own instant.
+	linger time.Duration
+}
+
+// completedEnding is a completed ride's FIRST half: the alerting update, and
+// then nothing until the hold expires.
+//
+// linger is carried even though this call never sends an `end`, because the two
+// halves must agree on it and DismissAfter is the single number they agree on —
+// it is both the hold horizon (how long the island keeps the check) and the
+// dismissal offset (how long the lock-screen card outlives the end). See
+// heldCompletionEnding.
+var completedEnding = activityEnding{announce: true, hold: true, linger: DismissAfter}
+
+// heldCompletionEnding is a completed ride's SECOND half, sent by the ticker
+// once the hold has expired: the `end` alone.
+var heldCompletionEnding = activityEnding{linger: DismissAfter}
+
+// promptEnding is every unhappy ending — declined, cancelled, and a reservation
+// that lapsed. UNCHANGED by MYR-421: one push, sent at once, dismissed in thirty
+// seconds. Holding these would be the opposite of what they are for; a card that
+// keeps saying "on its way" after a cancellation is the whole reason this
+// surface pushes on every transition, and the news is the ending itself rather
+// than a state worth lingering over.
+var promptEnding = activityEnding{announce: true, linger: DismissPromptly}
 
 // endAfterAlertGap is how far the `end` push's `aps.timestamp` is stamped ahead
 // of the alerting update that precedes it on a completed ride.
@@ -68,7 +119,18 @@ const endAfterAlertGap = time.Second
 // excluded from its own final push and the Activity would be left on the lock
 // screen showing the last state it happened to receive — which for a declined
 // ride is "your car is on its way".
-func (a *ActivityNotifier) endRide(ctx context.Context, rideRequestID, status string, linger time.Duration) {
+//
+// AND ON A COMPLETED RIDE THE PAIR IS NOW FIVE MINUTES APART (MYR-421). The
+// second push does not merely end the Activity, it REMOVES IT FROM THE DYNAMIC
+// ISLAND about 1.4 seconds after it lands — so a pair one second apart showed
+// the sixth expansion's check for roughly two seconds and then took the island
+// presence away with it. Completion therefore sends only the announcement here
+// and returns with the rows still live; the ticker's held-end pass sends the
+// `end` once the hold expires, and tombstones then. Everything that reads
+// `ended_at IS NULL` sees a live row for those five minutes — audited in
+// §7.21.4, and the short version is that the ticker's active-leg list excludes
+// `completed` and the MYR-413 banner gate has no completed banner to suppress.
+func (a *ActivityNotifier) endRide(ctx context.Context, rideRequestID, status string, ending activityEnding) {
 	if !a.active() {
 		return
 	}
@@ -96,25 +158,56 @@ func (a *ActivityNotifier) endRide(ctx context.Context, rideRequestID, status st
 	// answered. A seventh phase, or a terminal status promoted onto the ladder,
 	// is then covered by construction. Which Activities actually alert is still
 	// decided per row inside the fan-out, against each one's own mark.
-	if alertPhaseFor(rc, endAt) != AlertPhaseNone {
+	if ending.announce && alertPhaseFor(rc, endAt) != AlertPhaseNone {
 		a.fanOut(ctx, rideRequestID, rc, activityFanOut{
 			event:    ActivityEventUpdate,
 			at:       endAt,
 			alerting: true,
 		})
+		if ending.hold {
+			// THE ROWS STAY LIVE ON PURPOSE. Tombstoning here would exclude
+			// them from their own `end` five minutes from now, which is the
+			// same defect the send-then-tombstone ordering below exists to
+			// prevent — relocated in time rather than avoided.
+			a.logger.Info("live activity end held",
+				slog.String("ride_id", rideRequestID),
+				slog.String("status", status),
+				slog.Duration("hold", ending.linger),
+			)
+			return
+		}
 		endAt = endAt.Add(endAfterAlertGap)
 	}
 
 	// Computed off the END's own instant rather than the pair's first, so the
 	// linger the rider gets is measured from the push that actually ends the
-	// Activity.
-	dismissAt := endAt.Add(linger)
+	// Activity. On a held completion that instant is five minutes past the
+	// announcement, which is the point: the card the rider is left with outlives
+	// the end by the same five minutes it has always been given.
+	dismissAt := endAt.Add(ending.linger)
 	a.fanOut(ctx, rideRequestID, rc, activityFanOut{
 		event:     ActivityEventEnd,
 		at:        endAt,
 		dismissAt: &dismissAt,
 	})
 	a.tombstone(ctx, rideRequestID)
+}
+
+// endHeldCompletion sends the `end` a completed ride's announcement held back,
+// and tombstones the rows (MYR-421).
+//
+// The status is forced to `completed` rather than read from the row for the
+// same reason endRide takes one at all: this is called from a list that already
+// filtered on it, and a ride that was hard-deleted between the list and the read
+// must still tombstone rather than push a zero-valued state. `completed` is
+// terminal and latched, so there is no transition that could have moved it under
+// us.
+//
+// No announcement: the alerting update went out at completion and raised the
+// mark to 6, so a second one would attach no alert, expand nothing, and collide
+// with this push's own `aps.timestamp` in the bargain.
+func (a *ActivityNotifier) endHeldCompletion(ctx context.Context, rideRequestID string) {
+	a.endRide(ctx, rideRequestID, statusCompleted, heldCompletionEnding)
 }
 
 // tombstone marks a ride's Activities ended so no later tick reaches them.
