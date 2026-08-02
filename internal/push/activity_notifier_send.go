@@ -90,22 +90,38 @@ type activityFanOut struct {
 }
 
 // fanOut resolves a ride into its Activities and pushes one update to each.
+//
+// IT REPORTS HOW MANY ROWS ARE STILL OWED THIS PUSH, which only the held
+// completion `end` acts on (MYR-421) — but the count is computed here because
+// here is the only place that knows. Three outcomes are NOT owed anything
+// further and must not read as failures:
+//
+//   - delivered — Apple took it;
+//   - suppressed by preference — a muted rider is a normal, permanent state,
+//     and counting it as a failure would retry that ride every 75 seconds
+//     forever;
+//   - permanently rejected — `send` has already deleted the row, so there is
+//     nothing left to retry against.
+//
+// A registry lookup that failed is reported as one owed row rather than zero:
+// the rows exist and were never even reached, and returning "nothing owed"
+// would let a caller tombstone them on the strength of a failed read.
 func (a *ActivityNotifier) fanOut(
 	ctx context.Context,
 	rideRequestID string,
 	rc RideContext,
 	spec activityFanOut,
-) {
+) (owed int) {
 	activities, err := a.store.ActivitiesForRide(ctx, rideRequestID)
 	if err != nil {
 		a.logger.Error("live activity: registry lookup failed",
 			slog.String("ride_id", rideRequestID),
 			slog.String("error", err.Error()),
 		)
-		return
+		return 1
 	}
 	if len(activities) == 0 {
-		return
+		return 0
 	}
 
 	now := spec.at
@@ -145,7 +161,7 @@ func (a *ActivityNotifier) fanOut(
 		if spec.alerting {
 			alert = alertFor(phase, act.AlertedPhase)
 		}
-		if a.send(ctx, act, ActivityNotification{
+		switch a.send(ctx, act, ActivityNotification{
 			ActivityToken: act.Token,
 			Sandbox:       act.Sandbox,
 			Event:         spec.event,
@@ -155,12 +171,17 @@ func (a *ActivityNotifier) fanOut(
 			LowPriority:   spec.lowPriority,
 			Alert:         alert,
 		}) {
+		case sendDelivered:
 			delivered++
 			a.saveProgress(ctx, act, anchor)
 			if alert != nil {
 				alerted++
 				a.saveAlertedPhase(ctx, act, phase)
 			}
+		case sendFailed:
+			owed++
+		case sendDropped:
+			// The row is gone. Nothing to deliver and nothing to retry.
 		}
 	}
 
@@ -178,7 +199,9 @@ func (a *ActivityNotifier) fanOut(
 		// names no place and no person.
 		slog.Int("alerted", alerted),
 		slog.Int("alert_phase", int(phase)),
+		slog.Int("owed", owed),
 	)
+	return owed
 }
 
 // allowed applies the ride_lifecycle preference gate, failing open exactly as
@@ -208,6 +231,27 @@ func (a *ActivityNotifier) allowed(ctx context.Context, userID, rideRequestID st
 	return false
 }
 
+// sendOutcome is what became of one push, and the distinction that matters is
+// between the two ways of not being delivered.
+//
+// A bool collapsed them, which was harmless while every caller tombstoned
+// unconditionally and became a stranded card the moment one caller wanted to
+// retry (MYR-421): "Apple permanently rejected this token" and "Apple was
+// briefly unreachable" both read as `false`, so a retry loop would either give
+// up on the transient case or spin forever on the permanent one.
+type sendOutcome int
+
+const (
+	// sendDelivered — Apple accepted it.
+	sendDelivered sendOutcome = iota
+	// sendFailed — a transient refusal (5xx, timeout, a cancelled context).
+	// The row is untouched and another attempt is worth making.
+	sendFailed
+	// sendDropped — APNs permanently rejected the token and the row has
+	// already been deleted. There is nothing left to retry against.
+	sendDropped
+)
+
 // send delivers one already-assembled update and handles APNs's permanent
 // rejections.
 //
@@ -217,17 +261,17 @@ func (a *ActivityNotifier) allowed(ctx context.Context, userID, rideRequestID st
 // ActivityNotification.priority) gets sent by accident. `act` is still taken
 // separately because the rejection paths log the ride, which the notification
 // does not carry.
-func (a *ActivityNotifier) send(ctx context.Context, act Activity, n ActivityNotification) bool {
+func (a *ActivityNotifier) send(ctx context.Context, act Activity, n ActivityNotification) sendOutcome {
 	err := a.sender.SendActivity(ctx, n)
 	if err == nil {
-		return true
+		return sendDelivered
 	}
 
 	if errors.Is(err, ErrUnregistered) {
 		// The ACTIVITY is gone — dismissed by the rider, or expired — not the
 		// phone. Drop this row only; the device registry is untouched.
 		a.dropActivity(ctx, act.Token)
-		return false
+		return sendDropped
 	}
 
 	a.logger.Warn("live activity: send failed",
@@ -235,7 +279,7 @@ func (a *ActivityNotifier) send(ctx context.Context, act Activity, n ActivityNot
 		slog.String("activity_token_prefix", tokenPrefix(act.Token)),
 		slog.String("error", err.Error()),
 	)
-	return false
+	return sendFailed
 }
 
 // dropActivity removes a permanently rejected token.

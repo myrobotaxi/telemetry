@@ -40,6 +40,28 @@ type activityEnding struct {
 
 	// linger is the dismissal-date's offset past the `end`'s own instant.
 	linger time.Duration
+
+	// retryable says a FAILURE on this path must leave the rows LIVE instead of
+	// tombstoning them.
+	//
+	// Only the completed endings set it, and only because something comes back
+	// for them: queryListRidesAwaitingActivityEnd re-lists any completed ride
+	// with a live row, so an un-tombstoned failure is retried on the next pass
+	// and the `end` is idempotent (a second one at an Activity the phone has
+	// already ended is answered 410, which deletes the row).
+	//
+	// FALSE EVERYWHERE ELSE, and that is not caution — it is the honest reading
+	// of what a tombstone means for an ending nothing will revisit. A declined
+	// ride left live is not "retried later", it is simply never ended; the row
+	// lingers until the 24-hour sweep deletes it without a push. Tombstoning is
+	// no worse for the rider and keeps the registry honest about what is still
+	// running.
+	//
+	// It exists because without it the hold was SINGLE-SHOT: endRide tombstoned
+	// after a failed context read and after a failed send alike, so one APNs
+	// blip overlapping a pass would strand every card in that pass — up to
+	// MaxPerPass at once — until ActivityKit's own multi-hour ceiling.
+	retryable bool
 }
 
 // completedEnding is a completed ride's FIRST half: the alerting update, and
@@ -50,11 +72,23 @@ type activityEnding struct {
 // it is both the hold horizon (how long the island keeps the check) and the
 // dismissal offset (how long the lock-screen card outlives the end). See
 // heldCompletionEnding.
-var completedEnding = activityEnding{announce: true, hold: true, linger: DismissAfter}
+var completedEnding = activityEnding{announce: true, hold: true, linger: DismissAfter, retryable: true}
 
 // heldCompletionEnding is a completed ride's SECOND half, sent by the ticker
 // once the hold has expired: the `end` alone.
-var heldCompletionEnding = activityEnding{linger: DismissAfter}
+var heldCompletionEnding = activityEnding{linger: DismissAfter, retryable: true}
+
+// teardownCompletedEnding ends a card whose ride COMPLETED but whose rows an
+// owner teardown is about to cascade away (MYR-258, corrected by MYR-421).
+//
+// Identical to heldCompletionEnding except that it is NOT retryable, and the
+// difference is the whole reason it is a second variable rather than a reuse:
+// the teardown's `DELETE FROM go_ride_requests WHERE vehicle_id = $1` takes
+// go_live_activities with it moments later, so there will be nothing left to
+// retry against and nothing left for the held-end pass to find. This is the one
+// and only chance to end that card, which is also why the teardown may not
+// simply skip completed rides and leave them to the hold.
+var teardownCompletedEnding = activityEnding{linger: DismissAfter}
 
 // promptEnding is every unhappy ending — declined, cancelled, and a reservation
 // that lapsed. UNCHANGED by MYR-421: one push, sent at once, dismissed in thirty
@@ -139,10 +173,20 @@ func (a *ActivityNotifier) endRide(ctx context.Context, rideRequestID, status st
 	if err != nil {
 		a.logger.Warn("live activity: ride context lookup failed on end",
 			slog.String("ride_id", rideRequestID),
+			slog.Bool("retryable", ending.retryable),
 			slog.String("error", err.Error()),
 		)
-		// Still tombstone: the ride is over whatever the read said, and leaving
-		// live rows behind would keep the ETA ticker pushing at a finished ride.
+		if ending.retryable {
+			// LEAVE THE ROWS LIVE. Nothing was sent, so tombstoning here would
+			// take the ride out of the held-end query forever and freeze the
+			// card on whatever state it last received. A ride hard-deleted
+			// under us needs no tombstone either: migration 0025's FK cascade
+			// has already taken the rows, and the query's own JOIN means a
+			// vanished ride can never be listed again.
+			return
+		}
+		// Still tombstone: the ride is over whatever the read said, and nothing
+		// will ever come back for this ending.
 		a.tombstone(ctx, rideRequestID)
 		return
 	}
@@ -185,11 +229,24 @@ func (a *ActivityNotifier) endRide(ctx context.Context, rideRequestID, status st
 	// announcement, which is the point: the card the rider is left with outlives
 	// the end by the same five minutes it has always been given.
 	dismissAt := endAt.Add(ending.linger)
-	a.fanOut(ctx, rideRequestID, rc, activityFanOut{
+	owed := a.fanOut(ctx, rideRequestID, rc, activityFanOut{
 		event:     ActivityEventEnd,
 		at:        endAt,
 		dismissAt: &dismissAt,
 	})
+	if ending.retryable && owed > 0 {
+		// THE TOMBSTONE IS THE RECEIPT FOR A DELIVERED END, not for having
+		// tried. A row tombstoned after a failed send drops out of the held-end
+		// query and is never attempted again — and because this path is a
+		// BATCH, one 30-second APNs blip overlapping a pass would do that to
+		// every card in the pass at once.
+		a.logger.Warn("live activity: end not delivered; rows left live for the next pass",
+			slog.String("ride_id", rideRequestID),
+			slog.String("status", status),
+			slog.Int("owed", owed),
+		)
+		return
+	}
 	a.tombstone(ctx, rideRequestID)
 }
 
@@ -205,8 +262,18 @@ func (a *ActivityNotifier) endRide(ctx context.Context, rideRequestID, status st
 //
 // No announcement: the alerting update went out at completion and raised the
 // mark to 6, so a second one would attach no alert, expand nothing, and collide
-// with this push's own `aps.timestamp` in the bargain.
+// with this push's own `aps.timestamp` in the bargain. The residual is named
+// rather than fixed — a rider whose announcement failed to reach Apple gets the
+// final content-state here but no expansion, which is the same "lifecycle
+// pushes are not retried" hole every other transition has.
+//
+// Counted on the drain, because it runs on the TICKER's goroutine and never
+// passes through async: without track() the notifier's Wait would return at
+// shutdown while these pushes and their phase-mark writes were still going.
 func (a *ActivityNotifier) endHeldCompletion(ctx context.Context, rideRequestID string) {
+	done := a.track()
+	defer done()
+
 	a.endRide(ctx, rideRequestID, statusCompleted, heldCompletionEnding)
 }
 

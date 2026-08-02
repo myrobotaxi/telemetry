@@ -285,6 +285,9 @@ func (t *ActivityTicker) refreshActiveLegs(ctx context.Context) {
 		// (MYR-194 decision 3). An alerting tick is promoted back to 10 by
 		// ActivityNotification.priority — the flag is a statement about a
 		// routine refresh, and this push is not one.
+		// A tick has no retry semantics — the next pass is the retry — so the
+		// two failure outcomes are treated alike here and only `delivered`
+		// stamps the row.
 		if t.notifier.send(ctx, leg.Activity, ActivityNotification{
 			ActivityToken: leg.Token,
 			Sandbox:       leg.Sandbox,
@@ -293,7 +296,7 @@ func (t *ActivityTicker) refreshActiveLegs(ctx context.Context) {
 			Timestamp:     now,
 			LowPriority:   true,
 			Alert:         alert,
-		}) {
+		}) == sendDelivered {
 			pushed = append(pushed, ActivityKey{RideRequestID: leg.RideRequestID, UserID: leg.UserID})
 			t.notifier.saveProgress(ctx, leg.Activity, anchor)
 			if alert != nil {
