@@ -43,6 +43,30 @@ func (a *ActivityNotifier) Wait() {
 	}
 }
 
+// track registers work that runs on the CALLER's goroutine with the same drain
+// async's workers use, and returns the function that retires it.
+//
+// The ticker's held-end pass (MYR-421) is why this exists. It reaches send —
+// and the progress and phase-mark writes behind it — synchronously on the
+// ticker goroutine, without ever passing through async, so until it was counted
+// here Wait() returned at shutdown while those pushes and writes were still in
+// flight. That is the same silently-empty-counter failure the comment above
+// describes, arriving by a different door: not a WaitGroup racing an Add, but a
+// whole code path the counter never knew about.
+//
+//	done := a.track()
+//	defer done()
+//
+// No deadlock against Wait: Cond.Wait releases mu while parked, so an increment
+// can land while a drain is in progress — and one that lands after Wait has
+// returned belongs to the next drain, exactly as async's does.
+func (a *ActivityNotifier) track() func() {
+	a.mu.Lock()
+	a.inflight++
+	a.mu.Unlock()
+	return a.workerDone
+}
+
 // async runs fn on a bounded worker with its own timeout, detached from the
 // bus so a slow APNs round-trip never backs up event delivery.
 func (a *ActivityNotifier) async(fn func(context.Context)) {

@@ -35,6 +35,26 @@ import (
 // and the hold plus one tick interval — five minutes to about six and a half.
 // Nothing can stretch it further, because the predicate is a durable column
 // rather than anything this loop remembers.
+//
+// THE TOMBSTONE IS THE RECEIPT FOR A DELIVERED END, and that rule lives in
+// endRide (activityEnding.retryable). A pass that failed to reach Apple leaves
+// the rows live and the next pass re-lists them; the `end` is idempotent, since
+// a second one at an Activity the phone has already ended is answered 410 and
+// deletes the row. Without it the hold was single-shot and one 30-second APNs
+// blip overlapping a pass would strand every card in that pass at once.
+//
+// TWO REPLICAS CAN BOTH SEND ONE RIDE'S END, and that is ACCEPTED rather than
+// prevented. This service runs a single replica today; if it did not, both
+// would list the same due ride, both would push, and the loser's tombstone
+// would move zero rows. The cost is one duplicate `end` at a card that is
+// already ending — invisible to the rider, and answered 410 at worst. The
+// obvious guard is a claim-then-send latch (`UPDATE … WHERE ended_at IS NULL
+// RETURNING`, the shape ClaimReservationDispatch already uses) and it is the
+// WRONG trade here for exactly the reason above: claiming before the send makes
+// the tombstone a receipt for having tried, which is the stranding bug this
+// file was corrected for. Between one duplicate push and a card nobody ends,
+// this surface chooses the first — the same choice §7.21.4 makes about the
+// island opening once more than it had to.
 
 // endHeldCompletions sends the `end` push for every completed ride whose hold
 // has expired.
@@ -64,16 +84,34 @@ func (t *ActivityTicker) endHeldCompletions(ctx context.Context) {
 		return
 	}
 
+	var sent int
 	for _, rideID := range rides {
+		// STOP AT THE FIRST SIGN OF SHUTDOWN, before the send rather than
+		// inside it. A cancelled context makes every remaining push fail — and
+		// the tombstone deliberately runs on a context.WithoutCancel, so a loop
+		// that ploughed on through SIGTERM would tombstone the rest of the
+		// batch on the strength of pushes that never left. With the retry rule
+		// in endRide this would already leave the rows live, but the pass would
+		// still spend a doomed APNs round-trip per ride while the process is
+		// trying to exit. The survivors are picked up by the next process's
+		// startup pass.
+		if err := ctx.Err(); err != nil {
+			t.logger.Info("live activity ticker: held-end pass cut short",
+				slog.Int("sent", sent),
+				slog.Int("remaining", len(rides)-sent),
+				slog.String("reason", err.Error()))
+			return
+		}
 		// Serially, and on the pass context. Each ride is one fan-out over the
 		// (usually one) Activity registered against it, and completions arrive
 		// at human rates — a queue deep enough to need concurrency here is one
 		// the per-pass cap has already truncated.
 		t.notifier.endHeldCompletion(ctx, rideID)
+		sent++
 	}
 
 	t.logger.Info("live activity ticker: held ends sent",
-		slog.Int("rides", len(rides)),
+		slog.Int("rides", sent),
 		slog.Duration("held", DismissAfter),
 		slog.Bool("capped", len(rides) == t.cfg.MaxPerPass))
 }
