@@ -30,10 +30,13 @@ import (
 // Everything else keeps its banner, and each exclusion is load-bearing rather
 // than cautious:
 //
-//   - `declined` and `cancelled` are outside the design's six phases, so their
-//     Activity update carries no alert and expands nothing. Suppressing those
-//     banners would leave the worst news of the ride to a card the rider may
-//     not be looking at. They send unconditionally.
+//   - `declined` is outside the design's six phases, so its Activity update
+//     carries no alert and expands nothing. Suppressing that banner would leave
+//     the worst news of the ride to a card the rider may not be looking at, so
+//     it sends unconditionally. `cancelled` and `reservation_expired` need no
+//     exclusion for a different reason: statusAlert (copy.go) generates a
+//     lifecycle banner for `accepted`, `declined` and `arrived` only, so those
+//     two have never produced one and there is nothing here to suppress.
 //   - A TOMBSTONED or DELETED row reads as no row (store.HasLiveActivity), so a
 //     rider who swiped the card away, or whose token APNs rejected, keeps every
 //     banner. A swiped-away card must never leave somebody dark.
@@ -88,9 +91,16 @@ type notifierStores struct {
 // ticker crosses, so no lifecycle banner is ever sent for it and there is
 // nothing here to suppress.
 //
-// The three unhappy endings are deliberately absent, not forgotten: `declined`,
-// `cancelled` and `reservation_expired` are outside the design's six, their
-// Activity update expands no island, and their banners must therefore survive.
+// `declined` is deliberately absent, not forgotten: it is outside the design's
+// six, its Activity update expands no island, and its banner must therefore
+// survive. `cancelled` and `reservation_expired` are absent for a weaker reason
+// — statusAlert produces no banner for them at all, so their absence here
+// changes nothing either way.
+//
+// `requested`, `enroute` and `completed` are carried for forward-safety against
+// the ladder, not because a banner exists for them today — `statusAlert` sends
+// nothing on those transitions, so the gate is currently reachable only on
+// `accepted` and `arrived`.
 var alertLadderStatuses = map[string]bool{
 	statusRequested: true,
 	statusAccepted:  true,
