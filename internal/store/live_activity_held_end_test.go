@@ -42,7 +42,7 @@ func TestLiveActivityRepo_HeldEndWaitsForTheHorizon(t *testing.T) {
 
 	// Just completed — inside the hold.
 	completeRideAt(t, ride, time.Now())
-	due, err := repo.ListRidesAwaitingActivityEnd(ctx, 5*time.Minute, 10)
+	due, err := repo.ListRidesAwaitingActivityEnd(ctx, 5*time.Minute, 30*time.Minute, 10)
 	if err != nil {
 		t.Fatalf("ListRidesAwaitingActivityEnd: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestLiveActivityRepo_HeldEndWaitsForTheHorizon(t *testing.T) {
 
 	// Six minutes on — overdue.
 	completeRideAt(t, ride, time.Now().Add(-6*time.Minute))
-	due, err = repo.ListRidesAwaitingActivityEnd(ctx, 5*time.Minute, 10)
+	due, err = repo.ListRidesAwaitingActivityEnd(ctx, 5*time.Minute, 30*time.Minute, 10)
 	if err != nil {
 		t.Fatalf("ListRidesAwaitingActivityEnd: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestLiveActivityRepo_HeldEndExclusions(t *testing.T) {
 			}
 			tt.arrange(t, repo, tt.ride)
 
-			due, err := repo.ListRidesAwaitingActivityEnd(ctx, 5*time.Minute, 10)
+			due, err := repo.ListRidesAwaitingActivityEnd(ctx, 5*time.Minute, 30*time.Minute, 10)
 			if err != nil {
 				t.Fatalf("ListRidesAwaitingActivityEnd: %v", err)
 			}
@@ -163,7 +163,7 @@ func TestLiveActivityRepo_HeldEndReportsARideOnce(t *testing.T) {
 	}
 	completeRideAt(t, ride, time.Now().Add(-10*time.Minute))
 
-	due, err := repo.ListRidesAwaitingActivityEnd(ctx, 5*time.Minute, 10)
+	due, err := repo.ListRidesAwaitingActivityEnd(ctx, 5*time.Minute, 30*time.Minute, 10)
 	if err != nil {
 		t.Fatalf("ListRidesAwaitingActivityEnd: %v", err)
 	}
@@ -172,10 +172,17 @@ func TestLiveActivityRepo_HeldEndReportsARideOnce(t *testing.T) {
 	}
 }
 
-// TestLiveActivityRepo_HeldEndOrdersOldestFirst pins the ordering the cap
-// relies on. It only bites after a restart left a backlog, which is precisely
-// when "most overdue first" is the ordering worth having.
-func TestLiveActivityRepo_HeldEndOrdersOldestFirst(t *testing.T) {
+// TestLiveActivityRepo_HeldEndOrdersNewestFirst pins the ordering the cap
+// relies on, and it is a REVERSAL of what this query shipped with.
+//
+// Oldest-first was chosen so a capped pass shed the least overdue — sound while
+// the list drained on every pass, and wrong once a failed `end` began leaving
+// its row live: an undeliverable ride then sits at the head of every subsequent
+// pass and consumes a slot forever, so a few hundred of them push every newly
+// completed ride out of reach. Newest-first sheds the rides whose end matters
+// least (the oldest, closest to the horizon that will retire them anyway), and
+// a healthy backlog drains in the same number of passes either way.
+func TestLiveActivityRepo_HeldEndOrdersNewestFirst(t *testing.T) {
 	if !dockerAvailable {
 		t.Skip("docker unavailable; skipping live activity repo test")
 	}
@@ -185,37 +192,138 @@ func TestLiveActivityRepo_HeldEndOrdersOldestFirst(t *testing.T) {
 	repo := newLiveActivityRepo(t)
 	ctx := context.Background()
 
-	// Seeded newest-first so a query that preserved insertion order would fail.
-	rides := []string{"cride0025h9", "cride0025h8", "cride0025h7"}
-	for i, ride := range rides {
-		seedActivityRide(t, ride)
-		if err := repo.RegisterActivity(ctx, ride, "rider-"+ride, "token-"+ride, false); err != nil {
-			t.Fatalf("RegisterActivity(%s): %v", ride, err)
+	// Inserted oldest-completion-first, which is the REVERSE of the expected
+	// output, so a query that merely preserved insertion order would fail. All
+	// three sit inside the 30-minute horizon.
+	seeds := []struct {
+		ride string
+		age  time.Duration
+	}{
+		{"cride0025h9", 25 * time.Minute},
+		{"cride0025h8", 20 * time.Minute},
+		{"cride0025h7", 10 * time.Minute},
+	}
+	for _, seed := range seeds {
+		seedActivityRide(t, seed.ride)
+		if err := repo.RegisterActivity(ctx, seed.ride, "rider-"+seed.ride, "token-"+seed.ride, false); err != nil {
+			t.Fatalf("RegisterActivity(%s): %v", seed.ride, err)
 		}
-		completeRideAt(t, ride, time.Now().Add(-time.Duration(10+i*10)*time.Minute))
+		completeRideAt(t, seed.ride, time.Now().Add(-seed.age))
 	}
 
-	due, err := repo.ListRidesAwaitingActivityEnd(ctx, 5*time.Minute, 10)
+	due, err := repo.ListRidesAwaitingActivityEnd(ctx, 5*time.Minute, 30*time.Minute, 10)
 	if err != nil {
 		t.Fatalf("ListRidesAwaitingActivityEnd: %v", err)
 	}
+	// h7 completed 10 minutes ago and h9 twenty-five, so h7 is the NEWEST and
+	// must come first.
 	want := []string{"cride0025h7", "cride0025h8", "cride0025h9"}
 	if len(due) != len(want) {
 		t.Fatalf("due = %v, want %v", due, want)
 	}
 	for i := range want {
 		if due[i] != want[i] {
-			t.Fatalf("due = %v, want %v (oldest completion first)", due, want)
+			t.Fatalf("due = %v, want %v (newest completion first)", due, want)
 		}
 	}
 
-	// And the cap takes the most overdue, not an arbitrary two.
-	capped, err := repo.ListRidesAwaitingActivityEnd(ctx, 5*time.Minute, 2)
+	// And the cap keeps the freshest, shedding the ones nearest the horizon.
+	capped, err := repo.ListRidesAwaitingActivityEnd(ctx, 5*time.Minute, 30*time.Minute, 2)
 	if err != nil {
 		t.Fatalf("ListRidesAwaitingActivityEnd(limit=2): %v", err)
 	}
 	if len(capped) != 2 || capped[0] != want[0] || capped[1] != want[1] {
-		t.Errorf("capped = %v, want the two most overdue %v", capped, want[:2])
+		t.Errorf("capped = %v, want the two freshest %v", capped, want[:2])
+	}
+}
+
+// TestLiveActivityRepo_HeldEndWindowHasACeiling — a ride past the give-up
+// horizon must leave the due list, so the retry provably terminates instead of
+// re-attempting the same row until the 24-hour sweep deletes it.
+func TestLiveActivityRepo_HeldEndWindowHasACeiling(t *testing.T) {
+	const ride = "cride0025h10"
+	repo := setupLiveActivities(t, ride)
+	ctx := context.Background()
+
+	if err := repo.RegisterActivity(ctx, ride, "rider-1", "token-h10", false); err != nil {
+		t.Fatalf("RegisterActivity: %v", err)
+	}
+	completeRideAt(t, ride, time.Now().Add(-31*time.Minute))
+
+	due, err := repo.ListRidesAwaitingActivityEnd(ctx, 5*time.Minute, 30*time.Minute, 10)
+	if err != nil {
+		t.Fatalf("ListRidesAwaitingActivityEnd: %v", err)
+	}
+	if len(due) != 0 {
+		t.Errorf("due = %v, want none — a ride past the horizon must not hold a slot in a "+
+			"LIMITed list it can never leave", due)
+	}
+}
+
+// TestLiveActivityRepo_AbandonRetiresExpiredHeldEnds is the loop's terminator.
+//
+// A bulk UPDATE with no LIMIT and no ordering, precisely because the due list
+// has both: newest-first puts the rows AT the horizon last, so a capped pass
+// might never reach them, and a per-ride give-up would then never run. This
+// statement cannot be starved.
+func TestLiveActivityRepo_AbandonRetiresExpiredHeldEnds(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping live activity repo test")
+	}
+	mustApplyGoMigrations(t)
+	cleanGoLiveActivities(t)
+
+	repo := newLiveActivityRepo(t)
+	ctx := context.Background()
+
+	// One expired, one still inside its retry window, one still in flight.
+	seeds := map[string]time.Duration{
+		"cride0025h11": 31 * time.Minute, // expired
+		"cride0025h12": 10 * time.Minute, // retrying
+	}
+	for ride, age := range seeds {
+		seedActivityRide(t, ride)
+		if err := repo.RegisterActivity(ctx, ride, "rider-"+ride, "token-"+ride, false); err != nil {
+			t.Fatalf("RegisterActivity(%s): %v", ride, err)
+		}
+		completeRideAt(t, ride, time.Now().Add(-age))
+	}
+	const inFlight = "cride0025h13"
+	seedActivityRide(t, inFlight)
+	if err := repo.RegisterActivity(ctx, inFlight, "rider-"+inFlight, "token-"+inFlight, false); err != nil {
+		t.Fatalf("RegisterActivity(%s): %v", inFlight, err)
+	}
+
+	retired, err := repo.AbandonExpiredHeldEnds(ctx, 30*time.Minute)
+	if err != nil {
+		t.Fatalf("AbandonExpiredHeldEnds: %v", err)
+	}
+	if retired != 1 {
+		t.Errorf("retired %d activities, want 1 — only the expired ride may be abandoned", retired)
+	}
+
+	// The expired one is tombstoned; the other two are untouched.
+	for ride, wantLive := range map[string]bool{
+		"cride0025h11": false,
+		"cride0025h12": true,
+		inFlight:       true,
+	} {
+		got, err := repo.ActivitiesForRide(ctx, ride)
+		if err != nil {
+			t.Fatalf("ActivitiesForRide(%s): %v", ride, err)
+		}
+		if live := len(got) > 0; live != wantLive {
+			t.Errorf("%s live = %v, want %v", ride, live, wantLive)
+		}
+	}
+
+	// Idempotent: nothing left to retire.
+	again, err := repo.AbandonExpiredHeldEnds(ctx, 30*time.Minute)
+	if err != nil {
+		t.Fatalf("AbandonExpiredHeldEnds (second): %v", err)
+	}
+	if again != 0 {
+		t.Errorf("second call retired %d, want 0", again)
 	}
 }
 
@@ -231,10 +339,18 @@ func TestLiveActivityRepo_HeldEndRejectsBadArguments(t *testing.T) {
 	repo := newLiveActivityRepo(t)
 	ctx := context.Background()
 
-	if _, err := repo.ListRidesAwaitingActivityEnd(ctx, 5*time.Minute, 0); err == nil {
+	if _, err := repo.ListRidesAwaitingActivityEnd(ctx, 5*time.Minute, 30*time.Minute, 0); err == nil {
 		t.Error("a zero limit was accepted")
 	}
-	if _, err := repo.ListRidesAwaitingActivityEnd(ctx, -time.Minute, 10); err == nil {
+	if _, err := repo.ListRidesAwaitingActivityEnd(ctx, -time.Minute, 30*time.Minute, 10); err == nil {
 		t.Error("a negative hold was accepted")
+	}
+	// An empty window would return nothing forever and read in production as
+	// "the held end simply stopped working".
+	if _, err := repo.ListRidesAwaitingActivityEnd(ctx, 30*time.Minute, 5*time.Minute, 10); err == nil {
+		t.Error("a horizon below the hold was accepted")
+	}
+	if _, err := repo.AbandonExpiredHeldEnds(ctx, 0); err == nil {
+		t.Error("a zero give-up horizon was accepted; it would retire every completed card at once")
 	}
 }
