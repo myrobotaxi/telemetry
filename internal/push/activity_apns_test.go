@@ -283,6 +283,11 @@ func TestActivityEndCarriesDismissalDate(t *testing.T) {
 // and nothing ever retries — so a three-minute expiration meant a phone in a
 // tunnel kept "your car is on its way" on the lock screen for hours after the
 // ride was declined. It now outlives a flat battery.
+//
+// MYR-413 added a third shape between them: an ALERTING update. It is an
+// `update`, so it used to take the stale-date, but the duplicate-banner gate
+// made it the sole carrier of news that used to travel on a banner APNs stored
+// and retried, so it takes the day's floor too.
 func TestActivityExpirationPerShape(t *testing.T) {
 	promptly := fixedNow.Add(DismissPromptly)
 	linger := fixedNow.Add(DismissAfter)
@@ -292,12 +297,26 @@ func TestActivityExpirationPerShape(t *testing.T) {
 		name      string
 		event     ActivityEvent
 		dismissAt *time.Time
+		alert     *ActivityAlert
 		want      time.Time
 	}{
 		{
 			name:  "update expires at its stale-date",
 			event: ActivityEventUpdate,
 			want:  fixedNow.Add(StaleAfter),
+		},
+		{
+			// MYR-413. An ORDINARY tick above keeps the three-minute
+			// expiration because a late one is worthless. An ALERTING one
+			// does not, because since the duplicate-banner gate it is the
+			// only thing that tells a rider watching a card that their car
+			// arrived — the durable banner it replaced is not sent. Late is
+			// safe here: the payload carries its own stale-date and
+			// aps.timestamp ordering stops it overwriting a newer tick.
+			name:  "alerting update outlives the phone being offline",
+			event: ActivityEventUpdate,
+			alert: &ActivityAlert{Title: alertTitle, Body: "Your car is here."},
+			want:  fixedNow.Add(alertingUpdateRetention),
 		},
 		{
 			// The regression guard. DismissPromptly is 30 SECONDS, so pinning
@@ -335,6 +354,7 @@ func TestActivityExpirationPerShape(t *testing.T) {
 			n := testActivityNotification()
 			n.Event = tc.event
 			n.DismissalDate = tc.dismissAt
+			n.Alert = tc.alert
 
 			got := captureActivity(t, n).header.Get("Apns-Expiration")
 			if want := strconv.FormatInt(tc.want.Unix(), 10); got != want {
@@ -357,6 +377,36 @@ func TestActivityEndExpirationOutlivesTheStaleDate(t *testing.T) {
 		t.Errorf("end expiration = %s, want later than the stale-date %s — an end push"+
 			" that expires with the content is one an offline phone never receives",
 			got, n.StaleDate())
+	}
+}
+
+// TestActivityAlertingUpdateExpirationOutlivesTheStaleDate is the sibling
+// invariant for MYR-413, stated so that a future edit which moves every
+// constant at once still has to keep the property.
+//
+// The asymmetry it guards is the whole point: the banner the gate deletes had
+// NO apns-expiration, so APNs stored and retried it for an offline phone. If
+// the alerting update that inherited its job expires at the three-minute
+// stale-date, a rider in a tunnel when the car reaches the kerb reconnects to
+// nothing at all — neither surface ever told them. The ordinary tick beside it
+// must keep the short expiration, because a late ETA refresh really is
+// worthless, so the two are asserted together.
+func TestActivityAlertingUpdateExpirationOutlivesTheStaleDate(t *testing.T) {
+	n := testActivityNotification()
+	n.Event = ActivityEventUpdate
+	n.Alert = &ActivityAlert{Title: alertTitle, Body: "Your car is here."}
+
+	if got := activityExpiration(n); !got.After(n.StaleDate()) {
+		t.Errorf("alerting update expiration = %s, want later than the stale-date %s —"+
+			" since the duplicate-banner gate this push is the only thing that tells a"+
+			" rider watching a card that their car arrived, and an offline phone must"+
+			" still get it", got, n.StaleDate())
+	}
+
+	n.Alert = nil
+	if got, want := activityExpiration(n), n.StaleDate(); !got.Equal(want) {
+		t.Errorf("ordinary update expiration = %s, want the stale-date %s — a late ETA"+
+			" tick is worthless and must still be dropped by Apple", got, want)
 	}
 }
 

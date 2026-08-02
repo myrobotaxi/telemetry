@@ -27,16 +27,6 @@ type DeviceStore interface {
 	DeleteDeviceToken(ctx context.Context, deviceToken string) error
 }
 
-// notifierStores groups the two persistence seams the fan-out consults. They
-// are bundled rather than sitting side by side on Notifier because they are
-// asked the same question about the same person on the same code path — "may I
-// wake them, and where?" — and because the struct was already at the field
-// count this project's rules call a God struct.
-type notifierStores struct {
-	devices DeviceStore
-	prefs   PrefStore
-}
-
 // VehicleNamer resolves a vehicle cuid to its owner-chosen nickname. An empty
 // name (or an error) is not fatal — the copy falls back to a generic label.
 type VehicleNamer interface {
@@ -115,10 +105,15 @@ type Notifier struct {
 // lookup errors, and it is the only safe default: a notifier that silenced
 // itself because its preference store was unwired would leave riders standing
 // on sidewalks with no signal anywhere that anything was wrong.
+//
+// activities (MYR-413) may be nil too, and nil means NO BANNER IS EVER
+// SUPPRESSED — the pre-MYR-413 behaviour, and the same fail-open direction for
+// the same reason. See notifier_activity_gate.go.
 func NewNotifier(
 	sender Sender,
 	devices DeviceStore,
 	prefs PrefStore,
+	activities ActivityPresenceStore,
 	vehicles VehicleNamer,
 	cfg Config,
 	logger *slog.Logger,
@@ -129,7 +124,7 @@ func NewNotifier(
 	cfg = cfg.withDefaults()
 	return &Notifier{
 		sender:   sender,
-		stores:   notifierStores{devices: devices, prefs: prefs},
+		stores:   notifierStores{devices: devices, prefs: prefs, activities: activities},
 		vehicles: vehicles,
 		cfg:      cfg,
 		logger:   logger,
@@ -240,6 +235,12 @@ func (n *Notifier) handleStatusChanged(evt events.Event) {
 			rideID:   ev.RideRequestID,
 			topic:    string(evt.Topic),
 			category: CategoryRideLifecycle,
+			// MYR-413 — the ONLY site that sets this. The rider is the party
+			// whose island expands, and a ride status is the only input the
+			// ladder is driven by; see notifier_activity_gate.go for why the
+			// owner's created push and the reservation's due push are not
+			// gated even though one of their statuses is on the ladder.
+			islandAlerts: carriesIslandAlert(ev.Status),
 		}, a)
 	})
 }

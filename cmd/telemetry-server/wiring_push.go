@@ -59,6 +59,7 @@ func setupPushNotifier(
 	client *push.Client,
 	pushRepo *store.PushDeviceRepo,
 	prefsRepo *store.PushPrefsRepo,
+	activityRepo *store.LiveActivityRepo,
 	vehicleNames *store.VehicleNameRepo,
 	logger *slog.Logger,
 ) (*push.Notifier, error) {
@@ -73,10 +74,20 @@ func setupPushNotifier(
 		sender = client
 	}
 
+	// The Live Activity registry, passed WITHOUT an adapter (MYR-413): the repo
+	// method's signature already is push.ActivityPresenceStore. Same typed-nil
+	// care as the sender above — the gate's fail-open path keys off the
+	// INTERFACE being nil, which a typed nil pointer is not.
+	var activities push.ActivityPresenceStore
+	if activityRepo != nil {
+		activities = activityRepo
+	}
+
 	notifier := push.NewNotifier(
 		sender,
 		&pushDeviceStoreAdapter{repo: pushRepo},
 		&pushPrefsAdapter{repo: prefsRepo},
+		activities,
 		vehicleNames,
 		push.Config{Enabled: pushCfg.Enabled},
 		log,

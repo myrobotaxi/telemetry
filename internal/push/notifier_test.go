@@ -86,7 +86,7 @@ func newTestNotifier(t *testing.T, sender Sender, namer VehicleNamer) *Notifier 
 	devices.byUser[testOwnerID] = []Device{{Token: ownerDevice}}
 	devices.byUser[testRiderID] = []Device{{Token: riderDevice, Sandbox: true}}
 
-	return NewNotifier(sender, devices, nil, namer, Config{Enabled: true}, discardLogger())
+	return NewNotifier(sender, devices, nil, nil, namer, Config{Enabled: true}, discardLogger())
 }
 
 func strptr(s string) *string { return &s }
@@ -387,7 +387,7 @@ func TestNotifierFireAndForgetUnderSenderFailure(t *testing.T) {
 
 	devices := newFakeDeviceStore()
 	devices.byUser[testRiderID] = []Device{{Token: "tok-a"}, {Token: "tok-b"}}
-	n := NewNotifier(sender, devices, nil, &fakeVehicleNamer{}, Config{Enabled: true}, discardLogger())
+	n := NewNotifier(sender, devices, nil, nil, &fakeVehicleNamer{}, Config{Enabled: true}, discardLogger())
 
 	n.handleStatusChanged(statusEvent("accepted"))
 	n.Wait()
@@ -409,7 +409,7 @@ func TestNotifierUnregisteredDeletesDevice(t *testing.T) {
 
 	devices := newFakeDeviceStore()
 	devices.byUser[testRiderID] = []Device{{Token: "tok-dead"}, {Token: "tok-live"}}
-	n := NewNotifier(sender, devices, nil, &fakeVehicleNamer{}, Config{Enabled: true}, discardLogger())
+	n := NewNotifier(sender, devices, nil, nil, &fakeVehicleNamer{}, Config{Enabled: true}, discardLogger())
 
 	n.handleStatusChanged(statusEvent("arrived"))
 	n.Wait()
@@ -427,7 +427,7 @@ func TestNotifierThrottledDoesNotDelete(t *testing.T) {
 	sender.Err = ErrThrottled
 	devices := newFakeDeviceStore()
 	devices.byUser[testRiderID] = []Device{{Token: "tok-busy"}}
-	n := NewNotifier(sender, devices, nil, &fakeVehicleNamer{}, Config{Enabled: true}, discardLogger())
+	n := NewNotifier(sender, devices, nil, nil, &fakeVehicleNamer{}, Config{Enabled: true}, discardLogger())
 
 	n.handleDue(dueEvent())
 	n.Wait()
@@ -459,7 +459,7 @@ func TestNotifierSkipsWhenInactive(t *testing.T) {
 			}
 			devices := newFakeDeviceStore()
 			devices.byUser[testOwnerID] = []Device{{Token: ownerDevice}}
-			n := NewNotifier(s, devices, nil, &fakeVehicleNamer{}, Config{Enabled: tt.enabled}, discardLogger())
+			n := NewNotifier(s, devices, nil, nil, &fakeVehicleNamer{}, Config{Enabled: tt.enabled}, discardLogger())
 
 			// Must not panic on a nil sender, and must not deliver.
 			n.handleCreated(createdEvent(strptr("Ada"), nil))
@@ -478,7 +478,7 @@ func TestNotifierDeviceLookupFailureIsSwallowed(t *testing.T) {
 	sender := NewFakeSender()
 	devices := newFakeDeviceStore()
 	devices.listErr = errors.New("db down")
-	n := NewNotifier(sender, devices, nil, &fakeVehicleNamer{}, Config{Enabled: true}, discardLogger())
+	n := NewNotifier(sender, devices, nil, nil, &fakeVehicleNamer{}, Config{Enabled: true}, discardLogger())
 
 	n.handleDue(dueEvent())
 	n.Wait()
@@ -490,7 +490,7 @@ func TestNotifierDeviceLookupFailureIsSwallowed(t *testing.T) {
 
 func TestNotifierNoDevicesRegistered(t *testing.T) {
 	sender := NewFakeSender()
-	n := NewNotifier(sender, newFakeDeviceStore(), nil, &fakeVehicleNamer{}, Config{Enabled: true}, discardLogger())
+	n := NewNotifier(sender, newFakeDeviceStore(), nil, nil, &fakeVehicleNamer{}, Config{Enabled: true}, discardLogger())
 
 	n.handleCreated(createdEvent(strptr("Ada"), nil))
 	n.Wait()
