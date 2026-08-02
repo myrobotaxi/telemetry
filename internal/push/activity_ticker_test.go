@@ -274,19 +274,39 @@ func TestTickerSweepRunsHourlyNotEveryTick(t *testing.T) {
 	}
 }
 
-// TestTickerDisabledDoesNothing pins the kill-switch. Lifecycle updates carry
-// on; only the periodic refresh stops, and the Activity's own stale-date then
-// does exactly the job MYR-194 designed it for.
-func TestTickerDisabledDoesNothing(t *testing.T) {
+// TestTickerDisabledRefreshesNothing pins the kill-switch. Lifecycle updates
+// carry on; only the periodic refresh stops, and the Activity's own stale-date
+// then does exactly the job MYR-194 designed it for.
+//
+// The switch no longer stops the LOOP (MYR-421) — the held completion `end`
+// runs on it and is a lifecycle transition rather than a refresh — so this now
+// drives a pass directly instead of relying on Run returning at once. The
+// held-end half of that boundary is TestHeldEndRunsWithTheEtaTickerOff.
+func TestTickerDisabledRefreshesNothing(t *testing.T) {
 	ticker, sender, _ := newTestTicker(t, 2, nil)
 	ticker.cfg.Enabled = false
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	ticker.Run(ctx) // returns immediately rather than blocking on the timer
+	ticker.RunPass(context.Background())
 
 	if got := len(sender.Sent()); got != 0 {
-		t.Errorf("a disabled ticker sent %d updates, want 0", got)
+		t.Errorf("a disabled ticker sent %d ETA refreshes, want 0", got)
+	}
+}
+
+// TestTickerRunStopsWhenUnwired — a ticker with no store or no notifier has
+// nothing to do at all, and must not spin a timer forever proving it.
+func TestTickerRunStopsWhenUnwired(t *testing.T) {
+	ticker := NewActivityTicker(nil, nil, TickerConfig{Enabled: true}, discardLogger())
+
+	done := make(chan struct{})
+	go func() {
+		ticker.Run(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return with nothing wired")
 	}
 }
 

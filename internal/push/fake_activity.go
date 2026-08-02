@@ -20,6 +20,17 @@ type FakeActivitySender struct {
 	// ErrByToken overrides Err for a specific activity token, so a test can
 	// make exactly one Activity look unregistered.
 	ErrByToken map[string]error
+
+	// Before, when set, runs at the top of every SendActivity — deliberately
+	// BEFORE the mutex is taken, so a test may call Sent() from another
+	// goroutine while one send is parked inside it.
+	//
+	// It exists for the shutdown-drain tests (MYR-421), which have to observe
+	// the window in which a push is genuinely in flight: the question "does
+	// Wait() cover this code path?" cannot be asked of a send that has already
+	// returned. Set it before the goroutine that sends is started; the `go`
+	// statement is the happens-before edge that keeps the read race-free.
+	Before func()
 }
 
 // NewFakeActivitySender builds an empty spy.
@@ -29,6 +40,10 @@ func NewFakeActivitySender() *FakeActivitySender {
 
 // SendActivity records the update and returns the configured error, if any.
 func (f *FakeActivitySender) SendActivity(_ context.Context, n ActivityNotification) error {
+	if f.Before != nil {
+		f.Before()
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 

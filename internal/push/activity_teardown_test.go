@@ -35,7 +35,10 @@ func newTeardownNotifier(t *testing.T) (*ActivityNotifier, *FakeActivitySender, 
 		Token:         "second-activity-token",
 	}}
 	store.context[otherRide] = RideContext{Status: "enroute", VehicleName: "Blue Whale", Destination: "Work"}
-	store.ridesByVehicle[teardownVehicleID] = []string{activityRideID, otherRide}
+	store.ridesByVehicle[teardownVehicleID] = []VehicleRide{
+		{RideRequestID: activityRideID, Status: statusEnroute},
+		{RideRequestID: otherRide, Status: statusEnroute},
+	}
 
 	return n, sender, store
 }
@@ -93,6 +96,75 @@ func TestEndForVehicleTeardownDismissesPromptly(t *testing.T) {
 	}
 }
 
+// TestEndForVehicleTeardownDoesNotCancelACompletedRide is the MYR-421
+// correction, and it is a defect the hold CREATED.
+//
+// The teardown read's predicate is `ended_at IS NULL`. Before the held `end`
+// that could never match a completed ride — the tombstone went out with the
+// transition — so every id this read returned was a ride genuinely in flight
+// and `cancelled` was always the truth. Now a completed ride's row stays live
+// for five minutes, so a rider who finished their trip and whose owner then
+// unlinked the car had their completion check OVERWRITTEN with a cancellation
+// and dismissed in thirty seconds.
+//
+// Skipping completed rides here would be worse, not better: the teardown's
+// cascade destroys the rows moments later, so the held-end pass would never
+// fire and the card would sit on its arrival state until ActivityKit's own
+// ceiling. This is the last chance to end it, so it is ended honestly.
+func TestEndForVehicleTeardownDoesNotCancelACompletedRide(t *testing.T) {
+	n, sender, store := newTeardownNotifier(t)
+	// activityRideID completed two minutes ago and is inside its hold; the
+	// other ride is still in flight.
+	store.ridesByVehicle[teardownVehicleID] = []VehicleRide{
+		{RideRequestID: activityRideID, Status: statusCompleted},
+		{RideRequestID: "ride_live_2", Status: statusEnroute},
+	}
+	store.completeRide(activityRideID, fixedNow.Add(-2*time.Minute))
+
+	n.EndForVehicleTeardown(context.Background(), teardownVehicleID)
+
+	byRide := map[string]ActivityNotification{}
+	for _, s := range sender.Sent() {
+		byRide[s.ContentState.Status] = s
+	}
+	if len(sender.Sent()) != 2 {
+		t.Fatalf("sent %d pushes, want one per ride", len(sender.Sent()))
+	}
+
+	done, ok := byRide[statusCompleted]
+	if !ok {
+		t.Fatalf("no push carried the completed state; the rider's finished ride was reported as %v",
+			byRide)
+	}
+	if done.Event != ActivityEventEnd {
+		t.Errorf("completed ride event = %q, want end", done.Event)
+	}
+	if done.Alert != nil {
+		t.Errorf("the teardown end carries an alert (%+v); rung six was already spent", *done.Alert)
+	}
+	// The honest linger, not the 30-second brush-off an unhappy ending gets.
+	// Literal, for the reason TestEndForVehicleTeardownDismissesPromptly gives.
+	if done.DismissalDate == nil || !done.DismissalDate.Equal(done.Timestamp.Add(5*time.Minute)) {
+		t.Errorf("completed dismissal-date = %v, want 5m past the end", done.DismissalDate)
+	}
+
+	// The ride that was genuinely in flight is still cancelled, promptly.
+	live, ok := byRide["cancelled"]
+	if !ok {
+		t.Fatal("the in-flight ride was not cancelled")
+	}
+	if live.DismissalDate == nil || !live.DismissalDate.Equal(live.Timestamp.Add(30*time.Second)) {
+		t.Errorf("cancelled dismissal-date = %v, want 30s past the end", live.DismissalDate)
+	}
+
+	// BOTH are tombstoned here and now. The cascade is about to delete the
+	// rows, so leaving the completed one live for the held-end pass would mean
+	// nothing ever ends it.
+	if store.ended[activityRideID] != 1 || store.ended["ride_live_2"] != 1 {
+		t.Errorf("tombstones = %v, want one per ride", store.ended)
+	}
+}
+
 // TestEndForVehicleTeardownIsQuietWithNothingToEnd — most teardowns remove a car
 // with no ride in flight, and that must cost one read and no pushes.
 func TestEndForVehicleTeardownIsQuietWithNothingToEnd(t *testing.T) {
@@ -124,7 +196,9 @@ func TestEndForVehicleTeardownSurvivesALookupFailure(t *testing.T) {
 // tombstone, and the teardown must not care.
 func TestEndForVehicleTeardownIsANoopWhenPushIsOff(t *testing.T) {
 	store := newFakeActivityStore()
-	store.ridesByVehicle[teardownVehicleID] = []string{activityRideID}
+	store.ridesByVehicle[teardownVehicleID] = []VehicleRide{
+		{RideRequestID: activityRideID, Status: statusEnroute},
+	}
 
 	n := NewActivityNotifier(nil, store, nil, Config{Enabled: true}, discardLogger())
 	n.EndForVehicleTeardown(context.Background(), teardownVehicleID)

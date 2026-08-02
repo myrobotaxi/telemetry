@@ -179,17 +179,21 @@ func TestCompletedPairWireLayout(t *testing.T) {
 	// prints for a completed ride.
 	rc.ETAMinutes = nil
 	store.context[activityRideID] = rc
+	store.completeRide(activityRideID, fixedNow)
 
 	n.handleStatusChanged(events.NewEvent(events.RideStatusChangedEvent{
 		RideRequestID: activityRideID, RiderID: testRiderID, Status: statusCompleted,
 	}))
 	n.Wait()
+	// The end is HELD for the linger (MYR-421), so the second half of the pair
+	// is a ticker pass five minutes on rather than a send one second on.
+	holdExpires(t, n, store)
 
 	sent := sender.Sent()
 	if len(sent) != 2 {
 		t.Fatalf("sends = %d, want 2", len(sent))
 	}
-	endAt := fixedNow.Add(endAfterAlertGap)
+	endAt := fixedNow.Add(DismissAfter)
 
 	// The alerting update. `progress` is exactly 1 and renders as `1`, not
 	// `1.0` — a float that reached the wire as `1e+00` would decode into the

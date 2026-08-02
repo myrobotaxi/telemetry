@@ -201,12 +201,24 @@ func (h *RideRequestHandler) ServeRegisterActivityToken(w http.ResponseWriter, r
 // explain it: a client seeing `conflict` on an `accepted` ride would have no
 // way to tell a bug from a reservation that lapsed.
 func (h *RideRequestHandler) guardActivityRegistrable(w http.ResponseWriter, rec RideRequestData) bool {
-	// A ride that has already ended will never be pushed to again — the
-	// terminal `event: "end"` has fired and the rows are tombstoned — so
-	// accepting a registration here would store a row nothing will ever update
-	// and only the 24h sweep would remove. The 409 tells the client to end its
-	// Activity locally now, which is exactly what its final-state fallback is
-	// for.
+	// A ride that has reached a terminal status will never be pushed to on
+	// this registration's account, so accepting one here would store a row
+	// nothing will ever update and only the 24h sweep would remove. The 409
+	// tells the client to end its Activity locally now, which is exactly what
+	// its final-state fallback is for.
+	//
+	// "THE ROWS ARE ALREADY TOMBSTONED" IS NO LONGER WHY, and the distinction
+	// matters because it used to be the whole argument. Since MYR-421 a
+	// completed ride's rows stay LIVE for five minutes while its `end` is held,
+	// so a POST arriving in that window meets a live row and is refused anyway
+	// — by the status, which is the check that was always doing the work. The
+	// refusal is if anything more necessary there: the upsert clears `ended_at`
+	// and re-seeds the phase mark, so a registration allowed through mid-hold
+	// would hand the held-end pass a row belonging to an Activity it never
+	// announced to.
+	//
+	// The reservation-expiry arm below is unchanged and still tombstone-shaped,
+	// because that ending IS immediate.
 	if isTerminalRideStatus(rec.Status) {
 		h.writeError(w, http.StatusConflict, wserrors.ErrCodeConflict,
 			"ride request is already "+rec.Status)

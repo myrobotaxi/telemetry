@@ -200,12 +200,19 @@ func (a *liveActivityStoreAdapter) ActiveLegs(ctx context.Context, limit int) ([
 	return out, nil
 }
 
-func (a *liveActivityStoreAdapter) RideIDsWithActivitiesForVehicle(ctx context.Context, vehicleID string) ([]string, error) {
-	ids, err := a.repo.ActivityRideIDsForVehicle(ctx, vehicleID)
+func (a *liveActivityStoreAdapter) RideIDsWithActivitiesForVehicle(ctx context.Context, vehicleID string) ([]push.VehicleRide, error) {
+	rides, err := a.repo.ActivityRideIDsForVehicle(ctx, vehicleID)
 	if err != nil {
 		return nil, fmt.Errorf("live activity: list vehicle rides: %w", err)
 	}
-	return ids, nil
+	out := make([]push.VehicleRide, 0, len(rides))
+	for _, ride := range rides {
+		out = append(out, push.VehicleRide{
+			RideRequestID: ride.RideRequestID,
+			Status:        string(ride.Status),
+		})
+	}
+	return out, nil
 }
 
 func (a *liveActivityStoreAdapter) MarkPushed(ctx context.Context, keys []push.ActivityKey) (int64, error) {
@@ -216,6 +223,26 @@ func (a *liveActivityStoreAdapter) MarkPushed(ctx context.Context, keys []push.A
 	n, err := a.repo.MarkActivitiesPushed(ctx, rows)
 	if err != nil {
 		return 0, fmt.Errorf("live activity: mark pushed: %w", err)
+	}
+	return n, nil
+}
+
+// RidesAwaitingEnd surfaces the completed rides whose held-back `end` push has
+// come due and is still inside its retry horizon (MYR-421).
+func (a *liveActivityStoreAdapter) RidesAwaitingEnd(ctx context.Context, heldFor, giveUpAfter time.Duration, limit int) ([]string, error) {
+	ids, err := a.repo.ListRidesAwaitingActivityEnd(ctx, heldFor, giveUpAfter, limit)
+	if err != nil {
+		return nil, fmt.Errorf("live activity: list rides awaiting end: %w", err)
+	}
+	return ids, nil
+}
+
+// AbandonHeldEnds retires the cards whose retry horizon has passed, sending
+// nothing — the held-end loop's terminator (MYR-421).
+func (a *liveActivityStoreAdapter) AbandonHeldEnds(ctx context.Context, giveUpAfter time.Duration) (int64, error) {
+	n, err := a.repo.AbandonExpiredHeldEnds(ctx, giveUpAfter)
+	if err != nil {
+		return 0, fmt.Errorf("live activity: abandon expired held ends: %w", err)
 	}
 	return n, nil
 }

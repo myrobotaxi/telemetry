@@ -667,26 +667,36 @@ func TestOutOfOrderTransitionDoesNotReopenTheIsland(t *testing.T) {
 // rejected, and not honoured. There is no failure signal for it anywhere, which
 // is why the shape is pinned here rather than trusted.
 //
-// SO THE PAIR: an alerting UPDATE carrying the terminal state, then the `end` a
-// second later carrying the same state, its dismissal-date, and no alert.
+// SO THE PAIR: an alerting UPDATE carrying the terminal state, then the `end`
+// carrying the same state, its dismissal-date, and no alert.
+//
+// AND THE PAIR IS NOW FIVE MINUTES APART (MYR-421), which is the other half of
+// what this pins. The end does not merely end the Activity — it removes it from
+// the Dynamic Island about 1.4 seconds later — so a pair one second apart put
+// the sixth expansion's check on the island for two seconds total. The
+// announcement goes out on the transition and the end is HELD for the linger,
+// sent by the ticker's held-end pass.
 func TestCompletedSendsAnAlertingUpdateThenTheEnd(t *testing.T) {
 	n, sender, store := newTestActivityNotifier(t, nil)
 	store.byRide[activityRideID] = []Activity{{
 		RideRequestID: activityRideID, UserID: testRiderID, Token: riderToken,
 		AlertedPhase: AlertPhaseOnTrip,
 	}}
-	rc := store.context[activityRideID]
-	rc.Status = statusCompleted
-	store.context[activityRideID] = rc
+	store.completeRide(activityRideID, fixedNow)
 
 	n.handleStatusChanged(events.NewEvent(events.RideStatusChangedEvent{
 		RideRequestID: activityRideID, RiderID: testRiderID, Status: statusCompleted,
 	}))
 	n.Wait()
 
+	if got := len(sender.Sent()); got != 1 {
+		t.Fatalf("sends at completion = %d, want 1 — the announcement alone; the end is held", got)
+	}
+	holdExpires(t, n, store)
+
 	sent := sender.Sent()
 	if len(sent) != 2 {
-		t.Fatalf("sends = %d, want 2 — an alerting update, then the end", len(sent))
+		t.Fatalf("sends = %d, want 2 — an alerting update, then the held end", len(sent))
 	}
 	update, end := sent[0], sent[1]
 
@@ -740,10 +750,20 @@ func TestCompletedSendsAnAlertingUpdateThenTheEnd(t *testing.T) {
 	// is showing; `aps.timestamp` is whole seconds, so two pushes off one clock
 	// read would collide. Asserted as a strict inequality ON THE RENDERED
 	// SECOND rather than on the time.Time, because the wire is where the
-	// collision would happen.
+	// collision would happen. The hold makes the gap five minutes rather than
+	// the one second endAfterAlertGap used to buy, which subsumes the defence
+	// rather than replacing it — the constant still guards every ending that is
+	// not held.
 	if end.Timestamp.Unix() <= update.Timestamp.Unix() {
 		t.Errorf("end aps.timestamp %d does not exceed the update's %d — the end is the push that "+
 			"must never be discarded", end.Timestamp.Unix(), update.Timestamp.Unix())
+	}
+	// THE HOLD ITSELF. The island keeps the check for the whole linger instead
+	// of ~2 seconds, which is the defect MYR-421 is about.
+	if got := end.Timestamp.Sub(update.Timestamp); got < DismissAfter {
+		t.Errorf("the end followed the announcement after %s, want at least %s — an `.ended` "+
+			"Activity leaves the Dynamic Island ~1.4s later, so this gap IS the time the "+
+			"rider has to see the check", got, DismissAfter)
 	}
 
 	// THE LADDER IS MARKED, on the push that carried the alert. It could not be
@@ -755,6 +775,56 @@ func TestCompletedSendsAnAlertingUpdateThenTheEnd(t *testing.T) {
 	}
 	if store.endCount() != 1 {
 		t.Error("the pair did not tombstone the registry rows")
+	}
+}
+
+// TestCompletedHoldsTheRowsLiveUntilTheEndGoesOut is MYR-421's tombstone
+// semantics, which are the part of this change that reaches beyond the push.
+//
+// The row must SURVIVE the hold. Tombstoning at completion — where it used to
+// happen — would exclude the row from its own `end` five minutes later, which
+// is the very defect the send-then-tombstone ordering exists to prevent, moved
+// in time rather than avoided.
+func TestCompletedHoldsTheRowsLiveUntilTheEndGoesOut(t *testing.T) {
+	n, sender, store := newTestActivityNotifier(t, nil)
+	store.completeRide(activityRideID, fixedNow)
+
+	n.handleStatusChanged(events.NewEvent(events.RideStatusChangedEvent{
+		RideRequestID: activityRideID, RiderID: testRiderID, Status: statusCompleted,
+	}))
+	n.Wait()
+
+	if store.endCount() != 0 {
+		t.Fatal("completion tombstoned the rows; the held end would then have nothing to push to")
+	}
+	if got := len(sender.Sent()); got != 1 || sender.Sent()[0].Event != ActivityEventUpdate {
+		t.Fatalf("sends at completion = %+v, want one update", sender.Sent())
+	}
+
+	// A pass BEFORE the hold expires must send nothing: the whole point is that
+	// the island keeps the check for the five minutes.
+	NewActivityTicker(n, store, TickerConfig{Enabled: false}, discardLogger()).RunPass(context.Background())
+	if got := len(sender.Sent()); got != 1 {
+		t.Fatalf("sends after an early pass = %d, want 1 — the end went out before its hold expired", got)
+	}
+	if store.endCount() != 0 {
+		t.Error("an early pass tombstoned the rows")
+	}
+
+	holdExpires(t, n, store)
+
+	sent := sender.Sent()
+	if len(sent) != 2 || sent[1].Event != ActivityEventEnd {
+		t.Fatalf("sends after the hold = %+v, want the end", sent)
+	}
+	if store.endCount() != 1 {
+		t.Error("the held end did not tombstone the registry rows")
+	}
+
+	// And it is idempotent: a second pass finds no live row and pushes nothing.
+	holdExpires(t, n, store)
+	if got := len(sender.Sent()); got != 2 {
+		t.Errorf("sends after a second pass = %d, want 2 — the tombstone must retire the ride", got)
 	}
 }
 
@@ -770,14 +840,13 @@ func TestCompletedDoesNotReAlertWhenTheSixthRungIsAlreadySpent(t *testing.T) {
 		RideRequestID: activityRideID, UserID: testRiderID, Token: riderToken,
 		AlertedPhase: AlertPhaseCompleted,
 	}}
-	rc := store.context[activityRideID]
-	rc.Status = statusCompleted
-	store.context[activityRideID] = rc
+	store.completeRide(activityRideID, fixedNow)
 
 	n.handleStatusChanged(events.NewEvent(events.RideStatusChangedEvent{
 		RideRequestID: activityRideID, RiderID: testRiderID, Status: statusCompleted,
 	}))
 	n.Wait()
+	holdExpires(t, n, store)
 
 	for i, s := range sender.Sent() {
 		if s.Alert != nil {
@@ -812,11 +881,17 @@ func TestNoEndPushEverCarriesAnAlert(t *testing.T) {
 			rc := store.context[activityRideID]
 			rc.Status = status
 			store.context[activityRideID] = rc
+			if status == statusCompleted {
+				store.completeRide(activityRideID, fixedNow)
+			}
 
 			n.handleStatusChanged(events.NewEvent(events.RideStatusChangedEvent{
 				RideRequestID: activityRideID, RiderID: testRiderID, Status: status,
 			}))
 			n.Wait()
+			// The completed end is held; the unhappy ones already went out and
+			// a pass over them finds nothing.
+			holdExpires(t, n, store)
 
 			var ends int
 			for _, s := range sender.Sent() {

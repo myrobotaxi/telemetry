@@ -73,6 +73,17 @@ type RideContext struct {
 	DispatchUnderway bool
 }
 
+// VehicleRide is one ride caught by an owner teardown: which ride, and the
+// status that decides how its card must be ended.
+//
+// The status is carried rather than looked up per ride because the read that
+// produces this list already joins the ride, and because getting it wrong is
+// the specific defect it exists to prevent — see EndForVehicleTeardown.
+type VehicleRide struct {
+	RideRequestID string
+	Status        string
+}
+
 // ActivityStore is the send path's view of the registry.
 type ActivityStore interface {
 	// ActivitiesForRide lists the still-live Activities on a ride.
@@ -84,8 +95,9 @@ type ActivityStore interface {
 	// RideContextFor reads the content-state inputs for one ride.
 	RideContextFor(ctx context.Context, rideRequestID string) (RideContext, error)
 	// RideIDsWithActivitiesForVehicle lists the rides of one vehicle that
-	// still have a live Activity registered against them.
-	RideIDsWithActivitiesForVehicle(ctx context.Context, vehicleID string) ([]string, error)
+	// still have a live Activity registered against them, with each ride's
+	// status — which decides how its card is ended (MYR-421).
+	RideIDsWithActivitiesForVehicle(ctx context.Context, vehicleID string) ([]VehicleRide, error)
 	// SaveProgress records the leg-progress anchor one Activity was just shown.
 	// Called ONLY after APNs accepted the push (MYR-398).
 	SaveProgress(ctx context.Context, key ActivityKey, anchor ProgressAnchor) error
@@ -94,21 +106,24 @@ type ActivityStore interface {
 	SaveAlertedPhase(ctx context.Context, key ActivityKey, phase AlertPhase) error
 }
 
-// terminalStatuses maps a terminal ride status onto how long its Activity
-// lingers on the lock screen before iOS dismisses it (MYR-194 decision 5).
+// terminalStatuses maps a terminal ride status onto how its Activity ends —
+// how long the card lingers before iOS dismisses it (MYR-194 decision 5), and
+// since MYR-421 whether the `end` push waits.
 //
 // `completed` lingers because the arrival state is the thing the rider most
-// wants a moment with. The unhappy endings go promptly — but not instantly, so
-// the news is legible before it disappears.
+// wants a moment with, and it is the one ending whose `end` is HELD for that
+// linger: the push does not merely end the Activity, it takes the Dynamic
+// Island presence with it. The unhappy endings go promptly and immediately —
+// but not instantly, so the news is legible before it disappears.
 //
 // `arrived` and `enroute` are NOT here: `arrived` is the car reaching the
 // pickup (the ride is just beginning) and `enroute` is leg two. Both are the
 // most active moments of the ride, and reading either as terminal would end the
 // Activity exactly when the rider is looking at it.
-var terminalStatuses = map[string]time.Duration{
-	"completed": DismissAfter,
-	"declined":  DismissPromptly,
-	"cancelled": DismissPromptly,
+var terminalStatuses = map[string]activityEnding{
+	"completed": completedEnding,
+	"declined":  promptEnding,
+	"cancelled": promptEnding,
 }
 
 // ActivityNotifier pushes ActivityKit updates on ride lifecycle transitions.
@@ -239,7 +254,7 @@ func (a *ActivityNotifier) handleStatusChanged(evt events.Event) {
 // watch an Activity promise a pickup forever. Called synchronously by the
 // sweeper on a context it owns.
 func (a *ActivityNotifier) EndForReservationExpiry(ctx context.Context, rideRequestID string) {
-	a.endRide(ctx, rideRequestID, "reservation_expired", DismissPromptly)
+	a.endRide(ctx, rideRequestID, "reservation_expired", promptEnding)
 }
 
 // EndForVehicleTeardown ends every live Activity on a vehicle's rides, and is
@@ -255,9 +270,24 @@ func (a *ActivityNotifier) EndForReservationExpiry(ctx context.Context, rideRequ
 // DATABASE ROW, which is what the migration header claimed; it strands the
 // thing the row was pointing at.
 //
-// Sent as `cancelled` because that is what it is from the rider's side — the
-// ride is not happening, and no one is coming — and with DismissPromptly, the
-// same linger as any other unhappy ending.
+// A RIDE IN FLIGHT is sent as `cancelled`, because that is what it is from the
+// rider's side — the ride is not happening, and no one is coming — with
+// DismissPromptly, the same linger as any other unhappy ending.
+//
+// A RIDE THAT ALREADY COMPLETED IS ENDED AS COMPLETED, and MYR-421 is why that
+// distinction had to be drawn. The teardown read's predicate is
+// `ended_at IS NULL`, which before the held `end` could never match a completed
+// ride: the tombstone went out with the transition. Now the row stays live for
+// five minutes, so a rider who finished their trip and whose owner then
+// unlinked the car had their completion check overwritten with a CANCELLATION —
+// news that is both wrong and worse — and dismissed in thirty seconds.
+//
+// Skipping completed rides here is NOT the fix, tempting as it looks: the
+// cascade is about to delete the rows, so the held-end pass would never fire
+// for them and the card would be stranded on its arrival state until
+// ActivityKit's ceiling. This is the last chance to end it, so it is ended
+// honestly — final `completed` content-state, no alert (the announcement
+// already spent rung six), and the same five-minute linger it would have got.
 //
 // Called synchronously on the caller's context and best-effort throughout: a
 // teardown must never fail because a push did.
@@ -266,7 +296,7 @@ func (a *ActivityNotifier) EndForVehicleTeardown(ctx context.Context, vehicleID 
 		return
 	}
 
-	rideIDs, err := a.store.RideIDsWithActivitiesForVehicle(ctx, vehicleID)
+	rides, err := a.store.RideIDsWithActivitiesForVehicle(ctx, vehicleID)
 	if err != nil {
 		a.logger.Error("live activity: teardown ride lookup failed",
 			slog.String("vehicle_id", vehicleID),
@@ -274,16 +304,26 @@ func (a *ActivityNotifier) EndForVehicleTeardown(ctx context.Context, vehicleID 
 		)
 		return
 	}
-	if len(rideIDs) == 0 {
+	if len(rides) == 0 {
 		return
 	}
 
-	for _, rideID := range rideIDs {
-		a.endRide(ctx, rideID, "cancelled", DismissPromptly)
+	var completed int
+	for _, ride := range rides {
+		if ride.Status == statusCompleted {
+			completed++
+			a.endRide(ctx, ride.RideRequestID, statusCompleted, teardownCompletedEnding)
+			continue
+		}
+		a.endRide(ctx, ride.RideRequestID, "cancelled", promptEnding)
 	}
 
 	a.logger.Info("live activities ended for vehicle teardown",
 		slog.String("vehicle_id", vehicleID),
-		slog.Int("rides", len(rideIDs)),
+		slog.Int("rides", len(rides)),
+		// Separated because the two endings say opposite things to the rider,
+		// and "the teardown cancelled a ride that had already happened" is the
+		// shape of the bug this count exists to make visible.
+		slog.Int("completed", completed),
 	)
 }

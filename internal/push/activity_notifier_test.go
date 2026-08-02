@@ -3,6 +3,7 @@ package push
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -23,8 +24,9 @@ type fakeActivityStore struct {
 	legs    []ActivityLeg
 
 	// ridesByVehicle backs RideIDsWithActivitiesForVehicle — the owner-teardown
-	// read (MYR-172).
-	ridesByVehicle map[string][]string
+	// read (MYR-172). Values carry the ride's STATUS as well as its id, because
+	// that is what decides how the teardown ends each card (MYR-421).
+	ridesByVehicle map[string][]VehicleRide
 
 	ended   map[string]int
 	deleted []string
@@ -42,6 +44,23 @@ type fakeActivityStore struct {
 	alerts   []savedAlert
 	alertErr error
 
+	// completedAt is `go_ride_requests.completed_at` for the rides this fixture
+	// has completed (MYR-421). RidesAwaitingEnd reads it against clock the way
+	// the real query reads the column against NOW().
+	completedAt map[string]time.Time
+	// heldFor and giveUpAfter record the window the ticker asked for, so a test
+	// can assert both bounds without reaching into the ticker.
+	heldFor     time.Duration
+	giveUpAfter time.Duration
+	heldEndErr  error
+	abandonErr  error
+	// abandoned records the rides retired without an end, in call order.
+	abandoned []string
+	// clock is the fake's own NOW, moved by a test to walk the hold window.
+	// Separate from the notifier's clock only so a case can advance the
+	// database's idea of time without also moving the push timestamps.
+	clock func() time.Time
+
 	contextErr error
 	listErr    error
 	vehicleErr error
@@ -52,9 +71,114 @@ func newFakeActivityStore() *fakeActivityStore {
 	return &fakeActivityStore{
 		byRide:         map[string][]Activity{},
 		context:        map[string]RideContext{},
-		ridesByVehicle: map[string][]string{},
+		ridesByVehicle: map[string][]VehicleRide{},
 		ended:          map[string]int{},
+		completedAt:    map[string]time.Time{},
+		clock:          func() time.Time { return fixedNow },
 	}
+}
+
+// completeRide marks a ride terminal at `at`, which is what the status write
+// stamps on go_ride_requests.completed_at.
+func (f *fakeActivityStore) completeRide(rideID string, at time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	rc := f.context[rideID]
+	rc.Status = statusCompleted
+	f.context[rideID] = rc
+	f.completedAt[rideID] = at
+}
+
+// advanceClock moves the store's NOW, so the held-end predicate can be walked
+// across the hold horizon without sleeping.
+func (f *fakeActivityStore) advanceClock(d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	base := f.clock()
+	f.clock = func() time.Time { return base.Add(d) }
+}
+
+// RidesAwaitingEnd mimics queryListRidesAwaitingActivityEnd: completed rides
+// whose completion instant falls in [heldFor, giveUpAfter) and that still have
+// a LIVE row, NEWEST completion first.
+//
+// Both halves of the window are modelled, and so is the ordering, because both
+// are load-bearing: the ceiling is what makes the list drain, and newest-first
+// is what stops a stuck row holding the head of a capped list against a ride
+// that has just finished.
+//
+// The live-row half is modelled by byRide rather than asserted separately,
+// because that is exactly the coupling under test — a ride tombstoned during
+// the window (the rider swiped the card away, or the app ended it locally) must
+// drop out of this list rather than be pushed an end nobody is watching for.
+func (f *fakeActivityStore) RidesAwaitingEnd(_ context.Context, heldFor, giveUpAfter time.Duration, limit int) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.heldEndErr != nil {
+		return nil, f.heldEndErr
+	}
+	f.heldFor, f.giveUpAfter = heldFor, giveUpAfter
+
+	now := f.clock()
+	due, floor := now.Add(-heldFor), now.Add(-giveUpAfter)
+	type row struct {
+		ride string
+		at   time.Time
+	}
+	var rows []row
+	for ride, at := range f.completedAt {
+		if at.After(due) || !at.After(floor) || len(f.byRide[ride]) == 0 {
+			continue
+		}
+		rows = append(rows, row{ride: ride, at: at})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].at.Equal(rows[j].at) {
+			return rows[i].ride < rows[j].ride
+		}
+		return rows[i].at.After(rows[j].at)
+	})
+
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if len(out) == limit {
+			break
+		}
+		out = append(out, r.ride)
+	}
+	return out, nil
+}
+
+// AbandonHeldEnds mimics queryAbandonExpiredHeldEnds: an unbounded bulk
+// tombstone of every live row on a ride that completed longer than giveUpAfter
+// ago. No LIMIT and no ordering, which is the property that makes it the
+// loop's terminator rather than another thing the cap can starve.
+func (f *fakeActivityStore) AbandonHeldEnds(_ context.Context, giveUpAfter time.Duration) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.abandonErr != nil {
+		return 0, f.abandonErr
+	}
+
+	floor := f.clock().Add(-giveUpAfter)
+	var retired int64
+	for ride, at := range f.completedAt {
+		if at.After(floor) || len(f.byRide[ride]) == 0 {
+			continue
+		}
+		retired += int64(len(f.byRide[ride]))
+		f.abandoned = append(f.abandoned, ride)
+		f.ended[ride]++
+		delete(f.byRide, ride)
+	}
+	return retired, nil
+}
+
+// abandonedRides reports which rides were retired without an end, in call order.
+func (f *fakeActivityStore) abandonedRides() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.abandoned...)
 }
 
 func (f *fakeActivityStore) ActivitiesForRide(_ context.Context, rideID string) ([]Activity, error) {
@@ -202,13 +326,13 @@ func (f *fakeActivityStore) savedProgressFor(rideID, userID string) []ProgressAn
 	return out
 }
 
-func (f *fakeActivityStore) RideIDsWithActivitiesForVehicle(_ context.Context, vehicleID string) ([]string, error) {
+func (f *fakeActivityStore) RideIDsWithActivitiesForVehicle(_ context.Context, vehicleID string) ([]VehicleRide, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.vehicleErr != nil {
 		return nil, f.vehicleErr
 	}
-	return append([]string(nil), f.ridesByVehicle[vehicleID]...), nil
+	return append([]VehicleRide(nil), f.ridesByVehicle[vehicleID]...), nil
 }
 
 // MarkPushed mimics the real UPDATE: it stamps the delivered rows and REORDERS
@@ -347,22 +471,32 @@ func TestActivityNotifierUpdatesOnStatusChange(t *testing.T) {
 // `wantPushes` and the offset applied below. Measuring it from the alerting
 // update instead would make the number the rider experiences depend on which
 // half of the pair the test happened to look at.
+//
+// On a completed ride that second push is now five minutes late (MYR-421), so
+// the case runs the ticker's held-end pass to reach it. The number asserted is
+// unchanged and deliberately so: the linger is a property of the END, and
+// holding the end moves WHEN the card starts its five minutes, never how long
+// they are.
 func TestActivityNotifierTerminalDismissal(t *testing.T) {
 	tests := []struct {
 		name       string
 		status     string
 		wantPushes int
+		held       bool
 		wantLinger time.Duration
 	}{
-		{"completed lingers five minutes, matching the client's own linger", "completed", 2, 5 * time.Minute},
-		{"declined dismisses promptly", "declined", 1, 30 * time.Second},
-		{"cancelled dismisses promptly", "cancelled", 1, 30 * time.Second},
+		{"completed lingers five minutes, matching the client's own linger", "completed", 2, true, 5 * time.Minute},
+		{"declined dismisses promptly", "declined", 1, false, 30 * time.Second},
+		{"cancelled dismisses promptly", "cancelled", 1, false, 30 * time.Second},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			n, sender, store := newTestActivityNotifier(t, nil)
 			store.context[activityRideID] = RideContext{Status: tt.status, VehicleName: "Blue Whale", Destination: "Home"}
+			if tt.held {
+				store.completeRide(activityRideID, fixedNow)
+			}
 
 			n.handleStatusChanged(events.NewEvent(events.RideStatusChangedEvent{
 				RideRequestID: activityRideID,
@@ -370,6 +504,9 @@ func TestActivityNotifierTerminalDismissal(t *testing.T) {
 				Status:        tt.status,
 			}))
 			n.Wait()
+			if tt.held {
+				holdExpires(t, n, store)
+			}
 
 			sent := sender.Sent()
 			if len(sent) != tt.wantPushes {
