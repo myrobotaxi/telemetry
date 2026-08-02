@@ -48,10 +48,14 @@ type fakeActivityStore struct {
 	// has completed (MYR-421). RidesAwaitingEnd reads it against clock the way
 	// the real query reads the column against NOW().
 	completedAt map[string]time.Time
-	// heldFor records the hold the ticker asked for, so a test can assert the
-	// horizon is DismissAfter without reaching into the ticker.
-	heldFor    time.Duration
-	heldEndErr error
+	// heldFor and giveUpAfter record the window the ticker asked for, so a test
+	// can assert both bounds without reaching into the ticker.
+	heldFor     time.Duration
+	giveUpAfter time.Duration
+	heldEndErr  error
+	abandonErr  error
+	// abandoned records the rides retired without an end, in call order.
+	abandoned []string
 	// clock is the fake's own NOW, moved by a test to walk the hold window.
 	// Separate from the notifier's clock only so a case can advance the
 	// database's idea of time without also moving the push timestamps.
@@ -95,38 +99,44 @@ func (f *fakeActivityStore) advanceClock(d time.Duration) {
 }
 
 // RidesAwaitingEnd mimics queryListRidesAwaitingActivityEnd: completed rides
-// whose completion instant is at least heldFor old and that still have a LIVE
-// row, oldest completion first.
+// whose completion instant falls in [heldFor, giveUpAfter) and that still have
+// a LIVE row, NEWEST completion first.
+//
+// Both halves of the window are modelled, and so is the ordering, because both
+// are load-bearing: the ceiling is what makes the list drain, and newest-first
+// is what stops a stuck row holding the head of a capped list against a ride
+// that has just finished.
 //
 // The live-row half is modelled by byRide rather than asserted separately,
 // because that is exactly the coupling under test — a ride tombstoned during
 // the window (the rider swiped the card away, or the app ended it locally) must
 // drop out of this list rather than be pushed an end nobody is watching for.
-func (f *fakeActivityStore) RidesAwaitingEnd(_ context.Context, heldFor time.Duration, limit int) ([]string, error) {
+func (f *fakeActivityStore) RidesAwaitingEnd(_ context.Context, heldFor, giveUpAfter time.Duration, limit int) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.heldEndErr != nil {
 		return nil, f.heldEndErr
 	}
-	f.heldFor = heldFor
+	f.heldFor, f.giveUpAfter = heldFor, giveUpAfter
 
-	cutoff := f.clock().Add(-heldFor)
-	type due struct {
+	now := f.clock()
+	due, floor := now.Add(-heldFor), now.Add(-giveUpAfter)
+	type row struct {
 		ride string
 		at   time.Time
 	}
-	var rows []due
+	var rows []row
 	for ride, at := range f.completedAt {
-		if at.After(cutoff) || len(f.byRide[ride]) == 0 {
+		if at.After(due) || !at.After(floor) || len(f.byRide[ride]) == 0 {
 			continue
 		}
-		rows = append(rows, due{ride: ride, at: at})
+		rows = append(rows, row{ride: ride, at: at})
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].at.Equal(rows[j].at) {
 			return rows[i].ride < rows[j].ride
 		}
-		return rows[i].at.Before(rows[j].at)
+		return rows[i].at.After(rows[j].at)
 	})
 
 	out := make([]string, 0, len(rows))
@@ -137,6 +147,38 @@ func (f *fakeActivityStore) RidesAwaitingEnd(_ context.Context, heldFor time.Dur
 		out = append(out, r.ride)
 	}
 	return out, nil
+}
+
+// AbandonHeldEnds mimics queryAbandonExpiredHeldEnds: an unbounded bulk
+// tombstone of every live row on a ride that completed longer than giveUpAfter
+// ago. No LIMIT and no ordering, which is the property that makes it the
+// loop's terminator rather than another thing the cap can starve.
+func (f *fakeActivityStore) AbandonHeldEnds(_ context.Context, giveUpAfter time.Duration) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.abandonErr != nil {
+		return 0, f.abandonErr
+	}
+
+	floor := f.clock().Add(-giveUpAfter)
+	var retired int64
+	for ride, at := range f.completedAt {
+		if at.After(floor) || len(f.byRide[ride]) == 0 {
+			continue
+		}
+		retired += int64(len(f.byRide[ride]))
+		f.abandoned = append(f.abandoned, ride)
+		f.ended[ride]++
+		delete(f.byRide, ride)
+	}
+	return retired, nil
+}
+
+// abandonedRides reports which rides were retired without an end, in call order.
+func (f *fakeActivityStore) abandonedRides() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.abandoned...)
 }
 
 func (f *fakeActivityStore) ActivitiesForRide(_ context.Context, rideID string) ([]Activity, error) {

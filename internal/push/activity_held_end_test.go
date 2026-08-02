@@ -3,6 +3,7 @@ package push
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -487,16 +488,31 @@ func TestHeldEndIsCoveredByTheDrain(t *testing.T) {
 	<-passDone
 }
 
-// TestHeldEndPassIsCapped bounds the backlog one pass can work through. After a
-// long outage the due list is every ride that completed while the process was
-// down, and the rest are re-listed on the next pass.
+// seedCompletedRide adds one already-announced completed ride to the fixture.
+func seedCompletedRide(store *fakeActivityStore, ride string, at time.Time) {
+	store.byRide[ride] = []Activity{{
+		RideRequestID: ride, UserID: testRiderID, Token: ride + "_token",
+		AlertedPhase: AlertPhaseCompleted,
+	}}
+	store.context[ride] = RideContext{Status: statusCompleted, VehicleName: "Blue Whale", Destination: "Home"}
+	store.completeRide(ride, at)
+}
+
+// TestHeldEndPassIsCapped bounds the backlog one pass can work through, and
+// pins the ordering the cap sheds by.
+//
+// NEWEST COMPLETION FIRST, which is a reversal of what this shipped with.
+// Oldest-first was sound while the list drained on every pass and became a
+// starvation bug the moment a failed end started leaving its row in place: a
+// ride that cannot be delivered to sits at the head of every subsequent pass
+// and consumes a slot forever. Newest-first sheds the rides whose end matters
+// least — the oldest, whose card is stalest and which the horizon is about to
+// retire anyway — and a healthy backlog drains in the same number of passes
+// either way, because the same number leaves per pass regardless of order.
 func TestHeldEndPassIsCapped(t *testing.T) {
 	n, sender, store := newTestActivityNotifier(t, nil)
 	for i := range 3 {
-		ride := string(rune('a'+i)) + "_done"
-		store.byRide[ride] = []Activity{{RideRequestID: ride, UserID: testRiderID, Token: ride + "_token"}}
-		store.context[ride] = RideContext{Status: statusCompleted, VehicleName: "Blue Whale", Destination: "Home"}
-		store.completeRide(ride, fixedNow.Add(time.Duration(i)*time.Second))
+		seedCompletedRide(store, string(rune('a'+i))+"_done", fixedNow.Add(time.Duration(i)*time.Second))
 	}
 	// Past the hold for all three, which is the backlog shape: a process that
 	// was down while several rides completed.
@@ -510,14 +526,255 @@ func TestHeldEndPassIsCapped(t *testing.T) {
 	if got := len(sender.Sent()); got != 2 {
 		t.Fatalf("sends in a capped pass = %d, want 2", got)
 	}
-	// Oldest completion first: the cap sheds the LEAST overdue.
-	if got := sender.Sent()[0].ActivityToken; got != "a_done_token" {
-		t.Errorf("first end went to %s, want the oldest completion", got)
+	if got := sender.Sent()[0].ActivityToken; got != "c_done_token" {
+		t.Errorf("first end went to %s, want the NEWEST completion — a capped pass must not let "+
+			"the oldest rides hold the head of the queue", got)
 	}
 
 	ticker.RunPass(context.Background())
 	if got := len(sender.Sent()); got != 3 {
 		t.Errorf("sends after the second pass = %d, want 3 — the shed ride was not re-listed", got)
+	}
+}
+
+// TestHeldEndGivesUpAtTheHorizon is the retry's TERMINATOR, and without it the
+// retry rule is a permanent resident rather than a retry.
+//
+// Only 410 and 400 take a row out of the due list. A 403 TopicDisallowed from a
+// misconfigured APNS_TOPIC, a 404, a timeout — all come back retryable, so an
+// uncapped retry re-attempts the same row every 75 seconds until the 24-hour
+// registration sweep DELETEs it: ~1,150 doomed pushes and no `end` ever sent.
+// Past the horizon the card is abandoned honestly instead: no push, a tombstone,
+// and a loud log.
+func TestHeldEndGivesUpAtTheHorizon(t *testing.T) {
+	n, sender, store := newTestActivityNotifier(t, nil)
+	completeAndAnnounce(t, n, store)
+	sender.Err = errors.New("apns 403 TopicDisallowed")
+
+	// Every pass inside the window retries and leaves the row live.
+	ticker := NewActivityTicker(n, store, TickerConfig{Enabled: false}, discardLogger())
+	for elapsed := DismissAfter; elapsed < heldEndGiveUpAfter; elapsed += 5 * time.Minute {
+		store.advanceClock(5 * time.Minute)
+		n.now = func() time.Time { return store.clock() }
+		ticker.RunPass(context.Background())
+		if store.endCount() != 0 {
+			t.Fatalf("%s after completion: the row was retired early", elapsed)
+		}
+	}
+	attempted := len(sender.Sent())
+	if attempted < 2 {
+		t.Fatalf("only %d attempts across the whole window; the retry is not retrying", attempted)
+	}
+
+	// Past it, the bulk terminator retires the card — and sends nothing.
+	store.advanceClock(5 * time.Minute)
+	n.now = func() time.Time { return store.clock() }
+	ticker.RunPass(context.Background())
+
+	if got := store.abandonedRides(); len(got) != 1 || got[0] != activityRideID {
+		t.Errorf("abandoned = %v, want [%s]", got, activityRideID)
+	}
+	if store.endCount() != 1 {
+		t.Error("the expired card was not tombstoned; the 24h sweep is still the terminator")
+	}
+	if got := len(sender.Sent()); got != attempted {
+		t.Errorf("sends = %d, want %d — giving up must push nothing", got, attempted)
+	}
+
+	// And it is gone for good: a further pass finds nothing at all.
+	store.advanceClock(5 * time.Minute)
+	n.now = func() time.Time { return store.clock() }
+	ticker.RunPass(context.Background())
+	if got := len(sender.Sent()); got != attempted {
+		t.Errorf("sends after the horizon = %d, want %d — the loop did not terminate", got, attempted)
+	}
+}
+
+// TestHeldEndHorizonBracketsTheHold pins the two constants against each other.
+//
+// A horizon at or below the hold is an empty window, which returns nothing
+// forever and reads in production as "the held end simply stopped working".
+// Literal numbers rather than the constants, so moving either one has to be
+// deliberate.
+func TestHeldEndHorizonBracketsTheHold(t *testing.T) {
+	if DismissAfter != 5*time.Minute {
+		t.Errorf("hold = %s, want 5m", DismissAfter)
+	}
+	if heldEndGiveUpAfter != 30*time.Minute {
+		t.Errorf("give-up horizon = %s, want 30m", heldEndGiveUpAfter)
+	}
+	if heldEndGiveUpAfter <= DismissAfter {
+		t.Fatal("the horizon does not exceed the hold; the retry window is empty")
+	}
+}
+
+// TestStuckRidesDoNotBlockANewCompletion is the head-of-line guarantee, and it
+// is the failure the retry rule would otherwise have introduced.
+//
+// A full cap's worth of undeliverable rides — trivial to produce with one bad
+// APNS_TOPIC — used to sit at the head of every pass under oldest-first
+// ordering, so a ride that completed a moment ago would not be reached until
+// the poison aged out. Here the poison is exactly MaxPerPass rides, all inside
+// their horizon, all failing; a newly completed ride must still get its end.
+func TestStuckRidesDoNotBlockANewCompletion(t *testing.T) {
+	n, sender, store := newTestActivityNotifier(t, nil)
+	const stuck = 4
+	for i := range stuck {
+		seedCompletedRide(store, string(rune('a'+i))+"_stuck", fixedNow)
+	}
+	store.advanceClock(DismissAfter + time.Minute)
+	n.now = func() time.Time { return store.clock() }
+
+	ticker := NewActivityTicker(n, store, TickerConfig{Enabled: false}, discardLogger())
+	ticker.cfg.MaxPerPass = stuck
+
+	// A pass in which every send fails: the rows stay live, as designed.
+	sender.Err = errors.New("apns 503")
+	ticker.RunPass(context.Background())
+	if len(store.ended) != 0 {
+		t.Fatalf("stuck rides were retired: %v", store.ended)
+	}
+
+	// A ride completes now and comes due five minutes later. Apple is healthy
+	// again for it — but the four stuck rides are still there and still fill
+	// the cap.
+	sender.Err = nil
+	seedCompletedRide(store, "fresh_ride", store.clock())
+	store.advanceClock(DismissAfter)
+	n.now = func() time.Time { return store.clock() }
+	sender.Reset()
+
+	ticker.RunPass(context.Background())
+
+	var reached bool
+	for _, s := range sender.Sent() {
+		if s.ActivityToken == "fresh_ride_token" && s.Event == ActivityEventEnd {
+			reached = true
+		}
+	}
+	if !reached {
+		t.Errorf("the newly completed ride was not reached in a pass full of stuck ones "+
+			"(sent %d, cap %d) — the stuck rides are holding the head of the queue",
+			len(sender.Sent()), stuck)
+	}
+}
+
+// TestHeldEndPassYieldsOnItsTimeBudget — a saturated batch must not starve the
+// ETA refresh.
+//
+// RunPass runs the refresh and then the held ends serially on one goroutine, so
+// a batch that runs long does not delay the refresh it already ran: it delays
+// every subsequent one, by keeping the loop away from its timer. At MaxPerPass
+// with each send bounded by heldEndSendTimeout that is tens of minutes with no
+// ETA refresh for any live ride.
+//
+// The clock is advanced by the SENDER rather than per call, so the arithmetic is
+// exact: budget is half of a 60s interval (30s), each send costs 20s, so rides
+// one and two start inside the budget and the third finds it spent.
+func TestHeldEndPassYieldsOnItsTimeBudget(t *testing.T) {
+	n, sender, store := newTestActivityNotifier(t, nil)
+	for i := range 3 {
+		seedCompletedRide(store, string(rune('a'+i))+"_slow", fixedNow.Add(time.Duration(i)*time.Second))
+	}
+	store.advanceClock(DismissAfter + time.Minute)
+
+	clock := store.clock()
+	var mu sync.Mutex
+	n.now = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return clock
+	}
+	sender.Before = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		clock = clock.Add(20 * time.Second)
+	}
+
+	ticker := NewActivityTicker(n, store, TickerConfig{Enabled: false}, discardLogger())
+	ticker.cfg.Interval = time.Minute // budget = 30s
+	ticker.RunPass(context.Background())
+
+	if got := len(sender.Sent()); got != 2 {
+		t.Fatalf("sends in one pass = %d, want 2 — the pass spent %s of a 30s budget",
+			got, time.Duration(got)*20*time.Second)
+	}
+	// The deferred ride is not lost, only deferred.
+	sender.Before = nil
+	ticker.RunPass(context.Background())
+	if got := len(sender.Sent()); got != 3 {
+		t.Errorf("sends after the next pass = %d, want 3 — the deferred ride was dropped", got)
+	}
+}
+
+// deadlineSpySender records how much time each send was actually given.
+//
+// Every send on this surface already runs under SOME deadline — async gives a
+// fan-out the notifier's 30-second Timeout — so the question is not whether a
+// deadline exists but how tight it is. The held-end pass must impose a much
+// shorter one of its own.
+type deadlineSpySender struct {
+	mu      sync.Mutex
+	budgets []time.Duration
+}
+
+func (s *deadlineSpySender) SendActivity(ctx context.Context, _ ActivityNotification) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if deadline, ok := ctx.Deadline(); ok {
+		s.budgets = append(s.budgets, time.Until(deadline))
+	} else {
+		s.budgets = append(s.budgets, 0)
+	}
+	return nil
+}
+
+func (s *deadlineSpySender) recorded() []time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]time.Duration(nil), s.budgets...)
+}
+
+// TestHeldEndSendCarriesItsOwnDeadline — one unreachable ride may not own a
+// quarter of the tick.
+//
+// The APNs client allows 10s per attempt and retries once, so an unbounded ride
+// holds the loop for ~20s by itself; the deadline cuts the inline retry short
+// because the PASS is already the retry and a pass retry costs the loop nothing.
+// Safe only because both mark writes and the tombstone run on detached
+// contexts — asserted here by the tombstone landing despite the deadline.
+func TestHeldEndSendCarriesItsOwnDeadline(t *testing.T) {
+	_, _, store := newTestActivityNotifier(t, nil)
+	spy := &deadlineSpySender{}
+	n := NewActivityNotifier(spy, store, nil, Config{Enabled: true}, discardLogger())
+	n.now = func() time.Time { return fixedNow }
+
+	completeAndAnnounce(t, n, store)
+
+	store.advanceClock(DismissAfter)
+	n.now = func() time.Time { return store.clock() }
+	NewActivityTicker(n, store, TickerConfig{Enabled: false}, discardLogger()).
+		RunPass(context.Background())
+
+	budgets := spy.recorded()
+	if len(budgets) != 2 {
+		t.Fatalf("sends = %d, want 2 (the announcement and the held end)", len(budgets))
+	}
+	// The announcement runs on the fan-out worker's own 30-second timeout.
+	if budgets[0] <= heldEndSendTimeout {
+		t.Errorf("the announcement was given %s, want more than the sweep's %s — the per-ride "+
+			"deadline must be the SWEEP's, not a new bound on every lifecycle push",
+			budgets[0], heldEndSendTimeout)
+	}
+	// The held end is capped, so one unreachable ride cannot own a quarter of
+	// the tick by exhausting the APNs client's inline retry.
+	if budgets[1] <= 0 || budgets[1] > heldEndSendTimeout {
+		t.Errorf("the held end was given %s, want (0, %s]", budgets[1], heldEndSendTimeout)
+	}
+	// The tombstone still lands: it runs on a context detached from this
+	// deadline, which is what makes the deadline safe rather than merely tight.
+	if store.endCount() != 1 {
+		t.Error("the tombstone did not land; the per-ride deadline is reaching writes it must not")
 	}
 }
 
