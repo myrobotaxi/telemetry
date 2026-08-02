@@ -194,7 +194,8 @@ Activity every **60–90 seconds** (75s ± 20% jitter) while their ride is
 `accepted`, `arrived` or `enroute`, so the ETA on the lock screen keeps moving.
 It exists because the ETA is the one thing on that card that goes wrong by
 **sitting still**: the status only changes when something happens, but "arrives
-at 4:12" stops being true the moment traffic does. The same loop sweeps
+at 4:12" stops being true the moment traffic does. The same loop sends the
+**held `end`** for rides that completed five minutes ago (MYR-421) and sweeps
 registrations untouched for 24 hours, hourly.
 
 **It is a SECOND kill-switch rather than a reuse of `PUSH_ENABLED`, because the
@@ -204,6 +205,14 @@ this service sends, Live Activity updates included. Setting
 ride lifecycle transitions (accepted, arrived, enroute, completed, cancelled)
 still update the Activity as they happen, and it is still ended and dismissed
 correctly at the end of the ride.
+
+**The loop itself keeps running when the switch is off (MYR-421).** A completed
+ride's `end` is deliberately held for five minutes and sent by this loop, and
+that end is the second half of a lifecycle transition rather than a refresh —
+so stopping the loop would strand every completed card on every rider's lock
+screen until ActivityKit's own multi-hour ceiling, which is precisely what the
+sentence above promises does not happen. The 24-hour registration sweep keeps
+running for the same reason: it is a `DELETE`, not a push.
 
 **What turning it off degrades to, and why that is a safe place to stand.**
 Every Activity update carries an `aps.stale-date` three minutes out, so once a
@@ -217,7 +226,9 @@ refresh IS the feature, not an optimisation.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Startup log `live activity ticker disabled` with `enabled=false` | `LIVE_ACTIVITY_TICKER_ENABLED` is set false | Expected while the switch is off; unset it (or set `true`) and restart to resume ETA refreshes |
+| Startup log `live activity ticker started` with `eta_refresh=false` | `LIVE_ACTIVITY_TICKER_ENABLED` is set false | Expected while the switch is off. The loop still runs — it carries the held completion `end` — and only the ETA refresh is skipped; unset the variable (or set `true`) and restart to resume refreshes |
+| Startup log `live activity ticker not wired` | The registry or the notifier failed to build | Not a switch — the loop did not start at all. Check the store and APNs wiring in the lines above it |
+| A completed card is still on the lock screen more than ~7 minutes after dropoff | The held `end` has not gone out | Look for `live activity end held` (the hold was recorded) followed by `live activity ticker: held ends sent`. `live activity: end not delivered; rows left live for the next pass` means APNs refused and the next pass will retry; `held-end list failed` means the read is failing |
 | Lock-screen cards go grey/"as of N min ago" mid-ride, but status changes still land | The ticker is off, or its passes are failing | Check for `live activity ticker: list failed`; confirm the switch, then `fly deploy` (or restart) |
 | Live Activity sends log `apns status 403 TopicDisallowed` | `APNS_TOPIC` is not the app's real bundle id | Fix `APNS_TOPIC` — the Live Activity topic is derived from it and cannot be set independently |
 
