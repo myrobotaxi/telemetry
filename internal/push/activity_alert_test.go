@@ -1,6 +1,7 @@
 package push
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -137,6 +138,27 @@ func TestAlertLadderIsStrictlyAscending(t *testing.T) {
 		if body := alertBodies[p]; body == "" {
 			t.Errorf("phase %d has no alert body", p)
 		}
+	}
+
+	// THE TOP OF THE LADDER IS A STRUCTURAL ASSUMPTION SINCE MYR-418, not
+	// merely a fact about today's table. Completed is the only rung that
+	// coincides with the Activity ending, and endRide handles it by sending its
+	// expansion as an UPDATE and then the alert-free `end` — after which the
+	// rows are tombstoned and no push can ever follow. A seventh rung above
+	// Completed would therefore be unreachable by construction, silently: there
+	// is no send path left to carry it. If this line fails, the new phase needs
+	// a home before it needs copy.
+	for phase := range alertBodies {
+		if phase > AlertPhaseCompleted {
+			t.Errorf("phase %d sits above Completed(%d); nothing pushes after the `end`, so it can "+
+				"never be delivered — see endRide", phase, AlertPhaseCompleted)
+		}
+	}
+	// The ladder above must enumerate every phase that has copy, or a rung
+	// could be added and skipped by both this guard and the ascending check.
+	if len(alertBodies) != len(ladder)-1 {
+		t.Errorf("alertBodies has %d phases and the ladder enumerates %d; the drift guard is "+
+			"only as good as the list it walks", len(alertBodies), len(ladder)-1)
 	}
 }
 
@@ -631,9 +653,23 @@ func TestOutOfOrderTransitionDoesNotReopenTheIsland(t *testing.T) {
 	}
 }
 
-// TestCompletedAlertsOnTheEndPushAndPersistsNothing covers the sixth rung,
-// which is the only one that rides an `end`.
-func TestCompletedAlertsOnTheEndPushAndPersistsNothing(t *testing.T) {
+// TestCompletedSendsAnAlertingUpdateThenTheEnd is MYR-418, and it is the whole
+// issue in one function.
+//
+// WHAT THE OLD SHAPE DID, because the regression this guards is invisible from
+// the server side. The sixth rung used to ride the `end` push itself: one
+// notification, `event: "end"`, carrying the final content-state AND an
+// `aps.alert`. APNs accepted every one of them — the client's ride alerted
+// through phase 5 and then tombstoned at phase 5 with the end delivered — and
+// no island ever opened. Apple's ActivityKit push documentation introduces the
+// alert dictionary under `start` and `update`, and says of `end` only that it
+// should carry the final content state; an alert there is undocumented, not
+// rejected, and not honoured. There is no failure signal for it anywhere, which
+// is why the shape is pinned here rather than trusted.
+//
+// SO THE PAIR: an alerting UPDATE carrying the terminal state, then the `end` a
+// second later carrying the same state, its dismissal-date, and no alert.
+func TestCompletedSendsAnAlertingUpdateThenTheEnd(t *testing.T) {
 	n, sender, store := newTestActivityNotifier(t, nil)
 	store.byRide[activityRideID] = []Activity{{
 		RideRequestID: activityRideID, UserID: testRiderID, Token: riderToken,
@@ -649,24 +685,228 @@ func TestCompletedAlertsOnTheEndPushAndPersistsNothing(t *testing.T) {
 	n.Wait()
 
 	sent := sender.Sent()
-	if len(sent) != 1 {
-		t.Fatalf("sends = %d, want 1", len(sent))
+	if len(sent) != 2 {
+		t.Fatalf("sends = %d, want 2 — an alerting update, then the end", len(sent))
 	}
-	if sent[0].Event != ActivityEventEnd {
-		t.Errorf("event = %s, want %s", sent[0].Event, ActivityEventEnd)
+	update, end := sent[0], sent[1]
+
+	// THE ALERT IS ON THE UPDATE, which is the shape Apple documents it on.
+	if update.Event != ActivityEventUpdate {
+		t.Errorf("first send event = %s, want %s", update.Event, ActivityEventUpdate)
 	}
-	if sent[0].Alert == nil || sent[0].Alert.Body != alertBodies[AlertPhaseCompleted] {
-		t.Fatalf("alert = %v, want the Completed copy", sent[0].Alert)
+	if update.Alert == nil || update.Alert.Body != alertBodies[AlertPhaseCompleted] {
+		t.Fatalf("first send alert = %v, want the Completed copy", update.Alert)
 	}
-	// The dismissal-date is MYR-406's five minutes, unchanged by any of this.
-	if sent[0].DismissalDate == nil || !sent[0].DismissalDate.Equal(fixedNow.Add(DismissAfter)) {
-		t.Errorf("dismissal-date = %v, want %v", sent[0].DismissalDate, fixedNow.Add(DismissAfter))
+	// It is not an `end`, so it must not carry a dismissal-date: on an update
+	// the key is meaningless, and its presence would be the first symptom of
+	// the two shapes being built from one branch again.
+	if update.DismissalDate != nil {
+		t.Errorf("alerting update carries dismissal-date %v; that key belongs to the end alone",
+			update.DismissalDate)
 	}
-	// Nothing is persisted: the rows are tombstoned immediately after, there
-	// is no phase seven, and the write would race that tombstone to become a
-	// guaranteed no-op.
-	if got := store.savedAlertsFor(activityRideID, testRiderID); len(got) != 0 {
-		t.Errorf("persisted alert phases on an end push = %v, want none", got)
+	// An expansion is never a refresh. Priority 10 whatever else is true.
+	if got := update.priority(); got != priorityImmediate {
+		t.Errorf("alerting update priority = %q, want %q", got, priorityImmediate)
+	}
+
+	// THE END IS ALERT-FREE and carries the same final state.
+	if end.Event != ActivityEventEnd {
+		t.Errorf("second send event = %s, want %s", end.Event, ActivityEventEnd)
+	}
+	if end.Alert != nil {
+		t.Errorf("the end push carries an alert (%+v); Apple does not document one there, "+
+			"and MYR-418 is what believing it did cost", *end.Alert)
+	}
+	if end.DismissalDate == nil || !end.DismissalDate.Equal(end.Timestamp.Add(DismissAfter)) {
+		t.Errorf("dismissal-date = %v, want %v (MYR-406's five minutes past the end's own instant)",
+			end.DismissalDate, end.Timestamp.Add(DismissAfter))
+	}
+
+	// BOTH CARRY THE FINAL CONTENT-STATE. The end's is what the card is left
+	// rendering after the Activity ends, and the update's is what the island
+	// expands to show — a wrong or empty one on either is a rider who watches
+	// the expansion happen and sees the old state inside it.
+	for i, n := range []ActivityNotification{update, end} {
+		if n.ContentState.Status != statusCompleted {
+			t.Errorf("send %d status = %q, want %q", i, n.ContentState.Status, statusCompleted)
+		}
+		if n.ContentState.Progress == nil || *n.ContentState.Progress != 1 {
+			t.Errorf("send %d progress = %v, want a full track — `completed` is asserted by the "+
+				"ride record, not estimated", i, n.ContentState.Progress)
+		}
+	}
+
+	// THE ORDERING DEFENCE. ActivityKit discards a push older than the one it
+	// is showing; `aps.timestamp` is whole seconds, so two pushes off one clock
+	// read would collide. Asserted as a strict inequality ON THE RENDERED
+	// SECOND rather than on the time.Time, because the wire is where the
+	// collision would happen.
+	if end.Timestamp.Unix() <= update.Timestamp.Unix() {
+		t.Errorf("end aps.timestamp %d does not exceed the update's %d — the end is the push that "+
+			"must never be discarded", end.Timestamp.Unix(), update.Timestamp.Unix())
+	}
+
+	// THE LADDER IS MARKED, on the push that carried the alert. It could not be
+	// before: the mark's guarded UPDATE is scoped to live rows and the end's
+	// tombstone was already racing it, so a completed ride's row tombstoned at
+	// 5 no matter what happened. That tombstone-at-5 was the prod evidence.
+	if got := store.savedAlertsFor(activityRideID, testRiderID); len(got) != 1 || got[0] != AlertPhaseCompleted {
+		t.Errorf("persisted alert phases = %v, want exactly [%d]", got, AlertPhaseCompleted)
+	}
+	if store.endCount() != 1 {
+		t.Error("the pair did not tombstone the registry rows")
+	}
+}
+
+// TestCompletedDoesNotReAlertWhenTheSixthRungIsAlreadySpent keeps the pair
+// inside the once-per-phase promise the other five rungs make.
+//
+// The mark is raised by the pair's own first push, so the second one finds
+// 6 > 6 false and attaches nothing — which is the mechanism, not a special
+// case. A row that somehow arrives already at 6 gets the same treatment.
+func TestCompletedDoesNotReAlertWhenTheSixthRungIsAlreadySpent(t *testing.T) {
+	n, sender, store := newTestActivityNotifier(t, nil)
+	store.byRide[activityRideID] = []Activity{{
+		RideRequestID: activityRideID, UserID: testRiderID, Token: riderToken,
+		AlertedPhase: AlertPhaseCompleted,
+	}}
+	rc := store.context[activityRideID]
+	rc.Status = statusCompleted
+	store.context[activityRideID] = rc
+
+	n.handleStatusChanged(events.NewEvent(events.RideStatusChangedEvent{
+		RideRequestID: activityRideID, RiderID: testRiderID, Status: statusCompleted,
+	}))
+	n.Wait()
+
+	for i, s := range sender.Sent() {
+		if s.Alert != nil {
+			t.Errorf("send %d (%s) alerted at a rung already spent: %+v", i, s.Event, *s.Alert)
+		}
+	}
+	// Still ended, and still tombstoned: a spent rung suppresses the expansion,
+	// never the ending.
+	sent := sender.Sent()
+	if len(sent) == 0 || sent[len(sent)-1].Event != ActivityEventEnd {
+		t.Fatalf("sends = %+v, want the end push regardless", sent)
+	}
+	if store.endCount() != 1 {
+		t.Error("the ride was not tombstoned")
+	}
+}
+
+// TestNoEndPushEverCarriesAnAlert is the invariant MYR-418 turns on, stated
+// once across every ending this surface has.
+//
+// It is deliberately broader than the completed case above: the rule is not
+// "completed moved its alert", it is "an `end` is a state delivery and never an
+// interruption", and that is what a future phase seven must not quietly undo.
+func TestNoEndPushEverCarriesAnAlert(t *testing.T) {
+	for _, status := range []string{statusCompleted, statusDeclined, "cancelled"} {
+		t.Run(status, func(t *testing.T) {
+			n, sender, store := newTestActivityNotifier(t, nil)
+			store.byRide[activityRideID] = []Activity{{
+				RideRequestID: activityRideID, UserID: testRiderID, Token: riderToken,
+				AlertedPhase: AlertPhaseDispatch,
+			}}
+			rc := store.context[activityRideID]
+			rc.Status = status
+			store.context[activityRideID] = rc
+
+			n.handleStatusChanged(events.NewEvent(events.RideStatusChangedEvent{
+				RideRequestID: activityRideID, RiderID: testRiderID, Status: status,
+			}))
+			n.Wait()
+
+			var ends int
+			for _, s := range sender.Sent() {
+				if s.Event != ActivityEventEnd {
+					continue
+				}
+				ends++
+				if s.Alert != nil {
+					t.Errorf("%s: the end push carries an alert (%+v)", status, *s.Alert)
+				}
+			}
+			if ends != 1 {
+				t.Errorf("%s: end pushes = %d, want exactly 1", status, ends)
+			}
+		})
+	}
+}
+
+// TestTerminalEndsCarryTheirFinalContentState is the other half of MYR-418's
+// question, asked of the endings that do NOT alert.
+//
+// They have no expansion to lose, but they do have a card: the client renders
+// each terminal status's own copy, and an `end` that carried a stale or empty
+// state would leave a cancelled ride reading "your car is on its way" for the
+// thirty seconds before it dismisses. Apple asks for the final content state on
+// an end in as many words, and this is the assertion that we send it.
+//
+// `reservation_expired` is here and is not a ride status: the sweeper resolves
+// it into the dispatch columns and leaves the ride at `accepted`, so
+// EndForReservationExpiry passes the ending in and endRide's `rc.Status =
+// status` is the only reason the card ever hears the word. That override is
+// exactly what this case guards.
+func TestTerminalEndsCarryTheirFinalContentState(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+		end    func(n *ActivityNotifier)
+	}{
+		{"declined", statusDeclined, nil},
+		{"cancelled", "cancelled", nil},
+		{
+			"reservation_expired overrides a ride row still reading accepted",
+			"reservation_expired",
+			func(n *ActivityNotifier) {
+				n.EndForReservationExpiry(context.Background(), activityRideID)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			n, sender, store := newTestActivityNotifier(t, nil)
+			if tc.end == nil {
+				rc := store.context[activityRideID]
+				rc.Status = tc.status
+				store.context[activityRideID] = rc
+				n.handleStatusChanged(events.NewEvent(events.RideStatusChangedEvent{
+					RideRequestID: activityRideID, RiderID: testRiderID, Status: tc.status,
+				}))
+				n.Wait()
+			} else {
+				// The store still says `accepted`, as the real row does.
+				tc.end(n)
+			}
+
+			sent := sender.Sent()
+			if len(sent) != 1 {
+				t.Fatalf("sends = %d, want 1 — no pre-end alert outside the six", len(sent))
+			}
+			end := sent[0]
+			if end.Event != ActivityEventEnd {
+				t.Fatalf("event = %s, want %s", end.Event, ActivityEventEnd)
+			}
+			if end.ContentState.Status != tc.status {
+				t.Errorf("content-state.status = %q, want %q — the card renders the ending's own copy",
+					end.ContentState.Status, tc.status)
+			}
+			if end.ContentState.Version != ActivityContentStateVersion {
+				t.Errorf("content-state.v = %d, want %d", end.ContentState.Version, ActivityContentStateVersion)
+			}
+			// No track on a journey that did not happen: a partial arc over bad
+			// news is noise on top of it.
+			if end.ContentState.Progress != nil {
+				t.Errorf("content-state.progress = %v on %s, want absent",
+					*end.ContentState.Progress, tc.status)
+			}
+			if end.ContentState.AsOf == nil {
+				t.Error("content-state.asOf absent; every content-state carries one")
+			}
+		})
 	}
 }
 

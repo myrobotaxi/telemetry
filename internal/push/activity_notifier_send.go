@@ -38,64 +38,55 @@ func (a *ActivityNotifier) pushRide(ctx context.Context, rideRequestID, topic st
 		return
 	}
 
-	a.fanOut(ctx, rideRequestID, rc, ActivityEventUpdate, nil, false)
+	a.fanOut(ctx, rideRequestID, rc, activityFanOut{
+		event:    ActivityEventUpdate,
+		at:       a.now(),
+		alerting: true,
+	})
 }
 
-// endRide delivers the final content-state with `event: "end"` and a
-// dismissal-date, then tombstones the rows.
+// activityFanOut is one pass over a ride's Activities: which push shape goes
+// out, what instant it claims its state was true at, and whether it is allowed
+// to open the island.
 //
-// Order matters: the tombstone comes AFTER the sends, because a row ended first
-// would be excluded from its own final push and the Activity would be left on
-// the lock screen showing the last state it happened to receive — which for a
-// declined ride is "your car is on its way".
-func (a *ActivityNotifier) endRide(ctx context.Context, rideRequestID, status string, linger time.Duration) {
-	if !a.active() {
-		return
-	}
+// A struct rather than five more positional parameters, for exactly the reason
+// `send` below states about ActivityNotification: the completion pair (MYR-418)
+// differs from an ordinary pass in three of these fields AT ONCE, and a
+// positional bool is how an `end` that alerts — or a pair of pushes that share
+// one `aps.timestamp` — gets shipped by accident.
+type activityFanOut struct {
+	// event is `update` or `end`.
+	event ActivityEvent
 
-	rc, err := a.store.RideContextFor(ctx, rideRequestID)
-	if err != nil {
-		a.logger.Warn("live activity: ride context lookup failed on end",
-			slog.String("ride_id", rideRequestID),
-			slog.String("error", err.Error()),
-		)
-		// Still tombstone: the ride is over whatever the read said, and leaving
-		// live rows behind would keep the ETA ticker pushing at a finished ride.
-		a.tombstone(ctx, rideRequestID)
-		return
-	}
-	// The caller's status wins. A reservation expiry ends an Activity while the
-	// ride row still reads `accepted`, and the lock screen must show the ending,
-	// not the stale status the row still carries.
-	rc.Status = status
+	// at is `aps.timestamp`: when this pass claims its state was true, and the
+	// base every other instant on the push is computed from (the stale-date,
+	// the expiration, the dismissal-date).
+	//
+	// PASSED IN RATHER THAN READ FROM THE CLOCK HERE, and that is the whole
+	// reason this field exists: `aps.timestamp` is rendered in whole SECONDS,
+	// so two passes that each called a.now() would stamp the identical integer
+	// and the completion pair's ordering would rest on undefined behaviour. See
+	// endAfterAlertGap.
+	at time.Time
 
-	dismissAt := a.now().Add(linger)
-	a.fanOut(ctx, rideRequestID, rc, ActivityEventEnd, &dismissAt, false)
-	a.tombstone(ctx, rideRequestID)
-}
+	// dismissAt is `aps.dismissal-date`, set only on an `end`.
+	dismissAt *time.Time
 
-// tombstone marks a ride's Activities ended so no later tick reaches them.
-func (a *ActivityNotifier) tombstone(ctx context.Context, rideRequestID string) {
-	// Detached from the caller's deadline: the sends above may have consumed
-	// most of it, and a missed tombstone is the one failure here that keeps
-	// costing after the request is over.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deleteTimeout)
-	defer cancel()
+	// lowPriority sends at apns-priority 5. Never set on a lifecycle pass; the
+	// ticker builds its own notifications rather than coming through here.
+	lowPriority bool
 
-	ended, err := a.store.EndActivitiesForRide(ctx, rideRequestID)
-	if err != nil {
-		a.logger.Error("live activity: end tombstone failed",
-			slog.String("ride_id", rideRequestID),
-			slog.String("error", err.Error()),
-		)
-		return
-	}
-	if ended > 0 {
-		a.logger.Info("live activities ended",
-			slog.String("ride_id", rideRequestID),
-			slog.Int64("count", ended),
-		)
-	}
+	// alerting lets this pass attach an `aps.alert` to the rows whose
+	// high-water mark sits below the ride's phase.
+	//
+	// FALSE ON EVERY `end`, and that is the MYR-418 fix rather than a
+	// conservative default. Apple's ActivityKit push documentation introduces
+	// the alert dictionary under `start` and `update` and says of `end` only
+	// that it should "include the final content state"; a `completed` end that
+	// carried an alert anyway was accepted by APNs and expanded nothing on a
+	// real device. The sixth expansion now rides an alerting UPDATE sent
+	// immediately before the end — see endRide.
+	alerting bool
 }
 
 // fanOut resolves a ride into its Activities and pushes one update to each.
@@ -103,9 +94,7 @@ func (a *ActivityNotifier) fanOut(
 	ctx context.Context,
 	rideRequestID string,
 	rc RideContext,
-	event ActivityEvent,
-	dismissAt *time.Time,
-	lowPriority bool,
+	spec activityFanOut,
 ) {
 	activities, err := a.store.ActivitiesForRide(ctx, rideRequestID)
 	if err != nil {
@@ -119,11 +108,15 @@ func (a *ActivityNotifier) fanOut(
 		return
 	}
 
-	now := a.now()
+	now := spec.at
 	// One phase per ride: it is a function of the ride's state and of the age of
 	// the reading that state was projected from, not of who is watching. Which
 	// Activities actually ALERT on it still differs per row, because each
 	// carries its own high-water mark.
+	//
+	// Computed even on a non-alerting pass, because it is on the log line below
+	// and "the end went out at phase 6" is the sentence that would have found
+	// MYR-418 in an afternoon rather than over a ride.
 	phase := alertPhaseFor(rc, now)
 
 	var delivered, alerted int
@@ -148,29 +141,32 @@ func (a *ActivityNotifier) fanOut(
 		if !a.allowed(ctx, act.UserID, rideRequestID) {
 			continue
 		}
-		alert := alertFor(phase, act.AlertedPhase)
+		var alert *ActivityAlert
+		if spec.alerting {
+			alert = alertFor(phase, act.AlertedPhase)
+		}
 		if a.send(ctx, act, ActivityNotification{
 			ActivityToken: act.Token,
 			Sandbox:       act.Sandbox,
-			Event:         event,
+			Event:         spec.event,
 			ContentState:  state,
 			Timestamp:     now,
-			DismissalDate: dismissAt,
-			LowPriority:   lowPriority,
+			DismissalDate: spec.dismissAt,
+			LowPriority:   spec.lowPriority,
 			Alert:         alert,
 		}) {
 			delivered++
 			a.saveProgress(ctx, act, anchor)
 			if alert != nil {
 				alerted++
-				a.saveAlertedPhase(ctx, act, phase, event)
+				a.saveAlertedPhase(ctx, act, phase)
 			}
 		}
 	}
 
 	a.logger.Info("live activity updated",
 		slog.String("ride_id", rideRequestID),
-		slog.String("event", string(event)),
+		slog.String("event", string(spec.event)),
 		slog.String("status", rc.Status),
 		slog.Bool("has_eta", hasETA),
 		slog.Bool("has_progress", hasProgress),
@@ -183,89 +179,6 @@ func (a *ActivityNotifier) fanOut(
 		slog.Int("alerted", alerted),
 		slog.Int("alert_phase", int(phase)),
 	)
-}
-
-// saveProgress persists the anchor an Activity was just shown, AFTER the send
-// and only on a delivery Apple accepted.
-//
-// The order is the monotonicity promise. `Value` is the floor the next push
-// clamps to, so it must record what the phone HAS SEEN, not what we hoped to
-// show it: writing before the send would advance the floor past a push that
-// never arrived, and the client's next value could then be lower than its
-// previous one — the one thing the clamp exists to prevent.
-//
-// Best-effort and detached from the caller's deadline, which the send may have
-// consumed.
-//
-// A LOST WRITE CAN REGRESS THE DELIVERED FLOOR BY ONE STEP, and the honest
-// statement of the bound is worth more than the comfortable one. If APNs
-// accepts a push and this UPDATE never lands — the process dies on a deploy or
-// an OOM, or the statement errors and is logged and dropped — the next pass
-// reads back the PREVIOUS floor. Where the clamp was load-bearing, the phone
-// can then be shown a lower value than it already has: a leg that delivered
-// 0.99 from the all-but-arrived branch and lost the write can follow it with
-// the 0.93 the next reading recomputes. Bounded to one step and self-healing,
-// because the next successful write records whatever was actually delivered.
-//
-// The only alternative is to write BEFORE the send, which advances the floor
-// past pushes that never arrived and is strictly worse — it turns a rare
-// regression after a crash into a routine one after every dropped push. The
-// process-death window is not closable from this side; the database-error half
-// of it is bounded by the guarded UPDATE in store.SaveActivityProgress, which
-// also refuses a write that would LOWER the floor across two replicas.
-func (a *ActivityNotifier) saveProgress(ctx context.Context, act Activity, anchor ProgressAnchor) {
-	if sameAnchor(anchor, act.Progress) {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deleteTimeout)
-	defer cancel()
-
-	key := ActivityKey{RideRequestID: act.RideRequestID, UserID: act.UserID}
-	if err := a.store.SaveProgress(ctx, key, anchor); err != nil {
-		a.logger.Warn("live activity: save progress anchor failed",
-			slog.String("ride_id", act.RideRequestID),
-			slog.String("error", err.Error()),
-		)
-	}
-}
-
-// saveAlertedPhase raises this Activity's island-expand high-water mark, AFTER
-// the send and only on a delivery Apple accepted.
-//
-// Same ordering as saveProgress and for the same reason, with the sign of the
-// failure reversed and worth stating: the mark records what the phone HAS BEEN
-// SHOWN, so writing before the send would burn a phase on a push that never
-// arrived and the rider would never get that expansion at all. Written after,
-// the failure mode is one EXTRA expansion on a phase the next push re-evaluates
-// — a lost write costs an island opening twice, not a phase change the rider
-// misses. Between "a state change went unseen" and "the island opened once
-// more than it had to", the second is the one to choose.
-//
-// SKIPPED ON AN `end`, which is not an optimisation: the rows are tombstoned
-// immediately after, the ticker will never look at them again, and the write
-// would race that tombstone to become a guaranteed no-op. `completed` is the
-// only phase that rides an end push, and there is no phase seven for the mark
-// to protect.
-//
-// Best-effort and detached from the caller's deadline, which the send may have
-// consumed.
-func (a *ActivityNotifier) saveAlertedPhase(ctx context.Context, act Activity, phase AlertPhase, event ActivityEvent) {
-	if event == ActivityEventEnd {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deleteTimeout)
-	defer cancel()
-
-	key := ActivityKey{RideRequestID: act.RideRequestID, UserID: act.UserID}
-	if err := a.store.SaveAlertedPhase(ctx, key, phase); err != nil {
-		a.logger.Warn("live activity: save alerted phase failed",
-			slog.String("ride_id", act.RideRequestID),
-			slog.Int("alert_phase", int(phase)),
-			slog.String("error", err.Error()),
-		)
-	}
 }
 
 // allowed applies the ride_lifecycle preference gate, failing open exactly as

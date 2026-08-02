@@ -265,7 +265,7 @@ func (t *ActivityTicker) RunPass(ctx context.Context) {
 			pushed = append(pushed, ActivityKey{RideRequestID: leg.RideRequestID, UserID: leg.UserID})
 			t.notifier.saveProgress(ctx, leg.Activity, anchor)
 			if alert != nil {
-				t.notifier.saveAlertedPhase(ctx, leg.Activity, phase, ActivityEventUpdate)
+				t.notifier.saveAlertedPhase(ctx, leg.Activity, phase)
 			}
 		}
 	}
