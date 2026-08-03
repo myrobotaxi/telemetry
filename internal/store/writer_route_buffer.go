@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -92,8 +93,34 @@ func (rb *routeBuffer) discard(driveID string) {
 	rb.mu.Unlock()
 }
 
-// flushDrive writes all buffered points for a single drive to the database
-// and removes them from the buffer.
+// flushDrive writes all buffered points for a single drive to the
+// database and removes them from the buffer.
+//
+// Failures split two ways, and the split matters (MYR-433):
+//
+//   - TRANSIENT (a dropped connection, a pool timeout): re-buffer and
+//     retry on the next tick. This is the original behaviour and it is
+//     right — the points are still good, the database just blipped.
+//
+//   - PERMANENT (ErrRouteTrailUnreadable, ErrEncryptionRequired): DROP
+//     the batch and free the entry. Retrying cannot help: the drive's
+//     stored trail will not decrypt, and it will not start decrypting on
+//     the next tick.
+//
+// Retrying a permanent failure is not merely useless, it is actively
+// harmful. `add` returns true once a drive holds FlushSize points, and
+// the writer then flushes SYNCHRONOUSLY on the GPS frame — so at 1Hz a
+// poisoned drive would attempt a doomed Begin + FOR UPDATE + decrypt +
+// Rollback on every single sample, while its buffer grows without bound
+// (nothing but drive.discarded ever frees the entry) holding a plaintext
+// P1 coordinate trail in memory, and keeps retrying every 10s forever
+// after the drive has ended.
+//
+// Dropping loses that drive's remaining points. That is the correct
+// trade: the trail they would be appended to is already unreadable, so
+// they are being added to something nobody can use, and the loud Error
+// plus the decrypt-failure counter is what actually gets the key or the
+// row fixed.
 func (rb *routeBuffer) flushDrive(ctx context.Context, driveID string) {
 	rb.mu.Lock()
 	pts := rb.buffers[driveID]
@@ -104,23 +131,43 @@ func (rb *routeBuffer) flushDrive(ctx context.Context, driveID string) {
 		return
 	}
 
-	if err := rb.drives.AppendRoutePoints(ctx, driveID, pts); err != nil {
-		rb.logger.Warn("failed to flush buffered route points",
+	err := rb.drives.AppendRoutePoints(ctx, driveID, pts)
+	if err == nil {
+		rb.logger.Debug("flushed route points",
 			slog.String("drive_id", driveID),
 			slog.Int("points", len(pts)),
-			slog.String("error", err.Error()),
 		)
-		// Re-buffer the points so they can be retried on next flush.
-		rb.mu.Lock()
-		rb.buffers[driveID] = append(pts, rb.buffers[driveID]...)
-		rb.mu.Unlock()
 		return
 	}
 
-	rb.logger.Debug("flushed route points",
+	if isPermanentRouteFlushError(err) {
+		rb.logger.Error("dropping buffered route points: the drive's stored trail is unreadable",
+			slog.String("drive_id", driveID),
+			slog.Int("points_dropped", len(pts)),
+			slog.String("error", err.Error()),
+			slog.String("action", "check ENCRYPTION_KEY and telemetry_store_decrypt_failures_total"),
+		)
+		return // entry already deleted above — do NOT re-buffer
+	}
+
+	rb.logger.Warn("failed to flush buffered route points; will retry",
 		slog.String("drive_id", driveID),
 		slog.Int("points", len(pts)),
+		slog.String("error", err.Error()),
 	)
+	rb.mu.Lock()
+	rb.buffers[driveID] = append(pts, rb.buffers[driveID]...)
+	rb.mu.Unlock()
+}
+
+// isPermanentRouteFlushError reports whether a flush failure can never
+// succeed on retry, so the batch must be dropped rather than re-buffered.
+//
+// ErrDriveNotFound is deliberately NOT here. It is usually a race with a
+// micro-drive discard that `discard` handles, and the retry is harmless
+// and short-lived.
+func isPermanentRouteFlushError(err error) bool {
+	return errors.Is(err, ErrRouteTrailUnreadable) || errors.Is(err, ErrEncryptionRequired)
 }
 
 // flushAll writes all buffered points for all drives to the database.

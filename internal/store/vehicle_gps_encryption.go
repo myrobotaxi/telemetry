@@ -3,11 +3,14 @@
 // ../my-robo-taxi/src/lib/vehicle-gps-encryption.ts so writes from
 // either side decrypt cleanly on the other.
 //
+// MYR-433 retired the plaintext half of this rollout. The *Enc columns
+// are now the ONLY store for vehicle coordinates on this server.
+//
 // Atomic-pair semantics: latitude and longitude are persisted as separate
 // columns but consumed as a synchronized pair (vehicle-state-schema.md
 // §3.3 GPS predicates). A half-pair *Enc — one column populated with
 // ciphertext while its mate is NULL — is treated as corrupt: read paths
-// fall back to plaintext for the entire pair, write paths skip the
+// surface no location for the entire pair, write paths skip the
 // ciphertext write rather than emit a corrupt row. Either choice
 // preserves the invariant.
 //
@@ -95,61 +98,67 @@ func encStringToFloat(ciphertext *string, enc cryptox.Encryptor) (*float64, erro
 	return &f, nil
 }
 
-// resolveGPSPair implements the read-path preference rule for one
-// (lat, lng) pair: ciphertext wins when BOTH halves are present;
-// half-pair *Enc is corrupt and forces a plaintext fallback for the
-// entire pair (the TS side's identical guard).
+// resolveGPSPair decrypts one (lat, lng) *Enc pair. Ciphertext is the
+// only source (MYR-433) — there is no plaintext parameter to fall back
+// to any more, because the plaintext columns are no longer selected.
 //
-// Returns the resolved (lat, lng) pointers — nil when the column is
-// truly absent. The boolean return distinguishes "fell back to
-// plaintext after a half-pair was detected" from a clean read so
-// callers can warn at most once per row.
+// Returns (nil, nil) when the pair is absent or unusable. Every failure
+// mode collapses to "no location", which is the correct answer: the
+// alternative the pre-MYR-433 code chose — reading the plaintext column
+// — is precisely the readable-coordinates hole this issue closes.
+//
+// Atomic-pair semantics are preserved. A half-pair (one half ciphertext,
+// its mate NULL) is corrupt and yields no location rather than half of
+// one, so a consumer can never plot a latitude against a stale longitude.
 func resolveGPSPair(
 	latEncCT, lngEncCT *string,
-	latPT, lngPT *float64,
 	enc cryptox.Encryptor,
 	logger *slog.Logger,
+	metrics Metrics,
 	pair gpsPair,
 ) (lat, lng *float64) {
 	latPresent := latEncCT != nil && *latEncCT != ""
 	lngPresent := lngEncCT != nil && *lngEncCT != ""
 
 	if latPresent != lngPresent {
-		// Half-pair: the row is corrupt — ignore both *Enc halves and
-		// fall back to plaintext. This is the read-side mirror of
-		// buildEncryptedVehicleGPSWrite's input check.
+		// Half-pair: the row is corrupt. Surface no location.
 		if logger != nil {
-			logger.Warn("vehicle GPS half-pair *Enc detected; falling back to plaintext",
+			logger.Warn("vehicle GPS half-pair *Enc detected; surfacing no location",
 				slog.String("pair", pair.lat+"/"+pair.lng),
 				slog.Bool("lat_enc_present", latPresent),
 				slog.Bool("lng_enc_present", lngPresent),
 			)
 		}
-		return latPT, lngPT
+		if metrics != nil {
+			metrics.IncDecryptFailure(pair.lat + "Enc")
+		}
+		return nil, nil
 	}
 
 	if !latPresent {
-		// Neither half encrypted — legacy plaintext row. Pre-rollout
-		// path; expected during the dual-write window.
-		return latPT, lngPT
+		// Neither half encrypted. Either the row predates the rollout
+		// and was never backfilled, or it genuinely has no location.
+		return nil, nil
 	}
 
 	latRes, latErr := encStringToFloat(latEncCT, enc)
 	lngRes, lngErr := encStringToFloat(lngEncCT, enc)
 	if latErr != nil || lngErr != nil {
-		// Decrypt-or-parse failure on a fully populated *Enc pair.
-		// Treat the pair as corrupt: fall back to plaintext rather
-		// than surface partial GPS to consumers. Logged at Warn so the
-		// failure shows up in operator dashboards without crashing the
-		// read path.
+		// Decrypt-or-parse failure on a fully populated *Enc pair —
+		// typically a key mistake. Logged at ERROR, not Warn: this read
+		// is fail-soft, so without a loud signal the car simply stops
+		// having a location and nobody finds out until a user complains.
 		if logger != nil {
-			logger.Warn("vehicle GPS *Enc decrypt failed; falling back to plaintext",
+			logger.Error("vehicle GPS *Enc decrypt failed; surfacing no location",
 				slog.String("pair", pair.lat+"/"+pair.lng),
 				slog.Any("lat_err", latErr),
 				slog.Any("lng_err", lngErr),
 			)
 		}
-		return latPT, lngPT
+		if metrics != nil {
+			metrics.IncDecryptFailure(pair.lat + "Enc")
+		}
+		return nil, nil
 	}
 	return latRes, lngRes
 }

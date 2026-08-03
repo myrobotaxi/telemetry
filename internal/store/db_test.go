@@ -355,4 +355,5 @@ type metricsRecorder struct {
 
 func (m *metricsRecorder) ObserveQueryDuration(string, float64) {}
 func (m *metricsRecorder) IncQueryError(string)                 {}
+func (m *metricsRecorder) IncDecryptFailure(string)             {}
 func (m *metricsRecorder) SetPoolStats(_, _, _ int32)           { m.poolStatsCalled = true }

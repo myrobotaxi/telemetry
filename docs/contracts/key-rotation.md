@@ -122,6 +122,13 @@ Each entry records a real or staged execution of the rotation procedure with the
   - A v2 key generated via `head -c 32 /dev/urandom | base64` and stored in the staging Fly.io secret manager.
   - Representative load: at least one synthetic vehicle session (cmd/simulator) and one human session active during step 4 onward, so the v1 series ticks under realistic decrypt traffic and the decay curve is observable.
   - Re-encrypt-on-read background job available (currently per-column backfill CLIs: `cmd/backfill-account-tokens`, `cmd/backfill-vehicle-gps`, `cmd/backfill-route-blobs`). Drill must exercise all three or document which columns the drill skipped.
+  - `telemetry_store_decrypt_failures_total{column=...}` visible on the staging `/metrics` endpoint. **This is the drill's most important instrument since MYR-433** — see the note below.
+
+> **MYR-433 raised the stakes of a botched rotation, and changed what it looks like.** Before, a key the server could not use fell back to the plaintext column: wrong but working, and quietly so. There is no plaintext column now. A key mistake means the affected reads return *nothing* — vehicles report no position, drives report no route, and `GetTeslaToken` reports the account as unlinked. The server does not error; it serves empty, because these reads are deliberately fail-soft so one corrupt row cannot 500 a snapshot.
+>
+> The consequence for this procedure: **`cryptox_decrypt_total` decaying to zero is no longer sufficient evidence of a healthy rotation.** A retiring version's series also decays to zero when every decrypt under it is *failing*. Always read it alongside `telemetry_store_decrypt_failures_total`, which must stay flat at zero throughout. If failures tick up at any step, roll the key back before proceeding — the data is intact and still sealed under the old key, but every read of it is returning blanks to users in the meantime.
+>
+> One thing this does NOT threaten: `cmd/purge-plaintext-columns` cannot destroy data under a wrong key. Its scrub gate is "the ciphertext decrypts", so a key that cannot decrypt purges nothing (`TestVerifyRejectsWrongKey`). Do not run it during a rotation anyway — a run that purges nothing is just a confusing report.
 - **Plan:** Execute steps 1–7 of the §"Procedure" section above, in order. Each step is observable independently: step 2 is a deploy with a config change, step 3 is a manual check, step 4 is a deploy, step 5 is a backfill run, step 6 is a Grafana query against the staging Prometheus, step 7 is a deploy.
 - **Success criteria:**
   - Step 3: a manual `/snapshot` request decrypts both v1 and v2 ciphertexts (both labels increment at least once on `cryptox_decrypt_total`).

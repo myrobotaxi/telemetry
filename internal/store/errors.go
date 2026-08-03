@@ -91,6 +91,34 @@ var (
 	// ErrDatabaseClosed is returned when an operation is attempted on a
 	// closed database connection pool.
 	ErrDatabaseClosed = errors.New("database connection closed")
+
+	// ErrEncryptionRequired is returned when an operation that persists
+	// location data is attempted on a repository built without an
+	// Encryptor (MYR-433).
+	//
+	// Before MYR-433 these writes could degrade to plaintext-only. They
+	// can't any more: the plaintext columns are no longer written, so a
+	// keyless write would silently discard the data instead of storing it
+	// somewhere readable. Failing loudly is the only honest option — the
+	// composition root must wire an Encryptor.
+	ErrEncryptionRequired = errors.New("encryptor required to persist location data")
+
+	// ErrRouteTrailUnreadable is returned by AppendRoutePoints when the
+	// drive's EXISTING encrypted trail cannot be decrypted or decoded, so
+	// the new points cannot be appended to it (MYR-433).
+	//
+	// This is a PERMANENT condition, and saying so is the point of having
+	// a sentinel. The append is fail-closed — writing anyway would replace
+	// an intact-but-unreadable trail with a fragment — but a caller that
+	// cannot tell "permanent" from "the database blipped" will retry
+	// forever, and the route buffer re-buffers on any error. A poisoned
+	// drive would then re-attempt a decrypt that cannot succeed on every
+	// GPS sample for the life of the process, holding the whole trail in
+	// memory as plaintext P1 coordinates.
+	//
+	// Callers MUST treat this as terminal for the drive: drop the batch,
+	// free the buffer, log loudly. Only transient errors deserve a retry.
+	ErrRouteTrailUnreadable = errors.New("existing route trail cannot be decrypted")
 )
 
 // redactVIN returns a VIN with only the last 4 characters visible.

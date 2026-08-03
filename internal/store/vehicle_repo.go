@@ -1,19 +1,20 @@
-// Package store — VehicleRepo lives behind a dual-write contract during
-// the MYR-63 cross-repo Vehicle-GPS encryption rollout (NFR-3.23,
-// NFR-3.25).
+// Package store — VehicleRepo stores vehicle coordinates as ciphertext
+// only (NFR-3.23, NFR-3.25, MYR-433).
 //
 // Read path: every (lat, lng) pair (`latitude`, `destinationLatitude`,
-// `originLatitude` and their longitude mates) prefers the encrypted
-// shadow `*Enc` ciphertext when both halves are present. A half-pair
-// `*Enc` row (one column populated, the other NULL) is corrupt and
-// forces a plaintext fallback for the entire pair — see
-// vehicle_gps_encryption.go for the rationale and the byte-compatible
-// TS counterpart.
+// `originLatitude` and their longitude mates) comes from the `*Enc`
+// ciphertext columns. The plaintext Float columns are not selected. A
+// half-pair `*Enc` row (one column populated, the other NULL) is corrupt
+// and surfaces as no location for the entire pair — see
+// vehicle_gps_encryption.go for the rationale and the byte-compatible TS
+// counterpart. There is no plaintext fallback: MYR-433 removed it,
+// because a fallback requires the plaintext column to stay readable,
+// which is the exposure it set out to close.
 //
-// Write path: every UPDATE encrypts the new pair and dual-writes BOTH
-// the plaintext Float column AND the `*Enc` TEXT column in one
-// statement. Half-pair input (one half nil) skips the *Enc write
-// entirely and logs a warning, preserving the atomic-pair invariant.
+// Write path: every UPDATE encrypts the pair into the `*Enc` TEXT
+// columns and writes nothing to the plaintext Floats. Half-pair input
+// (one half nil) writes neither half, preserving the atomic-pair
+// invariant.
 //
 // The Encryptor MUST be injected via constructor. The composition root
 // owns the loaded KeySet for the entire process — never call
@@ -39,39 +40,43 @@ import (
 // "Vehicle" table. It never creates or deletes vehicles -- that is
 // the Next.js app's responsibility.
 //
-// During the MYR-63 dual-write rollout window the repo encrypts on
-// write and prefers ciphertext on read for the six GPS columns. See
-// the package comment above.
+// The six GPS columns and the nav-route blob are encrypted on write and
+// decrypted on read; ciphertext is their only store. See the package
+// comment above.
 type VehicleRepo struct {
 	pool      *pgxpool.Pool
 	metrics   Metrics
-	encryptor cryptox.Encryptor // nil disables the dual-write (legacy callers)
+	encryptor cryptox.Encryptor // nil means this repo cannot read or write location
 	logger    *slog.Logger      // optional; warnings go here when non-nil
 }
 
 // NewVehicleRepo creates a VehicleRepo without column-level encryption.
-// Retained for the migration window so existing call sites that don't
-// yet have an Encryptor in scope keep compiling. New call sites should
-// prefer NewVehicleRepoWithEncryption.
+// Retained for call sites that have no Encryptor in scope and do not
+// need location data. New call sites should prefer
+// NewVehicleRepoWithEncryption.
 //
-// The repo built here returns plaintext rows on read and writes
-// plaintext-only on update. Once every caller is migrated this
-// constructor can be retired in a follow-up.
+// Since MYR-433 the repo built here reads NO coordinates and writes NO
+// coordinates — every GPS column and the nav-route blob come back zero
+// or nil. That is a real capability loss, not a degraded mode: there is
+// no plaintext column left to fall back to. Anything that renders a
+// position MUST use the encrypting constructor.
 func NewVehicleRepo(pool *pgxpool.Pool, metrics Metrics) *VehicleRepo {
 	return &VehicleRepo{pool: pool, metrics: metrics}
 }
 
-// NewVehicleRepoWithEncryption is the dual-write constructor: the
-// Encryptor is required and used on every read (preferring `*Enc`) and
-// every write (encrypting + dual-writing). The logger is optional but
-// recommended — half-pair `*Enc` reads and decrypt failures are logged
-// at Warn so the rollout's edge cases surface in operator dashboards.
+// NewVehicleRepoWithEncryption is the constructor every location-reading
+// caller needs: the Encryptor is required and used on every read
+// (decrypting `*Enc`) and every write (encrypting into `*Enc`). The
+// logger is optional but recommended — half-pair reads log at Warn and
+// decrypt failures at Error, alongside the
+// telemetry_store_decrypt_failures_total counter.
 func NewVehicleRepoWithEncryption(pool *pgxpool.Pool, metrics Metrics, encryptor cryptox.Encryptor, logger *slog.Logger) *VehicleRepo {
 	if encryptor == nil {
 		// Defensive: a nil Encryptor would silently produce empty *Enc
-		// columns, which the read path would then fall back to plaintext
-		// for, masking the rollout regression. Fail loudly so the
-		// composition root catches this at startup.
+		// columns — and since MYR-433 those are the only place
+		// coordinates live, that means silently discarding every
+		// position this server receives. Fail loudly so the composition
+		// root catches it at startup rather than at the first frame.
 		panic("store.NewVehicleRepoWithEncryption: encryptor must not be nil")
 	}
 	return &VehicleRepo{pool: pool, metrics: metrics, encryptor: encryptor, logger: logger}
@@ -178,10 +183,11 @@ func (r *VehicleRepo) scanVehicleByID(ctx context.Context, id string) (Vehicle, 
 // UpdateTelemetry performs a partial update of real-time telemetry fields
 // for one vehicle. Only non-nil fields in the update are written.
 //
-// MYR-63: when an Encryptor is wired the GPS pairs are dual-written —
-// plaintext Float columns AND `*Enc` TEXT shadows in the same UPDATE.
-// Half-pair input (one half nil) is rejected for the *Enc dual-write
-// per the atomic-pair invariant; the plaintext column still updates.
+// MYR-433: when an Encryptor is wired the GPS pairs are written to the
+// `*Enc` TEXT shadows and nowhere else. Half-pair input (one half nil)
+// writes neither half, per the atomic-pair invariant — and since the
+// plaintext columns are no longer written either, such an update simply
+// leaves that pair unchanged.
 func (r *VehicleRepo) UpdateTelemetry(ctx context.Context, vin string, update VehicleUpdate) error {
 	encShadows, err := r.buildShadows(update)
 	if err != nil {
@@ -223,20 +229,22 @@ func (r *VehicleRepo) UpdateStatus(ctx context.Context, vin string, status Vehic
 	return nil
 }
 
-// buildShadows encrypts each GPS pair in update into the matching `*Enc`
-// columns. Returns a map keyed by *Enc column name; an entry exists only
-// if both halves of a pair were present in the update. A nil Encryptor
-// short-circuits to a nil map so the dual-write is opt-in via the
-// constructor — buildTelemetryUpdate treats nil and empty identically.
+// buildShadows encrypts the location fields of an update into their
+// `*Enc` columns — the ONLY place those values are persisted since
+// MYR-433. Returns a map keyed by *Enc column name; a GPS entry exists
+// only if both halves of a pair were present in the update.
 //
-// MYR-64: also encrypts `Vehicle.navRouteCoordinates` into
-// `navRouteCoordinatesEnc` when the update touches the route blob. An
-// encrypt failure on the route blob is logged at Warn and DOES NOT
-// fail the overall write — the plaintext column still goes through so
-// live telemetry isn't lost. This deliberately differs from the GPS
-// pair behavior, where an encrypt failure is fatal because the GPS
-// shadow is the more constrained format and a partial dual-write would
-// surface as a half-pair on read.
+// A nil Encryptor short-circuits to a nil map, which means a repo built
+// with the legacy constructor writes no coordinates at all. That is not
+// a degraded dual-write any more; it is simply "no key, no location".
+//
+// Every encrypt failure here is FATAL to the write, for GPS and for the
+// nav-route blob alike. The nav-route case used to be non-fatal, on the
+// reasoning that the plaintext column still carried the route so live
+// telemetry was never lost over an encryption hiccup. With the plaintext
+// column gone, continuing would leave the PREVIOUS route ciphertext in
+// place while the rest of the row advanced — serving a stale route as
+// current — so the write fails and the next telemetry frame retries.
 //
 //nolint:nilnil // (nil map, nil err) signals "no encryptor wired".
 func (r *VehicleRepo) buildShadows(update VehicleUpdate) (map[string]string, error) {
@@ -264,38 +272,41 @@ func (r *VehicleRepo) buildShadows(update VehicleUpdate) (map[string]string, err
 		out[p.pair.lat+"Enc"] = *shadow.latEnc
 		out[p.pair.lng+"Enc"] = *shadow.lngEnc
 	}
-	r.addNavRouteShadow(update, out)
+	if err := r.addNavRouteShadow(update, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
 // addNavRouteShadow encrypts the nav-route blob into out when the
 // update touches `Vehicle.navRouteCoordinates`. Empty/null/`[]` raw
-// JSON maps to a NULL shadow per routeblob.EncryptJSONBytes. An
-// encrypt failure logs at Warn and leaves the entry out of the map so
-// the plaintext write still happens — telemetry is never dropped over
-// a shadow-encryption hiccup.
-func (r *VehicleRepo) addNavRouteShadow(update VehicleUpdate, out map[string]string) {
+// JSON maps to a NULL shadow per routeblob.EncryptJSONBytes.
+//
+// MYR-433 made an encrypt failure FATAL to the write. Before, it was
+// logged at Warn and the write continued, because the plaintext column
+// still carried the route — "telemetry is never dropped over a
+// shadow-encryption hiccup". That reasoning died with the plaintext
+// column. Continuing now would leave the PREVIOUS route ciphertext in
+// place while the rest of the row advances, i.e. it would serve a stale
+// route as if it were current. Failing the write lets the caller retry
+// on the next telemetry frame, which arrives within seconds.
+func (r *VehicleRepo) addNavRouteShadow(update VehicleUpdate, out map[string]string) error {
 	if update.NavRouteCoordinates == nil {
-		return
+		return nil
 	}
 	raw := *update.NavRouteCoordinates
 	ct, err := routeblob.EncryptJSONBytes(raw, r.encryptor)
 	if err != nil {
-		if r.logger != nil {
-			r.logger.Warn("Vehicle navRouteCoordinatesEnc encrypt failed; writing plaintext only",
-				slog.String("error", err.Error()),
-			)
-		}
-		return
+		return fmt.Errorf("encrypt navRouteCoordinates: %w", err)
 	}
-	// ct == "" means "absent" (empty / null / []). The plaintext path
-	// is responsible for emitting the corresponding NULL on the
-	// plaintext column via ClearFields when the caller wants the row
-	// cleared; we never write an empty ciphertext.
+	// ct == "" means "absent" (empty / null / []). Clearing the route is
+	// expressed through ClearFields, which NULLs the ciphertext column;
+	// we never write an empty ciphertext.
 	if ct == "" {
-		return
+		return nil
 	}
 	out["navRouteCoordinatesEnc"] = ct
+	return nil
 }
 
 // scanVehicle executes a query expected to return one vehicle row and
