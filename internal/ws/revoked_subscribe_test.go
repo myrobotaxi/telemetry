@@ -22,11 +22,29 @@ import (
 
 // gpsOnlySnapshot seeds the minimum that still produces a GPS frame, so the
 // frame count on the wire is small and known: one ungrouped frame (carrying
-// lastUpdated) plus one GPS frame.
+// `name` and lastUpdated) plus one GPS frame.
+//
+// `name` IS LOAD-BEARING, not decoration (MYR-435). latitude/longitude/heading
+// are ALL members of the `gps` atomic group, so a fixture of only those leaves
+// the ungrouped bucket holding nothing but the `lastUpdated` that sendSnapshot
+// injects — and §4.6 empty-payload suppression now drops a frame whose
+// projection is purely envelope keys, because a content-free frame still
+// signals "something changed" by existing at all. That made this fixture emit
+// ONE frame while snapshotFramesPerVehicle said two, and the drain below hung
+// until its 2s read deadline.
+//
+// The freshness-only shape is a FIXTURE artifact, not a production one:
+// cmd/telemetry-server's vehicleToSnapshotFields always emits name, model,
+// year, color, speed, locationName, locationAddress, odometerMiles and
+// fsdMilesSinceReset as literal keys, so a real ungrouped frame is never empty
+// of substance for either role. Adding one ungrouped field here makes the
+// fixture mirror that, and keeps these tests about REVOCATION rather than about
+// frame arithmetic.
 func gpsOnlySnapshot() map[string]VehicleSnapshot {
 	return map[string]VehicleSnapshot{
 		"veh-1": {
 			Fields: map[string]any{
+				"name":      "Stumpy",
 				"latitude":  37.7749,
 				"longitude": -122.4194,
 				"heading":   90,
@@ -34,7 +52,7 @@ func gpsOnlySnapshot() map[string]VehicleSnapshot {
 			Timestamp: "2026-08-02T00:00:00Z",
 		},
 		"veh-2": {
-			Fields:    map[string]any{"latitude": 1.0, "longitude": 2.0},
+			Fields:    map[string]any{"name": "Rover", "latitude": 1.0, "longitude": 2.0},
 			Timestamp: "2026-08-02T00:00:00Z",
 		},
 	}
