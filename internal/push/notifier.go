@@ -218,6 +218,23 @@ func (n *Notifier) Unsubscribe() {
 // orders the two, and its shutdown-order comment block is the authority.
 func (n *Notifier) Wait() { n.workers.Wait() }
 
+// WaitContext is Wait with a deadline, returning how many fan-outs were still
+// in flight when it gave up (0 on a clean drain).
+//
+// Shutdown uses this rather than Wait. A fan-out runs on a fresh Background
+// context bounded only by cfg.Timeout, which SIGTERM cannot shorten, and
+// bus.Close hands this drain the whole buffered backlog at once — so an
+// unbounded wait here can outlive the platform's kill timeout and be SIGKILLed
+// mid-push. Abandoning the tail at a deadline loses the same pushes but says
+// so.
+func (n *Notifier) WaitContext(ctx context.Context) (int, error) {
+	inFlight, err := n.workers.WaitContext(ctx)
+	if err != nil {
+		return inFlight, fmt.Errorf("push.Notifier.WaitContext (%d fan-out(s) abandoned): %w", inFlight, err)
+	}
+	return 0, nil
+}
+
 // handleCreated notifies the vehicle OWNER that somebody wants a ride.
 func (n *Notifier) handleCreated(evt events.Event) {
 	ev, ok := evt.Payload.(events.RideRequestCreatedEvent)

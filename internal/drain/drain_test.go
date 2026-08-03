@@ -1,6 +1,8 @@
 package drain
 
 import (
+	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -82,6 +84,108 @@ func TestGroupWaitIsReusable(t *testing.T) {
 		if !ran.Load() {
 			t.Fatalf("round %d: Wait() returned before the tracked work ran", round)
 		}
+	}
+}
+
+// TestGroupWaitContextGivesUpAndReportsWhatIsLeft pins the bounded drain
+// shutdown depends on (MYR-410).
+//
+// The workers a shutdown waits on run on contexts SIGTERM cannot shorten, so an
+// unbounded wait can outlast the platform's kill timeout and be SIGKILLed
+// mid-flight. Giving up at a deadline loses the same work but reports how much
+// — a deploy that drops pushes has to leave a number behind.
+func TestGroupWaitContextGivesUpAndReportsWhatIsLeft(t *testing.T) {
+	var g Group
+
+	const stuck = 3
+	release := make(chan struct{})
+	for i := 0; i < stuck; i++ {
+		done := g.Track()
+		go func() {
+			defer done()
+			<-release
+		}()
+	}
+	defer close(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	inFlight, err := g.WaitContext(ctx)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want context.DeadlineExceeded", err)
+	}
+	if inFlight != stuck {
+		t.Errorf("in-flight = %d, want %d — an abandoned drain must say how much it abandoned", inFlight, stuck)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("WaitContext took %v — it did not honour the deadline", elapsed)
+	}
+}
+
+// TestGroupWaitContextReturnsCleanlyWhenWorkFinishes is the happy path: inside
+// the deadline, WaitContext behaves exactly as Wait and reports nothing left.
+func TestGroupWaitContextReturnsCleanlyWhenWorkFinishes(t *testing.T) {
+	var g Group
+
+	var ran atomic.Bool
+	done := g.Track()
+	go func() {
+		defer done()
+		ran.Store(true)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	inFlight, err := g.WaitContext(ctx)
+	if err != nil {
+		t.Errorf("err = %v, want nil", err)
+	}
+	if inFlight != 0 {
+		t.Errorf("in-flight = %d, want 0", inFlight)
+	}
+	if !ran.Load() {
+		t.Error("WaitContext returned before the tracked work ran")
+	}
+}
+
+// TestGroupWaitContextWakesAParkedWaiter pins the cancellation path that a
+// sync.Cond makes easy to get wrong: a waiter already parked in Cond.Wait has
+// to be woken by the context, since Cond offers no select. A missed wakeup here
+// would hang shutdown until SIGKILL — the failure the deadline exists to avoid.
+func TestGroupWaitContextWakesAParkedWaiter(t *testing.T) {
+	var g Group
+
+	release := make(chan struct{})
+	done := g.Track()
+	go func() {
+		defer done()
+		<-release
+	}()
+	defer close(release)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Park first, cancel second.
+	returned := make(chan int, 1)
+	go func() {
+		inFlight, _ := g.WaitContext(ctx)
+		returned <- inFlight
+	}()
+	time.Sleep(50 * time.Millisecond) // let the waiter reach Cond.Wait
+	cancel()
+
+	select {
+	case inFlight := <-returned:
+		if inFlight != 1 {
+			t.Errorf("in-flight = %d, want 1", inFlight)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a parked WaitContext was not woken by its context — shutdown would hang to SIGKILL")
 	}
 }
 

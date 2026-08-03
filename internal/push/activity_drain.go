@@ -2,6 +2,7 @@ package push
 
 import (
 	"context"
+	"fmt"
 )
 
 // The Live Activity send path's worker accounting (MYR-398, MYR-410).
@@ -20,7 +21,24 @@ import (
 // the counting moved into one place rather than a third copy.
 
 // Wait blocks until every in-flight update finishes.
+//
+// Like the alert notifier's, this is HALF of the shutdown guarantee: it covers
+// updates that have STARTED, and an event still sitting in this subscriber's
+// buffered channel has not reached a handler at all. bus.Close is what makes
+// that backlog started work; only the pair means "everything accepted was
+// delivered" (MYR-410).
 func (a *ActivityNotifier) Wait() { a.workers.Wait() }
+
+// WaitContext is Wait with a deadline, returning how many updates were still in
+// flight when it gave up (0 on a clean drain). Shutdown uses this — see
+// Notifier.WaitContext for why an unbounded wait is unsafe there.
+func (a *ActivityNotifier) WaitContext(ctx context.Context) (int, error) {
+	inFlight, err := a.workers.WaitContext(ctx)
+	if err != nil {
+		return inFlight, fmt.Errorf("push.ActivityNotifier.WaitContext (%d update(s) abandoned): %w", inFlight, err)
+	}
+	return 0, nil
+}
 
 // track registers work that runs on the CALLER's goroutine with the same drain
 // async's workers use, and returns the function that retires it.
