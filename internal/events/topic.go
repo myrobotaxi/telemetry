@@ -103,4 +103,20 @@ const (
 	// the active inbound mTLS stream for the VIN), and the auth layer
 	// (invalidate any user-existence cache entry for the owning user).
 	TopicVehicleDeleted Topic = "vehicle.deleted"
+
+	// TopicShareAccessRevoked is published when an owner action narrows a
+	// grantee's vehicle access set while they may hold a live WebSocket —
+	// a §7.5.3 revoke or a §7.5.7 suspend. The payload is
+	// ShareAccessRevokedEvent. Consumer: the WS hub (close the grantee's
+	// sessions for that vehicle with code 4002), which is what closes
+	// websocket-protocol.md §10 DV-09 for the share-mutation case.
+	//
+	// Distinct from TopicVehicleDeleted on purpose. That event says "this
+	// car no longer exists" and every consumer — receiver, VIN cache,
+	// user-existence cache — has work to do. This one says "this ONE
+	// person may no longer look at a car that still exists and is still
+	// streaming to its owner", so the hub is the only consumer and the
+	// close must be scoped to the grantee. Folding them together would
+	// make a suspension tear down the owner's own session.
+	TopicShareAccessRevoked Topic = "share.access_revoked"
 )
