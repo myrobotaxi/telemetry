@@ -59,10 +59,11 @@ const DriveRetentionDays = 365
 const DriveRetentionWindow = DriveRetentionDays * 24 * time.Hour
 
 // DefaultPruneBatchSize is the number of drives one prune transaction deletes
-// (data-lifecycle.md §5.5). Large enough that a year of backlog clears in a
-// sane number of round trips, small enough that the row locks a single
+// (data-lifecycle.md §5.5). Small enough that the row locks a single
 // transaction holds on the Prisma-owned "Drive" table are never interesting to
-// a concurrent reader.
+// a concurrent reader, large enough that a sizeable backlog would clear in a
+// sane number of round trips should one ever accumulate — in the steady state
+// this table is in today, most passes claim nothing at all.
 const DefaultPruneBatchSize = 100
 
 // queryPrunableDriveBatch claims one batch of expired drives.
