@@ -2,7 +2,6 @@ package telemetry
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"testing"
 
@@ -191,25 +190,23 @@ func TestRideRequestHandler_Accept_PausedVehicle(t *testing.T) {
 	}
 }
 
-// TestRideRequestHandler_Accept_ScheduledPauseKeepsTheFailOpenRead is the
-// MYR-313 interaction that is easy to break. A scheduled accept whose vehicle
-// read FAILS still proceeds (fail-open) — that is the shape MYR-313 installed
-// to stop a lookup hiccup stranding an owner, and adding the pause check must
-// not quietly convert it to fail-closed. An unknown pause state does not block.
-func TestRideRequestHandler_Accept_ScheduledPauseKeepsTheFailOpenRead(t *testing.T) {
-	scheduled := fixtureRideData(rideUserID, rideStatusRequested)
-	when := scheduled.CreatedAt.AddDate(0, 0, 3)
-	scheduled.ScheduledFor = &when
-
-	store := &fakeRideStore{getRec: scheduled}
-	h := newRideHandler(store, &stubVehicleSnapshotReader{err: errors.New("db down")}, &fakeRidePublisher{}, rideUserID)
-
-	rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/accept", "", rideAuthOK)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("a scheduled accept must still fail OPEN on a vehicle-read failure: got %d. body=%s", rec.Code, rec.Body.String())
-	}
-}
+// A test used to sit here — TestRideRequestHandler_Accept_ScheduledPauseKeeps-
+// TheFailOpenRead — pinning that a scheduled accept whose vehicle read FAILED
+// still proceeded, so an UNKNOWN pause state never blocked.
+//
+// MYR-372 DELETED it rather than inverting it. That behaviour was never a
+// decision about pauses: it was a side effect of the MYR-313 fail-open early
+// return, which the pause check merely sat behind, and there is no independent
+// pause read on this path to fail — the flag rides the same `GetByID` row
+// (TestRideRequestHandler_Create_PauseCostsNoExtraLookup pins that there is
+// exactly one). Inverted, it asserted "an unreadable vehicle is a 500" while
+// exercising no pause code at all, duplicating
+// TestRideRequestAccept_MissingVehicleIsPermanentNotRetryable in
+// vehicle_availability_test.go, which now owns that rule for both error kinds.
+//
+// What remains pause-specific is covered above: the table in
+// TestRideRequestHandler_Accept_PausedVehicle refuses BOTH an instant and a
+// scheduled accept for a paused car.
 
 // TestRideRequestHandler_Accept_EnabledVehiclePasses is the counter-assertion
 // on the accept path.

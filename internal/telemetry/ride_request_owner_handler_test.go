@@ -281,27 +281,42 @@ func TestRideRequestHandler_Accept_ScheduledExemptFromAvailabilityGate(t *testin
 	}
 }
 
-// TestRideRequestHandler_Accept_ScheduledSurvivesVehicleLookupFailure pairs with
-// the fail-closed instant behaviour: a vehicle lookup that fails cannot strand a
-// reservation (MYR-313). Since MYR-316 the scheduled path DOES perform the
-// lookup (for the service-window bound), so this now pins the FAIL-OPEN rule —
-// an unreadable vehicle leaves the reservation unbounded rather than refused.
-// The instant fail-closed 500 is asserted separately below.
-func TestRideRequestHandler_Accept_ScheduledSurvivesVehicleLookupFailure(t *testing.T) {
+// TestRideRequestHandler_Accept_ScheduledVehicleLookupFailsClosed is the
+// MYR-372 inversion of what this test used to assert.
+//
+// It previously pinned FAIL-OPEN: since MYR-316 a scheduled accept reads the
+// vehicle for the service-window bound, and an unreadable vehicle left the
+// reservation UNBOUNDED rather than refused, on the argument that refusing it
+// would resurrect the MYR-313 stranding. The two failures are not alike. MYR-313
+// was a PERMANENT 409 — the car was in service, so every retry that day refused.
+// A lookup failure is a TRANSIENT 500: the owner retries and it succeeds.
+// Granting a reservation that may sit squarely inside a service visit, silently,
+// to avoid one retry is the worse trade — sharply so with external beta riders
+// on the other end.
+//
+// So the vehicle read now fails CLOSED on every path: unknown blocks, and the
+// ride is NOT accepted.
+//
+// The error here is a TRANSIENT store failure, which is what earns the
+// retryable 500. A vehicle that is merely GONE is a different, permanent thing
+// and answers 409 — see TestRideRequestAccept_MissingVehicleIsPermanentNot-
+// Retryable in vehicle_availability_test.go.
+func TestRideRequestHandler_Accept_ScheduledVehicleLookupFailsClosed(t *testing.T) {
 	const owner = rideOtherUsr
 	scheduled := time.Date(2026, 8, 1, 17, 30, 0, 0, time.UTC)
 	ride := fixtureRideData(owner, rideStatusRequested)
 	ride.ScheduledFor = &scheduled
 	store := &fakeRideStore{getRec: ride}
 	pub := &fakeRidePublisher{}
-	h := newRideHandler(store, &stubVehicleSnapshotReader{err: fmtNotFound()}, pub, owner)
+	h := newRideHandler(store, &stubVehicleSnapshotReader{err: errors.New("db down")}, pub, owner)
 	rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/accept", "", rideAuthOK)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("scheduled accept status: got %d want %d. body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	assertErrEnvelope(t, rec, http.StatusInternalServerError, wserrors.ErrCodeInternalError)
+	if store.updateCalls != 0 {
+		t.Errorf("an unreadable vehicle must not accept the reservation, got %d transition calls", store.updateCalls)
 	}
-	if store.updatedState != rideStatusAccepted {
-		t.Errorf("UpdateStatus arg got %q want %q", store.updatedState, rideStatusAccepted)
+	if len(pub.events) != 0 {
+		t.Errorf("no dispatch seam may fire on a refused accept, got %d events", len(pub.events))
 	}
 }
 
@@ -309,11 +324,16 @@ func TestRideRequestHandler_Accept_ScheduledSurvivesVehicleLookupFailure(t *test
 // CLOSED: if the vehicle's status cannot be read at accept time the server
 // returns 500 and does NOT accept the ride (we never dispatch a ride whose
 // vehicle we cannot confirm can serve it).
+//
+// MYR-372 changed the error this test injects from a not-found to a transient
+// store failure. The RULE is unchanged — an unreadable vehicle never accepts —
+// but not-found is now separated out as a permanent 409, so the 500 case must
+// be exercised with the failure that actually is retryable.
 func TestRideRequestHandler_Accept_VehicleLookupFailsClosed(t *testing.T) {
 	const owner = rideOtherUsr
 	store := &fakeRideStore{getRec: fixtureRideData(owner, rideStatusRequested)}
 	pub := &fakeRidePublisher{}
-	h := newRideHandler(store, &stubVehicleSnapshotReader{err: fmtNotFound()}, pub, owner)
+	h := newRideHandler(store, &stubVehicleSnapshotReader{err: errors.New("db down")}, pub, owner)
 	rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/accept", "", rideAuthOK)
 	assertErrEnvelope(t, rec, http.StatusInternalServerError, wserrors.ErrCodeInternalError)
 	if store.updateCalls != 0 {
