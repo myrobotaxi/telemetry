@@ -117,6 +117,12 @@ Every column in every persisted table is listed below. The **Tier** column is th
 
 ### 1.4 Drive table
 
+> **Retention: 365 days, enforced (MYR-439, 2026-08-02).** Every row in this table is deleted once its `createdAt` passes **365 days** — the P1 GPS trail and the P1 location/address strings along with it. **No row has reached that age yet:** production holds 315 drives, the oldest created 2026-03-08, so the first deletion happens on **2027-03-08**. The enforcement is in place ahead of the window, not catching up to it — nothing was ever over-retained. The window is NFR-3.27, the job that enforces it is specified in [`data-lifecycle.md`](data-lifecycle.md) §5, and it is implemented as `store.DrivePruner` driven by `internal/retention.Pruner` (daily, 03:00 UTC, batched, audited).
+>
+> **The window lives in exactly one place:** `store.DriveRetentionDays` in `internal/store/drive_pruner.go`. It is a compile-time constant and is deliberately unreachable from configuration (CG-DL-4) — the `DRIVE_RETENTION_PRUNER_ENABLED` kill-switch can stop the sweep but cannot shorten or lengthen the window. Changing it means changing `data-lifecycle.md` §2.2 first, then that constant, and nothing else.
+>
+> **There is nothing else to delete.** No table anywhere is keyed by a drive id — no sidecar, no derivative, no separate blob store. The GPS trail is two columns ON this row (`routePoints` plaintext + `routePointsEnc` ciphertext), so deleting the row is the complete deletion of both copies. This is why the pruner's statements name no column, and why [MYR-433](https://linear.app/myrobotaxi/issue/MYR-433) retiring the plaintext copy changes nothing about them.
+
 | Column | Type | Tier | Encrypt | Log-safe | Rationale |
 |--------|------|------|---------|----------|-----------|
 | `id` | `String` (cuid) | P0 | No | Yes | Opaque internal identifier |
