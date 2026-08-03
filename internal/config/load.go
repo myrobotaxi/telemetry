@@ -38,6 +38,9 @@ type fileConfig struct {
 	// kill-switch (RESERVATION_DISPATCH_ENABLED), independent of
 	// dispatchEnabled. See load_dispatch.go.
 	reservationDispatchEnabled bool
+	// drivePrunerEnabled is the MYR-439 drive-retention sweep kill-switch
+	// (DRIVE_RETENTION_PRUNER_ENABLED). See load_dispatch.go.
+	drivePrunerEnabled bool
 
 	// MYR-320 periodic in-service re-poll knobs (SERVICE_REPOLL_ENABLED /
 	// SERVICE_REPOLL_INTERVAL). See load_service_repoll.go.
@@ -393,5 +396,6 @@ func buildConfig(fc *fileConfig) *Config {
 		serviceRepollInterval:      fc.serviceRepollInterval,
 		ridePollEnabled:            fc.ridePollEnabled,
 		ridePollInterval:           fc.ridePollInterval,
+		drivePrunerEnabled:         fc.drivePrunerEnabled,
 	}
 }
