@@ -158,6 +158,13 @@ func TestRevokedSessionGetsNoSnapshot(t *testing.T) {
 // enqueue is the ONLY writer to c.send, so a guard here is the version of
 // "no further frames" that a newly added code path cannot bypass — which is
 // exactly how the blocker got in.
+//
+// ASSERTED ON THE WIRE, NOT ON len(c.send). An earlier version checked the
+// buffer depth and passed roughly half the time with the guard deleted,
+// because writePump drains the channel within microseconds — the test was
+// racing the very pump whose output it was trying to rule out. What the
+// property actually says is "nothing reaches the peer", so that is what gets
+// measured.
 func TestRevokedSessionEnqueueRefusesEveryFrame(t *testing.T) {
 	hub := NewHub(newSilentLogger(), NoopHubMetrics{})
 	defer hub.Stop()
@@ -170,14 +177,24 @@ func TestRevokedSessionEnqueueRefusesEveryFrame(t *testing.T) {
 	waitForClients(t, hub, 1)
 
 	client := hub.snapshotClients()[0]
+
+	// revoked.Store, NOT markRevoked — AND THIS MATTERS. markRevoked also
+	// signals writePump to exit, which would stop the frame for the wrong
+	// reason and make this test pass with the enqueue guard deleted. The
+	// window under test is "cut off, pumps still running", so only the flag
+	// is set here.
 	client.revoked.Store(true)
 
-	if dropped := client.enqueue([]byte(`{"type":"vehicle_update"}`)); dropped {
+	if dropped := client.enqueue([]byte(`{"type":"vehicle_update","fields":{"latitude":37.7}}`)); dropped {
 		t.Error("a refused frame reported itself as DROPPED; that inflates the " +
 			"slow-client drop metric with revocations")
 	}
-	if n := len(client.send); n != 0 {
-		t.Errorf("%d frame(s) queued for a revoked session, want 0", n)
+
+	// Silence on the socket is the pass.
+	readCtx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
+	defer cancel()
+	if _, data, err := conn.Read(readCtx); err == nil {
+		t.Fatalf("a frame reached a revoked session's peer: %s", string(data))
 	}
 }
 
