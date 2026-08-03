@@ -8,13 +8,17 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/store"
 )
 
-// TestVehicleRepo_GetStatus exercises the MYR-372 single-column status read
-// against a real Postgres. It backs the reservation sweeper's availability
-// re-check, so the two properties that matter are that it reports the column
-// FAITHFULLY — the sweeper's whole job is to notice a car that entered service
-// after the accept — and that a vehicle it cannot find is an ERROR rather than
-// a fabricated status the sweeper would happily dispatch against.
-func TestVehicleRepo_GetStatus(t *testing.T) {
+// TestVehicleRepo_GetDispatchState exercises the MYR-372 one-read vehicle probe
+// against a real Postgres. It backs the reservation sweeper, so four things
+// matter: it reports the status FAITHFULLY (noticing a car that entered service
+// after the accept is the sweeper's whole job), it carries the ride-share
+// flag's absent-means-enabled rule across the LEFT JOIN, both facts come from
+// ONE statement, and a vehicle it cannot find is an ERROR rather than a
+// fabricated pair the sweeper would happily dispatch against.
+func TestVehicleRepo_GetDispatchState(t *testing.T) {
+	// The join reaches the Go-owned side table, which TestMain's Prisma-only
+	// createSchema does not create. Idempotent.
+	mustApplyGoMigrations(t)
 	cleanTables(t, testPool)
 
 	const (
@@ -39,13 +43,52 @@ func TestVehicleRepo_GetStatus(t *testing.T) {
 			{vehicle: inSvc, want: store.VehicleStatusInService},
 		}
 		for _, tt := range tests {
-			got, err := repo.GetStatus(ctx, tt.vehicle)
+			got, _, err := repo.GetDispatchState(ctx, tt.vehicle)
 			if err != nil {
-				t.Fatalf("GetStatus(%s): %v", tt.vehicle, err)
+				t.Fatalf("GetDispatchState(%s): %v", tt.vehicle, err)
 			}
 			if got != tt.want {
-				t.Errorf("GetStatus(%s) = %q, want %q", tt.vehicle, got, tt.want)
+				t.Errorf("GetDispatchState(%s) status = %q, want %q", tt.vehicle, got, tt.want)
 			}
+		}
+	})
+
+	t.Run("a car with no control-state row reads as ride-share ENABLED", func(t *testing.T) {
+		// The COALESCE over the LEFT JOIN, which is what lets the sweeper's
+		// pause arm ride this read without a second statement. A missing row
+		// must be indistinguishable from a row at the column default.
+		var rows int
+		if err := testPool.QueryRow(ctx,
+			`SELECT COUNT(*) FROM go_vehicle_control_state WHERE vehicle_id = $1`, parked).Scan(&rows); err != nil {
+			t.Fatalf("count control-state rows: %v", err)
+		}
+		if rows != 0 {
+			t.Fatalf("precondition: expected no control-state row yet, got %d", rows)
+		}
+
+		_, enabled, err := repo.GetDispatchState(ctx, parked)
+		if err != nil {
+			t.Fatalf("GetDispatchState: %v", err)
+		}
+		if !enabled {
+			t.Error("a car nobody has ever touched must read as ride-share ENABLED")
+		}
+	})
+
+	t.Run("a pause is visible on the same read as the status", func(t *testing.T) {
+		if err := repo.SetRideShareEnabled(ctx, parked, false); err != nil {
+			t.Fatalf("SetRideShareEnabled(false): %v", err)
+		}
+
+		status, enabled, err := repo.GetDispatchState(ctx, parked)
+		if err != nil {
+			t.Fatalf("GetDispatchState: %v", err)
+		}
+		if enabled {
+			t.Error("the owner's pause did not survive the join")
+		}
+		if status != store.VehicleStatusParked {
+			t.Errorf("status = %q, want %q — pausing must not disturb the vehicle row", status, store.VehicleStatusParked)
 		}
 	})
 
@@ -58,22 +101,23 @@ func TestVehicleRepo_GetStatus(t *testing.T) {
 			t.Fatalf("flip status: %v", err)
 		}
 
-		got, err := repo.GetStatus(ctx, parked)
+		got, _, err := repo.GetDispatchState(ctx, parked)
 		if err != nil {
-			t.Fatalf("GetStatus after flip: %v", err)
+			t.Fatalf("GetDispatchState after flip: %v", err)
 		}
 		if got != store.VehicleStatusInService {
-			t.Errorf("GetStatus after flip = %q, want %q", got, store.VehicleStatusInService)
+			t.Errorf("status after flip = %q, want %q", got, store.VehicleStatusInService)
 		}
 	})
 
 	t.Run("an unknown vehicle is ErrVehicleNotFound, never a status", func(t *testing.T) {
-		got, err := repo.GetStatus(ctx, "veh_does_not_exist")
+		got, enabled, err := repo.GetDispatchState(ctx, "veh_does_not_exist")
 		if !errors.Is(err, store.ErrVehicleNotFound) {
-			t.Fatalf("GetStatus(unknown) error = %v, want ErrVehicleNotFound", err)
+			t.Fatalf("GetDispatchState(unknown) error = %v, want ErrVehicleNotFound", err)
 		}
-		if got != "" {
-			t.Errorf("GetStatus(unknown) returned status %q; absence must never be dressed as a value", got)
+		if got != "" || enabled {
+			t.Errorf("GetDispatchState(unknown) returned (%q, %v); absence must never be dressed as a value",
+				got, enabled)
 		}
 	})
 }

@@ -1,4 +1,4 @@
-// Single-column vehicle status read for the reservation sweeper (MYR-372).
+// The reservation sweeper's one-read vehicle probe (MYR-372).
 
 package store
 
@@ -11,44 +11,59 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// queryVehicleStatus reads one vehicle's persisted status.
+// queryVehicleDispatchState reads, for one vehicle, the two facts the
+// reservation sweeper must agree on before it claims: the persisted status and
+// the owner's ride-sharing switch.
 //
-// A READ of the Prisma-owned "Vehicle" table on its primary key, which needs
-// no carve-out — the data-lifecycle.md §1.4 rules constrain WRITES.
+// A READ of the Prisma-owned "Vehicle" table on its primary key, LEFT JOINed to
+// the Go-owned control-state side table — the same join shape queryVehicleByID
+// uses, narrowed from thirty-one columns to two. ONE statement rather than two
+// round trips is the point: the accept gate deliberately resolves everything it
+// needs from a single row so its facts cannot disagree, and the unattended path
+// should hold itself to no less.
 //
-// It exists rather than reusing queryVehicleByID because the sweeper wants one
-// column and that statement returns thirty-one across a LEFT JOIN of the
-// control-state side table. The same argument queryRideShareEnabled makes:
-// the list and snapshot paths already carry what they need, and this is for the
-// caller holding a vehicle id and one question.
+// The COALESCE carries queryRideShareEnabled's invariant unchanged: a car with
+// no side-table row is ENABLED, not unknown. Without it a missing row would
+// scan SQL NULL and every caller would collapse it to true anyway — inviting
+// exactly one caller to forget.
 //
-// Deliberately NOT `SELECT ... WHERE status NOT IN ('in_service','offline')`.
-// The set of undispatchable statuses is a POLICY, spelled once in
-// internal/telemetry's vehicleAvailability; encoding it as a SQL literal here
-// would make this the second definition and the one nobody thinks to update.
-// This statement answers what the column says, nothing more.
-const queryVehicleStatus = `SELECT "status" FROM "Vehicle" WHERE "id" = $1`
+// Deliberately NOT `... AND status NOT IN ('in_service','offline')`. Which
+// statuses block a dispatch is a POLICY, spelled once in internal/telemetry's
+// vehicleAvailability, and the two readers of it act on DIFFERENT arms — the
+// accept gate on both, the sweeper on `in_service` only. A SQL literal here
+// would be a second definition that could not express that difference and that
+// nobody would think to update.
+const queryVehicleDispatchState = `
+SELECT v."status",
+       COALESCE(gcs.ride_share_enabled, TRUE)
+FROM "Vehicle" v
+LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = v."id"
+WHERE v."id" = $1`
 
-// GetStatus returns one vehicle's persisted status.
+// GetDispatchState returns one vehicle's persisted status and its owner's
+// ride-sharing switch, from a single statement.
 //
-// Unknown vehicle ids are ErrVehicleNotFound, NOT a fabricated status. This is
-// the opposite reading from RideShareEnabled, and deliberately so: that method
-// probes a Go-owned side table which knows nothing about which vehicles exist,
-// whereas this one reads the vehicle row itself, where absence is a real and
-// reportable fact. The sweeper treats the error as "unknown, therefore hold",
-// which is the recoverable answer either way.
-func (r *VehicleRepo) GetStatus(ctx context.Context, vehicleID string) (VehicleStatus, error) {
+// Unknown vehicle ids are ErrVehicleNotFound, NOT a fabricated pair. This is
+// the opposite reading from RideShareEnabled taken alone, and deliberately so:
+// that method probes a side table which knows nothing about which vehicles
+// exist, whereas this one is anchored on the vehicle row itself, where absence
+// is a real and reportable fact. The sweeper treats the error as "unknown,
+// therefore hold", which is the recoverable answer either way.
+func (r *VehicleRepo) GetDispatchState(ctx context.Context, vehicleID string) (VehicleStatus, bool, error) {
 	start := time.Now()
-	var status VehicleStatus
-	err := r.pool.QueryRow(ctx, queryVehicleStatus, vehicleID).Scan(&status)
-	r.metrics.ObserveQueryDuration("vehicle.get_status", time.Since(start).Seconds())
+	var (
+		status           VehicleStatus
+		rideShareEnabled bool
+	)
+	err := r.pool.QueryRow(ctx, queryVehicleDispatchState, vehicleID).Scan(&status, &rideShareEnabled)
+	r.metrics.ObserveQueryDuration("vehicle.get_dispatch_state", time.Since(start).Seconds())
 	if errors.Is(err, pgx.ErrNoRows) {
-		r.metrics.IncQueryError("vehicle.get_status")
-		return "", fmt.Errorf("VehicleRepo.GetStatus(%s): %w", vehicleID, ErrVehicleNotFound)
+		r.metrics.IncQueryError("vehicle.get_dispatch_state")
+		return "", false, fmt.Errorf("VehicleRepo.GetDispatchState(%s): %w", vehicleID, ErrVehicleNotFound)
 	}
 	if err != nil {
-		r.metrics.IncQueryError("vehicle.get_status")
-		return "", fmt.Errorf("VehicleRepo.GetStatus(%s): %w", vehicleID, err)
+		r.metrics.IncQueryError("vehicle.get_dispatch_state")
+		return "", false, fmt.Errorf("VehicleRepo.GetDispatchState(%s): %w", vehicleID, err)
 	}
-	return status, nil
+	return status, rideShareEnabled, nil
 }

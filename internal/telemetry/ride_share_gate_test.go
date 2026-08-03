@@ -2,7 +2,6 @@ package telemetry
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"testing"
 
@@ -191,32 +190,23 @@ func TestRideRequestHandler_Accept_PausedVehicle(t *testing.T) {
 	}
 }
 
-// TestRideRequestHandler_Accept_ScheduledUnknownPauseStateBlocks is the MYR-372
-// inversion of this test.
+// A test used to sit here — TestRideRequestHandler_Accept_ScheduledPauseKeeps-
+// TheFailOpenRead — pinning that a scheduled accept whose vehicle read FAILED
+// still proceeded, so an UNKNOWN pause state never blocked.
 //
-// It used to pin the opposite: a scheduled accept whose vehicle read FAILED
-// still proceeded, so an UNKNOWN pause state never blocked. That was not a
-// decision about pauses at all — it was a side effect of the MYR-313 fail-open
-// early return, which the pause check happened to sit behind. MYR-372 made that
-// read fail closed, and the consequence lands here: an owner's pause can no
-// longer be sailed past by a database blip. Unknown blocks.
-func TestRideRequestHandler_Accept_ScheduledUnknownPauseStateBlocks(t *testing.T) {
-	scheduled := fixtureRideData(rideUserID, rideStatusRequested)
-	when := scheduled.CreatedAt.AddDate(0, 0, 3)
-	scheduled.ScheduledFor = &when
-
-	store := &fakeRideStore{getRec: scheduled}
-	h := newRideHandler(store, &stubVehicleSnapshotReader{err: errors.New("db down")}, &fakeRidePublisher{}, rideUserID)
-
-	rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/accept", "", rideAuthOK)
-
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("a scheduled accept must fail CLOSED on a vehicle-read failure: got %d. body=%s", rec.Code, rec.Body.String())
-	}
-	if store.updateCalls != 0 {
-		t.Errorf("an unreadable vehicle must not accept the reservation, got %d transition calls", store.updateCalls)
-	}
-}
+// MYR-372 DELETED it rather than inverting it. That behaviour was never a
+// decision about pauses: it was a side effect of the MYR-313 fail-open early
+// return, which the pause check merely sat behind, and there is no independent
+// pause read on this path to fail — the flag rides the same `GetByID` row
+// (TestRideRequestHandler_Create_PauseCostsNoExtraLookup pins that there is
+// exactly one). Inverted, it asserted "an unreadable vehicle is a 500" while
+// exercising no pause code at all, duplicating
+// TestRideRequestAccept_MissingVehicleIsPermanentNotRetryable in
+// vehicle_availability_test.go, which now owns that rule for both error kinds.
+//
+// What remains pause-specific is covered above: the table in
+// TestRideRequestHandler_Accept_PausedVehicle refuses BOTH an instant and a
+// scheduled accept for a paused car.
 
 // TestRideRequestHandler_Accept_EnabledVehiclePasses is the counter-assertion
 // on the accept path.

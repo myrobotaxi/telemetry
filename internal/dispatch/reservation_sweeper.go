@@ -47,6 +47,19 @@ type DueReservation struct {
 	ScheduledFor  time.Time
 }
 
+// VehicleDispatchState is the one-read answer to the two vehicle-level
+// questions the sweeper asks before claiming a due reservation. Both fields
+// are stated POSITIVELY (true = the reservation may proceed on that axis) so
+// no caller has to keep an inverted boolean straight.
+type VehicleDispatchState struct {
+	// InService: the owner has the car in for service. Holds the reservation.
+	InService bool
+	// RideShareEnabled: the owner still accepts rides against this car
+	// (MYR-342). False means PAUSED — nothing about the vehicle itself. A car
+	// with no control-state row reads as enabled.
+	RideShareEnabled bool
+}
+
 // ReservationStore is the sweeper's store seam. Satisfied by the ride-request
 // repo via a cmd/ adapter. The outcome WRITE still goes through the existing
 // OutcomeStore leg-1 record seam — a reservation resolves into the very same
@@ -61,25 +74,22 @@ type ReservationStore interface {
 	// VehicleHasActiveInstantRide reports whether the vehicle is mid-ride on
 	// an active INSTANT ride (the MYR-266 per-vehicle busy predicate).
 	VehicleHasActiveInstantRide(ctx context.Context, vehicleID string) (bool, error)
-	// VehicleDispatchable reports whether the vehicle can be dispatched RIGHT
-	// NOW (MYR-372) — false when it is in service or offline. It is the
-	// owner-accept availability predicate, asked again at the reservation's
-	// due instant, and the adapter answers it with the very same function the
-	// accept path uses so the two can never disagree.
+	// VehicleDispatchState reads, in ONE statement, the two vehicle-level
+	// facts the sweeper must agree on before it claims: whether the car is in
+	// service (MYR-372) and whether its owner still accepts rides (MYR-342).
 	//
-	// An unknown vehicle id IS an error here, unlike VehicleRideShareEnabled
-	// below: this question is about the vehicle row itself, where absence is a
-	// real fact rather than a missing opinion. Either way the sweeper holds.
-	VehicleDispatchable(ctx context.Context, vehicleID string) (bool, error)
-	// VehicleRideShareEnabled reports whether the vehicle's OWNER currently
-	// accepts ride requests against it (MYR-342). False means the owner has
-	// PAUSED the car — nothing about the vehicle itself.
+	// One read rather than two, matching the discipline the accept gate keeps
+	// deliberately — that path resolves ownership and availability from a
+	// single row so they cannot disagree, and there is no reason the
+	// unattended path should hold itself to less. It also halves the
+	// per-reservation round trips.
 	//
-	// An unknown vehicle id is NOT an error and answers true: the flag lives on
-	// the Go-owned control-state side table, which knows nothing about which
-	// vehicles exist, and a reservation could only have been accepted for a real
-	// car. Existence is not this method's question.
-	VehicleRideShareEnabled(ctx context.Context, vehicleID string) (bool, error)
+	// An unknown vehicle id IS an error: this reads the vehicle row itself,
+	// where absence is a real and reportable fact. (The ride-share flag alone
+	// would have answered `true` for an unknown id, since it lives on a side
+	// table with no opinion on existence — but a missing vehicle is not a
+	// missing opinion, and the sweeper holds either way.)
+	VehicleDispatchState(ctx context.Context, vehicleID string) (VehicleDispatchState, error)
 	// RiderMayRequestRides reports whether riderID is still permitted to
 	// ride in vehicleID (MYR-369) — true when they OWN the car, and
 	// otherwise true only when they hold a LIVE accepted share whose

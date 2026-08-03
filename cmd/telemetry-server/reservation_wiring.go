@@ -89,11 +89,11 @@ func startReservationSweeper(
 // accept path's RideAcceptedEvent carries them).
 type reservationStoreAdapter struct {
 	repo *store.RideRequestRepo
-	// vehicles serves the MYR-342 pause probe and the MYR-372 availability
-	// re-check. Neither fact lives on a ride row — the pause switch is on the
-	// Go-owned control-state side table and the status is on the Prisma
-	// "Vehicle" row — so the sweeper's store seam spans repos, asking each its
-	// own question before the claim.
+	// vehicles serves the combined MYR-342 pause / MYR-372 service probe.
+	// Neither fact lives on a ride row — the pause switch is on the Go-owned
+	// control-state side table and the status is on the Prisma "Vehicle" row —
+	// so the sweeper's store seam spans repos. The two are read together in one
+	// joined statement, so the sweeper asks this repo a single question.
 	vehicles *store.VehicleRepo
 	// shares serves the MYR-369 rider-grant probe. Neither repo above owns
 	// go_vehicle_shares, so the seam spans three — one question to each,
@@ -142,36 +142,39 @@ func (a *reservationStoreAdapter) VehicleHasActiveInstantRide(ctx context.Contex
 	return a.repo.VehicleHasActiveInstantRide(ctx, vehicleID)
 }
 
-// VehicleDispatchable answers the MYR-372 availability re-check at a
-// reservation's due instant.
+// VehicleDispatchState answers the MYR-372 service re-check and the MYR-342
+// pause check together, from the repo's single joined read.
 //
-// This adapter method is the WHOLE POINT of putting the probe here rather than
-// in internal/dispatch: it reads the status from the store and hands it to
-// telemetry.VehicleStatusDispatchable — the identical function the owner-accept
-// gate's 409 is built from. cmd/ is the only layer that can see both, so it is
-// the only place the two surfaces can be made to share one predicate instead of
-// two copies that drift.
+// This adapter method is the WHOLE POINT of putting the status question here
+// rather than in internal/dispatch: it hands the raw status to
+// telemetry.VehicleStatusIsInService — one arm of the very switch the
+// owner-accept gate's 409 is built from. cmd/ is the only layer that can see
+// both internal/store and internal/telemetry, so it is the only place the two
+// surfaces can share one enumeration instead of keeping two copies that drift.
+//
+// ONLY THE IN-SERVICE ARM CROSSES OVER. Accept also refuses `offline`; the
+// sweeper must not, because `offline` is the "Vehicle" schema default that
+// nothing in this server ever writes back, so holding on it would strand every
+// not-yet-streaming car until its reservation expired — while the nav push's
+// own wake ladder is exactly what would have cleared it. The full argument is
+// at holdIfVehicleBlocked in internal/dispatch; do not "restore" the symmetry
+// here without reading it.
 //
 // A vehicle that has vanished surfaces as ErrVehicleNotFound from the repo, and
 // the sweeper holds on any error — the right answer for a car nobody can look
 // up, and one the lateness ceiling resolves within the window.
-func (a *reservationStoreAdapter) VehicleDispatchable(ctx context.Context, vehicleID string) (bool, error) {
-	status, err := a.vehicles.GetStatus(ctx, vehicleID)
+func (a *reservationStoreAdapter) VehicleDispatchState(
+	ctx context.Context,
+	vehicleID string,
+) (dispatch.VehicleDispatchState, error) {
+	status, rideShareEnabled, err := a.vehicles.GetDispatchState(ctx, vehicleID)
 	if err != nil {
-		return false, err
+		return dispatch.VehicleDispatchState{}, err
 	}
-	return telemetry.VehicleStatusDispatchable(string(status)), nil
-}
-
-// VehicleRideShareEnabled reads the owner's ride-sharing switch (MYR-342).
-//
-// It crosses to the VEHICLE repo rather than the ride-request one, because the
-// flag lives on the Go-owned go_vehicle_control_state side table next to the
-// service window, not on a ride row. That is why this adapter now holds two
-// repos: the sweeper asks one question of each, both immediately before the
-// irreversible claim.
-func (a *reservationStoreAdapter) VehicleRideShareEnabled(ctx context.Context, vehicleID string) (bool, error) {
-	return a.vehicles.RideShareEnabled(ctx, vehicleID)
+	return dispatch.VehicleDispatchState{
+		InService:        telemetry.VehicleStatusIsInService(string(status)),
+		RideShareEnabled: rideShareEnabled,
+	}, nil
 }
 
 // RiderMayRequestRides reads the rider's ride capability over the vehicle

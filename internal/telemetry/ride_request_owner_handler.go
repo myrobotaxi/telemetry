@@ -2,10 +2,12 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
+	"github.com/myrobotaxi/telemetry/pkg/sdk"
 )
 
 // Owner-facing ride-request endpoints (P10, MYR-175), methods on the same
@@ -206,6 +208,23 @@ const vehicleStatusOffline = "offline"
 func (h *RideRequestHandler) rejectIfVehicleUnavailable(ctx context.Context, w http.ResponseWriter, rec RideRequestData) bool {
 	row, err := h.vehicles.GetByID(ctx, rec.VehicleID)
 	if err != nil {
+		if errors.Is(err, sdk.ErrNotFound) {
+			// PERMANENT, so it must not wear the retryable 500 a transient
+			// store failure gets. The ride's target vehicle is gone (deleted,
+			// or transferred out from under an outstanding request), which is
+			// precisely a CAPABILITY refusal — the request is well formed and
+			// the caller authorised, the car simply cannot serve it — so it
+			// takes the code this gate already uses rather than a `404`, whose
+			// documented meaning on this endpoint is "unknown ride / non-party"
+			// and which would tell an owner their own request had vanished.
+			h.logger.Warn("ride-request accept: vehicle no longer exists",
+				slog.String("ride_request_id", rec.ID),
+				slog.String("vehicle_id", rec.VehicleID),
+			)
+			h.writeError(w, http.StatusConflict, wserrors.ErrCodeVehicleUnavailable,
+				"Vehicle is no longer available")
+			return true
+		}
 		h.logger.Error("ride-request accept: vehicle status lookup failed",
 			slog.String("ride_request_id", rec.ID),
 			slog.String("vehicle_id", rec.VehicleID),
@@ -253,10 +272,11 @@ func (h *RideRequestHandler) rejectIfVehicleUnavailable(ctx context.Context, w h
 		return false
 	}
 
-	// The shared MYR-277 predicate (vehicle_availability.go). The sweeper asks
-	// the identical question at the reservation's due instant, which is what
-	// makes the MYR-313 exemption a DEFERRAL rather than a hole.
-	if dispatchable, refusal := vehicleAvailability(row.Status); !dispatchable {
+	// The shared MYR-277 enumeration (vehicle_availability.go). Accept acts on
+	// BOTH arms; the sweeper acts on the in-service arm only, for reasons
+	// argued at holdIfVehicleInService. Instant-accept semantics are
+	// unchanged by MYR-372 — `offline` still refuses here.
+	if blocker, refusal := vehicleAvailability(row.Status); blocker != blockerNone {
 		h.writeError(w, http.StatusConflict, wserrors.ErrCodeVehicleUnavailable, refusal)
 		return true
 	}

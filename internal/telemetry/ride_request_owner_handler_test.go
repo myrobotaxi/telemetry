@@ -296,6 +296,11 @@ func TestRideRequestHandler_Accept_ScheduledExemptFromAvailabilityGate(t *testin
 //
 // So the vehicle read now fails CLOSED on every path: unknown blocks, and the
 // ride is NOT accepted.
+//
+// The error here is a TRANSIENT store failure, which is what earns the
+// retryable 500. A vehicle that is merely GONE is a different, permanent thing
+// and answers 409 — see TestRideRequestAccept_MissingVehicleIsPermanentNot-
+// Retryable in vehicle_availability_test.go.
 func TestRideRequestHandler_Accept_ScheduledVehicleLookupFailsClosed(t *testing.T) {
 	const owner = rideOtherUsr
 	scheduled := time.Date(2026, 8, 1, 17, 30, 0, 0, time.UTC)
@@ -303,7 +308,7 @@ func TestRideRequestHandler_Accept_ScheduledVehicleLookupFailsClosed(t *testing.
 	ride.ScheduledFor = &scheduled
 	store := &fakeRideStore{getRec: ride}
 	pub := &fakeRidePublisher{}
-	h := newRideHandler(store, &stubVehicleSnapshotReader{err: fmtNotFound()}, pub, owner)
+	h := newRideHandler(store, &stubVehicleSnapshotReader{err: errors.New("db down")}, pub, owner)
 	rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/accept", "", rideAuthOK)
 
 	assertErrEnvelope(t, rec, http.StatusInternalServerError, wserrors.ErrCodeInternalError)
@@ -319,11 +324,16 @@ func TestRideRequestHandler_Accept_ScheduledVehicleLookupFailsClosed(t *testing.
 // CLOSED: if the vehicle's status cannot be read at accept time the server
 // returns 500 and does NOT accept the ride (we never dispatch a ride whose
 // vehicle we cannot confirm can serve it).
+//
+// MYR-372 changed the error this test injects from a not-found to a transient
+// store failure. The RULE is unchanged — an unreadable vehicle never accepts —
+// but not-found is now separated out as a permanent 409, so the 500 case must
+// be exercised with the failure that actually is retryable.
 func TestRideRequestHandler_Accept_VehicleLookupFailsClosed(t *testing.T) {
 	const owner = rideOtherUsr
 	store := &fakeRideStore{getRec: fixtureRideData(owner, rideStatusRequested)}
 	pub := &fakeRidePublisher{}
-	h := newRideHandler(store, &stubVehicleSnapshotReader{err: fmtNotFound()}, pub, owner)
+	h := newRideHandler(store, &stubVehicleSnapshotReader{err: errors.New("db down")}, pub, owner)
 	rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/accept", "", rideAuthOK)
 	assertErrEnvelope(t, rec, http.StatusInternalServerError, wserrors.ErrCodeInternalError)
 	if store.updateCalls != 0 {
