@@ -30,8 +30,11 @@ const (
 	upcomingOwnerB   = "clownerb234567890abcd"
 )
 
-// upcomingSeed describes one row to plant.
-type upcomingSeed struct {
+// ownerVehicleSeed describes one row to plant. Shared by the two owner-scoped vehicle
+// slices' suites (MYR-360 upcoming, MYR-400 active) — they plant the same rows
+// for opposite reasons, and one seeder keeps the two predicates being compared
+// against identical fixtures.
+type ownerVehicleSeed struct {
 	name      string
 	vehicleID string
 	ownerID   string
@@ -43,7 +46,7 @@ type upcomingSeed struct {
 
 // seedRideRow creates the row and moves it to its target status. Returns the
 // persisted id.
-func seedRideRow(t *testing.T, repo *store.RideRequestRepo, s upcomingSeed) string {
+func seedRideRow(t *testing.T, repo *store.RideRequestRepo, s ownerVehicleSeed) string {
 	t.Helper()
 	ctx := context.Background()
 
@@ -92,14 +95,14 @@ func TestRideRequestRepo_ListUpcomingByOwnerVehicle_Predicate(t *testing.T) {
 	ctx := context.Background()
 	owner := minimalRideRequest().OwnerID
 
-	sooner := seedRideRow(t, repo, upcomingSeed{
+	sooner := seedRideRow(t, repo, ownerVehicleSeed{
 		name: "accepted future (sooner)", offset: time.Hour, status: store.RideRequestStatusAccepted,
 	})
-	later := seedRideRow(t, repo, upcomingSeed{
+	later := seedRideRow(t, repo, ownerVehicleSeed{
 		name: "accepted future (later)", offset: 5 * time.Hour, status: store.RideRequestStatusAccepted,
 	})
 
-	excluded := []upcomingSeed{
+	excluded := []ownerVehicleSeed{
 		{name: "still requested", offset: 2 * time.Hour, status: store.RideRequestStatusRequested},
 		{name: "accepted but already due", offset: -time.Hour, status: store.RideRequestStatusAccepted},
 		{name: "accepted instant ride", instant: true, status: store.RideRequestStatusAccepted},
@@ -153,7 +156,7 @@ func TestRideRequestRepo_ListUpcomingByOwnerVehicle_Paginates(t *testing.T) {
 	// Two distinct instants plus a pair sharing one instant.
 	tie := 3 * time.Hour
 	for _, off := range []time.Duration{time.Hour, 2 * time.Hour, tie, tie} {
-		seedRideRow(t, repo, upcomingSeed{name: "reservation", offset: off, status: store.RideRequestStatusAccepted})
+		seedRideRow(t, repo, ownerVehicleSeed{name: "reservation", offset: off, status: store.RideRequestStatusAccepted})
 	}
 	const total = 4
 
@@ -213,7 +216,7 @@ func TestRideRequestRepo_ListUpcomingByOwnerVehiclePage_UnknownVehicle(t *testin
 	ctx := context.Background()
 	owner := minimalRideRequest().OwnerID
 
-	seedRideRow(t, repo, upcomingSeed{name: "a real reservation", offset: time.Hour, status: store.RideRequestStatusAccepted})
+	seedRideRow(t, repo, ownerVehicleSeed{name: "a real reservation", offset: time.Hour, status: store.RideRequestStatusAccepted})
 
 	for _, tt := range []struct {
 		name      string

@@ -40,21 +40,47 @@ import (
 // with the same RideRequestsListResponse envelope + (createdAt, id) cursor as
 // the rider list.
 //
-// ONE optional query param selects a different slice of this same owner-scoped
-// feed: `?upcomingForVehicle={vehicleId}` returns the owner's ACCEPTED, still
-// FUTURE reservations for that car, soonest first (MYR-360 — see
-// ride_request_upcoming_handler.go). ABSENT the param this endpoint is
-// byte-identical to what it has always served; a test pins that.
+// TWO optional, mutually exclusive query params each select a different slice
+// of this same owner-scoped feed, both keyed on one of the owner's vehicles:
+//
+//   - `?upcomingForVehicle={vehicleId}` — the owner's ACCEPTED, still FUTURE
+//     reservations for that car, soonest first (MYR-360 — see
+//     ride_request_upcoming_handler.go).
+//   - `?activeForVehicle={vehicleId}` — the ride that car is serving RIGHT NOW:
+//     committed status, dormant reservations excluded, newest first (MYR-400 —
+//     see ride_request_active_handler.go).
+//
+// They are complementary halves of one question and never overlap: a future
+// reservation is `upcoming`, and the same reservation is `active` once it goes
+// live. ABSENT both params this endpoint is byte-identical to what it has
+// always served; a test pins that.
 func (h *RideRequestHandler) ServeIncoming(w http.ResponseWriter, r *http.Request) {
 	userID, ok := h.authUser(w, r)
 	if !ok {
 		return
 	}
 
+	query := r.URL.Query()
 	// Presence, not emptiness: `?upcomingForVehicle=` is a malformed request
 	// for the slice (400), not a request for the default feed.
-	if r.URL.Query().Has(queryUpcomingForVehicle) {
+	wantUpcoming := query.Has(queryUpcomingForVehicle)
+	wantActive := query.Has(queryActiveForVehicle)
+
+	// Both at once is REFUSED rather than silently resolved by precedence. The
+	// two slices are disjoint by construction, so no single page could honour
+	// both, and answering with one of them would hand a client a confidently
+	// wrong page — the failure mode this read exists to eliminate.
+	if wantUpcoming && wantActive {
+		h.writeError(w, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest,
+			queryUpcomingForVehicle+" and "+queryActiveForVehicle+" are mutually exclusive")
+		return
+	}
+	if wantUpcoming {
 		h.serveUpcomingForVehicle(w, r, userID)
+		return
+	}
+	if wantActive {
+		h.serveActiveForVehicle(w, r, userID)
 		return
 	}
 

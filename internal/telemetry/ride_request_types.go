@@ -248,6 +248,17 @@ type RideRequestStore interface {
 	// matches no rows, so an unknown/unowned id is an empty page, never an
 	// error the caller could read as "this vehicle exists".
 	ListUpcomingByOwnerVehiclePage(ctx context.Context, ownerID, vehicleID string, cursor RideRequestUpcomingCursor, limit int) (RideRequestListPage, error)
+	// ListActiveByOwnerVehiclePage returns the owner's LIVE rides for ONE
+	// vehicle — committed status (`accepted`/`arrived`/`enroute`, the set the
+	// per-vehicle one-active-ride index covers) with DORMANT reservations
+	// excluded — newest first (MYR-400). Owner scoping is the authorization
+	// model exactly as it is for ListUpcomingByOwnerVehiclePage: a vehicle the
+	// caller does not own matches no rows, so an unknown/unowned id is an empty
+	// page, never an error the caller could read as "this vehicle exists".
+	//
+	// It takes the ORDINARY descending (createdAt, id) cursor: this slice keeps
+	// the feed's default ordering, so there is no third cursor type.
+	ListActiveByOwnerVehiclePage(ctx context.Context, ownerID, vehicleID string, cursor RideRequestListCursor, limit int) (RideRequestListPage, error)
 	// ListBookedWindows returns the intervals in [from, to) in which the
 	// vehicle is already spoken for, ordered by start (MYR-385) — the READ
 	// side of the same rule Create enforces, derived from the same predicate
