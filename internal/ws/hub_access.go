@@ -81,9 +81,17 @@ func (h *Hub) RevokeUserAccess(userID, vehicleID, reason string) int {
 	affected := h.collectUserSessions(userID, vehicleID)
 	for _, client := range affected {
 		// FIRST, and synchronously: no further frame for this session,
-		// whatever the close handshake does next. Everything downstream —
-		// Broadcast, BroadcastMasked — funnels through hasVehicle, which
-		// reads this flag before anything else.
+		// whatever the close handshake does next.
+		//
+		// The flag is enforced in Client.enqueue, which is the ONLY writer to
+		// the send channel — so it covers the broadcast paths AND the
+		// snapshot-on-subscribe path, which reaches the client without
+		// consulting hasVehicle at all. An earlier version of this comment
+		// claimed hasVehicle was the choke point; it was not, and a revoked
+		// session could still pull live GPS by sending `subscribe` during the
+		// close window. sendSnapshot and handleSubscribeFrame check the flag
+		// too, so the refusal happens before the database read rather than at
+		// the channel.
 		client.revoked.Store(true)
 
 		if client.conn != nil {

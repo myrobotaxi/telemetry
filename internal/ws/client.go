@@ -170,7 +170,24 @@ func (c *Client) readPump(ctx context.Context, writeTimeout time.Duration) {
 // enqueue adds a message to the client's send buffer. If the buffer is
 // full, it drops the oldest message to make room (drop-oldest policy).
 // Returns true if a message was dropped.
+//
+// THIS IS THE ONLY WRITER TO c.send, which is what makes the revoked check
+// below a real choke point rather than one of several (MYR-373). An earlier
+// version of this fix guarded `hasVehicle` instead and was WRONG: the
+// snapshot-on-subscribe path (snapshot.go `sendSnapshot`) reaches `enqueue`
+// without ever consulting `hasVehicle`, so a revoked session could still pull
+// live GPS by sending a `subscribe` frame during the close-handshake window.
+// Guarding the channel itself is the version of this claim that cannot be
+// bypassed by a path somebody adds later.
+//
+// A refusal returns FALSE, not true: `true` means "a message was dropped
+// because this client is slow" and feeds `IncMessagesDropped`. A revoked
+// session is not a slow client, and counting it as one would make a
+// revocation look like backpressure on the dashboards.
 func (c *Client) enqueue(msg []byte) bool {
+	if c.revoked.Load() {
+		return false
+	}
 	select {
 	case c.send <- msg:
 		return false
