@@ -127,6 +127,17 @@ func (r *AccessRevalidator) SweepOnce(ctx context.Context) int {
 			closed += r.hub.RevokeUserAccess(client.userID, lost, "revalidation_backstop")
 		}
 	}
+
+	// Only when it actually fired. A backstop that closes something is a
+	// signal worth seeing — either the nudge did not reach this hub, or a
+	// mutation happened somewhere that does not publish — and logging every
+	// quiet pass at Info would bury exactly that line once a minute forever.
+	if closed > 0 {
+		r.logger.Info("access revalidation backstop closed sessions",
+			slog.Int("sessions_closed", closed),
+			slog.Int("clients_examined", len(clients)),
+		)
+	}
 	return closed
 }
 
@@ -145,8 +156,18 @@ type accessSet struct {
 	allowed map[string]struct{}
 }
 
+// resolveTimeout caps a single resolver call. The sweep walks every connected
+// user on one goroutine, so a hung database read would wedge the whole pass
+// and, with it, every later pass — the backstop would go quiet exactly when
+// the thing it backstops is most likely to be struggling. Nothing on the path
+// today blocks unboundedly; this is the guard that keeps that true.
+const resolveTimeout = 5 * time.Second
+
 // resolve fetches the user's current entitlement.
 func (r *AccessRevalidator) resolve(ctx context.Context, userID string) (accessSet, error) {
+	ctx, cancel := context.WithTimeout(ctx, resolveTimeout)
+	defer cancel()
+
 	ids, err := r.resolver.GetUserVehicles(ctx, userID)
 	if err != nil {
 		return accessSet{}, fmt.Errorf("revalidator.resolve(user=%s): %w", userID, err)
