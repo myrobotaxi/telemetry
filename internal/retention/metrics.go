@@ -46,9 +46,11 @@ func NewPrometheusMetrics(reg prometheus.Registerer) *PrometheusMetrics {
 		drivesDeleted: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "telemetry_pruner_drives_deleted_total",
 			Help: "Drive rows deleted by the 365-day retention sweep, cumulative. " +
-				"Expect a large first-run spike against the initial backlog, then a " +
-				"low daily rate. A flat line while telemetry_pruner_batches_processed_total " +
-				"also stays flat means the sweep is not running.",
+				"EXPECT ZERO UNTIL 2027-03-08: the oldest production drive was created " +
+				"2026-03-08, so no row is eligible before then and a flat line is the " +
+				"correct reading, not a stalled sweep. Use " +
+				"telemetry_pruner_last_success_timestamp_seconds to tell 'nothing to do' " +
+				"from 'not running'. After that date, expect a modest daily rate.",
 		}),
 		batches: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "telemetry_pruner_batches_processed_total",
@@ -65,7 +67,8 @@ func NewPrometheusMetrics(reg prometheus.Registerer) *PrometheusMetrics {
 		runDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name: "telemetry_pruner_run_duration_seconds",
 			Help: "Wall-clock duration of one retention pass. Buckets span sub-second " +
-				"(nothing to do) to tens of minutes (first-run backlog).",
+				"(nothing to do — the expected case until 2027-03-08) to tens of " +
+				"minutes (a large backlog, should it ever accumulate).",
 			Buckets: []float64{0.01, 0.1, 1, 10, 60, 300, 900, 3600},
 		}),
 		lastSuccess: prometheus.NewGauge(prometheus.GaugeOpts{
@@ -73,10 +76,24 @@ func NewPrometheusMetrics(reg prometheus.Registerer) *PrometheusMetrics {
 			Help: "Unix timestamp of the last retention pass that completed without a " +
 				"batch error. Alert when now() minus this exceeds ~48h: the retention " +
 				"promise is a privacy commitment, so a silently stalled sweep is a " +
-				"compliance problem and not merely a missed cron.",
+				"compliance problem and not merely a missed cron. " +
+				"IT IS SEEDED TO 0 AT STARTUP, NOT LEFT ABSENT — a bare " +
+				"'now() - gauge > 48h' rule would silently never fire against an absent " +
+				"series, so the sweep publishes 0 at registration and the alert reads as " +
+				"firing from the moment the process starts until the first pass succeeds. " +
+				"That is deliberate: a process that never reaches 03:00 UTC is exactly " +
+				"the failure this gauge exists to catch. Suppress the startup window with " +
+				"a 'for' clause longer than one day rather than by ignoring zero.",
 		}),
 	}
 	reg.MustRegister(m.drivesDeleted, m.batches, m.batchErrors, m.runDuration, m.lastSuccess)
+	// Publish the freshness gauge immediately rather than leaving the series
+	// absent until the first 03:00 UTC pass. A plain Gauge already exports 0 on
+	// registration, so this Set is redundant TODAY — it is here to state the
+	// requirement, because the staleness alert is only sound if the series
+	// exists from startup, and a future switch to a GaugeVec (which publishes
+	// nothing until a child is touched) would break that silently.
+	m.lastSuccess.Set(0)
 	return m
 }
 

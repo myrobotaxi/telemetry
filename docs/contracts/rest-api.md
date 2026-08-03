@@ -958,7 +958,7 @@ The SDK MUST NOT re-fetch the list when a `drive_ended` frame arrives -- the fra
 
 #### Retention
 
-Drives older than 365 days are pruned by the background retention job per NFR-3.27 (see [`data-lifecycle.md`](data-lifecycle.md) §5). **Implemented and running daily since [MYR-439](https://linear.app/myrobotaxi/issue/MYR-439) (2026-08-02);** before that the job was specified but absent, and drive history was retained indefinitely.
+Drives older than 365 days are pruned by the background retention job per NFR-3.27 (see [`data-lifecycle.md`](data-lifecycle.md) §5). **Implemented and running daily since [MYR-439](https://linear.app/myrobotaxi/issue/MYR-439) (2026-08-02);** before that the policy existed with nothing enforcing it. No drive has yet been pruned and none will be until **2027-03-08** — the oldest production drive dates to 2026-03-08, so the platform is still younger than its own retention window.
 
 A cursor scan that straddles a prune event MAY observe items disappearing -- this is acceptable, and it cannot corrupt the scan: the keyset cursor is a pure value comparison that never dereferences its anchor row, so a cursor naming a since-pruned drive still returns the correct next page.
 

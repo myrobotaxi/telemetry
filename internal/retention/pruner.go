@@ -31,8 +31,11 @@ type BatchOutcome struct {
 	DrivesDeleted int
 	// AuditRows is how many drives_pruned audit entries it wrote.
 	AuditRows int
-	// Exhausted is true when the batch came back short, meaning no eligible
-	// drives remain. The pass loop's terminator.
+	// Exhausted is true only when the claim found nothing left to delete. The
+	// pass loop's terminator. A batch that merely came back SHORT does not
+	// qualify — under the store's SKIP LOCKED claim that means "no rows I can
+	// take", which may be a peer holding the rest, so the loop keeps going and
+	// stops on a genuinely empty claim.
 	Exhausted bool
 }
 

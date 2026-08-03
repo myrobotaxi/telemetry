@@ -53,10 +53,12 @@ func (f *fakeDriveStore) PruneBatch(ctx context.Context, batchSize int) (BatchOu
 	defer f.mu.Unlock()
 	deleted := min(batchSize, f.remaining)
 	f.remaining -= deleted
+	// Mirrors the real store: Exhausted only on an empty claim, never on a
+	// merely short one.
 	return BatchOutcome{
 		DrivesDeleted: deleted,
 		AuditRows:     1,
-		Exhausted:     deleted < batchSize,
+		Exhausted:     deleted == 0,
 	}, nil
 }
 
@@ -101,16 +103,17 @@ func TestRunPassConvergesOverBatches(t *testing.T) {
 	if store.remaining != 0 {
 		t.Errorf("backlog remaining = %d, want 0 — the pass did not converge", store.remaining)
 	}
-	// 250 at 100 a batch: 100, 100, 50. The short batch terminates the loop, so
-	// convergence costs no extra empty call.
-	if got := store.callCount(); got != 3 {
-		t.Errorf("PruneBatch calls = %d, want 3", got)
+	// 250 at 100 a batch: 100, 100, 50, then ONE empty claim to confirm the
+	// backlog is genuinely drained rather than merely unclaimable. That fourth
+	// call is the deliberate cost of not treating a short batch as "done".
+	if got := store.callCount(); got != 4 {
+		t.Errorf("PruneBatch calls = %d, want 4 (three batches + the confirming empty claim)", got)
 	}
 	if metrics.deleted != 250 {
 		t.Errorf("metrics deleted = %d, want 250", metrics.deleted)
 	}
-	if metrics.batches != 3 {
-		t.Errorf("metrics batches = %d, want 3", metrics.batches)
+	if metrics.batches != 4 {
+		t.Errorf("metrics batches = %d, want 4", metrics.batches)
 	}
 	if metrics.successCalls != 1 {
 		t.Errorf("last-success set %d times, want 1", metrics.successCalls)

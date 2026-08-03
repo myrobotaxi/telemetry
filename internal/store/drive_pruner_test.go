@@ -282,10 +282,12 @@ func TestPruneBatchConvergesOverBatches(t *testing.T) {
 	if totalDeleted != seeded {
 		t.Errorf("total deleted = %d, want %d", totalDeleted, seeded)
 	}
-	// 25 rows at 10 per batch: 10, 10, 5 — the short third batch is what signals
-	// Exhausted, so convergence costs no extra empty round trip.
-	if batches != 3 {
-		t.Errorf("batches = %d, want 3", batches)
+	// 25 rows at 10 per batch: 10, 10, 5, then a FOURTH call that claims nothing
+	// and reports Exhausted. The short third batch deliberately does NOT
+	// terminate the loop — under SKIP LOCKED "short" means "no rows I can
+	// claim", which a peer holding the rest also satisfies.
+	if batches != 4 {
+		t.Errorf("batches = %d, want 4 (three deleting batches + the confirming empty claim)", batches)
 	}
 	if !driveExists(t, "drive-batch-keep") {
 		t.Error("in-window drive was deleted by the batch loop")

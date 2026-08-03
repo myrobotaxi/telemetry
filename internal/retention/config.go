@@ -42,11 +42,16 @@ const (
 	// validates its own argument regardless.
 	defaultBatchSize = 100
 	// defaultMaxBatchesPerPass is 500 batches — 50,000 drives at the default
-	// batch size. THE FIRST PRODUCTION PASS FACES A YEAR OF UNPRUNED BACKLOG,
-	// and this is sized so that pass converges in one night for any plausible
-	// beta fleet while still being a hard ceiling rather than an open loop.
-	// A budget-capped pass logs a warning naming the cap, which is the signal
-	// to raise it.
+	// batch size.
+	//
+	// THIS IS HEADROOM, NOT A RESPONSE TO AN EXISTING BACKLOG. As of 2026-08-02
+	// production holds 315 Drive rows, the oldest created 2026-03-08, so NOTHING
+	// is eligible for deletion until 2027-03-08 and every pass until then
+	// deletes zero rows. The budget exists because a ceiling is cheaper to have
+	// than to add later, and because the shape of the backlog on the day the
+	// window first bites is not knowable now — not because the first pass has
+	// work to do. A budget-capped pass logs a warning naming the cap, which is
+	// the signal to raise it.
 	defaultMaxBatchesPerPass = 500
 	// defaultBatchTimeout bounds one batch transaction. Generous for a
 	// 100-row delete on an indexed predicate; short enough that a wedged

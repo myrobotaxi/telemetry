@@ -16,8 +16,19 @@ import (
 //
 // Drive history and the full GPS trail on it are the most sensitive thing this
 // service keeps, and the design docs have promised a one-year ceiling on them
-// since Phase 1. Nothing enforced it: every drive ever recorded was still
-// there. This is the enforcement.
+// since Phase 1 with no code behind the promise. This is the enforcement.
+//
+// IT WILL DELETE NOTHING FOR MONTHS, AND THAT IS THE EXPECTED STATE. As of
+// 2026-08-02 production holds 315 Drive rows, the oldest created 2026-03-08 —
+// the platform is younger than its own retention window, so the first row
+// becomes eligible on 2027-03-08. Shipping now is about having the enforcement
+// in place and observed before the window first bites, not about clearing a
+// backlog; there is no backlog. The practical consequence for anyone reading
+// this in March 2027: until that date every production pass claims zero rows,
+// so the audit grouping, the SKIP LOCKED contention path and Postgres TOAST
+// reclamation for the deleted trails have been exercised ONLY by the tests in
+// drive_pruner_test.go and never against real data. Treat the first pass that
+// actually deletes something as the real first run, and watch it.
 //
 // WHY THE WHOLE ROW AND NOTHING ELSE. A drive's route/GPS trail is not a child
 // record — it is two columns ON the drive row ("routePoints" JSONB plaintext
@@ -114,9 +125,16 @@ type PruneBatchResult struct {
 	// AuditRows is how many drives_pruned entries were written — one per
 	// (owner, vehicle) group in the batch, per §5.5.
 	AuditRows int
-	// Exhausted is true when the batch came back short of the requested size,
-	// meaning no eligible drives remain for this claimant. The pass loop's
+	// Exhausted is true ONLY when the claim returned zero rows. The pass loop's
 	// terminator.
+	//
+	// NOT "the batch came back short". Under SKIP LOCKED a short batch is
+	// ambiguous: it means "no more rows I can claim", which is either "none are
+	// left" OR "a peer holds the rest". Treating the second as success lets this
+	// replica declare the backlog drained over rows that a dying peer is about
+	// to roll back — the sweep would report completion and then the gauge would
+	// advance on work nobody did. Requiring an empty claim costs one extra
+	// round trip per pass and removes the ambiguity entirely.
 	Exhausted bool
 }
 
@@ -215,7 +233,10 @@ func (p *DrivePruner) PruneBatch(ctx context.Context, batchSize int) (PruneBatch
 	return PruneBatchResult{
 		DrivesDeleted: deleted,
 		AuditRows:     auditRows,
-		Exhausted:     len(claimed) < batchSize,
+		// Always false here: this call claimed rows, so the only honest report
+		// of "nothing left" comes from a subsequent claim returning zero. See
+		// the field's doc comment for why a short batch does not qualify.
+		Exhausted: false,
 	}, nil
 }
 
