@@ -20,11 +20,17 @@ var masksByResource = map[ResourceType]map[auth.Role]ResourceMask{
 	// MYR-435 (client decision, 2026-08-02): the viewer arm is NO LONGER
 	// "owner minus vin". It is an explicit allow-list — location, route,
 	// identity, charge, availability, freshness — with media, cabin
-	// climate, and all vehicle-controls state withheld. Both delivery
-	// surfaces read THIS table (the WS hub's BroadcastMasked /
-	// enqueueSnapshotFrame and the REST GET /snapshot handler), so the
-	// narrowing applies to both by construction; that is pinned by
-	// TestBothDeliverySurfacesShareTheVehicleStateTable.
+	// climate, and all vehicle-controls state withheld. All THREE delivery
+	// surfaces read THIS table, so the narrowing applies to each by
+	// construction. That is pinned per-surface, by tests that drive the
+	// actual delivery path and iterate OwnerOnlyVehicleStateFields():
+	//
+	//   REST snapshot ......... internal/telemetry,
+	//     TestVehicleSnapshotHandler_ViewerSnapshotOmitsEveryOwnerOnlyField
+	//   WS live broadcast ..... internal/ws,
+	//     TestBroadcaster_CabinOnlyTelemetry_SendsViewerNothing
+	//   WS connect-time replay  internal/ws,
+	//     TestHub_SendSnapshot_ViewerReplayOmitsEveryOwnerOnlyField
 	//
 	// MYR-286: `licensePlate` is in BOTH role allow-lists. That is a
 	// DELIBERATE PRODUCT DECISION, not an oversight, and it reverses

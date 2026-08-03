@@ -56,6 +56,14 @@ var envelopeFields = map[string]struct{}{
 // `len(projected) == 0`. It is strictly stronger: an empty map is not
 // substantive, so every case the old check caught is still caught.
 //
+// CALLERS MUST PASS THE OUTPUT OF A PROJECTION — the map returned by
+// Apply(payload, For(resource, role)) — NOT the raw pre-mask payload. Run on
+// the input, the predicate answers a different and useless question: an
+// owner-only field like `interiorTemp` is not an envelope key, so a cabin-only
+// payload would report itself substantive and the frame would ship. The whole
+// point is that the fields deciding the answer are the ones that SURVIVED
+// masking for this specific role.
+//
 // Applied to ALL roles, not just viewers, and that is intentional — a frame
 // carrying only "the timestamp changed" informs nobody, whatever their role.
 // It cannot regress owners in practice because the broadcast path returns early
