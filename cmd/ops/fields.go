@@ -179,7 +179,10 @@ func runFieldsSnapshot(ctx context.Context, args []string) error {
 	}
 	defer db.Close()
 
-	repo := store.NewVehicleRepo(db.Pool(), store.NoopMetrics{})
+	repo, err := newVehicleRepo(db, logger)
+	if err != nil {
+		return err
+	}
 	v, err := repo.GetByVIN(ctx, *vin)
 	if err != nil {
 		return fmt.Errorf("lookup vehicle: %w", err)

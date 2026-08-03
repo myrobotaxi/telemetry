@@ -133,11 +133,21 @@ func TestDriveRepo_GetByID(t *testing.T) {
 	}
 }
 
+// TestDriveRepo_AppendRoutePoints covers the ordinary append semantics —
+// single point, multiple points, empty no-op, unknown drive.
+//
+// MYR-433: it must run on an encryption-enabled repo. The trail lives
+// only in routePointsEnc now, so a keyless repo short-circuits every
+// append with ErrEncryptionRequired and the "missing drive" case would
+// never reach the row lookup that produces ErrDriveNotFound — the error
+// this subtest is actually about. The encryptor is created once and
+// shared with the read-back below so the ciphertext round-trips.
 func TestDriveRepo_AppendRoutePoints(t *testing.T) {
 	cleanTables(t, testPool)
 	seedVehicle(t, testPool, "veh_012", "5YJ3E1EA1NF000012")
 
-	repo := store.NewDriveRepo(testPool, store.NoopMetrics{})
+	repo := store.NewDriveRepoWithEncryption(testPool, store.NoopMetrics{},
+		newTestEncryptor(t), silentRouteBlobLogger())
 	ctx := context.Background()
 
 	// Seed a drive.

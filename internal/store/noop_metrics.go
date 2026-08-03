@@ -8,4 +8,5 @@ var _ Metrics = NoopMetrics{}
 
 func (NoopMetrics) ObserveQueryDuration(string, float64) {}
 func (NoopMetrics) IncQueryError(string)                 {}
+func (NoopMetrics) IncDecryptFailure(string)             {}
 func (NoopMetrics) SetPoolStats(int32, int32, int32)     {}

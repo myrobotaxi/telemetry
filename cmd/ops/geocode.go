@@ -10,7 +10,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/myrobotaxi/telemetry/internal/cryptox"
 	"github.com/myrobotaxi/telemetry/internal/geocode"
 	"github.com/myrobotaxi/telemetry/internal/store"
 )
@@ -64,7 +63,10 @@ func runGeocodeBackfill(ctx context.Context, args []string) error {
 	}
 	defer db.Close()
 
-	drives := newDriveRepoForBackfill(db, logger)
+	drives, err := newDriveRepoForBackfill(db, logger)
+	if err != nil {
+		return err
+	}
 
 	rows, err := drives.ListMissingAddresses(ctx)
 	if err != nil {
@@ -108,30 +110,24 @@ func runGeocodeBackfill(ctx context.Context, args []string) error {
 	return nil
 }
 
-// newDriveRepoForBackfill prefers the encrypted routePointsEnc read path
-// when ENCRYPTION_KEY (or the versioned shape) is configured, but falls
-// back to the legacy plaintext-only DriveRepo when it isn't — unlike the
-// running server, this ops tool must not hard-fail on a missing key: the
-// dual-write's plaintext routePoints column is the source of truth
-// regardless of whether the encrypted shadow exists (see drive_repo.go),
-// so a plaintext-only read still returns correct coordinates for every
-// row that has any.
-func newDriveRepoForBackfill(db *store.DB, logger *slog.Logger) *store.DriveRepo {
-	ks, err := cryptox.LoadKeySetFromEnv()
+// newDriveRepoForBackfill builds the DriveRepo the geocode backfill
+// reads through. A usable ENCRYPTION_KEY is REQUIRED.
+//
+// This used to degrade to a plaintext-only DriveRepo on a missing or
+// broken key, on the reasoning that "the plaintext routePoints column is
+// the source of truth regardless of whether the encrypted shadow
+// exists". MYR-433 inverted that: routePointsEnc is now the only store
+// for a drive's GPS trail. A keyless run would read every trail as
+// empty, geocode nothing, and report success — the worst possible
+// outcome for a backfill. So the key is a hard requirement and its
+// absence is an error the operator sees immediately.
+func newDriveRepoForBackfill(db *store.DB, logger *slog.Logger) (*store.DriveRepo, error) {
+	repo, err := newDriveRepo(db, logger)
 	if err != nil {
-		logger.Warn("geocode backfill: no usable ENCRYPTION_KEY, reading routePoints plaintext-only",
-			slog.String("detail", err.Error()),
-		)
-		return store.NewDriveRepo(db.Pool(), store.NoopMetrics{})
+		return nil, fmt.Errorf("geocode backfill requires a usable ENCRYPTION_KEY "+
+			"(drive GPS trails are stored encrypted since MYR-433): %w", err)
 	}
-	enc, err := cryptox.NewEncryptor(ks)
-	if err != nil {
-		logger.Warn("geocode backfill: ENCRYPTION_KEY set but unusable, reading routePoints plaintext-only",
-			slog.String("detail", err.Error()),
-		)
-		return store.NewDriveRepo(db.Pool(), store.NoopMetrics{})
-	}
-	return store.NewDriveRepoWithEncryption(db.Pool(), store.NoopMetrics{}, enc, logger)
+	return repo, nil
 }
 
 // backfillOutcome classifies what happened to one Drive row so the

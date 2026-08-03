@@ -3,24 +3,34 @@ package store
 // Vehicle queries. All column names use double-quoted camelCase to match
 // the Prisma-generated PostgreSQL schema.
 //
-// vehicleSelectColumns lists every column read into the Vehicle struct
-// (and the encrypted-shadow ciphertext columns the read path needs to
-// resolve a GPS pair or nav-route blob). The trailing six *Enc GPS
-// columns are MYR-63 Phase 2 additions; the navRouteCoordinatesEnc
-// column is the MYR-64 Phase 2 addition. See vehicle_gps_encryption.go
-// and vehicle_repo_scan.go for the read-side preference rules.
+// vehicleSelectColumns lists every column read into the Vehicle struct.
+// Location data is read ONLY from the encrypted-shadow ciphertext
+// columns: MYR-433 retired the plaintext GPS and nav-route columns from
+// every read path, so the six `*Enc` GPS columns and
+// `navRouteCoordinatesEnc` are the sole source of truth for coordinates.
+//
+// The plaintext columns ("latitude", "longitude", "destinationLatitude",
+// "destinationLongitude", "originLatitude", "originLongitude",
+// "navRouteCoordinates") still EXIST on the Prisma-owned table — they are
+// dropped by a react-frontend Prisma migration, not from here (CG-DL-9
+// forbids Go migrations touching Prisma tables). They MUST NOT be added
+// back to this projection: selecting them is what made an operator with
+// DB access able to read a user's location (MYR-433 acceptance bar).
+// `cmd/purge-plaintext-columns` scrubs their residual values.
+//
+// See vehicle_gps_encryption.go and vehicle_repo_scan.go for the
+// ciphertext-only read rules.
 
 const vehicleSelectColumns = `"id", "userId", "vin", "name",
 	"model", "year", "color", "licensePlate", "status",
 	"chargeLevel", "estimatedRange", "chargeState", "timeToFull",
 	"speed", "gearPosition", "heading",
-	"latitude", "longitude", "locationName", "locationAddress",
+	"locationName", "locationAddress",
 	"interiorTemp", "exteriorTemp",
 	"odometerMiles", "fsdMilesSinceReset",
-	"destinationName", "destinationAddress", "destinationLatitude",
-	"destinationLongitude", "originLatitude", "originLongitude",
+	"destinationName", "destinationAddress",
 	"etaMinutes", "tripDistanceRemaining",
-	"navRouteCoordinates", "lastUpdated",
+	"lastUpdated",
 	"latitudeEnc", "longitudeEnc",
 	"destinationLatitudeEnc", "destinationLongitudeEnc",
 	"originLatitudeEnc", "originLongitudeEnc",
@@ -200,12 +210,15 @@ const queryUpdateVehicleStatus = `UPDATE "Vehicle"
 SET "status" = $1::"VehicleStatus", "lastUpdated" = NOW()
 WHERE "vin" = $2`
 
-// Drive queries. The Drive table is Prisma-owned. The MYR-64 dual-write
-// adds `routePointsEnc` (Text?) alongside the existing `routePoints`
-// JSONB column. Append-on-write is plaintext-first via jsonb concat
-// (||); the helper re-encrypts the post-append array into the shadow
-// in a follow-up UPDATE so the plaintext path is never blocked on
-// encryption.
+// Drive queries. The Drive table is Prisma-owned. MYR-433 made
+// `routePointsEnc` (Text?) the sole store for a drive's GPS trail: the
+// plaintext `routePoints` JSONB column is never read and never written
+// with real coordinates by this server again.
+//
+// `routePoints` is NOT NULL on the Prisma schema, so the INSERT still has
+// to supply a value — it writes the empty array literal `[]`, which
+// carries no location data. Every real coordinate goes to the ciphertext
+// column only.
 
 const queryDriveInsert = `INSERT INTO "Drive" (
 	"id", "vehicleId", "date", "startTime", "endTime",
@@ -219,24 +232,26 @@ const queryDriveInsert = `INSERT INTO "Drive" (
 	$6, $7, $8, $9,
 	$10, $11, $12, $13,
 	$14, $15, $16,
-	$17, $18, $19, $20::jsonb,
-	$21
+	$17, $18, $19, '[]'::jsonb,
+	$20
 )`
 
-// queryDriveAppendRoutePoints appends the delta to plaintext jsonb AND
-// returns the post-append array so the caller can re-encrypt the full
-// shape into the *Enc shadow in one round-trip. Phase 2 dual-write
-// semantics: the plaintext column is the source-of-truth (Tesla
-// telemetry never goes missing), so a shadow re-encrypt failure logs
-// + fails open without rolling back the plaintext append.
-const queryDriveAppendRoutePoints = `UPDATE "Drive"
-SET "routePoints" = "routePoints" || $2::jsonb
+// queryDriveLockRoutePointsEnc reads the current ciphertext trail and
+// locks the row for the read-modify-write append.
+//
+// The pre-MYR-433 append was a single in-database `jsonb ||` concat, which
+// was atomic for free. Appending to ciphertext cannot be done in SQL — the
+// server must decrypt, append, and re-seal — so the row lock is what
+// preserves the same atomicity. Without it two concurrent flushes for one
+// drive would each decrypt the same trail and the second write would
+// silently drop the first one's points.
+const queryDriveLockRoutePointsEnc = `SELECT "routePointsEnc"
+FROM "Drive"
 WHERE "id" = $1
-RETURNING "routePoints"`
+FOR UPDATE`
 
-// queryDriveSetRoutePointsEnc updates only the encrypted shadow. Used
-// after queryDriveAppendRoutePoints succeeds so the plaintext write is
-// not entangled with the encrypt round-trip.
+// queryDriveSetRoutePointsEnc writes the re-sealed trail. Runs inside the
+// same transaction as queryDriveLockRoutePointsEnc.
 const queryDriveSetRoutePointsEnc = `UPDATE "Drive"
 SET "routePointsEnc" = $2
 WHERE "id" = $1`
@@ -267,7 +282,7 @@ const queryDriveByID = `SELECT "id", "vehicleId", "date", "startTime", "endTime"
 	"startLocation", "startAddress", "endLocation", "endAddress",
 	"distanceMiles", "durationMinutes", "avgSpeedMph", "maxSpeedMph",
 	"energyUsedKwh", "startChargeLevel", "endChargeLevel",
-	"fsdMiles", "fsdPercentage", "interventions", "routePoints", "createdAt",
+	"fsdMiles", "fsdPercentage", "interventions", "createdAt",
 	"routePointsEnc"
 FROM "Drive"
 WHERE "id" = $1`
@@ -346,10 +361,12 @@ LIMIT $4`
 // Drive row still missing a start address, or missing an end address on
 // a row that has actually ENDED, oldest first (the backfill is a
 // one-shot admin sweep, not a hot path, so ordering by createdAt just
-// makes progress human-legible in logs). routePoints (+ routePointsEnc)
-// are included because the Drive table carries no dedicated start/end
-// lat/lng columns — the only source of coordinates to re-geocode is the
-// first and last recorded route point.
+// makes progress human-legible in logs). routePointsEnc is included
+// because the Drive table carries no dedicated start/end lat/lng columns
+// — the only source of coordinates to re-geocode is the first and last
+// recorded route point, and since MYR-433 that trail exists only as
+// ciphertext. The backfill therefore REQUIRES a usable encryption key;
+// see cmd/ops/geocode.go.
 //
 // The end-side predicate is deliberately gated on endTime: every Drive
 // row is created with endTime and endAddress both set to the empty
@@ -363,7 +380,7 @@ LIMIT $4`
 // mirrors queryDriveListOpen's predicate: the cleanup-binary findings
 // showed the column can be either representation depending on how the
 // row was inserted.
-const queryDriveMissingAddresses = `SELECT "id", "startAddress", "endAddress", "endTime", "routePoints", "routePointsEnc"
+const queryDriveMissingAddresses = `SELECT "id", "startAddress", "endAddress", "endTime", "routePointsEnc"
 FROM "Drive"
 WHERE "startAddress" = '' OR ("endAddress" = '' AND NOT ("endTime" IS NULL OR "endTime" = ''))
 ORDER BY "createdAt" ASC`
@@ -385,29 +402,46 @@ WHERE "id" = $1`
 // Account queries. The Account table is Prisma-owned (NextAuth). We read
 // tokens and update them in-place when refreshing expired OAuth tokens.
 //
-// During the MYR-62 cross-repo encryption rollout we live in a dual-write
-// regime: the read path prefers `*_enc` (AES-256-GCM ciphertext) when
-// non-NULL and falls back to the plaintext columns; the write path
-// updates BOTH the plaintext column and the `*_enc` ciphertext column in
-// one statement. The plaintext columns will be dropped in a separate
-// post-rollout migration once every row is encrypted and the
-// account_token_plaintext_remaining_total gauge reaches zero across all
-// three columns. See docs/contracts/data-classification.md §3.3.
+// MYR-433 ended the MYR-62 dual-write regime on this server: Tesla OAuth
+// tokens are read from and written to the `*_enc` (AES-256-GCM
+// ciphertext) columns ONLY. A Tesla access/refresh token in plaintext is
+// the sharpest item in the whole database — a leak of these columns is
+// fleet control over a user's car — so this server does not select them
+// and does not set them.
+//
+// The plaintext columns still EXIST on the Prisma-owned table (dropping
+// them is a react-frontend Prisma migration; CG-DL-9 forbids Go
+// migrations touching Prisma tables). `cmd/purge-plaintext-columns`
+// NULLs their residual values once the ciphertext sibling verifies.
+// See docs/contracts/data-classification.md §3.3.
 
 // #nosec G101 -- column-name SQL, not a credential. gosec greps the
 // constant for "access_token" / "refresh_token" / "id_token" and flags
 // the literal as a hardcoded credential by mistake.
 const queryTeslaToken = `SELECT
-    "access_token", "access_token_enc",
-    "refresh_token", "refresh_token_enc",
-    "id_token", "id_token_enc",
+    "access_token_enc",
+    "refresh_token_enc",
+    "id_token_enc",
     "expires_at"
 FROM "Account"
 WHERE "userId" = $1 AND "provider" = 'tesla'
 LIMIT 1`
 
+// queryUpdateTeslaToken writes a refreshed token pair as ciphertext, and
+// NULLs the legacy plaintext columns while it is there.
+//
+// The NULLs make this self-healing. A token refresh is the moment a
+// pre-MYR-433 plaintext credential becomes not merely exposed but WRONG —
+// it is a superseded token sitting in a readable column — so scrubbing it
+// here means an account heals itself on its next refresh (Tesla tokens are
+// short-lived, so that is hours) without waiting for
+// cmd/purge-plaintext-columns to be run. queryProvisionAccount does the
+// same on re-link; between them, every Go-side Account write leaves the
+// row clean.
 const queryUpdateTeslaToken = `UPDATE "Account"
-SET "access_token" = $1, "access_token_enc" = $2,
-    "refresh_token" = $3, "refresh_token_enc" = $4,
-    "expires_at" = $5
-WHERE "userId" = $6 AND "provider" = 'tesla'`
+SET "access_token_enc" = $1,
+    "refresh_token_enc" = $2,
+    "expires_at" = $3,
+    "access_token" = NULL,
+    "refresh_token" = NULL
+WHERE "userId" = $4 AND "provider" = 'tesla'`

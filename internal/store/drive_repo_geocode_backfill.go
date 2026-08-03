@@ -50,10 +50,15 @@ type DriveBackfillRow struct {
 // geocode 422'd) or rows where the geocoder had no result for that
 // coordinate.
 //
-// RoutePoints prefers the routePointsEnc shadow the same way GetByID
-// does, falling back to plaintext on decrypt/shape failure — reusing
-// applyResolvedRoutePoints via a throwaway DriveRecord so the two read
-// paths can't drift on which column wins.
+// RoutePoints is decrypted from routePointsEnc the same way GetByID does
+// it — reusing applyResolvedRoutePoints via a throwaway DriveRecord so
+// the two read paths can't drift.
+//
+// MYR-433: rows whose trail cannot be decrypted yield an empty
+// RoutePoints and are skipped by the caller rather than geocoded from a
+// plaintext column. A backfill run without a usable ENCRYPTION_KEY
+// therefore does nothing at all, which is why cmd/ops/geocode.go now
+// requires the key up front instead of silently degrading.
 func (r *DriveRepo) ListMissingAddresses(ctx context.Context) ([]DriveBackfillRow, error) {
 	start := time.Now()
 	rows, err := r.pool.Query(ctx, queryDriveMissingAddresses)
@@ -68,12 +73,12 @@ func (r *DriveRepo) ListMissingAddresses(ctx context.Context) ([]DriveBackfillRo
 	for rows.Next() {
 		var d DriveBackfillRow
 		var routePointsEnc *string
-		if scanErr := rows.Scan(&d.ID, &d.StartAddress, &d.EndAddress, &d.EndTime, &d.RoutePoints, &routePointsEnc); scanErr != nil {
+		if scanErr := rows.Scan(&d.ID, &d.StartAddress, &d.EndAddress, &d.EndTime, &routePointsEnc); scanErr != nil {
 			r.metrics.IncQueryError("drive.list_missing_addresses")
 			r.metrics.ObserveQueryDuration("drive.list_missing_addresses", time.Since(start).Seconds())
 			return nil, fmt.Errorf("DriveRepo.ListMissingAddresses: scan: %w", scanErr)
 		}
-		rec := DriveRecord{ID: d.ID, RoutePoints: d.RoutePoints}
+		rec := DriveRecord{ID: d.ID}
 		r.applyResolvedRoutePoints(&rec, routePointsEnc)
 		d.RoutePoints = rec.RoutePoints
 		out = append(out, d)

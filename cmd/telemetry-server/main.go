@@ -394,6 +394,11 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	// startPlaintextGauges in wiring.go.
 	startPlaintextGauges(ctx, reg, db.Pool(), accountTokenGaugeInterval, vehicleGPSGaugeInterval, routeBlobGaugeInterval, logger)
 
+	// --- Drive retention sweep (MYR-439, NFR-3.27) ---
+	// Daily at 03:00 UTC: deletes drives — rows, GPS trails and all — past the
+	// documented 365-day window, in audited batches. See wiring_retention.go.
+	startDrivePruner(ctx, cfg, reg, db.Pool(), logger)
+
 	// --- TLS endpoint cert monitor (MYR-188) ---
 	// Probes the served leaf cert on each configured public endpoint so an
 	// impending expiry pages BEFORE it takes down customer traffic —

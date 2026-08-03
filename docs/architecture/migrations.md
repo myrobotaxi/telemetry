@@ -93,6 +93,12 @@ The following tables are owned by the Next.js app's Prisma schema. Go migration 
 
 > The Go store layer holds read access (FK resolution) and narrow insert-only access (AuditLog) to some Prisma tables via regular application queries — NOT via migration files. Migration SQL is for schema changes only. Application queries against Prisma tables are a separate concern and are governed by `docs/contracts/data-lifecycle.md` §1.4.
 
+> **Corollary: one-off data changes to Prisma-owned tables are COMMANDS, not migrations.** The prohibition above covers `INSERT`/`UPDATE`/`DELETE`, not just DDL, so "write a migration that backfills/scrubs a Prisma column" is not an available move — CG-DL-9 fails the build on the table name alone.
+>
+> The sanctioned pattern is a binary under `cmd/` backed by a package under `internal/store/`, run deliberately by an operator rather than implicitly at server startup. Four exist today: `cmd/backfill-account-tokens`, `cmd/backfill-vehicle-gps`, `cmd/backfill-route-blobs` (each sealing legacy plaintext into a ciphertext column), and `cmd/purge-plaintext-columns` (MYR-433, removing the plaintext once sealed). Follow their shape: idempotent, batched, `-dry-run` where the change is destructive, and a machine-readable report on stdout with a non-zero exit when rows were skipped.
+>
+> This is also a better fit than a migration would be. These runs are long, they touch live rows, and they need an operator watching — none of which suits fail-fast-at-boot migration semantics.
+
 ### 4.3 CG-DL-9: enforcement (contract-guard)
 
 Contract-guard rule CG-DL-9 (see `docs/contracts/data-lifecycle.md` §7) enforces the above at PR-time:
