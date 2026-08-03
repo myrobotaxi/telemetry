@@ -16,6 +16,30 @@
 app = 'my-robo-taxi-telemetry'
 primary_region = 'iad'
 
+# SIGTERM → SIGKILL budget for a deploy or a machine restart (MYR-410).
+#
+# Fly's default is 5s, which this server cannot shut down in — and blowing it
+# means SIGKILL lands mid-drain and a rider's push is dropped silently, which is
+# the exact failure MYR-410 exists to prevent. Note the grace_period under
+# services.http_checks below is HEALTH-CHECK grace and has nothing to do with
+# this; that mix-up is what set the budget wrong the first time.
+#
+# Worst-case arithmetic for the shutdown sequence, in execution order:
+#
+#   HTTP servers (internal/server.shutdownTimeout)         15s
+#   consumer Stops, writer's two 10s flushes dominating    25s
+#   shutdownDrainBudget in main.go: bus drain 5s + the
+#     bounded push drains that follow it                   15s
+#   db.Close and process teardown                           1s
+#   --------------------------------------------------------
+#   total worst case                                       56s
+#
+# 75s leaves headroom for a slow VM without letting a wedged shutdown stall a
+# deploy indefinitely. Every step above is individually bounded, so the total is
+# a real ceiling rather than an estimate. If you change any of those constants,
+# change this with them.
+kill_timeout = '75s'
+
 [build]
   dockerfile = 'Dockerfile'
 

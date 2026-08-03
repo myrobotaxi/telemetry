@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"errors"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -927,6 +928,80 @@ func TestReconcile_FloorsOlderThanAtOverallTimeout(t *testing.T) {
 	}
 	if lister.gotOlderThan != 90*time.Second {
 		t.Errorf("olderThan = %v, want floored to 90s (OverallTimeout)", lister.gotOlderThan)
+	}
+}
+
+// count returns how many distinct rides have recorded an outcome.
+func (s *concurrentStore) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.recorded)
+}
+
+// countingExecutor succeeds on every command and is safe for concurrent use
+// (unlike fakeExecutor, whose call slice is unguarded).
+type countingExecutor struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *countingExecutor) Execute(_ context.Context, req commands.Request) (commands.Result, error) {
+	c.mu.Lock()
+	c.calls++
+	c.mu.Unlock()
+	return commands.Result{Command: req.Command, Applied: true}, nil
+}
+
+// TestHandle_WaitDrainsConcurrentDispatches pins MYR-410.
+//
+// Wait always runs on a different goroutine from the one starting workers — in
+// production the bus's delivery goroutine, stood in for here — and nothing
+// orders the two. So a dispatch may be registered at the very moment a drain
+// begins, and Wait must still cover it. A sync.WaitGroup did not: its counter
+// may be read empty in that window, which is a drain that ends with a pickup
+// still in flight and a car that never gets the nav.
+//
+// Same shape as the Live Activity notifier's regression test from #364,
+// replayed on the second site that fix left carrying the bug.
+func TestHandle_WaitDrainsConcurrentDispatches(t *testing.T) {
+	st := &concurrentStore{recorded: map[string]recordCall{}}
+	exec := &countingExecutor{}
+	d := New(
+		echoVehicleResolver{},
+		&fakeTokenSource{token: "tok"},
+		exec, st,
+		Config{Enabled: true, MaxRetries: 0, MaxConcurrent: 4, Backoff: time.Millisecond},
+		nil,
+	)
+
+	const dispatches = 200
+	handled := make(chan struct{})
+	go func() {
+		defer close(handled)
+		for i := 0; i < dispatches; i++ {
+			d.handle(events.Event{ID: "e" + strconv.Itoa(i), Payload: events.RideAcceptedEvent{
+				RideRequestID: "ride" + strconv.Itoa(i),
+				VehicleID:     "veh" + strconv.Itoa(i),
+				OwnerID:       "owner",
+				Pickup:        events.RidePlace{Latitude: 37.7955, Longitude: -122.3937},
+			}})
+		}
+	}()
+
+	// Drain repeatedly against the live producer, the way shutdown races it.
+	for draining := true; draining; {
+		d.Wait()
+		select {
+		case <-handled:
+			draining = false
+		default:
+		}
+	}
+
+	// Every dispatch is registered by now, so this drain is the whole set.
+	d.Wait()
+	if got := st.count(); got != dispatches {
+		t.Errorf("Wait() returned with %d of %d dispatches recorded — a drain that ends early leaves a pickup unsent", got, dispatches)
 	}
 }
 

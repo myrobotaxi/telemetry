@@ -566,3 +566,46 @@ func TestNotifierSubscribeDeliversFromRealBus(t *testing.T) {
 		}
 	}
 }
+
+// TestNotifierWaitDrainsConcurrentSends pins MYR-410.
+//
+// Wait always runs on a different goroutine from the one starting workers — in
+// production the bus's delivery goroutine, stood in for here, racing main's
+// `defer notifier.Wait()` — and nothing orders the two. So a fan-out may be
+// registered at the very moment a drain begins, and Wait must still cover it. A
+// sync.WaitGroup did not: its counter may be read empty in that window, which
+// is a deploy landing mid-ride and a rider never getting the alert their
+// transition had already earned.
+//
+// This is the regression test #364 wrote for the Live Activity notifier,
+// replayed here on the alert notifier — the copy of the bug that fix
+// deliberately left behind.
+func TestNotifierWaitDrainsConcurrentSends(t *testing.T) {
+	sender := NewFakeSender()
+	n := newTestNotifier(t, sender, &fakeVehicleNamer{name: "Blue Whale"})
+
+	const sends = 200
+	handled := make(chan struct{})
+	go func() {
+		defer close(handled)
+		for i := 0; i < sends; i++ {
+			n.handleCreated(createdEvent(nil, nil))
+		}
+	}()
+
+	// Drain repeatedly against the live producer, the way shutdown races it.
+	for draining := true; draining; {
+		n.Wait()
+		select {
+		case <-handled:
+			draining = false
+		default:
+		}
+	}
+
+	// Every fan-out is registered by now, so this drain is the whole set.
+	n.Wait()
+	if got := len(sender.Sent()); got != sends {
+		t.Errorf("Wait() returned with %d of %d notifications sent — a drain that ends early drops a push the rider was owed", got, sends)
+	}
+}

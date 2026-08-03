@@ -3,6 +3,7 @@ package events
 import (
 	"log/slog"
 	"sync"
+	"sync/atomic"
 )
 
 // topicEntry holds all subscribers for a single topic.
@@ -49,8 +50,11 @@ func sendToSubscriber(s *subscriber, event Event, metrics BusMetrics, logger *sl
 
 // deliverLoop reads events from the subscriber's channel and calls the
 // handler until the done channel is closed, then drains remaining events.
-func deliverLoop(s *subscriber, topic Topic, metrics BusMetrics, wg *sync.WaitGroup) {
+func deliverLoop(s *subscriber, topic Topic, metrics BusMetrics, wg *sync.WaitGroup, live *atomic.Int64) {
 	defer wg.Done()
+	// live mirrors wg readably so a timed-out Close can report how many
+	// delivery goroutines are still running (MYR-410).
+	defer live.Add(-1)
 	for {
 		select {
 		case <-s.done:

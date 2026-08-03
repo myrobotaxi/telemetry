@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/myrobotaxi/telemetry/internal/drain"
 	"github.com/myrobotaxi/telemetry/internal/events"
 )
 
@@ -90,10 +91,13 @@ type Notifier struct {
 	logger   *slog.Logger
 
 	sem  chan struct{}
-	wg   sync.WaitGroup
 	mu   sync.Mutex
 	subs []events.Subscription
 	bus  events.Bus
+	// workers counts the detached fan-outs async has started and not yet
+	// retired. Not a sync.WaitGroup — see Wait, and internal/drain for the
+	// argument (MYR-410).
+	workers drain.Group
 }
 
 // NewNotifier builds a Notifier. sender may be nil — that is the KEYLESS mode
@@ -191,9 +195,45 @@ func (n *Notifier) Unsubscribe() {
 	}
 }
 
-// Wait blocks until every in-flight fan-out finishes. Call after the bus is
-// closed on shutdown; tests use it to make delivery deterministic.
-func (n *Notifier) Wait() { n.wg.Wait() }
+// Wait blocks until every in-flight fan-out finishes. Shutdown calls it so a
+// deploy landing mid-ride still delivers the push it already accepted; tests
+// use it to make delivery deterministic.
+//
+// It is NOT backed by a sync.WaitGroup, and cannot be (MYR-410). Wait runs on
+// the goroutine shutting the process down, while async's counting runs on the
+// bus's delivery goroutine, and nothing orders the two — so an event Publish
+// has already accepted can still be on its way into async when Wait looks. A
+// WaitGroup read in that window is silently empty: Wait returns, the process
+// exits, and the rider never gets the notification. internal/drain counts under
+// the mutex the waiter blocks on, which has no such window. The identical bug
+// was found and fixed on the Live Activity notifier first (MYR-398); this site
+// and the nav dispatcher were the two copies it left behind.
+//
+// This Wait is HALF of the shutdown guarantee, not the whole of it. It covers
+// fan-outs that have STARTED. An event still sitting in this subscriber's
+// buffered channel has not reached handleCreated at all, so there is nothing to
+// count and Wait returns over it — the dropped push, by a second route. The bus
+// Close is what runs that backlog through the handler; only after it has can
+// this Wait mean "every accepted event was delivered". cmd/telemetry-server
+// orders the two, and its shutdown-order comment block is the authority.
+func (n *Notifier) Wait() { n.workers.Wait() }
+
+// WaitContext is Wait with a deadline, returning how many fan-outs were still
+// in flight when it gave up (0 on a clean drain).
+//
+// Shutdown uses this rather than Wait. A fan-out runs on a fresh Background
+// context bounded only by cfg.Timeout, which SIGTERM cannot shorten, and
+// bus.Close hands this drain the whole buffered backlog at once — so an
+// unbounded wait here can outlive the platform's kill timeout and be SIGKILLed
+// mid-push. Abandoning the tail at a deadline loses the same pushes but says
+// so.
+func (n *Notifier) WaitContext(ctx context.Context) (int, error) {
+	inFlight, err := n.workers.WaitContext(ctx)
+	if err != nil {
+		return inFlight, fmt.Errorf("push.Notifier.WaitContext (%d fan-out(s) abandoned): %w", inFlight, err)
+	}
+	return 0, nil
+}
 
 // handleCreated notifies the vehicle OWNER that somebody wants a ride.
 func (n *Notifier) handleCreated(evt events.Event) {
@@ -278,10 +318,14 @@ func (n *Notifier) logUnexpectedPayload(evt events.Event) {
 // goroutine either runs or parks on sem — it never fans out further. The cap
 // therefore bounds concurrent APNs traffic, not goroutine count, which is the
 // resource actually worth limiting.
+//
+// The fan-out is counted HERE, on the bus's delivery goroutine, and not inside
+// the worker: counting after the go statement would reopen the window Wait
+// exists to close.
 func (n *Notifier) async(fn func(context.Context)) {
-	n.wg.Add(1)
+	done := n.workers.Track()
 	go func() {
-		defer n.wg.Done()
+		defer done()
 		n.sem <- struct{}{}
 		defer func() { <-n.sem }()
 
