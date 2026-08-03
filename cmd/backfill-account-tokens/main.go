@@ -1,7 +1,16 @@
 // Binary backfill-account-tokens encrypts pre-existing plaintext OAuth
-// tokens in the Account table into their *_enc ciphertext columns
-// (MYR-62 dual-write rollout). Idempotent: re-running over a fully
-// migrated table is a no-op.
+// tokens in the Account table into their *_enc ciphertext columns.
+// Idempotent: re-running over a fully migrated table is a no-op.
+//
+// Covers EVERY provider — Tesla, Apple, and anything NextAuth links in
+// future. It was Tesla-only until the first production purge (MYR-433)
+// found 7 unsealed Apple Sign-in rows; see the package comment on
+// internal/store/accountbackfill for why sealing them is correct and
+// what was checked first.
+//
+// Run this BEFORE cmd/purge-plaintext-columns. The purge will not scrub a
+// plaintext value that has no ciphertext copy, so anything this misses is
+// a row that stays readable.
 //
 // Configuration is env-driven, matching the running telemetry-server:
 //

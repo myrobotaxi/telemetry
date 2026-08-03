@@ -1,8 +1,31 @@
 // Package accountbackfill encrypts pre-existing Account.<col> plaintext
-// rows into the matching Account.<col>_enc ciphertext column during the
-// MYR-62 cross-repo encryption rollout. It is the dual-write companion
-// to AccountRepo.UpdateTeslaToken: the repo handles new writes; this
-// package handles the legacy backlog.
+// rows into the matching Account.<col>_enc ciphertext column. It is the
+// companion to AccountRepo.UpdateTeslaToken: the repo handles new writes;
+// this package handles the legacy backlog, and its output is the
+// precondition for cmd/purge-plaintext-columns (which refuses to scrub a
+// plaintext value that has no ciphertext copy).
+//
+// # Every provider, not just Tesla
+//
+// This originally scanned `WHERE "provider" = 'tesla'`, because MYR-62
+// was scoped to the Tesla OAuth tokens the telemetry server itself reads.
+// The first production purge run (MYR-433) found what that missed: 7
+// Apple Sign-in rows holding plaintext `access_token` and `id_token` that
+// the purge correctly refused to touch, because nothing had sealed them.
+//
+// An Apple `id_token` is an identity JWT and an `access_token` is a
+// credential; they meet the same bar as the Tesla pair — "a database leak
+// yields ciphertext" — and the fact that this server does not happen to
+// read them is not a reason to leave them legible. So the scan is now
+// provider-agnostic: every Account row, every token column.
+//
+// Nothing reads these columns for non-Tesla rows. Verified across both
+// repos before the change (MYR-433 follow-up): in Go every Account query
+// is `provider = 'tesla'`-scoped; in the Next.js app the only token
+// consumer is `src/lib/tesla.ts`, also Tesla-scoped, and the Prisma
+// adapter's `getUserByAccount` hydrates the row but returns only
+// `account.user` — the tokens are discarded. See the PR for the full
+// read map.
 //
 // Idempotent. Re-running over a fully migrated table touches zero rows.
 // Mixed-state rows (some columns encrypted, others not) are recoverable:
@@ -150,12 +173,9 @@ func (b *Backfiller) collectBatch(ctx context.Context, res *Result) ([]pending, 
             "refresh_token", "refresh_token_enc",
             "id_token",      "id_token_enc"
         FROM "Account"
-        WHERE "provider" = 'tesla'
-          AND (
-              ("access_token"  IS NOT NULL AND "access_token_enc"  IS NULL)
+        WHERE ("access_token"  IS NOT NULL AND "access_token_enc"  IS NULL)
            OR ("refresh_token" IS NOT NULL AND "refresh_token_enc" IS NULL)
-           OR ("id_token"      IS NOT NULL AND "id_token_enc"      IS NULL)
-          )`
+           OR ("id_token"      IS NOT NULL AND "id_token_enc"      IS NULL)`
 	rows, err := b.pool.Query(ctx, selectSQL)
 	if err != nil {
 		return nil, fmt.Errorf("accountbackfill: select rows: %w", err)
@@ -264,10 +284,17 @@ WHERE "id" = $1`
 	return firstErr
 }
 
-// CountPlaintextRemaining reports, per token column, the number of Tesla
-// Account rows where `<col>` is non-NULL and `<col>_enc` is NULL — i.e.
-// rows that still hold plaintext without ciphertext. Used by the CLI's
-// post-run report and by the running server's periodic gauge update.
+// CountPlaintextRemaining reports, per token column, the number of
+// Account rows — across EVERY provider — where `<col>` is non-NULL and
+// `<col>_enc` is NULL, i.e. rows that still hold plaintext without
+// ciphertext. Used by the CLI's post-run report and by the running
+// server's periodic gauge update.
+//
+// The provider filter was removed alongside the scan's. It had to be:
+// a gauge that reads zero while 7 Apple rows sit unsealed is worse than
+// no gauge, because it is the signal an operator uses to decide the
+// rollout is finished. That is exactly how the MYR-433 residual survived
+// the first production pass.
 //
 // Exported because the gauge wiring in cmd/telemetry-server/ needs to
 // call this without owning the rest of the Backfiller.
@@ -276,8 +303,7 @@ func CountPlaintextRemaining(ctx context.Context, p pool) (map[string]int, error
 	for _, col := range TokenColumns {
 		// Column names are constants, not user input: safe to interpolate.
 		sql := fmt.Sprintf(
-			`SELECT COUNT(*) FROM "Account"
-             WHERE "provider" = 'tesla' AND %q IS NOT NULL AND %q IS NULL`,
+			`SELECT COUNT(*) FROM "Account" WHERE %q IS NOT NULL AND %q IS NULL`,
 			col, col+"_enc",
 		)
 		var n int
