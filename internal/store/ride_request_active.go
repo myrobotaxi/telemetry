@@ -132,7 +132,8 @@ LIMIT $5`
 // IT RETURNS A LIST, AND THE LIST CAN LEGITIMATELY HOLD MORE THAN ONE ROW.
 // Index 0013 guarantees at most one active INSTANT ride per vehicle, but it is
 // partial on `scheduled_for IS NULL`, so DUE RESERVATIONS are exempt from it: a
-// reservation the sweeper is holding (car busy, owner paused, grant withdrawn)
+// reservation the sweeper is holding (car busy, owner paused, grant withdrawn,
+// or — since MYR-372 — the car in service at dispatch time)
 // stays `accepted` past its due instant and is live by the pickup contract even
 // while an instant ride occupies the car. The common case is 0 or 1 rows; the
 // pagination is not decoration.
