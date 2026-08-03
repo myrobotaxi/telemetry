@@ -24,6 +24,9 @@ type ChannelBus struct {
 	topics map[Topic]*topicEntry
 	closed atomic.Bool
 	wg     sync.WaitGroup // tracks subscriber goroutines
+	// liveSubs mirrors wg as a readable count, so a timed-out Close can say
+	// how many delivery goroutines it is walking away from (MYR-410).
+	liveSubs atomic.Int64
 }
 
 var _ Bus = (*ChannelBus)(nil)
@@ -112,7 +115,8 @@ func (b *ChannelBus) Subscribe(topic Topic, handler Handler) (Subscription, erro
 	)
 
 	b.wg.Add(1)
-	go deliverLoop(sub, topic, b.metrics, &b.wg)
+	b.liveSubs.Add(1)
+	go deliverLoop(sub, topic, b.metrics, &b.wg, &b.liveSubs)
 
 	return Subscription{ID: sub.id, Topic: topic}, nil
 }
@@ -188,8 +192,32 @@ func (b *ChannelBus) Close(ctx context.Context) error {
 	select {
 	case <-done:
 		b.logger.Info("event bus drained and stopped cleanly")
+		return nil
 	case <-drainCtx.Done():
-		b.logger.Warn("event bus drain timed out, some events may have been lost")
+		// Report, do not swallow. Returning nil here would tell the caller the
+		// bus was quiet when handlers are in fact still running — and the
+		// caller's next move is tearing down the database those handlers write
+		// to (MYR-410).
+		report := &DrainIncompleteError{
+			HandlersLive:    int(b.liveSubs.Load()),
+			EventsUndrained: undeliveredEvents(allSubs),
+		}
+		b.logger.Warn("event bus drain timed out, events lost",
+			slog.Int("handlers_live", report.HandlersLive),
+			slog.Int("events_undelivered", report.EventsUndrained),
+			slog.Duration("drain_timeout", b.cfg.DrainTimeout),
+		)
+		return report
 	}
-	return nil
+}
+
+// undeliveredEvents counts what is still sitting in subscriber buffers, never
+// handed to a handler. Reading len on a channel is safe concurrently; the count
+// is a snapshot, which is all a shutdown log line needs.
+func undeliveredEvents(subs []*subscriber) int {
+	total := 0
+	for _, s := range subs {
+		total += len(s.ch)
+	}
+	return total
 }

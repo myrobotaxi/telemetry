@@ -915,12 +915,28 @@ func TestChannelBus_CloseWithDrainTimeout(t *testing.T) {
 		}
 	}
 
-	// Close should return after DrainTimeout without hanging.
+	// Close should return after DrainTimeout without hanging, and must REPORT
+	// what it walked away from rather than returning nil (MYR-410). Returning
+	// nil told the caller the bus was quiet while handlers were still running,
+	// and the caller's next move is closing the database they write to.
 	start := time.Now()
-	if err := bus.Close(context.Background()); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	err = bus.Close(context.Background())
 	elapsed := time.Since(start)
+
+	var incomplete *DrainIncompleteError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("close on a timed-out drain: got %v, want a *DrainIncompleteError", err)
+	}
+	if !errors.Is(err, ErrDrainIncomplete) {
+		t.Errorf("errors.Is(err, ErrDrainIncomplete) = false, want true")
+	}
+	if incomplete.HandlersLive != 1 {
+		t.Errorf("HandlersLive = %d, want 1 (the blocked handler)", incomplete.HandlersLive)
+	}
+	// One event is in the handler; the rest never left the buffer.
+	if incomplete.EventsUndrained != 4 {
+		t.Errorf("EventsUndrained = %d, want 4", incomplete.EventsUndrained)
+	}
 
 	// Should complete roughly around DrainTimeout, not 2s+.
 	if elapsed > 500*time.Millisecond {
