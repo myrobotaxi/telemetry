@@ -172,7 +172,7 @@
     },
     "exteriorTemp": {
       "type": "integer",
-      "description": "Ambient exterior temperature. Rounded to nearest integer. OWNER-ONLY since MYR-435 — the ambiguous case, resolved toward removal: it is delivered in the climate atomic group and has no viewer-facing consumer. Moved OUT of `required` in the same change, for the same reason as interiorTemp.",
+      "description": "Ambient exterior temperature. Rounded to nearest integer. OWNER-ONLY since MYR-435 — the ambiguous case, resolved toward removal: ambient air is closer to weather than to privacy, but a rider beside the car already knows the weather, no viewer-facing surface renders it, and it arrives on the same climate read-back as its cabin siblings, so for a viewer it is data with no consumer. NOTE: it is NOT a member of any declared x-atomic-group (an earlier draft of this description said otherwise), so withholding it splits no group — the guard is TestViewerMaskNeverSplitsAnAtomicGroup. Moved OUT of `required` in the same change, for the same reason as interiorTemp.",
       "x-unit": "fahrenheit",
       "x-classification": "P0"
     },

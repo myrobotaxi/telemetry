@@ -674,9 +674,17 @@ The mask matrix is the **same matrix used by the REST handler layer** (`rest-api
 
 `Client.vehicleRoles map[VehicleID]Role` is populated at handshake time alongside `Client.vehicleIDs`. The `Authenticator.ResolveRole(ctx, userId, vehicleId)` interface method returns the role for each owned vehicle. Like `vehicleIDs`, `vehicleRoles` is a snapshot — see DV-09 below for the mid-connection refresh gap, which extends to role downgrade (e.g., a viewer being upgraded to owner mid-connection does not reflect until reconnection).
 
-**Empty-payload suppression.** If a role's mask projection yields a payload with no remaining fields (every field in the original frame was masked away), the hub MUST omit the frame for that role rather than send an empty `vehicle_update`. Sending an empty broadcast would leak "something happened on this vehicle" to a viewer who shouldn't even know the field existed.
+**Empty-payload suppression.** If a role's mask projection leaves nothing of substance, the hub MUST omit the frame for that role rather than send a `vehicle_update`. Sending it would leak "something happened on this vehicle" to a viewer who shouldn't even know the field existed.
 
-This matters more after MYR-435 than it did before: a frame carrying only cabin or media deltas now projects to **nothing** for a viewer, so suppression is the difference between silence and a stream of empty frames that would let a viewer infer "the owner is adjusting something in the cabin" from timing alone.
+**"Nothing of substance" is NOT "zero keys" — MYR-435.** This rule was originally implemented as `len(projected) == 0`, and that implementation could not fire on the shape production actually emits. The broadcast path injects `lastUpdated` into every non-nav frame **before** masking, and `lastUpdated` is viewer-visible (a viewer must be able to tell live from stale). So a frame carrying only owner-only deltas did not project to zero fields for a viewer — it projected to exactly one, `{"lastUpdated": …}`, the gate never fired, and the frame went out.
+
+The values were masked; **the frame timing was not**. A `mediaNowPlayingElapsedMs` tick alone became a beacon pulsing only while audio plays — precisely the "someone is listening right now" occupancy signal that withholding the media block exists to prevent. Lock, trunk and climate deltas are the same tell. Masking values while forwarding their timing defeats the point of masking.
+
+The predicate is therefore: **does the projection carry at least one field that is an observation of the vehicle?** A projection consisting solely of envelope keys — keys describing the frame rather than the car — MUST be suppressed. The envelope-key set is defined in `internal/mask` (`mask.IsSubstantive`) rather than in the ws package, deliberately: it is the same place the role allow-lists live, so the two cannot drift. Today the set is exactly `lastUpdated`.
+
+A key qualifies as envelope only if it is viewer-visible **and** its value is a property of the delivery rather than an observation of the car. `status`, `chargeLevel` and `vehicleId` do not qualify — each is a legitimate one-field frame.
+
+This applies to **both** WS delivery paths through the same predicate: the live broadcast (`buildRoleFrames`) and the connect-time snapshot replay (`enqueueSnapshotFrame`, §2.4), which sets `ungrouped["lastUpdated"]` before projecting and so had the identical latent hole. It is applied for **all** roles, not just viewers: a frame saying only "the timestamp changed" informs nobody. That cannot regress owners, because the broadcast path returns early when there are no real fields to send, before `lastUpdated` is added.
 
 #### 4.6.1 What a `viewer` receives on `vehicle_update` (MYR-435)
 
