@@ -208,6 +208,14 @@ func (n *Notifier) Unsubscribe() {
 // the mutex the waiter blocks on, which has no such window. The identical bug
 // was found and fixed on the Live Activity notifier first (MYR-398); this site
 // and the nav dispatcher were the two copies it left behind.
+//
+// This Wait is HALF of the shutdown guarantee, not the whole of it. It covers
+// fan-outs that have STARTED. An event still sitting in this subscriber's
+// buffered channel has not reached handleCreated at all, so there is nothing to
+// count and Wait returns over it — the dropped push, by a second route. The bus
+// Close is what runs that backlog through the handler; only after it has can
+// this Wait mean "every accepted event was delivered". cmd/telemetry-server
+// orders the two, and its shutdown-order comment block is the authority.
 func (n *Notifier) Wait() { n.workers.Wait() }
 
 // handleCreated notifies the vehicle OWNER that somebody wants a ride.

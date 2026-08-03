@@ -32,6 +32,28 @@
 // stays reusable: tests call Wait over and over, and each call is just a
 // barrier over whatever is in flight right then.
 //
+// # What this does NOT do
+//
+// A Group drains work that has been STARTED. It cannot drain work nobody has
+// told it about, and on the event-bus path there is a whole category of that:
+// subscriber channels are BUFFERED, so an event Publish has already accepted
+// can be sitting in a buffer with its handler never entered. Track has not run,
+// the counter is zero, and Wait returns immediately — byte-for-byte the
+// WaitGroup outcome above. The mutex serialises the counter; it cannot order
+// work that is not yet countable.
+//
+// So the guarantee is a PAIR, and neither half is one alone:
+//
+//	bus.Close(ctx)  // runs each buffered backlog through its handler,
+//	                // turning accepted work into started work
+//	group.Wait()    // then covers the workers those handlers started
+//
+// Reversed, or with the Close missing, the drain reads an empty counter and the
+// process exits with the backlog undelivered. "Belongs to the next drain" is
+// fine mid-flight and worthless at shutdown, where there is no next drain. See
+// cmd/telemetry-server's shutdown-order block for the sequence, and
+// internal/push's shutdown_drain_test.go for the pinned behaviour.
+//
 // The pattern was proven on the Live Activity notifier in MYR-398 and lifted
 // into this package in MYR-410, when the alert notifier (internal/push) and the
 // nav dispatcher (internal/dispatch) turned out to carry the identical latent

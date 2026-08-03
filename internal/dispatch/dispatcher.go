@@ -167,8 +167,8 @@ func (d *Dispatcher) Subscribe(bus events.Bus) (events.Subscription, error) {
 	return sub, nil
 }
 
-// Wait blocks until all in-flight dispatches finish. Call after unsubscribing
-// (bus.Close) on shutdown to drain cleanly; also used by tests.
+// Wait blocks until all in-flight dispatches finish. Call AFTER bus.Close on
+// shutdown, never before; also used by tests.
 //
 // It is NOT backed by a sync.WaitGroup, and cannot be (MYR-410). Wait runs on
 // whichever goroutine is shutting down, while dispatchAsync's counting runs on
@@ -178,6 +178,16 @@ func (d *Dispatcher) Subscribe(bus events.Bus) (events.Subscription, error) {
 // early and a pickup that was mid-flight never reaches the car. internal/drain
 // counts under the mutex the waiter blocks on, which has no such window. Same
 // bug, same fix as the Live Activity notifier in MYR-398.
+//
+// The ordering above is load-bearing, not advisory. This Wait covers dispatches
+// that have STARTED; an event still in this subscriber's buffered channel has
+// not reached handle, so nothing is counted and Wait returns over it. bus.Close
+// is what makes that backlog started work. The pair is the guarantee.
+//
+// NOTE: cmd/telemetry-server does not call this yet — setupNavDispatcher never
+// returns the dispatcher. Wiring it needs a BOUNDED wait, because one dispatch
+// may run for OverallTimeout (2 minutes) against a 10s deploy grace period.
+// That is MYR-431.
 func (d *Dispatcher) Wait() { d.workers.Wait() }
 
 // handle is the events.Handler: it type-asserts and hands the event to a
