@@ -1,24 +1,36 @@
-// Package store — DriveRepo lives behind a dual-write contract during
-// the MYR-64 cross-repo route-blob encryption rollout (NFR-3.23).
+// Package store — DriveRepo stores a drive's GPS trail as ciphertext
+// only (NFR-3.23, MYR-433). The trail is the single most sensitive
+// non-credential thing in this database: it is a minute-by-minute record
+// of where a person drove. The client's acceptance bar for MYR-433 was
+// that an operator with database access cannot read it.
 //
-// Read path: GetByID prefers the encrypted shadow `routePointsEnc`
-// when non-NULL and falls back to the plaintext `routePoints` JSONB
-// column on decrypt/unmarshal failure. The plaintext column is
-// non-nullable on the Prisma schema (defaults to `[]`), so the
-// fallback always has a value to surface.
+// Read path: GetByID decrypts `routePointsEnc`. The plaintext
+// `routePoints` JSONB column is not selected and is never consulted; on
+// any decrypt failure the trail reads as empty rather than falling back.
 //
-// Write path: Create dual-writes the seed array (typically `[]`).
-// AppendRoutePoints does a plaintext-first concat in PostgreSQL via
-// `jsonb_concat (||)` and uses RETURNING to read the post-append array
-// back; the helper then re-encrypts that full shape into the shadow
-// in a follow-up UPDATE. The two UPDATEs are not transactional — the
-// plaintext write is the source of truth and a shadow re-encrypt
-// failure logs at Warn rather than rolling back the plaintext (Tesla
-// telemetry MUST NOT be lost over an encryption hiccup).
+// Write path: Create seeds `routePoints` with the literal `[]` (the
+// column is NOT NULL on the Prisma schema and must be given something)
+// and puts any real seed trail in `routePointsEnc`.
 //
-// The Encryptor is opt-in via NewDriveRepoWithEncryption. The legacy
-// NewDriveRepo constructor stays plaintext-only for tests and
-// migration windows.
+// AppendRoutePoints is the interesting one. The pre-MYR-433 version
+// appended in SQL with `jsonb ||`, which was atomic for free, then
+// re-encrypted the RETURNING value into the shadow fail-open. Ciphertext
+// cannot be concatenated in the database, so the append is now a
+// read-modify-write in Go, wrapped in a transaction with SELECT … FOR
+// UPDATE. Two properties are deliberate:
+//
+//   - The row lock replaces the atomicity the SQL concat gave us. Without
+//     it, two concurrent flushes for one drive would both decrypt the same
+//     trail and the second commit would silently drop the first's points.
+//   - It is fail-CLOSED. A decrypt or encrypt failure aborts the append
+//     and returns an error. The old fail-open behaviour was correct when a
+//     plaintext copy was still landing; now, writing anyway would overwrite
+//     an unreadable-but-intact trail with a fragment, destroying history.
+//     An error lets the caller retry with the buffer still in hand.
+//
+// The Encryptor is opt-in via NewDriveRepoWithEncryption. A repo built
+// with the legacy NewDriveRepo constructor cannot persist or read a
+// trail at all — AppendRoutePoints returns ErrEncryptionRequired.
 
 package store
 
@@ -70,12 +82,11 @@ func NewDriveRepoWithEncryption(pool *pgxpool.Pool, metrics Metrics, encryptor c
 // created with placeholder end-time fields that will be filled in when
 // the drive completes.
 //
-// MYR-64: when an Encryptor is wired, the seed routePoints array is
-// also encrypted into routePointsEnc. The seed is typically `[]`, in
-// which case routeblob.EncryptJSONBytes returns the empty sentinel and
-// the shadow is left NULL — the read path will fall back to the
-// plaintext `[]` until the first AppendRoutePoints call writes a real
-// shadow.
+// MYR-433: the seed trail is written to routePointsEnc only; the
+// plaintext column receives the literal `[]` from the INSERT itself. The
+// seed is typically empty anyway, in which case
+// routeblob.EncryptJSONBytes returns the empty sentinel and the shadow
+// is left NULL until the first AppendRoutePoints call.
 func (r *DriveRepo) Create(ctx context.Context, drive DriveRecord) error {
 	routePoints := drive.RoutePoints
 	if routePoints == nil {
@@ -90,7 +101,7 @@ func (r *DriveRepo) Create(ctx context.Context, drive DriveRecord) error {
 		drive.StartLocation, drive.StartAddress, drive.EndLocation, drive.EndAddress,
 		drive.DistanceMiles, drive.DurationMinutes, drive.AvgSpeedMph, drive.MaxSpeedMph,
 		drive.EnergyUsedKwh, drive.StartChargeLevel, drive.EndChargeLevel,
-		drive.FsdMiles, drive.FsdPercentage, drive.Interventions, routePoints,
+		drive.FsdMiles, drive.FsdPercentage, drive.Interventions,
 		encShadow, // nil-string when encryptor is absent or shadow is empty
 	)
 	r.metrics.ObserveQueryDuration("drive.create", time.Since(start).Seconds())
@@ -117,75 +128,115 @@ func (r *DriveRepo) Delete(ctx context.Context, driveID string) error {
 	return nil
 }
 
-// AppendRoutePoints appends route points to the drive's routePoints
-// JSON array. Uses PostgreSQL jsonb_concat (||) to avoid
-// read-modify-write of the (potentially large) array.
+// AppendRoutePoints appends route points to the drive's encrypted GPS
+// trail (MYR-433).
 //
-// MYR-64 dual-write: the UPDATE returns the post-append array so we
-// can re-encrypt the full shape into the shadow in a second statement.
-// The shadow re-encrypt is fail-open — telemetry MUST NOT be lost over
-// an encryption hiccup.
+// Ciphertext cannot be concatenated in SQL, so this is a
+// decrypt-append-reseal cycle run inside a transaction that holds a row
+// lock (SELECT … FOR UPDATE) for its duration. The lock is what makes
+// concurrent flushes for the same drive safe — see the package comment.
+//
+// Fail-closed throughout: if the existing trail cannot be decrypted, the
+// append is abandoned rather than overwriting it with just the new
+// points.
 func (r *DriveRepo) AppendRoutePoints(ctx context.Context, driveID string, points []RoutePointRecord) error {
 	if len(points) == 0 {
 		return nil
 	}
-
-	pointsJSON, err := json.Marshal(points)
-	if err != nil {
-		return fmt.Errorf("DriveRepo.AppendRoutePoints(%s): marshal: %w", driveID, err)
+	if r.encryptor == nil {
+		return fmt.Errorf("DriveRepo.AppendRoutePoints(%s): %w", driveID, ErrEncryptionRequired)
 	}
 
-	// Pass as json.RawMessage so pgx encodes it as JSON (not bytea).
-	// Plain []byte from json.Marshal is sent as bytea by pgx, which fails
-	// the ::jsonb cast with "invalid input syntax for type json".
 	start := time.Now()
-	row := r.pool.QueryRow(ctx, queryDriveAppendRoutePoints, driveID, json.RawMessage(pointsJSON))
-	var fullArr json.RawMessage
-	scanErr := row.Scan(&fullArr)
+	err := r.appendRoutePointsTx(ctx, driveID, points)
 	r.metrics.ObserveQueryDuration("drive.append_route_points", time.Since(start).Seconds())
-	if errors.Is(scanErr, pgx.ErrNoRows) {
-		return fmt.Errorf("DriveRepo.AppendRoutePoints(%s): %w", driveID, ErrDriveNotFound)
+	if err != nil {
+		if !errors.Is(err, ErrDriveNotFound) {
+			r.metrics.IncQueryError("drive.append_route_points")
+		}
+		return fmt.Errorf("DriveRepo.AppendRoutePoints(%s): %w", driveID, err)
 	}
-	if scanErr != nil {
-		r.metrics.IncQueryError("drive.append_route_points")
-		return fmt.Errorf("DriveRepo.AppendRoutePoints(%s): %w", driveID, scanErr)
-	}
-
-	r.refreshRoutePointsShadow(ctx, driveID, fullArr)
 	return nil
 }
 
-// refreshRoutePointsShadow re-encrypts the post-append routePoints
-// array into the shadow column. Fail-open: encrypt or UPDATE failures
-// are logged at Warn but never returned. The plaintext column is the
-// source of truth and a shadow lag is the rollout's expected steady
-// state until the backfill catches up.
-func (r *DriveRepo) refreshRoutePointsShadow(ctx context.Context, driveID string, fullArr json.RawMessage) {
-	if r.encryptor == nil {
-		return
-	}
-	ct, err := routeblob.EncryptJSONBytes(fullArr, r.encryptor)
+// appendRoutePointsTx is the transactional body of AppendRoutePoints.
+// Split out so the caller owns metrics and error decoration.
+func (r *DriveRepo) appendRoutePointsTx(ctx context.Context, driveID string, points []RoutePointRecord) error {
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		if r.logger != nil {
-			r.logger.Warn("Drive routePointsEnc encrypt failed; plaintext-only append committed",
-				slog.String("drive_id", driveID),
-				slog.String("error", err.Error()),
-			)
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after Commit
+
+	var existingCT *string
+	if scanErr := tx.QueryRow(ctx, queryDriveLockRoutePointsEnc, driveID).Scan(&existingCT); scanErr != nil {
+		if errors.Is(scanErr, pgx.ErrNoRows) {
+			return ErrDriveNotFound
 		}
-		return
+		return fmt.Errorf("lock row: %w", scanErr)
+	}
+
+	merged, err := r.mergeRoutePoints(existingCT, points)
+	if err != nil {
+		return err
+	}
+
+	ct, err := routeblob.EncryptJSONBytes(merged, r.encryptor)
+	if err != nil {
+		return fmt.Errorf("encrypt trail: %w", err)
 	}
 	if ct == "" {
-		// Empty array — leave the shadow NULL. Read fallback applies.
-		return
+		// Unreachable: len(points) > 0 guarantees a non-empty array. Guard
+		// anyway so a future change to EncryptJSONBytes can't quietly NULL
+		// a live trail.
+		return fmt.Errorf("encrypt trail: unexpected empty ciphertext for %d points", len(points))
 	}
-	if _, uErr := r.pool.Exec(ctx, queryDriveSetRoutePointsEnc, driveID, ct); uErr != nil {
-		if r.logger != nil {
-			r.logger.Warn("Drive routePointsEnc shadow UPDATE failed; plaintext-only append committed",
-				slog.String("drive_id", driveID),
-				slog.String("error", uErr.Error()),
-			)
+
+	if _, err := tx.Exec(ctx, queryDriveSetRoutePointsEnc, driveID, ct); err != nil {
+		return fmt.Errorf("write trail: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
+}
+
+// mergeRoutePoints decrypts the existing trail (when present) and
+// appends the new points, returning the marshalled full array.
+//
+// Elements are carried as json.RawMessage so already-persisted points
+// are spliced through byte-for-byte — no decode/re-encode round trip
+// that could alter a float's representation on every single append.
+func (r *DriveRepo) mergeRoutePoints(existingCT *string, points []RoutePointRecord) (json.RawMessage, error) {
+	var trail []json.RawMessage
+
+	if existingCT != nil && *existingCT != "" {
+		raw, err := routeblob.DecryptJSONBytes(*existingCT, r.encryptor)
+		if err != nil {
+			// Fail closed. Appending here would replace a trail we simply
+			// cannot read with a fragment, which is unrecoverable.
+			return nil, fmt.Errorf("decrypt existing trail: %w", err)
+		}
+		if len(raw) > 0 {
+			if err := json.Unmarshal(raw, &trail); err != nil {
+				return nil, fmt.Errorf("decode existing trail: %w", err)
+			}
 		}
 	}
+
+	for i := range points {
+		b, err := json.Marshal(points[i])
+		if err != nil {
+			return nil, fmt.Errorf("marshal point %d: %w", i, err)
+		}
+		trail = append(trail, b)
+	}
+
+	merged, err := json.Marshal(trail)
+	if err != nil {
+		return nil, fmt.Errorf("marshal trail: %w", err)
+	}
+	return merged, nil
 }
 
 // encryptRoutePointsRaw is the Create-path companion: encrypts the
@@ -238,9 +289,9 @@ func (r *DriveRepo) Complete(ctx context.Context, driveID string, stats DriveCom
 // GetByID returns a single drive by its ID.
 // Returns ErrDriveNotFound if no drive has that ID.
 //
-// MYR-64: prefers the routePointsEnc shadow when the encryptor is wired
-// and the column is non-NULL. Decrypt or shape-validation failures fall
-// back to the plaintext column with a Warn log.
+// MYR-433: the trail comes from routePointsEnc alone. Decrypt or
+// shape-validation failures leave RoutePoints empty and log at Warn —
+// the plaintext column is not read.
 func (r *DriveRepo) GetByID(ctx context.Context, id string) (DriveRecord, error) {
 	start := time.Now()
 	row := r.pool.QueryRow(ctx, queryDriveByID, id)
@@ -252,7 +303,7 @@ func (r *DriveRepo) GetByID(ctx context.Context, id string) (DriveRecord, error)
 		&d.StartLocation, &d.StartAddress, &d.EndLocation, &d.EndAddress,
 		&d.DistanceMiles, &d.DurationMinutes, &d.AvgSpeedMph, &d.MaxSpeedMph,
 		&d.EnergyUsedKwh, &d.StartChargeLevel, &d.EndChargeLevel,
-		&d.FsdMiles, &d.FsdPercentage, &d.Interventions, &d.RoutePoints, &d.CreatedAt,
+		&d.FsdMiles, &d.FsdPercentage, &d.Interventions, &d.CreatedAt,
 		&routePointsEnc,
 	)
 	r.metrics.ObserveQueryDuration("drive.get_by_id", time.Since(start).Seconds())
@@ -268,9 +319,12 @@ func (r *DriveRepo) GetByID(ctx context.Context, id string) (DriveRecord, error)
 	return d, nil
 }
 
-// applyResolvedRoutePoints prefers the encrypted shadow and falls back
-// to the plaintext column on decrypt/unmarshal failure. The plaintext
-// column survives untouched on the legacy (no-encryptor) path.
+// applyResolvedRoutePoints decrypts the trail from the ciphertext
+// column. On any failure RoutePoints stays empty — MYR-433 removed the
+// plaintext column from the projection, so there is nothing to fall back
+// to, and an empty trail is a safer answer than a stale one.
+//
+// A repo built without an Encryptor reads no trail at all.
 func (r *DriveRepo) applyResolvedRoutePoints(d *DriveRecord, ct *string) {
 	if r.encryptor == nil || ct == nil || *ct == "" {
 		return
@@ -278,7 +332,7 @@ func (r *DriveRepo) applyResolvedRoutePoints(d *DriveRecord, ct *string) {
 	raw, err := routeblob.DecryptJSONBytes(*ct, r.encryptor)
 	if err != nil {
 		if r.logger != nil {
-			r.logger.Warn("Drive routePointsEnc decrypt failed; falling back to plaintext",
+			r.logger.Warn("Drive routePointsEnc decrypt failed; surfacing empty trail",
 				slog.String("drive_id", d.ID),
 				slog.String("error", err.Error()),
 			)
@@ -290,7 +344,7 @@ func (r *DriveRepo) applyResolvedRoutePoints(d *DriveRecord, ct *string) {
 	}
 	if !looksLikeJSONArray(raw) {
 		if r.logger != nil {
-			r.logger.Warn("Drive routePointsEnc decoded to non-array; falling back to plaintext",
+			r.logger.Warn("Drive routePointsEnc decoded to non-array; surfacing empty trail",
 				slog.String("drive_id", d.ID),
 			)
 		}

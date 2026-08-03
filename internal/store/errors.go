@@ -91,6 +91,17 @@ var (
 	// ErrDatabaseClosed is returned when an operation is attempted on a
 	// closed database connection pool.
 	ErrDatabaseClosed = errors.New("database connection closed")
+
+	// ErrEncryptionRequired is returned when an operation that persists
+	// location data is attempted on a repository built without an
+	// Encryptor (MYR-433).
+	//
+	// Before MYR-433 these writes could degrade to plaintext-only. They
+	// can't any more: the plaintext columns are no longer written, so a
+	// keyless write would silently discard the data instead of storing it
+	// somewhere readable. Failing loudly is the only honest option — the
+	// composition root must wire an Encryptor.
+	ErrEncryptionRequired = errors.New("encryptor required to persist location data")
 )
 
 // redactVIN returns a VIN with only the last 4 characters visible.

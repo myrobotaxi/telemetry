@@ -264,38 +264,41 @@ func (r *VehicleRepo) buildShadows(update VehicleUpdate) (map[string]string, err
 		out[p.pair.lat+"Enc"] = *shadow.latEnc
 		out[p.pair.lng+"Enc"] = *shadow.lngEnc
 	}
-	r.addNavRouteShadow(update, out)
+	if err := r.addNavRouteShadow(update, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
 // addNavRouteShadow encrypts the nav-route blob into out when the
 // update touches `Vehicle.navRouteCoordinates`. Empty/null/`[]` raw
-// JSON maps to a NULL shadow per routeblob.EncryptJSONBytes. An
-// encrypt failure logs at Warn and leaves the entry out of the map so
-// the plaintext write still happens — telemetry is never dropped over
-// a shadow-encryption hiccup.
-func (r *VehicleRepo) addNavRouteShadow(update VehicleUpdate, out map[string]string) {
+// JSON maps to a NULL shadow per routeblob.EncryptJSONBytes.
+//
+// MYR-433 made an encrypt failure FATAL to the write. Before, it was
+// logged at Warn and the write continued, because the plaintext column
+// still carried the route — "telemetry is never dropped over a
+// shadow-encryption hiccup". That reasoning died with the plaintext
+// column. Continuing now would leave the PREVIOUS route ciphertext in
+// place while the rest of the row advances, i.e. it would serve a stale
+// route as if it were current. Failing the write lets the caller retry
+// on the next telemetry frame, which arrives within seconds.
+func (r *VehicleRepo) addNavRouteShadow(update VehicleUpdate, out map[string]string) error {
 	if update.NavRouteCoordinates == nil {
-		return
+		return nil
 	}
 	raw := *update.NavRouteCoordinates
 	ct, err := routeblob.EncryptJSONBytes(raw, r.encryptor)
 	if err != nil {
-		if r.logger != nil {
-			r.logger.Warn("Vehicle navRouteCoordinatesEnc encrypt failed; writing plaintext only",
-				slog.String("error", err.Error()),
-			)
-		}
-		return
+		return fmt.Errorf("encrypt navRouteCoordinates: %w", err)
 	}
-	// ct == "" means "absent" (empty / null / []). The plaintext path
-	// is responsible for emitting the corresponding NULL on the
-	// plaintext column via ClearFields when the caller wants the row
-	// cleared; we never write an empty ciphertext.
+	// ct == "" means "absent" (empty / null / []). Clearing the route is
+	// expressed through ClearFields, which NULLs the ciphertext column;
+	// we never write an empty ciphertext.
 	if ct == "" {
-		return
+		return nil
 	}
 	out["navRouteCoordinatesEnc"] = ct
+	return nil
 }
 
 // scanVehicle executes a query expected to return one vehicle row and
