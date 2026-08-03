@@ -532,6 +532,30 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	}
 	runNotifyListener(ctx, cfg.Database().URL, bus, logger)
 
+	// --- Mid-connection share revocation (MYR-373, websocket-protocol.md §10
+	// DV-09) ---
+	// The PRIMARY mechanism: the sharing handlers publish on revoke/suspend
+	// and this dispatcher closes the grantee's live sessions with 4002. Wired
+	// unconditionally — unlike the caches above it needs nothing from the
+	// authenticator, so it works in dev mode too.
+	shareAccessLogger := logger.With(slog.String("component", "share-access"))
+	shareAccessNotifier := newShareAccessBusNotifier(bus, shareAccessLogger)
+	if _, err := newShareAccessDispatcher(hub, shareAccessLogger).Subscribe(bus); err != nil {
+		return fmt.Errorf("subscribe share_access_revoked dispatcher: %w", err)
+	}
+
+	// The BACKSTOP: a periodic sweep that re-derives every connected user's
+	// access set from the database and closes anyone holding a vehicle they
+	// can no longer see. It covers what the nudge structurally cannot — an
+	// event dropped by bus backpressure, a mutation served by another machine,
+	// a future write path that forgets to publish. Needs a real authenticator
+	// to resolve against, so dev mode (NoopAuthenticator, all-access wildcard)
+	// runs without it and loses nothing: there is no set to narrow there.
+	if jwtAuth != nil {
+		revalidator := ws.NewAccessRevalidator(hub, jwtAuth, ws.DefaultRevalidateInterval, shareAccessLogger)
+		go revalidator.Run(ctx)
+	}
+
 	// --- Push notifications (MYR-186) ---
 	// Subscribes to ride.request.created / ride.status.changed / ride.due and
 	// alerts the relevant party's registered phones. Gated by PUSH_ENABLED;
@@ -634,6 +658,8 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 		// The authenticator owns the access-set cache the sharing handlers
 		// bust on redeem and revoke.
 		accessInvalidator: accessInvalidator,
+		// MYR-373: and the live-socket teardown that the cache bust cannot do.
+		shareAccessNotifier: shareAccessNotifier,
 		// The same authenticator also owns the user-existence cache the
 		// account-deletion endpoint must drop (MYR-355).
 		sessionInvalidator: sessionInvalidator,
