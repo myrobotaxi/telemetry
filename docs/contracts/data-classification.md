@@ -69,6 +69,12 @@ Every column in every persisted table is listed below. The **Tier** column is th
 > `OwnerProvisioner` additionally NULLs the plaintext columns on its conflict-update, so re-linking a Tesla account scrubs pre-MYR-433 residue rather than preserving it.
 >
 > Migration tooling: `cmd/backfill-account-tokens/` seals legacy rows into the `_enc` columns; `cmd/purge-plaintext-columns/` then removes the plaintext values (verify-before-destroy — see §3.3). **The plaintext columns still EXIST on the table**; dropping them is a react-frontend Prisma migration, because Go migrations may not touch Prisma-owned tables (CG-DL-9).
+>
+> **Every provider, not just Tesla (MYR-433 follow-up).** The backfill originally scanned `WHERE "provider" = 'tesla'`, matching MYR-62's scope — the tokens *this server* reads. The first production purge run exposed the gap that left: **7 Apple Sign-in rows** holding a plaintext `access_token` and identity `id_token`, which the purge correctly refused to scrub because nothing had sealed them. The `Account` classification above is provider-agnostic and always was: an Apple `id_token` is an identity JWT, tiered P1 for exactly the reason the table states ("contains user identity claims"). "The telemetry server does not read it" was never the criterion. The scan and the `account_token_plaintext_remaining_total` gauge are now provider-agnostic; a gauge reading zero while unsealed rows exist is worse than no gauge, since it is the signal used to call the rollout finished.
+>
+> Nothing reads these columns for non-Tesla rows, verified in both repos before the change: every Go `Account` query is `provider = 'tesla'`-scoped, and in the Next.js app the sole token consumer (`src/lib/tesla.ts`) is Tesla-scoped while the Prisma adapter's `getUserByAccount` hydrates the row and returns only `account.user`, discarding the tokens.
+>
+> **If Sign in with Apple revocation is ever implemented**, it MUST read `id_token_enc` / `refresh_token_enc` through the decrypting path, never the plaintext columns. Apple requires token revocation on account deletion and neither repo implements it today — the Go deletion sequence revokes its own `go_refresh_tokens` and cascades the `Account` row away.
 
 ### 1.3 Vehicle table
 
