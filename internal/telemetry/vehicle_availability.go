@@ -49,7 +49,7 @@ const (
 // construction: there is no blocked status it has no message for. The refusal
 // strings are P0 — a vehicle status, no plate, place or party — so they are
 // safe to echo to whoever is holding the request.
-func vehicleAvailability(status string) (vehicleBlocker, string) {
+func vehicleAvailability(status string) (blocker vehicleBlocker, refusal string) {
 	switch status {
 	case serviceStatusInService:
 		return blockerInService, "Vehicle is in service and can't be dispatched"
