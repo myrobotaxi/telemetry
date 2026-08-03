@@ -42,6 +42,15 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
         -o /telemetry-server \
         ./cmd/telemetry-server
 
+# Operator binaries for the MYR-433 seal-then-purge sequence. They ship in the
+# image because the secrets they need (DATABASE_URL, ENCRYPTION_KEY) exist only
+# as Fly app secrets — running them anywhere else would mean exporting the key,
+# which is the custody the purge exists to protect. Run via `fly ssh console`.
+RUN CGO_ENABLED=0 GOOS=linux go build -o /backfill-account-tokens ./cmd/backfill-account-tokens \
+ && CGO_ENABLED=0 GOOS=linux go build -o /backfill-vehicle-gps ./cmd/backfill-vehicle-gps \
+ && CGO_ENABLED=0 GOOS=linux go build -o /backfill-route-blobs ./cmd/backfill-route-blobs \
+ && CGO_ENABLED=0 GOOS=linux go build -o /purge-plaintext-columns ./cmd/purge-plaintext-columns
+
 # Stage 2: Runtime
 # Minimal Alpine image — only ca-certificates and the static binary.
 FROM alpine:3.24
@@ -54,6 +63,10 @@ RUN apk add --no-cache ca-certificates
 RUN adduser -D -u 1000 appuser
 
 COPY --from=builder /telemetry-server /usr/local/bin/telemetry-server
+COPY --from=builder /backfill-account-tokens /usr/local/bin/backfill-account-tokens
+COPY --from=builder /backfill-vehicle-gps /usr/local/bin/backfill-vehicle-gps
+COPY --from=builder /backfill-route-blobs /usr/local/bin/backfill-route-blobs
+COPY --from=builder /purge-plaintext-columns /usr/local/bin/purge-plaintext-columns
 COPY --from=proxy-builder /tesla-http-proxy /usr/local/bin/tesla-http-proxy
 
 # Entrypoint wrapper that starts the proxy sidecar alongside the telemetry server.
