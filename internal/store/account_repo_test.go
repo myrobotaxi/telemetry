@@ -168,7 +168,16 @@ func TestAccountRepo_GetTeslaToken_PrefersCiphertext(t *testing.T) {
 	}
 }
 
-func TestAccountRepo_GetTeslaToken_FallsBackToPlaintext(t *testing.T) {
+// TestAccountRepo_GetTeslaToken_NoPlaintextFallback is the MYR-433
+// acceptance behaviour, inverting the fallback this test used to assert.
+//
+// A pre-rollout row (plaintext tokens, *_enc NULL) now reads as "no token
+// linked". These are Tesla fleet-control credentials: a read path willing
+// to use the plaintext column is a read path that needs that column to
+// stay readable, and a database leak of it hands an attacker the ability
+// to drive someone's car. Such rows are sealed ahead of the deploy by
+// cmd/backfill-account-tokens; the read path is not the safety net.
+func TestAccountRepo_GetTeslaToken_NoPlaintextFallback(t *testing.T) {
 	if !dockerAvailable {
 		t.Skip("Docker not available")
 	}
@@ -186,14 +195,8 @@ func TestAccountRepo_GetTeslaToken_FallsBackToPlaintext(t *testing.T) {
 		i64(1735689601))
 
 	tok, err := repo.GetTeslaToken(ctx, "user_pt")
-	if err != nil {
-		t.Fatalf("GetTeslaToken: %v", err)
-	}
-	if tok.AccessToken != "plaintext-access" {
-		t.Errorf("AccessToken fallback: got %q", tok.AccessToken)
-	}
-	if tok.RefreshToken != "plaintext-refresh" {
-		t.Errorf("RefreshToken fallback: got %q", tok.RefreshToken)
+	if !errors.Is(err, store.ErrTeslaTokenNotFound) {
+		t.Fatalf("GetTeslaToken = (%+v, %v), want ErrTeslaTokenNotFound — an unsealed row must read as absent", tok, err)
 	}
 }
 
@@ -233,7 +236,17 @@ func TestAccountRepo_GetTeslaToken_NotFoundOnAllNullTokens(t *testing.T) {
 	}
 }
 
-func TestAccountRepo_UpdateTeslaToken_DualWritesBothColumns(t *testing.T) {
+// TestAccountRepo_UpdateTeslaToken_WritesCiphertextOnly pins the MYR-433
+// write contract for the auto-refresh path: the new token is sealed into
+// *_enc and the plaintext column is not written.
+//
+// The row is seeded with a legacy plaintext token, and the assertion is
+// that it is left exactly as it was — stale, not refreshed. UpdateTeslaToken
+// deliberately does not scrub it (a targeted purge, cmd/purge-plaintext-columns,
+// owns that; a refresh path that started NULLing columns it does not own
+// would be a surprising side effect). What matters here is that the FRESH
+// credential never enters a readable column.
+func TestAccountRepo_UpdateTeslaToken_WritesCiphertextOnly(t *testing.T) {
 	if !dockerAvailable {
 		t.Skip("Docker not available")
 	}
@@ -266,11 +279,11 @@ func TestAccountRepo_UpdateTeslaToken_DualWritesBothColumns(t *testing.T) {
 		t.Fatalf("scan: %v", err)
 	}
 
-	if accessPT == nil || *accessPT != "new-access" {
-		t.Errorf("access plaintext not updated: got %v", accessPT)
+	if accessPT == nil || *accessPT != "old-access" {
+		t.Errorf("access plaintext = %v, want the stale seed untouched — the refreshed token must not be written there", accessPT)
 	}
-	if refreshPT == nil || *refreshPT != "new-refresh" {
-		t.Errorf("refresh plaintext not updated: got %v", refreshPT)
+	if refreshPT == nil || *refreshPT != "old-refresh" {
+		t.Errorf("refresh plaintext = %v, want the stale seed untouched — the refreshed token must not be written there", refreshPT)
 	}
 	if accessEnc == nil {
 		t.Fatal("access_token_enc not written")
@@ -289,7 +302,7 @@ func TestAccountRepo_UpdateTeslaToken_DualWritesBothColumns(t *testing.T) {
 		t.Errorf("decrypt refresh_token_enc: got (%q, %v), want (%q, nil)", dec, err, "new-refresh")
 	}
 
-	// Reading back must surface the new value (read prefers ciphertext).
+	// Reading back must surface the new value (ciphertext is the only source).
 	got, err := repo.GetTeslaToken(ctx, "user_dw")
 	if err != nil {
 		t.Fatalf("GetTeslaToken after update: %v", err)

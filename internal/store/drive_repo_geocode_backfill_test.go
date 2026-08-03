@@ -8,11 +8,22 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/store"
 )
 
+// TestDriveRepo_ListMissingAddresses covers the MYR-240 backfill
+// projection: which rows are eligible, and that each carries the
+// routePoints the caller extracts coordinates from.
+//
+// MYR-433: the repo must be encryption-enabled, and the SAME encryptor
+// has to serve the seeding Create and the ListMissingAddresses read.
+// routePoints is sealed in routePointsEnc now, so a keyless repo seeds
+// nothing decryptable and every row comes back with an empty trail —
+// which is also the honest production behaviour: `ops geocode backfill`
+// without a key geocodes nothing rather than reading plaintext.
 func TestDriveRepo_ListMissingAddresses(t *testing.T) {
 	cleanTables(t, testPool)
 	seedVehicle(t, testPool, "veh_020", "5YJ3E1EA1NF000020")
 
-	repo := store.NewDriveRepo(testPool, store.NoopMetrics{})
+	repo := store.NewDriveRepoWithEncryption(testPool, store.NoopMetrics{},
+		newTestEncryptor(t), silentRouteBlobLogger())
 	ctx := context.Background()
 
 	routePoints := json.RawMessage(`[

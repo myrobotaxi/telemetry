@@ -172,7 +172,10 @@ const (
 //  2. Fixture enumeration: every fixture row MUST be a schema property.
 //  3. Atomic-group consistency: fixture atomicGroup == schema x-atomic-group.
 //  4. Steady-state scenario: per telemetry field with nullableInSteadyState=false,
-//     apply a single-field VehicleUpdate, read back, assert non-null.
+//     apply a single-field VehicleUpdate, read back, assert non-null. The one
+//     exception is a latitude/longitude field, which is widened to its pair —
+//     see addCoordinatePairMate for why half a coordinate pair is not a shape
+//     the writer pipeline can emit or the server will store.
 //  5. Active-group scenario: per atomic group, apply ALL members in one
 //     VehicleUpdate, read back, assert ALL non-null.
 //  6. Identity / derived / writer_metadata fields are evaluated against
@@ -240,7 +243,7 @@ func TestSnapshotCompleteness(t *testing.T) {
 			}
 
 			t.Run(p.name, func(t *testing.T) {
-				runSteadyStateField(t, p, row)
+				runSteadyStateField(t, p, row, fix)
 			})
 		}
 	})
@@ -262,14 +265,35 @@ func TestSnapshotCompleteness(t *testing.T) {
 	})
 }
 
+// newCompletenessRepo builds the VehicleRepo every scenario in this file
+// writes and reads through.
+//
+// It MUST be the encryption-aware constructor (MYR-433). The seven
+// location columns — latitude, longitude, the destination/origin pairs
+// and navRouteCoordinates — are stored only as ciphertext now, so a repo
+// built without an Encryptor writes nothing for them and reads nothing
+// back. That would surface here as a fleet of bogus NFR-3.5 "DB
+// persistence missing in writer pipeline" failures, blaming the writer
+// for a key that was never wired.
+//
+// One repo instance per scenario is what keeps this honest: the same
+// Encryptor seals the write and opens the read-back, exactly as a single
+// process does in production. Handing the read a different key would test
+// nothing but the decrypt failure path.
+func newCompletenessRepo(t *testing.T) *store.VehicleRepo {
+	t.Helper()
+	return store.NewVehicleRepoWithEncryption(testPool, store.NoopMetrics{},
+		newTestEncryptor(t), silentGPSLogger())
+}
+
 // runSteadyStateField applies a single-field VehicleUpdate (or seed/derived
 // path), reads back the row, and asserts the corresponding column is
 // non-null/non-zero.
-func runSteadyStateField(t *testing.T, p schemaProperty, row fixtureRow) {
+func runSteadyStateField(t *testing.T, p schemaProperty, row fixtureRow, fix fixtureRoot) {
 	t.Helper()
 	cleanTables(t, testPool)
 	seedVehicleWithCatalog(t, testPool, completenessVehicleID, completenessVIN, completenessSeedCatalog)
-	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+	repo := newCompletenessRepo(t)
 	ctx := context.Background()
 
 	switch row.Category {
@@ -303,17 +327,61 @@ func runSteadyStateField(t *testing.T, p schemaProperty, row fixtureRow) {
 		}
 		assertStatusValid(t, p.name, v)
 	case "telemetry", "telemetry_alias":
-		applySyntheticAndAssertNonNull(ctx, t, repo, p, row)
+		applySyntheticAndAssertNonNull(ctx, t, repo, p, row, fix)
 	case "expected_failure":
 		// expected_failure rows: still try to apply the synthetic and
 		// assert non-null on the read-back. If the writer pipeline is
 		// missing the field, this WILL fail with the standard error
 		// message — which is the entire point of MYR-48.
-		applySyntheticAndAssertNonNull(ctx, t, repo, p, row)
+		applySyntheticAndAssertNonNull(ctx, t, repo, p, row, fix)
 	case "writer_metadata":
 		// Covered by writer_metadata_lastUpdated subtest below.
 	default:
 		t.Errorf("unhandled category %q for field %q", row.Category, p.name)
+	}
+}
+
+// coordinatePairMate names the other half of each latitude/longitude
+// pair the Vehicle row stores. Mirrors store.gpsPairs, which is
+// unexported.
+var coordinatePairMate = map[string]string{
+	"latitude":             "longitude",
+	"longitude":            "latitude",
+	"destinationLatitude":  "destinationLongitude",
+	"destinationLongitude": "destinationLatitude",
+	"originLatitude":       "originLongitude",
+	"originLongitude":      "originLatitude",
+}
+
+// addCoordinatePairMate widens a single-field coordinate update into the
+// full (lat, lng) pair, pulling the mate's value from its own fixture row.
+//
+// A latitude is not independently persistable and never has been sent
+// that way: field_mapper.applyLocation sets both halves from one Tesla
+// LocationVal, the schema declares them one atomic group (NFR-3.7), and
+// since MYR-433 the write path enforces it — buildEncryptedGPSPair
+// refuses to seal half a pair, because a lone encrypted latitude read
+// back against a stale longitude would put the car on the wrong map
+// point. A half-pair update is therefore a shape production cannot
+// produce and the server is right to drop.
+//
+// Widening here keeps the steady-state scenario asking its real question
+// ("does the writer pipeline persist latitude at all?") instead of
+// failing on a synthetic event that was never valid. The assertion still
+// looks at the one field the subtest is named for.
+func addCoordinatePairMate(t *testing.T, update *store.VehicleUpdate, name string, fix fixtureRoot) {
+	t.Helper()
+	mate, ok := coordinatePairMate[name]
+	if !ok {
+		return
+	}
+	mateRow, ok := fix.Fields[mate]
+	if !ok || mateRow.Synthetic == nil || mateRow.Synthetic.Kind != "vehicleUpdate" {
+		t.Fatalf("coordinate field %q needs its pair mate %q to carry a vehicleUpdate synthetic "+
+			"in snapshot_completeness.json — a half-pair GPS write is rejected by the server", name, mate)
+	}
+	if err := applyValueToUpdate(update, mateRow.Synthetic.Field, mateRow.Synthetic.Value); err != nil {
+		t.Fatalf("build pair mate VehicleUpdate.%s for %q: %v", mateRow.Synthetic.Field, name, err)
 	}
 }
 
@@ -326,6 +394,7 @@ func applySyntheticAndAssertNonNull(
 	repo *store.VehicleRepo,
 	p schemaProperty,
 	row fixtureRow,
+	fix fixtureRoot,
 ) {
 	t.Helper()
 	if row.Synthetic == nil {
@@ -355,6 +424,7 @@ func applySyntheticAndAssertNonNull(
 			t.Errorf("NFR-3.5 violation: %s", body)
 			return
 		}
+		addCoordinatePairMate(t, &update, p.name, fix)
 		if err := repo.UpdateTelemetry(ctx, completenessVIN, update); err != nil {
 			t.Fatalf("UpdateTelemetry for %q: %v", p.name, err)
 		}
@@ -386,7 +456,7 @@ func runActiveGroup(t *testing.T, group string, members []string, fix fixtureRoo
 	t.Helper()
 	cleanTables(t, testPool)
 	seedVehicleWithCatalog(t, testPool, completenessVehicleID, completenessVIN, completenessSeedCatalog)
-	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+	repo := newCompletenessRepo(t)
 	ctx := context.Background()
 
 	update := store.VehicleUpdate{LastUpdated: time.Now().UTC()}
@@ -478,7 +548,7 @@ func runLastUpdatedAdvances(t *testing.T) {
 	t.Helper()
 	cleanTables(t, testPool)
 	seedVehicleWithCatalog(t, testPool, completenessVehicleID, completenessVIN, completenessSeedCatalog)
-	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+	repo := newCompletenessRepo(t)
 	ctx := context.Background()
 
 	before, err := repo.GetByVIN(ctx, completenessVIN)
