@@ -265,6 +265,18 @@ func TestFixturesValidateAgainstSchemas(t *testing.T) {
 				case baseName == "snapshot.json":
 					validate(t, vehicleStateSchema, stripped, "VehicleState snapshot")
 
+				case baseName == "snapshot.viewer.json":
+					// MYR-435: the VIEWER-masked snapshot. Validating it
+					// against the SAME VehicleState schema is the assertion —
+					// a masked viewer document must remain valid against the
+					// shape its own consumer decodes. This is what MYR-184
+					// got wrong for `name` on the summary resource, and it is
+					// why interiorTemp / exteriorTemp had to leave the
+					// schema's `required` list when the viewer mask stopped
+					// emitting them.
+					validate(t, vehicleStateSchema, stripped, "viewer-masked VehicleState snapshot")
+					assertViewerSnapshotOmitsMaskedFields(t, stripped)
+
 				case baseName == "snapshot_completeness.json":
 					// Coverage matrix used by the MYR-48 conformance test
 					// (internal/store.TestSnapshotCompleteness). Not a
@@ -586,6 +598,54 @@ func validateDriveDetail(t *testing.T, m map[string]any) {
 //
 // The empty-list fixture has no items at all — a caller with no
 // vehicles and no shares.
+// assertViewerSnapshotOmitsMaskedFields pins the MYR-435 removals on the
+// canonical viewer fixture. Schema validation alone cannot catch a leak here:
+// every removed field is an OPTIONAL property of VehicleState, so a fixture
+// that wrongly included `interiorTemp` or a now-playing track would validate
+// perfectly while documenting the exact contract the client asked us to end.
+//
+// Keys are checked for PRESENCE, not for a null value — "absent, not nulled"
+// (rest-api.md §5.1). A `"interiorTemp": null` would fail this, correctly:
+// emitting the key tells the viewer the field exists.
+func assertViewerSnapshotOmitsMaskedFields(t *testing.T, m map[string]any) {
+	t.Helper()
+
+	removed := []string{
+		// Identity (MYR-279, predates MYR-435).
+		"vin",
+		// Media / now-playing.
+		"mediaNowPlayingTitle", "mediaNowPlayingArtist", "mediaNowPlayingAlbum",
+		"mediaNowPlayingStation", "mediaPlaybackSource", "mediaPlaybackStatus",
+		"mediaVolume", "mediaVolumeMax",
+		"mediaNowPlayingDurationMs", "mediaNowPlayingElapsedMs",
+		// Cabin climate.
+		"interiorTemp", "exteriorTemp", "hvacPower", "isClimateOn", "fanSpeed",
+		"driverTempSetting", "passengerTempSetting", "hvacAutoMode", "hvacAcEnabled",
+		"seatHeaterLeft", "seatHeaterRight", "seatHeaterRearLeft",
+		"seatHeaterRearCenter", "seatHeaterRearRight",
+		"seatCoolerLeft", "seatCoolerRight", "seatVentEnabled", "seatCoolingCapable",
+		// Vehicle-controls state.
+		"locked", "chargePortDoorOpen", "frunkOpen", "trunkOpen", "virtualKeyPaired",
+	}
+	for _, field := range removed {
+		if _, present := m[field]; present {
+			t.Errorf("viewer snapshot fixture carries %q — MYR-435 removes media, "+
+				"cabin state and vehicle controls from viewers (rest-api.md §5.2.1.1)", field)
+		}
+	}
+
+	// The viewer must still get a usable car: a fixture narrowed into
+	// uselessness would satisfy every assertion above.
+	for _, field := range []string{
+		"vehicleId", "latitude", "longitude", "chargeLevel", "licensePlate", "lastUpdated",
+	} {
+		if _, present := m[field]; !present {
+			t.Errorf("viewer snapshot fixture is missing %q — viewers keep location, "+
+				"identity, charge and freshness", field)
+		}
+	}
+}
+
 func validateVehiclesList(t *testing.T, m map[string]any, baseName string) {
 	t.Helper()
 

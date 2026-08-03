@@ -712,7 +712,32 @@ The mask matrix is the **same matrix used by the REST handler layer** (`rest-api
 
 `Client.vehicleRoles map[VehicleID]Role` is populated at handshake time alongside `Client.vehicleIDs`. The `Authenticator.ResolveRole(ctx, userId, vehicleId)` interface method returns the role for each owned vehicle. Like `vehicleIDs`, `vehicleRoles` is a snapshot, and it is refreshed the same way: not in place, but by ending the connection so the reconnect re-derives both together (§4.5.1). Losing a grant tears the session down and the new handshake resolves roles fresh, so there is no stale role left to project through. What remains a snapshot is a role that WIDENS mid-connection — see §10 DV-09 for why that direction is left to reconnect.
 
-**Empty-payload suppression.** If a role's mask projection yields a payload with no remaining fields (every field in the original frame was masked away), the hub MUST omit the frame for that role rather than send an empty `vehicle_update`. Sending an empty broadcast would leak "something happened on this vehicle" to a viewer who shouldn't even know the field existed.
+**Empty-payload suppression.** If a role's mask projection leaves nothing of substance, the hub MUST omit the frame for that role rather than send a `vehicle_update`. Sending it would leak "something happened on this vehicle" to a viewer who shouldn't even know the field existed.
+
+**"Nothing of substance" is NOT "zero keys" — MYR-435.** This rule was originally implemented as `len(projected) == 0`, and that implementation could not fire on the shape production actually emits. The broadcast path injects `lastUpdated` into every non-nav frame **before** masking, and `lastUpdated` is viewer-visible (a viewer must be able to tell live from stale). So a frame carrying only owner-only deltas did not project to zero fields for a viewer — it projected to exactly one, `{"lastUpdated": …}`, the gate never fired, and the frame went out.
+
+The values were masked; **the frame timing was not**. A `mediaNowPlayingElapsedMs` tick alone became a beacon pulsing only while audio plays — precisely the "someone is listening right now" occupancy signal that withholding the media block exists to prevent. Lock, trunk and climate deltas are the same tell. Masking values while forwarding their timing defeats the point of masking.
+
+The predicate is therefore: **does the projection carry at least one field that is an observation of the vehicle?** A projection consisting solely of envelope keys — keys describing the frame rather than the car — MUST be suppressed. The envelope-key set is defined in `internal/mask` (`mask.IsSubstantive`) rather than in the ws package, deliberately: it is the same place the role allow-lists live, so the two cannot drift. Today the set is exactly `lastUpdated`.
+
+A key qualifies as envelope only if it is viewer-visible **and** its value is a property of the delivery rather than an observation of the car. `status`, `chargeLevel` and `vehicleId` do not qualify — each is a legitimate one-field frame.
+
+This applies to **both** WS delivery paths through the same predicate: the live broadcast (`buildRoleFrames`) and the connect-time snapshot replay (`enqueueSnapshotFrame`, §2.4), which sets `ungrouped["lastUpdated"]` before projecting and so had the identical latent hole. It is applied for **all** roles, not just viewers: a frame saying only "the timestamp changed" informs nobody. That cannot regress owners, because the broadcast path returns early when there are no real fields to send, before `lastUpdated` is added.
+
+#### 4.6.1 What a `viewer` receives on `vehicle_update` (MYR-435)
+
+> **Client decision, 2026-08-02 ([MYR-435](https://linear.app/myrobotaxi/issue/MYR-435)):** *"Remove media/cabin and any vehicle controls."*
+
+The viewer arm of the `vehicle_state` mask is an **explicit allow-list**, not "owner minus `vin`". The [MYR-427](https://linear.app/myrobotaxi/issue/MYR-427) privacy audit found the subtraction shape was itself the defect: every field added to the owner list reached viewers by default. The full enumeration — kept and withheld, with per-group reasoning — is canonical in [`rest-api.md`](rest-api.md) §5.2.1.1 and is **not duplicated here**, because two copies of a field list is how the two transports would drift.
+
+What matters at this layer:
+
+- **A viewer receives** location/heading/speed, the navigation group and route/trail, vehicle identity (incl. `licensePlate`, excl. the full `vin`), charge and charging state, availability (`status`, `rideShareEnabled`, `serviceEstimatedEndAt`), and `lastUpdated`.
+- **A viewer receives NO** media/now-playing field, **no** cabin-climate field (including `interiorTemp` and `exteriorTemp`), and **no** vehicle-controls state (`locked`, `chargePortDoorOpen`, `frunkOpen`, `trunkOpen`, `virtualKeyPaired`).
+- **Absent, not nulled.** A withheld field's JSON key is omitted from `payload.fields` entirely. Emitting `null` would tell the viewer the field exists. `vehicle_update.fields` is a sparse map by contract (§4.1), so a consumer decoding a frame needs no change for this — unlike the REST snapshot, whose generated bindings do (see `rest-api.md` §5.2.1.2).
+- **One table, both transports.** The hub's `buildRoleFrames` (`internal/ws/hub_masked.go`), the connect-time snapshot replay `enqueueSnapshotFrame` (`internal/ws/snapshot.go`), and the REST `/snapshot` handler all resolve `mask.For(ResourceVehicleState, role)`. There is no WS-specific matrix. Each surface is pinned by a test that drives that surface end-to-end and iterates `mask.OwnerOnlyVehicleStateFields()`, so a per-surface branch cannot be added without failing one: `TestBroadcaster_CabinOnlyTelemetry_SendsViewerNothing` (live broadcast, via the real `Broadcaster`), `TestHub_SendSnapshot_ViewerReplayOmitsEveryOwnerOnlyField` (connect-time replay), and `TestVehicleSnapshotHandler_ViewerSnapshotOmitsEveryOwnerOnlyField` (REST, in `internal/telemetry`).
+
+Note the **connect-time snapshot replay** specifically (§2.4): it is a WS path that carries snapshot-sourced fields, so it is the one place where "the socket is masked" and "the snapshot is masked" have to be the same statement. It is, because it calls the same table.
 
 ### 4.7 `ride_request_created`
 
