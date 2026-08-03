@@ -110,6 +110,23 @@ func (h *Hub) sendSnapshot(ctx context.Context, client *Client, vehicleID string
 		return
 	}
 
+	// A revoked session gets no snapshot (MYR-373). `enqueue` would refuse
+	// the frames anyway, but returning here also skips the database read and
+	// the role resolution — and, more importantly, this is the guard that
+	// covers the two windows the enqueue check alone would leave looking
+	// reachable to a reader:
+	//
+	//  1. `subscribe` during the close handshake. handleSubscribeFrame gates
+	//     on `owns()`, which reads the HANDSHAKE-FROZEN vehicleIDs — still
+	//     containing the revoked vehicle — so it happily reaches this
+	//     function while the socket is being torn down.
+	//  2. The handshake's own snapshot loop (handler.go). `Register` runs
+	//     BEFORE that loop, so a revocation landing in between finds the
+	//     client, marks it, and must stop the snapshot that is about to ship.
+	if client.revoked.Load() {
+		return
+	}
+
 	fetchCtx, cancel := context.WithTimeout(ctx, writeTimeout)
 	snap, err := h.snapshots.GetVehicleSnapshot(fetchCtx, vehicleID)
 	cancel()

@@ -218,28 +218,36 @@ func (r *VehicleShareRepo) ListInvitesForVehicle(ctx context.Context, vehicleID,
 // else — the two are deliberately indistinguishable, so the endpoint cannot be
 // used to probe for the existence of other people's invites.
 //
-// The returned string is the user id whose access this revocation removed
-// (empty when the row was still pending, so nobody held access). The caller
-// uses it to bust that person's cached access set: without it a revoked viewer
-// keeps resolving the vehicle until the cache TTL lapses.
-func (r *VehicleShareRepo) RevokeInvite(ctx context.Context, inviteID, ownerUserID string) (string, error) {
-	var revokedViewerID string
-	switch err := r.pool.QueryRow(ctx, queryRevokeShare, inviteID, ownerUserID).Scan(&revokedViewerID); {
+// The returned RevokedShare names who lost access and to which vehicle. The
+// viewer id is empty when the row was still pending (nobody held access) and
+// on the idempotent already-revoked path (this call removed nothing). The
+// caller uses it to bust that person's cached access set and to close their
+// live socket for that car: without the first, a revoked viewer keeps
+// resolving the vehicle until the cache TTL lapses; without the second, an
+// already-open WebSocket keeps streaming its GPS until reconnect
+// (websocket-protocol.md §10 DV-09).
+func (r *VehicleShareRepo) RevokeInvite(ctx context.Context, inviteID, ownerUserID string) (RevokedShare, error) {
+	var revoked RevokedShare
+	switch err := r.pool.QueryRow(ctx, queryRevokeShare, inviteID, ownerUserID).
+		Scan(&revoked.ViewerUserID, &revoked.VehicleID); {
 	case err == nil:
-		return revokedViewerID, nil
+		return revoked, nil
 	case !errors.Is(err, pgx.ErrNoRows):
-		return "", fmt.Errorf("store.RevokeInvite(invite=%s): %w", inviteID, err)
+		return RevokedShare{}, fmt.Errorf("store.RevokeInvite(invite=%s): %w", inviteID, err)
 	}
 
 	// Zero rows: either already revoked (idempotent success) or not ours.
 	var status string
 	switch err := r.pool.QueryRow(ctx, queryShareExistsForOwner, inviteID, ownerUserID).Scan(&status); {
 	case err == nil:
-		return "", nil // status is necessarily 'revoked' — the UPDATE covered the rest
+		// status is necessarily 'revoked' — the UPDATE covered the rest.
+		// Nothing to report: the access this call would have removed was
+		// already gone, so there is no cache to bust and no socket to close.
+		return RevokedShare{}, nil
 	case errors.Is(err, pgx.ErrNoRows):
-		return "", ErrShareNotFound
+		return RevokedShare{}, ErrShareNotFound
 	default:
-		return "", fmt.Errorf("store.RevokeInvite(invite=%s): probe: %w", inviteID, err)
+		return RevokedShare{}, fmt.Errorf("store.RevokeInvite(invite=%s): probe: %w", inviteID, err)
 	}
 }
 

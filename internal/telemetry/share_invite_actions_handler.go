@@ -33,7 +33,7 @@ func (h *ShareInviteHandler) ServeRevoke(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	revokedViewerID, err := h.invites.RevokeInvite(r.Context(), inviteID, userID)
+	revoked, err := h.invites.RevokeInvite(r.Context(), inviteID, userID)
 	if err != nil {
 		h.writeInviteError(w, "share invite revoke", inviteID, err)
 		return
@@ -43,13 +43,20 @@ func (h *ShareInviteHandler) ServeRevoke(w http.ResponseWriter, r *http.Request)
 	// expiry. This is a security property, not a nicety: the cached access
 	// set is what the WebSocket handshake and every per-vehicle handler
 	// consult, so a stale entry is a live grant.
-	if h.access != nil && revokedViewerID != "" {
-		h.access.InvalidateVehicles(revokedViewerID)
+	if h.access != nil && revoked.ViewerUserID != "" {
+		h.access.InvalidateVehicles(revoked.ViewerUserID)
 	}
+
+	// ...and then end the connection that already got past the handshake
+	// (MYR-373). The bust above stops the NEXT one; a socket opened before
+	// the revoke holds its access set frozen on the Client and would keep
+	// streaming this car's live GPS to a revoked viewer until it happened to
+	// reconnect. Strictly after the bust — see endLiveAccess on why.
+	h.endLiveAccess(revoked.ViewerUserID, revoked.VehicleID, "revoked")
 
 	h.logger.Info("share invite revoked",
 		slog.String("invite_id", inviteID),
-		slog.Bool("had_viewer", revokedViewerID != ""),
+		slog.Bool("had_viewer", revoked.ViewerUserID != ""),
 	)
 	w.WriteHeader(http.StatusNoContent)
 }

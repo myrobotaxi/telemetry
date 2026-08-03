@@ -34,9 +34,10 @@ type fakeShareInviteStore struct {
 	listErr  error
 	listedAs struct{ vehicleID, ownerID string }
 
-	revokedViewer string
-	revokeErr     error
-	revokedAs     struct{ inviteID, ownerID string }
+	revokedViewer  string
+	revokedVehicle string
+	revokeErr      error
+	revokedAs      struct{ inviteID, ownerID string }
 
 	resent    ShareInviteRow
 	resendErr error
@@ -73,9 +74,12 @@ func (f *fakeShareInviteStore) ListInvitesForVehicle(_ context.Context, vehicleI
 	return f.listed, f.listErr
 }
 
-func (f *fakeShareInviteStore) RevokeInvite(_ context.Context, inviteID, ownerID string) (string, error) {
+func (f *fakeShareInviteStore) RevokeInvite(_ context.Context, inviteID, ownerID string) (RevokedGrant, error) {
 	f.revokedAs.inviteID, f.revokedAs.ownerID = inviteID, ownerID
-	return f.revokedViewer, f.revokeErr
+	if f.revokeErr != nil {
+		return RevokedGrant{}, f.revokeErr
+	}
+	return RevokedGrant{ViewerUserID: f.revokedViewer, VehicleID: f.revokedVehicle}, nil
 }
 
 func (f *fakeShareInviteStore) ResendInvite(_ context.Context, _, _ string) (ShareInviteRow, error) {

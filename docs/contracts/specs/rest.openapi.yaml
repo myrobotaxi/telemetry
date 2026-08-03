@@ -634,11 +634,14 @@ paths:
         invite was in accepted state, the corresponding viewer
         immediately loses read access to the vehicle.
 
-        Per websocket-protocol.md §10 DV-09, the mid-connection
-        ownership snapshot is stale on the WS path today -- a revoked
-        viewer who is currently connected over the WS continues to
-        receive broadcasts until they reconnect. Closing DV-09 wires
-        this REST endpoint's effect into the live WebSocket path.
+        The revocation also ends the viewer's LIVE WebSocket, not
+        just their next handshake (MYR-373, websocket-protocol.md
+        §4.5.1): the server closes that grantee's sessions for that
+        vehicle with close code 4002 "vehicle access revoked", within
+        milliseconds on the instance that served this request. The
+        teardown is scoped to the revoked viewer -- the owner's own
+        stream and other viewers' streams are unaffected. This closed
+        the access-loss half of DV-09.
 
         Idempotent in the "equivalent final state" sense: a second
         DELETE returns 404 not_found.

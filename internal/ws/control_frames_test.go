@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -117,12 +118,12 @@ func TestControlFrames_SubscribeIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestControlFrames_SubscribeNonOwnedEmitsTypedErrorAndCloses4002 is
+// TestControlFrames_SubscribeNonOwnedEmitsTypedErrorAndStaysOpen is
 // the MYR-46 enforcement scenario: subscribe to a vehicle outside the
 // caller's ownership set must produce a typed `vehicle_not_owned`
-// error frame followed by close code 4002, per websocket-protocol.md
-// §6.1.1 / §6.2.
-func TestControlFrames_SubscribeNonOwnedEmitsTypedErrorAndCloses4002(t *testing.T) {
+// error frame — and, since MYR-373, must LEAVE THE CONNECTION OPEN.
+// Per websocket-protocol.md §6.1.1 / §6.2.
+func TestControlFrames_SubscribeNonOwnedEmitsTypedErrorAndStaysOpen(t *testing.T) {
 	hub := newTestHub(t)
 	t.Cleanup(hub.Stop)
 
@@ -160,15 +161,24 @@ func TestControlFrames_SubscribeNonOwnedEmitsTypedErrorAndCloses4002(t *testing.
 		t.Fatalf("code: got %q, want %q", payload.Code, wserrors.ErrCodeVehicleNotOwned)
 	}
 
-	// The next Read must return the close error with code 4002.
-	closeCtx, closeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// AND THE CONNECTION STAYS OPEN (behavior change, MYR-373). This used to
+	// assert a 4002 close here. That close became a server-driven reconnect
+	// loop once revocation started closing sockets: the viewer reconnects,
+	// re-handshakes into the reduced set, re-sends the subscribe its stale
+	// local state still lists, and gets closed again, forever. The typed
+	// error above already tells the client what happened; destroying an
+	// otherwise-valid session that may carry other vehicles does not.
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer closeCancel()
 	_, _, err = conn.Read(closeCtx)
-	if err == nil {
-		t.Fatal("expected close after error frame")
+	var closeErr websocket.CloseError
+	if errors.As(err, &closeErr) {
+		t.Fatalf("a denied subscribe closed the connection (code=%d reason=%q); "+
+			"it must refuse the subscription and leave the session alone",
+			closeErr.Code, closeErr.Reason)
 	}
-	if got := websocket.CloseStatus(err); got != closeCodePermissionRevoked {
-		t.Fatalf("close code: got %d, want %d", got, closeCodePermissionRevoked)
+	if hub.ClientCount() != 1 {
+		t.Errorf("client count = %d, want 1 — the session should have survived", hub.ClientCount())
 	}
 }
 

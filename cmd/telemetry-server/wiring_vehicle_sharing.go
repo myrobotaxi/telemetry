@@ -41,6 +41,14 @@ func setupVehicleSharingEndpoints(deps httpRouteDeps, vehicles telemetry.Vehicle
 		deps.accessInvalidator,
 		deps.inviteLinks,
 		logger,
+		// MYR-373: revoke and suspend also tear down the grantee's already-open
+		// sockets. The cache bust above only governs the NEXT handshake; a
+		// connection that already completed one holds its access set frozen on
+		// the Client and would keep streaming the car's live GPS to somebody the
+		// owner just cut off, until it happened to reconnect. Nil in dev mode
+		// and in tests that do not wire a bus, which restores the old behavior
+		// rather than failing.
+		telemetry.WithShareAccessNotifier(deps.shareAccessNotifier),
 	)
 	deps.srv.HandleFunc("POST /api/vehicles/{vehicleId}/invites", inviteHandler.ServeCreate)
 	deps.srv.HandleFunc("GET /api/vehicles/{vehicleId}/invites", inviteHandler.ServeList)

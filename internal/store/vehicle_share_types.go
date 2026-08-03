@@ -151,6 +151,28 @@ type ShareGrant struct {
 	AllowRides  bool
 }
 
+// RevokedShare is what a revocation actually took away: WHO lost access and to
+// WHICH vehicle. Returned by RevokeInvite so the caller can bust that person's
+// cached access set and close their live WebSocket for that one car
+// (MYR-373).
+//
+// A struct rather than two bare strings because the two are only ever
+// meaningful together, and because a caller that transposed them would revoke
+// the wrong person's socket — the sort of mistake a pair of same-typed return
+// values invites and a named field forecloses.
+//
+// The ZERO VALUE means "this call removed nothing": a pending row nobody had
+// redeemed, or an already-revoked row on the idempotent path. Callers MUST
+// check ViewerUserID before acting; an empty id is not a wildcard.
+type RevokedShare struct {
+	// ViewerUserID is the grantee whose access ended. Empty when the
+	// revocation removed no live grant.
+	ViewerUserID string
+	// VehicleID is the car they lost. Always populated when the UPDATE
+	// matched a row, including a pending one.
+	VehicleID string
+}
+
 // PatchShareInviteInput is one owner edit of one ACCEPTED grant (MYR-369,
 // PATCH /api/invites/{inviteId}).
 //
