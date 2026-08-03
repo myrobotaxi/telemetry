@@ -34,13 +34,17 @@ const codeReservationExpired = "reservation_expired"
 //     car whose rider gave up, which is strictly worse than an honest,
 //     alertable failure (the MYR-176 reconciler stance, applied to the
 //     sweeper's much larger lateness surface).
-//  2. Check busy — and, since MYR-342, the owner's ride-sharing pause — BEFORE
-//     claiming. The claim is irreversible (the latch admits one winner for the
-//     row's lifetime), so claiming a reservation we then decline to push would
-//     burn it permanently. Holding costs nothing: the row stays selectable and
-//     the next tick re-decides. Both questions are "may this car be dispatched
-//     right now?", and both must be answered before anything irreversible
-//     happens.
+//  2. Ask every "may this car be dispatched right now?" question BEFORE
+//     claiming — busy, then the vehicle's service state and the owner's
+//     ride-sharing pause together in one read (MYR-372 / MYR-342), then the
+//     rider's ride capability (MYR-369). The claim is irreversible (the latch
+//     admits one winner for the row's lifetime), so claiming a reservation we
+//     then decline to push would burn it permanently. Holding costs nothing:
+//     the row stays selectable and the next tick re-decides, which turns every
+//     one of these into a bounded retry that MaxLateness resolves rather than
+//     a refusal. Note what is NOT asked: whether the car is `offline`. See
+//     holdIfVehicleBlocked — that one is the dispatcher's wake ladder to
+//     answer, not ours to pre-empt.
 //  3. Claim, atomically, and only then. The claim re-validates status in SQL,
 //     so a rider cancel or an owner picked-up landing after the pass SELECTed
 //     the row loses the claim and we do nothing.
@@ -81,7 +85,7 @@ func (s *ReservationSweeper) handleDue(ctx context.Context, r *DueReservation) s
 		return decisionHeld
 	}
 
-	if held := s.holdIfRideSharePaused(ctx, r); held {
+	if held := s.holdIfVehicleBlocked(ctx, r); held {
 		return decisionHeld
 	}
 
@@ -117,45 +121,112 @@ func (s *ReservationSweeper) handleDue(ctx context.Context, r *DueReservation) s
 	return decisionDispatched
 }
 
-// holdIfRideSharePaused is the MYR-342 pause probe: the THIRD and last
-// enforcement layer of the owner's ride-sharing switch, and the only one that
-// runs outside a request.
+// holdIfVehicleBlocked answers, from ONE vehicle read, both "is this car in
+// for service?" (MYR-372) and "does its owner still accept rides?" (MYR-342).
 //
-// The first two layers refuse a paused car at request time (ride-request create
-// and owner accept). This one exists for the reservation that was ALREADY
-// accepted when its owner reached for the switch — the request-time gates
-// cannot reach backwards, and without this layer a paused car would still be
-// dialled days later by the sweeper.
+// WHAT THE SERVICE ARM CATCHES. The accept gate asks "can this car be
+// dispatched right now?" and, for a reservation, correctly declines to answer —
+// a car in service today says nothing about a car next Saturday. Its own
+// comment names who owes the answer instead: "availability at the reservation
+// instant belongs to the scheduled-dispatch machinery, which must re-check the
+// vehicle THEN". Nothing did. A car that entered service in the days between
+// accept and the due instant was nav-dialled anyway — a rider walking out to
+// meet a car that is on a lift, which is exactly the class of edge a first
+// external beta produces and has nobody on hand to explain.
 //
-// It sits BESIDE the busy probe and BEFORE the claim for exactly the reason
-// step 2 of handleDue's ordering gives: the claim is irreversible, so a
-// reservation we claim and then decline to push is burnt permanently. HOLDING is
-// free — the row stays selectable and the next tick re-decides — so an owner who
-// un-pauses inside the lateness window still gets the dispatch they meant to
-// allow.
+// ⚠ IT HOLDS ON `in_service` ONLY — NOT ON `offline`. THIS ASYMMETRY IS THE
+// POINT, AND REVERSING IT BREAKS EVERY NEW OWNER'S FIRST RESERVATION.
 //
-// There is deliberately NO expiry logic here. A reservation whose owner never
-// re-enables the car is not held forever: it crosses scheduledFor + MaxLateness
-// and expire() resolves it honestly as `reservation_expired`, which is the same
-// outcome a permanently-busy car produces and needs no new code path.
+// The accept gate refuses both statuses, and copying that here looks like the
+// consistent thing to do. It is not, because the two statuses have opposite
+// dynamics in this server:
 //
-// An unreadable pause state HOLDS, matching the busy probe: we cannot tell
-// whether pushing would dial a car its owner has withdrawn, and a held
-// reservation is recoverable where a wrong push is not. Note this is the one
-// place in MYR-342 that fails CLOSED — the accept path fails OPEN on an
-// unreadable vehicle (MYR-313) because there a human is waiting on an answer.
-// Here nobody is: the row simply gets re-decided in 30 seconds.
-func (s *ReservationSweeper) holdIfRideSharePaused(ctx context.Context, r *DueReservation) bool {
-	enabled, err := s.store.VehicleRideShareEnabled(ctx, r.VehicleID)
+//   - `in_service` is set by the service-status monitor and REFRESHED
+//     INDEPENDENTLY by the MYR-320 periodic re-poll, which exists precisely
+//     because a car at a service centre raises no mTLS connection. Waiting on
+//     it is therefore a bounded wait on a fact somebody else is maintaining,
+//     and it will clear on its own when the visit ends. Holding is honest.
+//   - `offline` is the SCHEMA DEFAULT on "Vehicle" (NOT NULL DEFAULT
+//     'offline'), and the owned-vehicle provisioning INSERT never sets the
+//     column. Nothing in this server ever writes the value back either: both
+//     status writers need a live stream event (a connectivity edge or a
+//     completed drive), the MYR-320 re-poll selects `in_service` rows only,
+//     and the §7.15 refresh writes everything except status. So a key-paired
+//     car that has not yet streamed — every new owner, for their first days —
+//     sits at `offline` with NOTHING scheduled to correct it.
+//
+// Holding on `offline` would therefore be self-perpetuating: the sweeper would
+// hold every 30 seconds for 30 minutes and then expire the reservation, every
+// time, forever. And it would suppress the one thing that WOULD have fixed it.
+// Nav dispatch never depended on the telemetry stream — internal/commands
+// classifies offline/asleep/unavailable alike as OutcomeAsleep and runs a wake
+// ladder within a bounded budget, and this package's own config comments name
+// asleep-vehicle pushes as ordinary steady state. Pre-MYR-372 the push fired
+// and the ladder woke the car. So the hold would replace a working dispatch
+// with a guaranteed `reservation_expired`.
+//
+// `offline` is consequently left to the dispatcher's existing arbitration,
+// exactly as before MYR-372: push, wake, and record an honest outcome if the
+// car really cannot be raised. (Accept's `409` on `offline` for INSTANT rides
+// is untouched pre-existing MYR-277 behaviour — a different question, asked
+// with a human waiting, and not this probe's to change.)
+//
+// THE VOCABULARY IS NOT RESTATED HERE. The adapter answers via
+// telemetry.VehicleStatusIsInService, one arm of the same switch the accept
+// gate's 409 is built from, so the `in_service` literal lives in exactly one
+// place even though the two readers act on different arms.
+//
+// HOLDS RATHER THAN EXPIRES, beside the grant probe and BEFORE the claim, for
+// the reason they share: the claim is irreversible, so a reservation claimed
+// and then not pushed is burnt permanently, while holding is free and the next
+// tick re-decides. That is what makes this a BOUNDED RETRY rather than a
+// refusal — a car back from service inside the lateness window still gets its
+// dispatch and the ride simply happens a few minutes late, while one that
+// never returns is resolved honestly at scheduledFor + MaxLateness as
+// `reservation_expired`, the same outcome a permanently-busy car produces.
+//
+// NO NEW WIRE STATUS, deliberately. Held and expired are both already
+// expressible: the ride row stays `accepted` throughout, and expiry moves only
+// dispatchStatus/dispatch_error. §7.8 documents both, so the client can render
+// this honestly today with nothing new to learn.
+//
+// THE PAUSE ARM (MYR-342) rides the same read. It is the THIRD and last
+// enforcement layer of the owner's ride-sharing switch and the only one that
+// runs outside a request: the create gate and the accept backstop cannot reach
+// backwards to a reservation that was ALREADY accepted when its owner reached
+// for the switch, and without this layer a paused car would still be dialled
+// days later. It has deliberately no expiry logic of its own — the lateness
+// ceiling resolves anything the owner never un-pauses — and an owner who
+// un-pauses inside the window still gets the dispatch they meant to allow.
+//
+// ONE READ SERVES BOTH ARMS, matching the accept gate's discipline of
+// resolving everything it needs from a single row rather than from two reads
+// that can disagree.
+//
+// AN UNREADABLE STATE HOLDS, matching every other probe in this file. We
+// cannot tell whether pushing would dial a car on a lift or one its owner has
+// withdrawn, and a held reservation is recoverable where a wrong push is not.
+// A vehicle row that cannot be found at all is an error too, never a
+// fabricated "dispatchable" — it holds, and the ceiling resolves it.
+func (s *ReservationSweeper) holdIfVehicleBlocked(ctx context.Context, r *DueReservation) bool {
+	state, err := s.store.VehicleDispatchState(ctx, r.VehicleID)
 	if err != nil {
-		s.logger.Error("reservation sweep: ride-share pause check failed",
+		s.logger.Error("reservation sweep: vehicle dispatch-state check failed",
 			slog.String("ride_id", r.RideRequestID),
 			slog.String("vehicle_id", r.VehicleID),
 			slog.String("error", err.Error()),
 		)
 		return true
 	}
-	if !enabled {
+	if state.InService {
+		s.logger.Info("reservation sweep: vehicle is in service, holding",
+			slog.String("ride_id", r.RideRequestID),
+			slog.String("vehicle_id", r.VehicleID),
+			slog.Time("scheduled_for", r.ScheduledFor),
+		)
+		return true
+	}
+	if !state.RideShareEnabled {
 		s.logger.Info("reservation sweep: ride sharing paused for vehicle, holding",
 			slog.String("ride_id", r.RideRequestID),
 			slog.String("vehicle_id", r.VehicleID),
@@ -167,7 +238,7 @@ func (s *ReservationSweeper) holdIfRideSharePaused(ctx context.Context, r *DueRe
 }
 
 // holdIfRiderNotGranted is the MYR-369 ride-capability probe — the THIRD and
-// last enforcement layer of the per-grant ride flag, and, like the pause probe
+// last enforcement layer of the per-grant ride flag, and, like the pause arm
 // above it, the only one that runs outside a request.
 //
 // WHAT IT CATCHES that the other two cannot. The create gate refuses a rider who
