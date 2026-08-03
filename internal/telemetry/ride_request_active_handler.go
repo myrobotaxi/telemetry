@@ -27,7 +27,11 @@ import (
 // follows the grammar `upcomingForVehicle` established rather than growing a
 // second endpoint family. The two params are siblings and complementary: a
 // future reservation is in `upcoming` and NOT in `active`; the same reservation
-// is in `active` once it goes live.
+// is in `active` once it goes live. They are NOT disjoint by construction — the
+// overlap set (a dispatched reservation whose instant is still future) is empty
+// today only because of how the sweeper claims, and becomes reachable when
+// reschedule ships. store/ride_request_active.go states the set and the
+// MYR-192 requirement that closes it.
 //
 // WHAT THE SLICE IS. Same owner (`owner_id` = JWT sub — unchanged, so no
 // cross-owner read is expressible), plus `vehicle_id = {vehicleId}` and the

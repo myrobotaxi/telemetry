@@ -21,8 +21,12 @@ import (
 //
 // The exclusions each say something different. An undecided request is not a
 // commitment. A terminal row has freed the car. A FUTURE reservation is the
-// sibling `upcomingForVehicle` slice's row, not this one — that boundary is the
-// whole reason the two params are complementary rather than overlapping.
+// sibling `upcomingForVehicle` slice's row, not this one — that boundary is
+// what makes the two params complementary.
+//
+// The two slices are NOT strictly disjoint, and no test here should imply they
+// are: TestRideRequestRepo_ActiveAndUpcoming_OverlapSet below states the exact
+// overlap set and pins it in both directions.
 
 const (
 	activeVehicleA = "clxyz1234567890abcdef" // == minimalRideRequest().VehicleID
@@ -177,6 +181,87 @@ func TestRideRequestRepo_ListActiveByOwnerVehicle_DispatchedReservation(t *testi
 	}
 	if len(page.Items) != 1 || page.Items[0].ID != dispatched {
 		t.Fatalf("expected only the dispatched reservation %s, got %v", dispatched, idsOf(page.Items))
+	}
+}
+
+// TestRideRequestRepo_ActiveAndUpcoming_OverlapSet pins the EXACT relationship
+// between the two owner-scoped vehicle slices, in both directions, because the
+// tempting claim — "they are disjoint by construction" — is FALSE and the docs
+// must not rest on it.
+//
+// The overlap set is exactly `accepted AND scheduled_for > NOW() AND
+// dispatch_status = 'sent'`: a reservation the sweeper has dispatched whose
+// instant is still future satisfies `upcoming` (accepted + future) and `active`
+// (the dormancy dispatch arm) simultaneously. This test constructs that row and
+// asserts it lands in BOTH — so a future refactor that "restores disjointness"
+// by dropping the dispatch arm fails here instead of silently losing a live
+// ride.
+//
+// It also pins the other direction: every NATURALLY REACHABLE shape is in at
+// most one slice. The overlap row is unreachable in production today only
+// because the sweep claims `scheduled_for <= NOW()`, so it has to be planted
+// with raw SQL — and it becomes reachable when MYR-192 (reschedule) ships,
+// which is why the requirement to clear the dispatch columns is recorded in
+// ride_request_active.go and in §7.8.
+func TestRideRequestRepo_ActiveAndUpcoming_OverlapSet(t *testing.T) {
+	repo, _ := setupRideRequestRepo(t)
+	ctx := context.Background()
+	owner := minimalRideRequest().OwnerID
+
+	// The overlap row, planted: dispatched AND still future.
+	overlap := seedRideRow(t, repo, ownerVehicleSeed{
+		name:   "dispatched reservation, instant still future",
+		offset: time.Hour, status: store.RideRequestStatusAccepted,
+	})
+	plantDispatchStatus(t, overlap, "sent")
+
+	// The naturally reachable shapes, one per slice.
+	futureDormant := seedRideRow(t, repo, ownerVehicleSeed{
+		name:   "future dormant reservation — upcoming only",
+		offset: 4 * time.Hour, status: store.RideRequestStatusAccepted,
+	})
+	liveInstant := seedRideRow(t, repo, ownerVehicleSeed{
+		name: "instant ride — active only", instant: true, status: store.RideRequestStatusEnroute,
+	})
+
+	active, err := repo.ListActiveByOwnerVehiclePage(ctx, owner, activeVehicleA, store.RideRequestListCursor{}, 50)
+	if err != nil {
+		t.Fatalf("ListActiveByOwnerVehiclePage: %v", err)
+	}
+	upcoming, err := repo.ListUpcomingByOwnerVehiclePage(ctx, owner, activeVehicleA, store.RideRequestUpcomingCursor{}, 50)
+	if err != nil {
+		t.Fatalf("ListUpcomingByOwnerVehiclePage: %v", err)
+	}
+	inActive, inUpcoming := idsOf(active.Items), idsOf(upcoming.Items)
+
+	for _, tt := range []struct {
+		name         string
+		id           string
+		wantActive   bool
+		wantUpcoming bool
+	}{
+		// THE OVERLAP SET, made concrete: this row is in BOTH.
+		{name: "dispatched future reservation", id: overlap, wantActive: true, wantUpcoming: true},
+		{name: "future dormant reservation", id: futureDormant, wantActive: false, wantUpcoming: true},
+		{name: "live instant ride", id: liveInstant, wantActive: true, wantUpcoming: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := containsID(inActive, tt.id); got != tt.wantActive {
+				t.Errorf("in active: got %v want %v (active=%v)", got, tt.wantActive, inActive)
+			}
+			if got := containsID(inUpcoming, tt.id); got != tt.wantUpcoming {
+				t.Errorf("in upcoming: got %v want %v (upcoming=%v)", got, tt.wantUpcoming, inUpcoming)
+			}
+		})
+	}
+
+	// Stated as an invariant so the failure message names the real problem: the
+	// ONLY row the two slices may share is the planted overlap shape.
+	for _, id := range inActive {
+		if containsID(inUpcoming, id) && id != overlap {
+			t.Errorf("unexpected row %s in BOTH slices — the overlap set is supposed to be "+
+				"exactly {dispatched AND future}", id)
+		}
 	}
 }
 

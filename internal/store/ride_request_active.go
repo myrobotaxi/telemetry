@@ -11,10 +11,39 @@
 // device did, so a ride accepted on a second device, or before a reinstall, was
 // unrecoverable).
 //
-// THE TWO SLICES ARE COMPLEMENTARY, NOT OVERLAPPING. `upcomingForVehicle` is
-// the reservation an owner could still spare a rider from; this is the ride
-// they are in the middle of. A future reservation appears in `upcoming` and
-// NOT here; the same reservation appears here once it is live.
+// THE TWO SLICES ARE COMPLEMENTARY. `upcomingForVehicle` is the reservation an
+// owner could still spare a rider from; this is the ride they are in the middle
+// of. A future reservation appears in `upcoming` and NOT here; the same
+// reservation appears here once it is live.
+//
+// THEY ARE NOT DISJOINT BY CONSTRUCTION, and the doc must not claim they are.
+// The overlap set is exactly:
+//
+//	status = 'accepted' AND scheduled_for > NOW() AND dispatch_status = 'sent'
+//
+// — a reservation the sweeper has dispatched whose instant is STILL FUTURE. It
+// satisfies `upcoming` (accepted + future) and `active` (the dormancy dispatch
+// arm) simultaneously.
+//
+// TODAY THAT SET IS EMPTY IN PRODUCTION, but by a property of the SWEEPER, not
+// of these predicates: the sweep only claims rows with `scheduled_for <= NOW()`
+// (queryRideRequestListDue), so nothing can be dispatched and future at once.
+// The only test that constructs such a row plants it with raw SQL.
+//
+// IT BECOMES REACHABLE WHEN MYR-192 (reschedule) SHIPS.
+// queryRideRequestResolveReschedule moves `scheduled_for` forward on confirm
+// and does NOT clear `dispatch_status` / `dispatched_at`, so a dispatched
+// reservation rescheduled later would land in the overlap set and appear in
+// both slices at once.
+//
+// REQUIREMENT FOR MYR-192, recorded here because this is where the predicates
+// live: resolve-reschedule MUST clear `dispatch_status` and `dispatched_at`
+// when it moves the instant. That is not merely tidiness — rest-api.md §7.8
+// already promises that "a confirmed reschedule moving the instant later
+// correctly re-imposes dormancy", and while the dispatch columns survive the
+// move the `dispatch_status = 'sent'` arm DEFEATS that promise: the ride would
+// stay pickup-able (and `active`) for a reservation that is days out again.
+// Clearing them restores both the documented dormancy and the disjointness.
 
 package store
 

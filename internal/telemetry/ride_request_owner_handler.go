@@ -50,10 +50,11 @@ import (
 //     committed status, dormant reservations excluded, newest first (MYR-400 —
 //     see ride_request_active_handler.go).
 //
-// They are complementary halves of one question and never overlap: a future
-// reservation is `upcoming`, and the same reservation is `active` once it goes
-// live. ABSENT both params this endpoint is byte-identical to what it has
-// always served; a test pins that.
+// They are complementary halves of one question: a future reservation is
+// `upcoming`, and the same reservation is `active` once it goes live. (They are
+// not strictly disjoint — see store/ride_request_active.go for the overlap set
+// and why it is unreachable today.) ABSENT both params this endpoint is
+// byte-identical to what it has always served; a test pins that.
 func (h *RideRequestHandler) ServeIncoming(w http.ResponseWriter, r *http.Request) {
 	userID, ok := h.authUser(w, r)
 	if !ok {
@@ -67,9 +68,12 @@ func (h *RideRequestHandler) ServeIncoming(w http.ResponseWriter, r *http.Reques
 	wantActive := query.Has(queryActiveForVehicle)
 
 	// Both at once is REFUSED rather than silently resolved by precedence. The
-	// two slices are disjoint by construction, so no single page could honour
-	// both, and answering with one of them would hand a client a confidently
-	// wrong page — the failure mode this read exists to eliminate.
+	// two params name different PREDICATES, different ORDERINGS and different
+	// cursor anchor columns, so no single page can honour both requests; a
+	// precedence rule would silently answer a question the client did not ask
+	// and hand back a confidently wrong page — the failure mode this read
+	// exists to eliminate. (The refusal does not rest on the slices being
+	// disjoint, which they are not strictly — see the store file.)
 	if wantUpcoming && wantActive {
 		h.writeError(w, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest,
 			queryUpcomingForVehicle+" and "+queryActiveForVehicle+" are mutually exclusive")
