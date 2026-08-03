@@ -446,6 +446,42 @@ func TestChannelBus_CloseIdempotent(t *testing.T) {
 	}
 }
 
+// TestChannelBus_UnsubscribeAfterCloseDoesNotPanic pins MYR-410.
+//
+// Close signals every subscriber by closing its done channel. It used to leave
+// them registered afterwards, so a consumer that unsubscribes itself on
+// shutdown would find its subscription still there and close the SAME channel a
+// second time — `panic: close of closed channel`, during shutdown, in whichever
+// consumer happened to stop last.
+//
+// That was latent only because nothing called Close. Wiring Close into main's
+// shutdown made it reachable by five consumers (the writer, broadcaster,
+// detector, service-status monitor and ride-position poller all unsubscribe in
+// Stop), plus any live debug-fields WebSocket, whose unsubscribe is deferred on
+// a hijacked connection that http.Server.Shutdown does not wait for.
+//
+// Close now deregisters what it signals, so a later Unsubscribe reports
+// ErrSubscriptionNotFound — which every caller already handles.
+func TestChannelBus_UnsubscribeAfterCloseDoesNotPanic(t *testing.T) {
+	bus := testBus(16)
+
+	sub, err := bus.Subscribe(TopicVehicleTelemetry, func(Event) {})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	if err := bus.Close(context.Background()); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Must not panic. The subscriber is gone, so this is a not-found, not a
+	// second close of an already-closed channel.
+	err = bus.Unsubscribe(sub)
+	if !errors.Is(err, ErrSubscriptionNotFound) {
+		t.Errorf("unsubscribe after close: got %v, want %v", err, ErrSubscriptionNotFound)
+	}
+}
+
 func TestChannelBus_GracefulShutdownDrains(t *testing.T) {
 	bus := testBus(64)
 

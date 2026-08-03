@@ -154,14 +154,21 @@ func (b *ChannelBus) Close(ctx context.Context) error {
 	}
 	b.logger.Info("event bus shutting down, draining pending events")
 
+	// Deregister as we collect. Close signals every subscriber by closing its
+	// done channel, and leaving them registered would let a consumer that
+	// unsubscribes itself on shutdown close the SAME channel a second time —
+	// a panic, during shutdown, in whichever consumer happened to stop last.
+	// Dropping them here turns that into the ErrSubscriptionNotFound every
+	// Unsubscribe caller already handles (MYR-410).
 	b.mu.RLock()
 	var allSubs []*subscriber
 	for _, te := range b.topics {
-		te.mu.RLock()
-		for _, s := range te.subscribers {
+		te.mu.Lock()
+		for id, s := range te.subscribers {
 			allSubs = append(allSubs, s)
+			delete(te.subscribers, id)
 		}
-		te.mu.RUnlock()
+		te.mu.Unlock()
 	}
 	b.mu.RUnlock()
 
