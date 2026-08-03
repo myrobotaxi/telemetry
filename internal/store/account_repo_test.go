@@ -279,11 +279,16 @@ func TestAccountRepo_UpdateTeslaToken_WritesCiphertextOnly(t *testing.T) {
 		t.Fatalf("scan: %v", err)
 	}
 
-	if accessPT == nil || *accessPT != "old-access" {
-		t.Errorf("access plaintext = %v, want the stale seed untouched — the refreshed token must not be written there", accessPT)
+	// The refresh SCRUBS the plaintext columns rather than merely
+	// declining to write them (MYR-433). A refresh is the moment the old
+	// plaintext credential becomes both exposed and superseded, so
+	// UpdateTeslaToken NULLs it — an account heals itself within hours
+	// instead of waiting for cmd/purge-plaintext-columns to be run.
+	if accessPT != nil {
+		t.Errorf("access plaintext = %q, want NULL — the refresh must scrub the superseded credential", *accessPT)
 	}
-	if refreshPT == nil || *refreshPT != "old-refresh" {
-		t.Errorf("refresh plaintext = %v, want the stale seed untouched — the refreshed token must not be written there", refreshPT)
+	if refreshPT != nil {
+		t.Errorf("refresh plaintext = %q, want NULL — the refresh must scrub the superseded credential", *refreshPT)
 	}
 	if accessEnc == nil {
 		t.Fatal("access_token_enc not written")

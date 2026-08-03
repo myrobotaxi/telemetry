@@ -93,10 +93,13 @@ func (r *DriveRepo) Create(ctx context.Context, drive DriveRecord) error {
 		routePoints = json.RawMessage("[]")
 	}
 
-	encShadow := r.encryptRoutePointsRaw(routePoints)
+	encShadow, err := r.encryptRoutePointsRaw(routePoints)
+	if err != nil {
+		return fmt.Errorf("DriveRepo.Create(%s): %w", drive.ID, err)
+	}
 
 	start := time.Now()
-	_, err := r.pool.Exec(ctx, queryDriveInsert,
+	_, err = r.pool.Exec(ctx, queryDriveInsert,
 		drive.ID, drive.VehicleID, drive.Date, drive.StartTime, drive.EndTime,
 		drive.StartLocation, drive.StartAddress, drive.EndLocation, drive.EndAddress,
 		drive.DistanceMiles, drive.DurationMinutes, drive.AvgSpeedMph, drive.MaxSpeedMph,
@@ -215,11 +218,23 @@ func (r *DriveRepo) mergeRoutePoints(existingCT *string, points []RoutePointReco
 		if err != nil {
 			// Fail closed. Appending here would replace a trail we simply
 			// cannot read with a fragment, which is unrecoverable.
-			return nil, fmt.Errorf("decrypt existing trail: %w", err)
+			//
+			// ErrRouteTrailUnreadable marks this PERMANENT so the caller
+			// drops the batch instead of retrying a decrypt that cannot
+			// start succeeding — see the sentinel's doc comment.
+			r.metrics.IncDecryptFailure("routePointsEnc")
+			return nil, fmt.Errorf("%w: %w", ErrRouteTrailUnreadable, err)
 		}
 		if len(raw) > 0 {
 			if err := json.Unmarshal(raw, &trail); err != nil {
-				return nil, fmt.Errorf("decode existing trail: %w", err)
+				// Decrypted but not a JSON array. GetByID treats this same
+				// condition as "empty trail" and keeps serving; the write
+				// path cannot do that, because "append to a trail I cannot
+				// parse" has no safe answer — starting fresh would silently
+				// destroy whatever IS in there. So the read stays lenient,
+				// the write refuses, and both are permanent-and-visible.
+				r.metrics.IncDecryptFailure("routePointsEnc")
+				return nil, fmt.Errorf("%w: decode: %w", ErrRouteTrailUnreadable, err)
 			}
 		}
 	}
@@ -239,29 +254,31 @@ func (r *DriveRepo) mergeRoutePoints(existingCT *string, points []RoutePointReco
 	return merged, nil
 }
 
-// encryptRoutePointsRaw is the Create-path companion: encrypts the
-// seed routePoints array into the shadow value and returns the *string
-// pgx wants for the parameter slot. nil result writes NULL into the
-// column. Encrypt failures are logged at Warn (when a logger is wired)
-// and converted to a NULL shadow so the plaintext write still goes
-// through — telemetry must never be lost over an encryption hiccup.
-func (r *DriveRepo) encryptRoutePointsRaw(raw json.RawMessage) *string {
+// encryptRoutePointsRaw is the Create-path companion: encrypts the seed
+// routePoints array into the shadow value and returns the *string pgx
+// wants for the parameter slot. A nil result writes NULL into the column.
+//
+// Fail-CLOSED, matching AppendRoutePoints. The pre-MYR-433 version logged
+// at Warn and returned nil "so the plaintext write still goes through" —
+// but there is no plaintext write any more, so swallowing the error would
+// create a drive whose seed trail was silently discarded. An error here
+// aborts Create, and the drive detector will retry on the next event.
+//
+// An empty seed (the normal case — `[]`) is not a failure: EncryptJSONBytes
+// returns the empty sentinel and the shadow stays NULL until the first
+// append.
+func (r *DriveRepo) encryptRoutePointsRaw(raw json.RawMessage) (*string, error) {
 	if r.encryptor == nil {
-		return nil
+		return nil, nil //nolint:nilnil // no encryptor wired: no shadow to write
 	}
 	ct, err := routeblob.EncryptJSONBytes(raw, r.encryptor)
 	if err != nil {
-		if r.logger != nil {
-			r.logger.Warn("Drive routePointsEnc seed encrypt failed; writing plaintext only",
-				slog.String("error", err.Error()),
-			)
-		}
-		return nil
+		return nil, fmt.Errorf("encrypt seed trail: %w", err)
 	}
 	if ct == "" {
-		return nil
+		return nil, nil //nolint:nilnil // empty seed: leave the shadow NULL
 	}
-	return &ct
+	return &ct, nil
 }
 
 // Complete updates a drive with its final stats when the drive ends.
@@ -331,12 +348,15 @@ func (r *DriveRepo) applyResolvedRoutePoints(d *DriveRecord, ct *string) {
 	}
 	raw, err := routeblob.DecryptJSONBytes(*ct, r.encryptor)
 	if err != nil {
+		// ERROR, not Warn: this read is fail-soft, so a key mistake would
+		// otherwise present as "this drive recorded no route".
 		if r.logger != nil {
-			r.logger.Warn("Drive routePointsEnc decrypt failed; surfacing empty trail",
+			r.logger.Error("Drive routePointsEnc decrypt failed; surfacing empty trail",
 				slog.String("drive_id", d.ID),
 				slog.String("error", err.Error()),
 			)
 		}
+		r.metrics.IncDecryptFailure("routePointsEnc")
 		return
 	}
 	if len(raw) == 0 {
@@ -344,10 +364,11 @@ func (r *DriveRepo) applyResolvedRoutePoints(d *DriveRecord, ct *string) {
 	}
 	if !looksLikeJSONArray(raw) {
 		if r.logger != nil {
-			r.logger.Warn("Drive routePointsEnc decoded to non-array; surfacing empty trail",
+			r.logger.Error("Drive routePointsEnc decoded to non-array; surfacing empty trail",
 				slog.String("drive_id", d.ID),
 			)
 		}
+		r.metrics.IncDecryptFailure("routePointsEnc")
 		return
 	}
 	d.RoutePoints = raw

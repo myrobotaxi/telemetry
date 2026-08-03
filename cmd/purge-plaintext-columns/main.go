@@ -8,10 +8,18 @@
 // ciphertext-only server binary is deployed. Idempotent — re-running over
 // a purged database touches nothing.
 //
-// Every row is verified before it is scrubbed: the ciphertext sibling is
-// decrypted and compared against the plaintext, and any row that cannot
-// be verified is reported and left completely intact. The purge never
-// destroys the only copy of a value. See internal/store/plaintextpurge.
+// Every row is verified before it is scrubbed: the ciphertext sibling
+// must decrypt. A row whose ciphertext is absent or undecryptable is
+// reported and left completely intact — the purge never destroys the only
+// copy of a value.
+//
+// A plaintext that DIFFERS from its decrypted ciphertext is scrubbed, not
+// blocked. After this server deploys nothing writes plaintext, so a
+// difference means the plaintext is an older snapshot of a field whose
+// current value just decrypted successfully — which is exactly the
+// residue this tool exists to remove. Expect `stale` to dominate
+// `redundant` on a live fleet. See internal/store/plaintextpurge for the
+// full argument.
 //
 // Run with -dry-run first. It performs the identical scan and
 // verification and writes nothing, so the report tells you exactly what
@@ -112,12 +120,13 @@ func run() int {
 	}
 }
 
-// columnReport is the per-column JSON shape.
-type columnReport struct {
+// targetReport is the per-target JSON shape.
+type targetReport struct {
 	Scanned       int `json:"scanned"`
 	Purged        int `json:"purged"`
+	Redundant     int `json:"redundant"`
+	Stale         int `json:"stale"`
 	Unsealed      int `json:"unsealed"`
-	Mismatched    int `json:"mismatched"`
 	Undecryptable int `json:"undecryptable"`
 	UpdateErrors  int `json:"updateErrors"`
 	Remaining     int `json:"remaining"`
@@ -125,35 +134,44 @@ type columnReport struct {
 
 // writeReport emits the machine-readable run summary on stdout.
 //
-// `remaining` per column, and `totalRemaining`, are the numbers that
+// `remaining` per target, and `totalRemaining`, are the numbers that
 // matter: the MYR-433 acceptance bar is met when totalRemaining is 0,
 // because that is the count of rows from which an operator could still
 // read a token or a coordinate.
+//
+// `stale` is the expected shape on a live database, not a warning. Once
+// the ciphertext-only server is deployed the plaintext stops advancing
+// while the ciphertext keeps moving, so on a busy fleet most purged rows
+// will be stale rather than redundant. `unsealed` and `undecryptable` are
+// the ones that need an operator.
 func writeReport(res plaintextpurge.Result, runErr error) {
-	cols := make(map[string]columnReport, len(res.Columns))
-	for label, c := range res.Columns {
-		cols[label] = columnReport{
-			Scanned:       c.Scanned,
-			Purged:        c.Purged,
-			Unsealed:      c.Unsealed,
-			Mismatched:    c.Mismatched,
-			Undecryptable: c.Undecryptable,
-			UpdateErrors:  c.UpdateErrors,
-			Remaining:     c.Remaining,
+	targets := make(map[string]targetReport, len(res.Targets))
+	for label, t := range res.Targets {
+		targets[label] = targetReport{
+			Scanned:       t.Scanned,
+			Purged:        t.Purged,
+			Redundant:     t.Redundant,
+			Stale:         t.Stale,
+			Unsealed:      t.Unsealed,
+			Undecryptable: t.Undecryptable,
+			UpdateErrors:  t.UpdateErrors,
+			Remaining:     t.Remaining,
 		}
 	}
 
 	report := struct {
 		DryRun         bool                    `json:"dryRun"`
-		Columns        map[string]columnReport `json:"columns"`
+		Targets        map[string]targetReport `json:"targets"`
 		TotalPurged    int                     `json:"totalPurged"`
+		TotalStale     int                     `json:"totalStale"`
 		TotalBlocked   int                     `json:"totalBlocked"`
 		TotalRemaining int                     `json:"totalRemaining"`
 		Error          string                  `json:"error,omitempty"`
 	}{
 		DryRun:         res.DryRun,
-		Columns:        cols,
+		Targets:        targets,
 		TotalPurged:    res.TotalPurged(),
+		TotalStale:     res.TotalStale(),
 		TotalBlocked:   res.TotalBlocked(),
 		TotalRemaining: res.TotalRemaining(),
 	}

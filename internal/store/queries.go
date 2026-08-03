@@ -427,8 +427,21 @@ FROM "Account"
 WHERE "userId" = $1 AND "provider" = 'tesla'
 LIMIT 1`
 
+// queryUpdateTeslaToken writes a refreshed token pair as ciphertext, and
+// NULLs the legacy plaintext columns while it is there.
+//
+// The NULLs make this self-healing. A token refresh is the moment a
+// pre-MYR-433 plaintext credential becomes not merely exposed but WRONG —
+// it is a superseded token sitting in a readable column — so scrubbing it
+// here means an account heals itself on its next refresh (Tesla tokens are
+// short-lived, so that is hours) without waiting for
+// cmd/purge-plaintext-columns to be run. queryProvisionAccount does the
+// same on re-link; between them, every Go-side Account write leaves the
+// row clean.
 const queryUpdateTeslaToken = `UPDATE "Account"
 SET "access_token_enc" = $1,
     "refresh_token_enc" = $2,
-    "expires_at" = $3
+    "expires_at" = $3,
+    "access_token" = NULL,
+    "refresh_token" = NULL
 WHERE "userId" = $4 AND "provider" = 'tesla'`

@@ -114,6 +114,7 @@ func resolveGPSPair(
 	latEncCT, lngEncCT *string,
 	enc cryptox.Encryptor,
 	logger *slog.Logger,
+	metrics Metrics,
 	pair gpsPair,
 ) (lat, lng *float64) {
 	latPresent := latEncCT != nil && *latEncCT != ""
@@ -128,6 +129,9 @@ func resolveGPSPair(
 				slog.Bool("lng_enc_present", lngPresent),
 			)
 		}
+		if metrics != nil {
+			metrics.IncDecryptFailure(pair.lat + "Enc")
+		}
 		return nil, nil
 	}
 
@@ -141,14 +145,18 @@ func resolveGPSPair(
 	lngRes, lngErr := encStringToFloat(lngEncCT, enc)
 	if latErr != nil || lngErr != nil {
 		// Decrypt-or-parse failure on a fully populated *Enc pair —
-		// typically a key-rotation mistake. Logged at Warn so it shows
-		// up in operator dashboards without 500'ing the read path.
+		// typically a key mistake. Logged at ERROR, not Warn: this read
+		// is fail-soft, so without a loud signal the car simply stops
+		// having a location and nobody finds out until a user complains.
 		if logger != nil {
-			logger.Warn("vehicle GPS *Enc decrypt failed; surfacing no location",
+			logger.Error("vehicle GPS *Enc decrypt failed; surfacing no location",
 				slog.String("pair", pair.lat+"/"+pair.lng),
 				slog.Any("lat_err", latErr),
 				slog.Any("lng_err", lngErr),
 			)
+		}
+		if metrics != nil {
+			metrics.IncDecryptFailure(pair.lat + "Enc")
 		}
 		return nil, nil
 	}

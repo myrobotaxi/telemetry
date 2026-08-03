@@ -53,6 +53,7 @@ type operatorFixture struct {
 	trail        []store.RoutePointRecord
 	accessToken  string
 	refreshToken string
+	idToken      string
 }
 
 // newOperatorFixture returns the fixture with deliberately distinctive
@@ -84,6 +85,7 @@ func newOperatorFixture() operatorFixture {
 		// marker prefix is what the needle scan below greps for.
 		accessToken:  "qts-MYR433-ACCESS-a1b2c3d4e5f6",
 		refreshToken: "qts-MYR433-REFRESH-9z8y7x6w5v",
+		idToken:      "qts-MYR433-IDTOKEN-4k3j2h1g0f",
 	}
 }
 
@@ -100,6 +102,7 @@ func (f operatorFixture) needles() map[string]string {
 		"origin longitude":      fmt.Sprintf("%v", f.originLng),
 		"tesla access token":    f.accessToken,
 		"tesla refresh token":   f.refreshToken,
+		"tesla id token":        f.idToken,
 	}
 }
 
@@ -133,7 +136,7 @@ func TestMYR433_OperatorCannotReadPlaintext(t *testing.T) {
 	// test the residue is planted deliberately (see
 	// plantLegacyPlaintextResidue) because the new write paths no longer
 	// create any — which is itself the point.
-	plantLegacyPlaintextResidue(ctx, t, f)
+	plantLegacyPlaintextResidue(ctx, t, f, enc)
 	runPurgeToCompletion(ctx, t, enc, quiet)
 
 	// The operator's view.
@@ -141,6 +144,151 @@ func TestMYR433_OperatorCannotReadPlaintext(t *testing.T) {
 
 	// And the data is still there for anyone holding the key.
 	assertRecoverableThroughRepos(ctx, t, enc, quiet, f, "after purge")
+}
+
+// TestMYR433_PurgeScrubsPostDeploySkew is the regression test for the
+// bug that made the first cut of this work useless on a live database.
+//
+// The original purge scrubbed only when the decrypted ciphertext EQUALLED
+// the plaintext. That looks careful and is catastrophic: once the
+// ciphertext-only server is deployed, plaintext stops being written while
+// ciphertext keeps advancing on every telemetry frame, token refresh and
+// route flush. So every ACTIVE row drifts apart within seconds and would
+// have been refused forever — leaving live Tesla credentials and live
+// coordinates readable on exactly the accounts that matter most, with
+// totalRemaining permanently non-zero. Re-running could not help, because
+// the backfills only populate a NULL ciphertext.
+//
+// The acceptance test above cannot catch this: it writes and purges in
+// one pass, so its two copies never diverge. This one deliberately
+// advances the ciphertext AFTER planting the legacy plaintext, exactly as
+// a running server would, and asserts the purge still clears the row.
+func TestMYR433_PurgeScrubsPostDeploySkew(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("Docker not available")
+	}
+	ensureOwnerSchema(t)
+	cleanTables(t, testPool)
+	cleanOwnerTables(t)
+
+	ctx := context.Background()
+	enc := newTestEncryptor(t)
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	f := newOperatorFixture()
+
+	seedOwnerUser(t, f.userID, "MYR-433 Owner", "myr433@example.com")
+	seedVehicle(t, testPool, f.vehicleID, f.vin)
+	writeFixtureThroughProductionPaths(ctx, t, enc, quiet, f)
+	plantLegacyPlaintextResidue(ctx, t, f, enc)
+
+	// Now let the "server" run: every write below touches ONLY ciphertext,
+	// which is what the post-MYR-433 write paths do. The plaintext columns
+	// keep their planted pre-deploy values and now disagree with it.
+	advanceCiphertextOnly(ctx, t, enc, quiet, f)
+
+	res, err := plaintextpurge.New(testPool, enc, quiet).Run(ctx, false)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+
+	if res.TotalStale() == 0 {
+		t.Error("no rows were classified stale; the skew this test exists to create did not happen, " +
+			"so it is not exercising the regression")
+	}
+	if res.TotalBlocked() != 0 {
+		t.Errorf("purge blocked %d row(s) after a normal post-deploy skew. This is the MYR-433 "+
+			"blocker: a ciphertext that advanced past its plaintext is STALE, not suspect, and "+
+			"must be scrubbed. Per-target: %+v", res.TotalBlocked(), res.Targets)
+	}
+	if res.TotalRemaining() != 0 {
+		t.Errorf("purge left %d readable plaintext row(s) on a live-traffic database; "+
+			"totalRemaining must reach 0 or the acceptance bar is unreachable. Per-target: %+v",
+			res.TotalRemaining(), res.Targets)
+	}
+
+	// And the operator still cannot read anything.
+	assertNoPlaintextReadable(ctx, t, f)
+}
+
+// advanceCiphertextOnly simulates live traffic after the ciphertext-only
+// server is deployed: new GPS, a new route, more trail points and a token
+// refresh, all of which land in the *Enc columns and none of which touch
+// the plaintext columns.
+func advanceCiphertextOnly(
+	ctx context.Context, t *testing.T, enc cryptox.Encryptor, logger *slog.Logger, f operatorFixture,
+) {
+	t.Helper()
+
+	newLat, newLng := 30.2672012, -97.7430613 // the car drove to Austin
+	newDestLat, newDestLng := 30.1975001, -97.6664002
+	newOriginLat, newOriginLng := 30.3000003, -97.7500004
+	newRoute := json.RawMessage(`[[-97.7430613,30.2672012],[-97.6664002,30.1975001]]`)
+
+	vehicles := store.NewVehicleRepoWithEncryption(testPool, store.NoopMetrics{}, enc, logger)
+	if err := vehicles.UpdateTelemetry(ctx, f.vin, store.VehicleUpdate{
+		Latitude:             &newLat,
+		Longitude:            &newLng,
+		DestinationLatitude:  &newDestLat,
+		DestinationLongitude: &newDestLng,
+		OriginLatitude:       &newOriginLat,
+		OriginLongitude:      &newOriginLng,
+		NavRouteCoordinates:  &newRoute,
+		LastUpdated:          time.Now(),
+	}); err != nil {
+		t.Fatalf("advance vehicle telemetry: %v", err)
+	}
+
+	drives := store.NewDriveRepoWithEncryption(testPool, store.NoopMetrics{}, enc, logger)
+	if err := drives.AppendRoutePoints(ctx, f.driveID, []store.RoutePointRecord{
+		{Latitude: 30.2672012, Longitude: -97.7430613, Speed: 55, Heading: 90, Timestamp: "2026-08-02T11:00:00Z"},
+	}); err != nil {
+		t.Fatalf("advance drive trail: %v", err)
+	}
+
+	accounts := store.NewAccountRepo(testPool, enc)
+	if err := accounts.UpdateTeslaToken(ctx, f.userID,
+		"qts-MYR433-ACCESS-REFRESHED", "qts-MYR433-REFRESH-ROTATED",
+		time.Now().Add(8*time.Hour).Unix(),
+	); err != nil {
+		t.Fatalf("advance tesla token: %v", err)
+	}
+
+	// Guard the premise: the vehicle's plaintext columns must still hold
+	// their OLD values, or the writes above touched plaintext and this
+	// test proves nothing about skew.
+	var lat float64
+	if err := testPool.QueryRow(ctx,
+		`SELECT "latitude" FROM "Vehicle" WHERE "vin" = $1`, f.vin).Scan(&lat); err != nil {
+		t.Fatalf("read plaintext latitude: %v", err)
+	}
+	if lat != f.lat {
+		t.Fatalf("plaintext latitude moved to %v; a write path is still touching the plaintext column", lat)
+	}
+
+	// The Account row is the deliberate exception. UpdateTeslaToken NULLs
+	// the plaintext token columns as it writes (queries.go), so a refresh
+	// heals the row on its own rather than leaving a superseded credential
+	// readable until someone runs the purge. Assert that self-healing here
+	// — it is the one plaintext write this server still makes, and it only
+	// ever writes NULL.
+	var access, refresh *string
+	if err := testPool.QueryRow(ctx,
+		`SELECT "access_token", "refresh_token" FROM "Account" WHERE "userId" = $1 AND "provider" = 'tesla'`,
+		f.userID).Scan(&access, &refresh); err != nil {
+		t.Fatalf("read plaintext tokens: %v", err)
+	}
+	if access != nil || refresh != nil {
+		t.Errorf("token refresh left plaintext credentials behind (access=%v refresh=%v); "+
+			"UpdateTeslaToken is supposed to scrub them", drefOrNil(access), drefOrNil(refresh))
+	}
+}
+
+// drefOrNil renders a nullable string column for an error message.
+func drefOrNil(p *string) string {
+	if p == nil {
+		return "NULL"
+	}
+	return *p
 }
 
 // writeFixtureThroughProductionPaths persists the fixture using the same
@@ -210,8 +358,27 @@ func writeFixtureThroughProductionPaths(
 // that does nothing, because the new write paths leave those columns
 // empty already. Planting the residue is what makes the post-purge
 // assertions meaningful.
-func plantLegacyPlaintextResidue(ctx context.Context, t *testing.T, f operatorFixture) {
+//
+// The id_token pair is planted wholesale — plaintext AND ciphertext.
+// Nothing in this server has ever written id_token (the Tesla refresh
+// response does not return one), so its ciphertext can only come from
+// cmd/backfill-account-tokens. Sealing it here is what stops that column
+// from being covered vacuously: without a row, "id_token is NULL" would
+// pass whether or not the purge handles the column at all.
+func plantLegacyPlaintextResidue(ctx context.Context, t *testing.T, f operatorFixture, enc cryptox.Encryptor) {
 	t.Helper()
+
+	idEnc, err := enc.EncryptString(f.idToken)
+	if err != nil {
+		t.Fatalf("seal id_token: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `
+		UPDATE "Account" SET "id_token" = $2, "id_token_enc" = $3
+		WHERE "userId" = $1 AND "provider" = 'tesla'`,
+		f.userID, f.idToken, idEnc,
+	); err != nil {
+		t.Fatalf("plant id_token pair: %v", err)
+	}
 
 	if _, err := testPool.Exec(ctx, `
 		UPDATE "Vehicle" SET
@@ -225,9 +392,9 @@ func plantLegacyPlaintextResidue(ctx context.Context, t *testing.T, f operatorFi
 		t.Fatalf("plant vehicle residue: %v", err)
 	}
 
-	trailJSON, err := json.Marshal(f.trail)
-	if err != nil {
-		t.Fatalf("marshal trail: %v", err)
+	trailJSON, mErr := json.Marshal(f.trail)
+	if mErr != nil {
+		t.Fatalf("marshal trail: %v", mErr)
 	}
 	if _, err := testPool.Exec(ctx,
 		`UPDATE "Drive" SET "routePoints" = $2::jsonb WHERE "id" = $1`,
@@ -275,7 +442,7 @@ func runPurgeToCompletion(ctx context.Context, t *testing.T, enc cryptox.Encrypt
 	}
 	if res.TotalRemaining() != 0 {
 		t.Errorf("purge finished with %d plaintext row(s) remaining, want 0; per-column: %+v",
-			res.TotalRemaining(), res.Columns)
+			res.TotalRemaining(), res.Targets)
 	}
 
 	// Idempotence: a second run must find nothing.

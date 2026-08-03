@@ -109,12 +109,15 @@ func (r *VehicleRepo) applyResolvedNavRoute(v *Vehicle, ct *string) {
 	}
 	raw, err := routeblob.DecryptJSONBytes(*ct, r.encryptor)
 	if err != nil {
+		// ERROR, not Warn: this read is fail-soft, so the only other
+		// evidence of a key mistake is routes quietly vanishing.
 		if r.logger != nil {
-			r.logger.Warn("Vehicle navRouteCoordinatesEnc decrypt failed; surfacing no route",
+			r.logger.Error("Vehicle navRouteCoordinatesEnc decrypt failed; surfacing no route",
 				slog.String("vehicle_id", v.ID),
 				slog.String("error", err.Error()),
 			)
 		}
+		r.incDecryptFailure("navRouteCoordinatesEnc")
 		return
 	}
 	if len(raw) == 0 {
@@ -125,13 +128,22 @@ func (r *VehicleRepo) applyResolvedNavRoute(v *Vehicle, ct *string) {
 	// surfaces as no route rather than garbage to the SDK.
 	if !looksLikeJSONArray(raw) {
 		if r.logger != nil {
-			r.logger.Warn("Vehicle navRouteCoordinatesEnc decoded to non-array; surfacing no route",
+			r.logger.Error("Vehicle navRouteCoordinatesEnc decoded to non-array; surfacing no route",
 				slog.String("vehicle_id", v.ID),
 			)
 		}
+		r.incDecryptFailure("navRouteCoordinatesEnc")
 		return
 	}
 	v.NavRouteCoordinates = raw
+}
+
+// incDecryptFailure records one at-rest decrypt failure, tolerating a
+// repo built without a Metrics (some legacy test constructors).
+func (r *VehicleRepo) incDecryptFailure(column string) {
+	if r.metrics != nil {
+		r.metrics.IncDecryptFailure(column)
+	}
 }
 
 // looksLikeJSONArray is the minimal shape guard the read path applies
@@ -163,11 +175,11 @@ func (r *VehicleRepo) applyResolvedGPS(v *Vehicle, main, dest, origin gpsScanRes
 	if r.encryptor == nil {
 		return
 	}
-	mainLat, mainLng := resolveGPSPair(main.latEnc, main.lngEnc, r.encryptor, r.logger, gpsPairs[0])
+	mainLat, mainLng := resolveGPSPair(main.latEnc, main.lngEnc, r.encryptor, r.logger, r.metrics, gpsPairs[0])
 	v.Latitude = derefFloatOrZero(mainLat)
 	v.Longitude = derefFloatOrZero(mainLng)
-	v.DestinationLatitude, v.DestinationLongitude = resolveGPSPair(dest.latEnc, dest.lngEnc, r.encryptor, r.logger, gpsPairs[1])
-	v.OriginLatitude, v.OriginLongitude = resolveGPSPair(origin.latEnc, origin.lngEnc, r.encryptor, r.logger, gpsPairs[2])
+	v.DestinationLatitude, v.DestinationLongitude = resolveGPSPair(dest.latEnc, dest.lngEnc, r.encryptor, r.logger, r.metrics, gpsPairs[1])
+	v.OriginLatitude, v.OriginLongitude = resolveGPSPair(origin.latEnc, origin.lngEnc, r.encryptor, r.logger, r.metrics, gpsPairs[2])
 }
 
 // derefFloatOrZero unpacks a *float64 to a float64, returning 0 when

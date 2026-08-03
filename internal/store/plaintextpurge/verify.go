@@ -1,9 +1,10 @@
 // Verification for the MYR-433 plaintext purge: decide, per row, whether
-// the ciphertext sibling faithfully reproduces the plaintext about to be
-// destroyed.
+// the ciphertext sibling is a good enough copy to justify destroying the
+// plaintext.
 //
-// This file is the whole safety argument of the package. Everything it
-// returns other than verdictOK means "leave the data alone".
+// This file is the whole safety argument of the package. See the package
+// comment for why "decrypts" — not "decrypts AND matches" — is the
+// correct gate.
 
 package plaintextpurge
 
@@ -16,57 +17,78 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/store/routeblob"
 )
 
-// verdict is the per-row verification outcome.
+// verdict is the per-target verification outcome.
 type verdict int
 
 const (
-	// verdictOK means the ciphertext decrypts and matches the plaintext,
-	// so the plaintext is redundant and safe to scrub.
-	verdictOK verdict = iota
-	// verdictUnsealed means there is no ciphertext. The plaintext is the
-	// only copy — scrubbing would be data loss.
+	// verdictScrub means every member with data has a ciphertext that
+	// decrypts, so the plaintext is redundant or stale and can go.
+	verdictScrub verdict = iota
+	// verdictUnsealed means at least one member has plaintext but no
+	// ciphertext. That plaintext is the only copy — scrubbing would be
+	// data loss.
 	verdictUnsealed
-	// verdictMismatch means the ciphertext decrypted to something other
-	// than the plaintext. One of the two is wrong and this tool must not
-	// be the one to decide which.
-	verdictMismatch
-	// verdictUndecryptable means the ciphertext exists but will not
-	// decrypt under the configured key.
+	// verdictUndecryptable means at least one member's ciphertext exists
+	// but will not decrypt under the configured key.
 	verdictUndecryptable
 )
 
-// verify decrypts the ciphertext sibling and compares it against the
-// plaintext value, dispatching on the column's Kind.
-func (p *Purger) verify(col Column, id, plaintext string, ciphertext *string) verdict {
-	if ciphertext == nil || *ciphertext == "" {
-		p.logBlocked(col, id, "no ciphertext sibling; run the matching backfill first")
-		return verdictUnsealed
-	}
+// verifyTarget decides a whole target at once.
+//
+// All-or-nothing: if ANY member blocks, the target blocks and no column
+// is written. That is what keeps a GPS pair honest — scrubbing a verified
+// latitude while its longitude stayed behind would both leave a readable
+// coordinate and half-destroy the pair.
+//
+// The second return reports whether any scrubbable member was STALE
+// (decrypted fine but differed). That is purely for the operator's
+// counters; it never affects the decision.
+func (p *Purger) verifyTarget(id string, scans []memberScan) (verdict, bool) {
+	anyStale := false
 
-	decrypted, err := p.decrypt(col, *ciphertext)
-	if err != nil {
-		p.logBlocked(col, id, "ciphertext did not decrypt: "+err.Error())
-		return verdictUndecryptable
-	}
+	for _, s := range scans {
+		m := s.member
 
-	if !valuesMatch(col.Kind, plaintext, decrypted) {
-		// Deliberately does NOT log the values. This runs over Tesla
-		// credentials and GPS coordinates; a mismatch report that printed
-		// them would recreate the exposure in the log aggregator.
-		p.logBlocked(col, id, "ciphertext decrypted but does not match the plaintext")
-		return verdictMismatch
+		// A member that holds nothing needs no ciphertext and cannot
+		// block. This is the already-scrubbed half of a pair, or a
+		// genuinely empty nullable column.
+		if !s.hasData || s.plaintext == nil {
+			continue
+		}
+
+		if s.ciphertext == nil || *s.ciphertext == "" {
+			p.logBlocked(m, id, "no ciphertext sibling; run the matching backfill first")
+			return verdictUnsealed, false
+		}
+
+		decrypted, err := p.decrypt(m, *s.ciphertext)
+		if err != nil {
+			p.logBlocked(m, id, "ciphertext did not decrypt: "+err.Error())
+			return verdictUndecryptable, false
+		}
+
+		if !valuesMatch(m.Kind, *s.plaintext, decrypted) {
+			// Stale, not suspect. Nothing writes this plaintext any more,
+			// so it is an older snapshot of a field whose current value we
+			// just decrypted successfully. Scrub it — that is the entire
+			// point of the tool. Deliberately does NOT log the values:
+			// this runs over Tesla credentials and GPS coordinates, and a
+			// log line carrying them would recreate the exposure in the
+			// log aggregator.
+			anyStale = true
+		}
 	}
-	return verdictOK
+	return verdictScrub, anyStale
 }
 
-// decrypt unseals one ciphertext according to the column's Kind.
+// decrypt unseals one ciphertext according to the member's Kind.
 //
 // The JSON columns went through routeblob (which base64s the JSON bytes
 // before sealing); the float and string columns were sealed directly with
-// EncryptString. Using the same helper the writer used is what makes this
-// comparison meaningful.
-func (p *Purger) decrypt(col Column, ciphertext string) (string, error) {
-	if col.Kind == KindJSON {
+// EncryptString. Using the same helper the writer used is what makes the
+// result meaningful.
+func (p *Purger) decrypt(m Member, ciphertext string) (string, error) {
+	if m.Kind == KindJSON {
 		raw, err := routeblob.DecryptJSONBytes(ciphertext, p.encryptor)
 		if err != nil {
 			return "", err //nolint:wrapcheck // caller renders the message
@@ -80,8 +102,10 @@ func (p *Purger) decrypt(col Column, ciphertext string) (string, error) {
 	return v, nil
 }
 
-// valuesMatch compares a plaintext column value against the decrypted
-// ciphertext, using the comparison appropriate to the column's Kind.
+// valuesMatch reports whether the plaintext and the decrypted ciphertext
+// are the same value, using the comparison appropriate to the Kind.
+//
+// A false result means "stale", not "corrupt" — see verifyTarget.
 func valuesMatch(kind Kind, plaintext, decrypted string) bool {
 	switch kind {
 	case KindString:
@@ -91,7 +115,6 @@ func valuesMatch(kind Kind, plaintext, decrypted string) bool {
 		// Compare as parsed floats, not as text. Postgres renders a double
 		// precision column its own way and Go's strconv.FormatFloat(-1)
 		// renders it another; "37.7" and "37.70" are the same coordinate.
-		// Both sides must parse — an unparseable side is not a match.
 		pf, pErr := strconv.ParseFloat(plaintext, 64)
 		df, dErr := strconv.ParseFloat(decrypted, 64)
 		if pErr != nil || dErr != nil {
@@ -108,16 +131,12 @@ func valuesMatch(kind Kind, plaintext, decrypted string) bool {
 // jsonEquivalent reports whether two JSON documents have the same decoded
 // shape.
 //
-// A byte comparison would produce false mismatches for entirely healthy
-// rows: the plaintext side is read back out of a jsonb column, which
-// Postgres has already normalised (whitespace stripped, object keys
-// reordered, numbers canonicalised), while the ciphertext preserves
-// whatever bytes were sealed. Decoding both sides is the only comparison
-// that answers the question we actually care about — is the same route
-// recoverable from the ciphertext?
-//
-// Numbers decode to float64 on both sides, so coordinate values compare
-// exactly as written.
+// A byte comparison would report differences for entirely healthy rows:
+// the plaintext side is read back out of a jsonb column, which Postgres
+// has already normalised (whitespace stripped, object keys reordered,
+// numbers canonicalised), while the ciphertext preserves whatever bytes
+// were sealed. Decoding both sides answers the question we actually care
+// about — is the same route recoverable?
 func jsonEquivalent(a, b string) bool {
 	var av, bv any
 	if err := json.Unmarshal([]byte(a), &av); err != nil {
@@ -129,14 +148,14 @@ func jsonEquivalent(a, b string) bool {
 	return reflect.DeepEqual(av, bv)
 }
 
-// logBlocked records a row the purge refused to touch. The row id is
-// safe to log; the column value never is.
-func (p *Purger) logBlocked(col Column, id, reason string) {
+// logBlocked records a row the purge refused to touch. The row id is safe
+// to log; the column value never is.
+func (p *Purger) logBlocked(m Member, id, reason string) {
 	if p.logger == nil {
 		return
 	}
 	p.logger.Warn("plaintextpurge: row left in place",
-		slog.String("column", col.Label()),
+		slog.String("column", m.Plaintext),
 		slog.String("id", id),
 		slog.String("reason", reason),
 	)
