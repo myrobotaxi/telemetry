@@ -22,6 +22,7 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/drives"
 	"github.com/myrobotaxi/telemetry/internal/events"
 	"github.com/myrobotaxi/telemetry/internal/mask"
+	"github.com/myrobotaxi/telemetry/internal/push"
 	"github.com/myrobotaxi/telemetry/internal/server"
 	"github.com/myrobotaxi/telemetry/internal/store"
 	"github.com/myrobotaxi/telemetry/internal/telemetry"
@@ -57,6 +58,14 @@ const routeBlobGaugeInterval = 1 * time.Hour
 // process level. MYR-138 wired this in after MYR-132 found the
 // testbench had no pool visibility.
 const storePoolStatsInterval = 15 * time.Second
+
+// busDrainTimeout bounds how long shutdown waits for the event bus to run its
+// buffered backlog through the handlers (MYR-410). It is deliberately well
+// under fly.toml's 10s grace_period: the drain is one step of a sequence that
+// still has the push waits and db.Close after it, and a drain that eats the
+// whole budget would be SIGKILLed at exactly the moment it was trying to
+// prevent a dropped push.
+const busDrainTimeout = 3 * time.Second
 
 // Build-time variables set via ldflags (see .goreleaser.yml).
 var (
@@ -179,6 +188,66 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	bus := events.NewChannelBus(events.BusConfig{
 		BufferSize: cfg.Telemetry().EventBufferSize,
 	}, events.NoopBusMetrics{}, logger.With(slog.String("component", "events")))
+
+	// --- Shutdown order (MYR-410) ---
+	//
+	// The push drains are useless without the bus Close that precedes them, and
+	// that Close is unsafe without the consumer Stops that precede IT. The three
+	// are one ordered sequence, so the order is stated here rather than left to
+	// be inferred from where each component happens to get built.
+	//
+	// What actually runs, once srv.Start returns — SIGTERM has cancelled ctx and
+	// all three HTTP servers have completed their own Shutdown, so nothing new
+	// is being published:
+	//
+	//  1. ridePoller.Stop, serviceStatusMonitor.Stop, broadcaster.Stop,
+	//     hub.Stop, writer.Stop, detector.Stop — every consumer that
+	//     unsubscribes itself. These MUST precede the Close: Close signals each
+	//     subscriber it still knows about, and a Stop that unsubscribed
+	//     afterwards would signal the same one twice. Going first costs them
+	//     nothing — Unsubscribe runs their own buffered backlog through their
+	//     own handler on the way out. LIFO lands them here because each is
+	//     deferred at its construction site, all of which are below this line.
+	//  2. bus.Close — the step that makes a drain mean anything. Subscriber
+	//     channels are BUFFERED (EventBufferSize, 256 by default), so an event
+	//     Publish already accepted can be sitting in a buffer with its handler
+	//     never entered: nothing has been counted, and a drain over it returns
+	//     instantly. Close signals the remaining subscribers and each delivery
+	//     goroutine runs its whole backlog through the handler synchronously.
+	//     That is what converts accepted-but-unhandled work into STARTED work —
+	//     the only kind a drain can see.
+	//  3. notifier.Wait / activityNotifier.Wait — now, and only now, covering
+	//     the workers step 2's handlers just started. In the other order they
+	//     read an empty counter and return before the handler had even run.
+	//  4. db.Close — last, because every handler above can touch the pool.
+	//
+	// The nav dispatcher also survives to step 2 and has a Wait, deliberately
+	// not called here: its per-dispatch budget is OverallTimeout (2 minutes)
+	// against a 10s grace_period, so waiting on it could only burn the budget
+	// the push drain needs and still be SIGKILLed. That one needs a bounded
+	// wait of its own — MYR-431.
+	var (
+		pushNotifier         *push.Notifier
+		liveActivityNotifier *push.ActivityNotifier
+	)
+	defer func() {
+		// A FRESH context, deliberately. ctx is already cancelled by the time
+		// this runs, and Close derives its drain deadline from whatever it is
+		// handed — given the cancelled ctx it would return immediately having
+		// drained nothing, quietly reintroducing the bug this block exists to
+		// fix.
+		closeCtx, cancelClose := context.WithTimeout(context.Background(), busDrainTimeout)
+		defer cancelClose()
+		if err := bus.Close(closeCtx); err != nil {
+			logger.Error("event bus close failed", slog.String("error", err.Error()))
+		}
+		if pushNotifier != nil {
+			pushNotifier.Wait()
+		}
+		if liveActivityNotifier != nil {
+			liveActivityNotifier.Wait()
+		}
+	}()
 
 	// --- Telemetry receiver ---
 	recv := telemetry.NewReceiver(
@@ -418,7 +487,10 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	if err != nil {
 		return fmt.Errorf("setting up push notifier: %w", err)
 	}
-	defer notifier.Wait()
+	// Drained by the shutdown block above, AFTER bus.Close — not here. A
+	// `defer notifier.Wait()` at this line would run before the bus had handed
+	// the handler its buffered backlog (MYR-410).
+	pushNotifier = notifier
 
 	// --- Live Activity push updates (MYR-172) ---
 	// The lifecycle consumer subscribes to ride.status.changed and replaces the
@@ -430,7 +502,8 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	if err != nil {
 		return fmt.Errorf("setting up live activity notifier: %w", err)
 	}
-	defer activityNotifier.Wait()
+	// Drained by the shutdown block above, after bus.Close — see MYR-410.
+	liveActivityNotifier = activityNotifier
 	startLiveActivityTicker(ctx, cfg, activityNotifier, liveActivityRepo, logger)
 
 	// --- Nav-dispatch (MYR-176) ---
