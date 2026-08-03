@@ -253,39 +253,29 @@ func TestOwnerFrameUnchangedByMYR435(t *testing.T) {
 	}
 }
 
-// TestBothDeliverySurfacesShareTheVehicleStateTable pins the thing the issue
-// asked to be verified rather than assumed: the WS broadcast mask and the REST
-// snapshot mask are not two tables that happen to agree today.
+// The per-surface conformance tests deliberately do NOT live here.
 //
-// Both call sites resolve their mask through For(ResourceVehicleState, role) —
-// internal/ws/hub_masked.go buildRoleFrames and internal/ws/snapshot.go
-// enqueueSnapshotFrame for the socket, internal/telemetry/
-// vehicle_snapshot_handler.go writeMaskedResponse for GET /snapshot. There is
-// exactly ONE table, so they agree by construction; this test pins that
-// For() is a pure function of (resource, role) with no hidden per-surface
-// variation, so a future "just for the REST path" branch cannot be added
-// without failing here.
-func TestBothDeliverySurfacesShareTheVehicleStateTable(t *testing.T) {
-	for _, role := range []auth.Role{auth.RoleOwner, auth.RoleViewer} {
-		wsMask := For(ResourceVehicleState, role)
-		restMask := For(ResourceVehicleState, role)
-
-		if len(wsMask.Allowed) != len(restMask.Allowed) {
-			t.Fatalf("%s: ws mask has %d fields, rest mask %d — the two delivery "+
-				"surfaces have diverged", role, len(wsMask.Allowed), len(restMask.Allowed))
-		}
-		for field := range wsMask.Allowed {
-			if !restMask.allows(field) {
-				t.Errorf("%s: %q allowed on the WS surface but not on REST", role, field)
-			}
-		}
-		for field := range restMask.Allowed {
-			if !wsMask.allows(field) {
-				t.Errorf("%s: %q allowed on the REST surface but not on WS", role, field)
-			}
-		}
-	}
-}
+// This file once held TestBothDeliverySurfacesShareTheVehicleStateTable, which
+// compared For(ResourceVehicleState, role) against For(ResourceVehicleState,
+// role) — two identical calls, which cannot disagree. It was a TAUTOLOGY: it
+// would have passed unchanged on a server where the REST handler and the WS hub
+// consulted completely different tables, because it never touched either
+// surface. It has been deleted rather than repaired; asserting that a pure
+// function returns the same value twice tests the language, not this system.
+//
+// Real per-surface coverage now lives at each surface, driving actual delivery
+// and asserting on raw JSON keys, so a future "just for the REST path" branch
+// fails a test that genuinely exercises the path:
+//
+//   - REST snapshot response ..... internal/telemetry, TestVehicleSnapshotHandler_
+//     ViewerSnapshotOmitsEveryOwnerOnlyField
+//   - WS live broadcast frame .... internal/ws, TestHub_BroadcastMasked_
+//     ViewerFrameOmitsMediaCabinAndControls
+//   - WS connect-time replay ..... internal/ws, TestHub_SendSnapshot_
+//     ViewerReplayOmitsEveryOwnerOnlyField
+//
+// All three iterate mask.OwnerOnlyVehicleStateFields() rather than a hand-copied
+// list, so the authoritative table is what every surface is measured against.
 
 // TestVehiclesListCarriesNoRemovedField checks the §7.0 VehicleSummary row for
 // leakage. The catalog is a thin row that never carried media, cabin or

@@ -147,10 +147,18 @@ func (h *Hub) sendSnapshot(ctx context.Context, client *Client, vehicleID string
 // re-deliver a stale snapshot to clients who are already caught up.
 func (h *Hub) enqueueSnapshotFrame(client *Client, vehicleID string, role auth.Role, fields map[string]any, timestamp string) {
 	projected, _ := mask.Apply(fields, mask.For(mask.ResourceVehicleState, role))
-	if len(projected) == 0 {
+	if !mask.IsSubstantive(projected) {
 		// Empty-payload suppression, mirroring BroadcastMasked: a role
 		// whose mask strips every field in this group must not see an
 		// empty vehicle_update.
+		//
+		// MYR-435 widened this alongside BroadcastMasked, and deliberately
+		// through the SAME predicate. sendSnapshot sets
+		// ungrouped["lastUpdated"] before projecting, exactly as the live
+		// path does, so this call site had the identical latent hole: a
+		// replayed snapshot whose ungrouped fields are all owner-only would
+		// have delivered a bare freshness frame to a viewer. Two copies of
+		// this rule is how one of them would rot.
 		return
 	}
 	frame, err := marshalVehicleUpdate(vehicleID, projected, timestamp)

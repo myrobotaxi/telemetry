@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/myrobotaxi/telemetry/internal/auth"
+	"github.com/myrobotaxi/telemetry/internal/mask"
 )
 
 // mediaSnapshotWireKeys is the full MYR-303/308 wire key set.
@@ -170,6 +171,43 @@ func TestVehicleSnapshotHandler_MediaNowPlayingOwnerOnly(t *testing.T) {
 			t.Error("viewer snapshot has no chargeLevel — the narrowing removed too much")
 		}
 	})
+}
+
+// TestVehicleSnapshotHandler_ViewerSnapshotOmitsEveryOwnerOnlyField is the REST
+// third of the per-surface conformance set (MYR-435, adversarial-review
+// follow-up). Its siblings drive the WS live broadcast and the WS connect-time
+// snapshot replay in internal/ws.
+//
+// These replaced a TAUTOLOGY in internal/mask that compared
+// For(ResourceVehicleState, role) to For(ResourceVehicleState, role) — two
+// identical calls, which cannot disagree, and which would have passed on a
+// server where REST and WS consulted different tables.
+//
+// It iterates mask.OwnerOnlyVehicleStateFields() rather than a hand-copied
+// list, so all three surfaces are measured against the one authoritative table
+// and none can quietly stop covering a field.
+func TestVehicleSnapshotHandler_ViewerSnapshotOmitsEveryOwnerOnlyField(t *testing.T) {
+	row := fixtureSnapshotRow(mediaFixtureUserID)
+	populateMediaRow(&row)
+
+	body := decodeSnapshotBodyForRole(t, row, auth.RoleViewer)
+
+	for _, field := range mask.OwnerOnlyVehicleStateFields() {
+		if got, present := body[field]; present {
+			t.Errorf("REST /snapshot: viewer response carries owner-only field %q (value %v) "+
+				"— MYR-435 withholds media, cabin state and vehicle controls from viewers",
+				field, got)
+		}
+	}
+
+	// Sanity: the viewer still receives a usable snapshot, so a mask bug that
+	// emptied the body cannot pass the loop above.
+	for _, field := range []string{"vehicleId", "chargeLevel", "status"} {
+		if _, present := body[field]; !present {
+			t.Errorf("REST /snapshot: viewer response is missing %q — the narrowing "+
+				"removed too much", field)
+		}
+	}
 }
 
 // TestVehicleSnapshotHandler_MediaNeverSeenIsExplicitNull matches the sibling

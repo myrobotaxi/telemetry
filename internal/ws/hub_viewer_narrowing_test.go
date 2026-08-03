@@ -194,38 +194,52 @@ func TestHub_BroadcastMasked_OwnerFrameUnchangedByMYR435(t *testing.T) {
 // interaction between MYR-435 and the §4.6 empty-payload suppression rule,
 // which this change makes load-bearing rather than theoretical.
 //
-// A frame carrying only cabin/media deltas now projects to NOTHING for a
-// viewer. Without suppression the viewer would receive a stream of empty
-// vehicle_update frames and could infer "the owner is fiddling with the cabin
-// right now" from their timing alone — the metadata leak that survives
-// stripping the values.
+// THIS TEST WAS DISHONEST IN ITS FIRST VERSION and the correction is the point.
+// It broadcast a cabin/media payload with NO `lastUpdated` key — a shape
+// production can never emit, because nav_broadcast.go injects `lastUpdated`
+// into every non-nav frame before masking. So the test passed against a
+// suppression gate (`len(projected) == 0`) that could not fire on real traffic:
+// for a viewer the real payload projects to exactly one key, {"lastUpdated"},
+// and the frame went out. The test's own doc comment named the hazard it was
+// failing to cover.
+//
+// It now includes `lastUpdated` exactly as production does. The end-to-end
+// version driving the real Broadcaster is
+// TestBroadcaster_CabinOnlyTelemetry_SendsViewerNothing below; this one stays
+// as the focused hub-level unit.
 func TestHub_BroadcastMasked_CabinOnlyFrameIsSuppressedForViewers(t *testing.T) {
 	hub := newTestHub(t)
 	t.Cleanup(hub.Stop)
 
 	conn := connectRole(t, hub, auth.RoleViewer)
 
-	// Cabin/media only — every field is owner-only after MYR-435.
+	// Cabin/media/controls only — every field is owner-only after MYR-435 —
+	// PLUS the lastUpdated key the production path always adds.
 	hub.BroadcastMasked(
 		"v-1",
 		mask.ResourceVehicleState,
 		time.Now().UTC().Format(time.RFC3339),
 		map[string]any{
-			"interiorTemp":         70,
-			"isClimateOn":          true,
-			"mediaNowPlayingTitle": "Blood on the Tracks",
-			"locked":               true,
+			"interiorTemp":             70,
+			"isClimateOn":              true,
+			"mediaNowPlayingTitle":     "Blood on the Tracks",
+			"mediaNowPlayingElapsedMs": 42000,
+			"locked":                   true,
+			"lastUpdated":              time.Now().UTC().Format(time.RFC3339),
 		},
 	)
 
 	// Then a frame the viewer IS allowed to see. If suppression works, this is
-	// the FIRST frame that arrives; if it does not, the empty cabin frame
-	// arrives first and this assertion fails on the missing speed.
+	// the FIRST frame that arrives; if it does not, the freshness-only cabin
+	// frame arrives first and this assertion fails on the missing speed.
 	hub.BroadcastMasked(
 		"v-1",
 		mask.ResourceVehicleState,
 		time.Now().UTC().Format(time.RFC3339),
-		map[string]any{"speed": 42},
+		map[string]any{
+			"speed":       42,
+			"lastUpdated": time.Now().UTC().Format(time.RFC3339),
+		},
 	)
 
 	got := readMessage(t, conn)
@@ -236,5 +250,52 @@ func TestHub_BroadcastMasked_CabinOnlyFrameIsSuppressedForViewers(t *testing.T) 
 	if _, present := pl.Fields["speed"]; !present {
 		t.Errorf("first frame the viewer received was not the speed frame (%v) — the "+
 			"cabin-only frame was NOT suppressed, leaking activity timing", pl.Fields)
+	}
+}
+
+// TestHub_BroadcastMasked_FreshnessOnlyProjectionIsSuppressed states the rule
+// directly, independent of which owner-only fields happen to be in the payload:
+// a viewer projection that survives as nothing but envelope keys is not a frame.
+//
+// Guards the generalization rather than the instance. A future envelope-ish key
+// added to the viewer allow-list would re-open the hole for a payload shape this
+// test does not enumerate, which is why mask.IsSubstantive owns the key set.
+func TestHub_BroadcastMasked_FreshnessOnlyProjectionIsSuppressed(t *testing.T) {
+	hub := newTestHub(t)
+	t.Cleanup(hub.Stop)
+
+	conn := connectRole(t, hub, auth.RoleViewer)
+
+	// A single owner-only delta plus freshness — the minimal leak shape.
+	hub.BroadcastMasked(
+		"v-1",
+		mask.ResourceVehicleState,
+		time.Now().UTC().Format(time.RFC3339),
+		map[string]any{
+			"mediaNowPlayingElapsedMs": 42000,
+			"lastUpdated":              "2026-08-02T12:00:00Z",
+		},
+	)
+	hub.BroadcastMasked(
+		"v-1",
+		mask.ResourceVehicleState,
+		time.Now().UTC().Format(time.RFC3339),
+		map[string]any{"speed": 7},
+	)
+
+	got := readMessage(t, conn)
+	var pl vehicleUpdatePayload
+	if err := json.Unmarshal(got.Payload, &pl); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if _, present := pl.Fields["lastUpdated"]; present {
+		if _, hasSpeed := pl.Fields["speed"]; !hasSpeed {
+			t.Errorf("viewer received a freshness-only frame %v — a media tick becomes a "+
+				"beacon that pulses only while audio plays, which is the occupancy signal "+
+				"MYR-435 removes the media block to prevent", pl.Fields)
+		}
+	}
+	if _, present := pl.Fields["speed"]; !present {
+		t.Errorf("first viewer frame was %v, want the speed frame", pl.Fields)
 	}
 }

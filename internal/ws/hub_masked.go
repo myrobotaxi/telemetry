@@ -177,8 +177,18 @@ func (h *Hub) buildRoleFrames(
 		// "removed at least one field").
 		h.maybeEmitAuditWS(vehicleID, role, frameSeq, fieldsMasked)
 
-		if len(projected) == 0 {
+		if !mask.IsSubstantive(projected) {
 			// Empty-payload suppression per websocket-protocol.md §4.6.
+			//
+			// MYR-435 widened this from `len(projected) == 0`. The old check
+			// could not fire on the shape production actually emits: this path
+			// injects `lastUpdated` into every non-nav frame BEFORE masking
+			// (nav_broadcast.go), and `lastUpdated` is viewer-visible, so a
+			// frame of purely owner-only deltas projected for a viewer to
+			// exactly one key — {"lastUpdated"} — and went out. The values were
+			// masked but the FRAME TIMING was not, turning a media tick into a
+			// "someone is listening right now" beacon and a lock/trunk delta
+			// into an occupancy tell. See mask.IsSubstantive.
 			frames[role] = nil
 			continue
 		}
