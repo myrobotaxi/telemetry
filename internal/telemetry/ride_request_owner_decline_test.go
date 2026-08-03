@@ -323,6 +323,10 @@ func (s *racingDeclineStore) ListUpcomingByOwnerVehiclePage(context.Context, str
 	return RideRequestListPage{}, errors.New("not used")
 }
 
+func (s *racingDeclineStore) ListActiveByOwnerVehiclePage(context.Context, string, string, RideRequestListCursor, int) (RideRequestListPage, error) {
+	return RideRequestListPage{}, errors.New("not used")
+}
+
 func (s *racingDeclineStore) ListBookedWindows(context.Context, string, string, time.Time, time.Time) ([]BookedWindowData, error) {
 	return nil, errors.New("not used")
 }

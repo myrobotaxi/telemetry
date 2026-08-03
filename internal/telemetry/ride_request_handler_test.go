@@ -108,6 +108,21 @@ type fakeRideStore struct {
 		cursorID           string
 		limit              int
 	}
+
+	// Active-rides slice of the owner feed (MYR-400). Same shape as the
+	// upcoming fixture above, but the anchor is the DESCENDING (createdAt, id)
+	// cursor — this slice keeps the feed's default ordering. Named
+	// activeRides* to stay clear of the MYR-230 active-INSTANT-guard fields.
+	activeRidesPage  RideRequestListPage
+	activeRidesErr   error
+	activeRidesCalls int
+	activeRidesCall  struct {
+		ownerID         string
+		vehicleID       string
+		cursorCreatedAt time.Time
+		cursorID        string
+		limit           int
+	}
 }
 
 func (f *fakeRideStore) Create(_ context.Context, in RideRequestCreateInput) (RideRequestData, error) {
@@ -283,6 +298,19 @@ func (f *fakeRideStore) ListUpcomingByOwnerVehiclePage(_ context.Context, ownerI
 		return RideRequestListPage{}, f.upcomingErr
 	}
 	return f.upcomingPage, nil
+}
+
+func (f *fakeRideStore) ListActiveByOwnerVehiclePage(_ context.Context, ownerID, vehicleID string, cursor RideRequestListCursor, limit int) (RideRequestListPage, error) {
+	f.activeRidesCalls++
+	f.activeRidesCall.ownerID = ownerID
+	f.activeRidesCall.vehicleID = vehicleID
+	f.activeRidesCall.cursorCreatedAt = cursor.CreatedAt
+	f.activeRidesCall.cursorID = cursor.ID
+	f.activeRidesCall.limit = limit
+	if f.activeRidesErr != nil {
+		return RideRequestListPage{}, f.activeRidesErr
+	}
+	return f.activeRidesPage, nil
 }
 
 func (f *fakeRideStore) ListBookedWindows(_ context.Context, vehicleID, callerID string, from, to time.Time) ([]BookedWindowData, error) {
