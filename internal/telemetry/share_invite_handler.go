@@ -33,12 +33,30 @@ type ShareInviteHandler struct {
 	auth     tokenValidator
 	vehicles VehicleSnapshotReader
 	invites  ShareInviteStore
-	// access busts a revoked viewer's cached access set. Optional.
+	// access busts a revoked viewer's cached access set — which stops the
+	// NEXT connection. Optional.
 	access AccessCacheInvalidator
+	// sockets ends the CURRENT one (MYR-373). Optional; see
+	// ShareAccessNotifier for why the cache bust alone does not cover it.
+	sockets ShareAccessNotifier
 	// links signs the `shareUrl` on pending rows (MYR-368). Nil means no
 	// signing key is configured and the field is simply omitted.
 	links  *InviteLinkSigner
 	logger *slog.Logger
+}
+
+// ShareInviteHandlerOption configures optional handler behavior. Variadic
+// rather than another positional parameter: the constructor already takes six,
+// and the things being added here are independently optional side channels,
+// not new required collaborators.
+type ShareInviteHandlerOption func(*ShareInviteHandler)
+
+// WithShareAccessNotifier attaches the live-socket teardown channel used when
+// an owner revokes or suspends a grant (MYR-373). Omitting it leaves the
+// pre-MYR-373 behavior: the grant is gone from every surface except an
+// already-open WebSocket, which lapses at reconnect.
+func WithShareAccessNotifier(n ShareAccessNotifier) ShareInviteHandlerOption {
+	return func(h *ShareInviteHandler) { h.sockets = n }
 }
 
 // NewShareInviteHandler builds the owner-facing sharing handler. invalidator
@@ -52,8 +70,9 @@ func NewShareInviteHandler(
 	invalidator AccessCacheInvalidator,
 	links *InviteLinkSigner,
 	logger *slog.Logger,
+	opts ...ShareInviteHandlerOption,
 ) *ShareInviteHandler {
-	return &ShareInviteHandler{
+	h := &ShareInviteHandler{
 		auth:     tokens,
 		vehicles: vehicles,
 		invites:  invites,
@@ -61,6 +80,31 @@ func NewShareInviteHandler(
 		links:    links,
 		logger:   logger,
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
+}
+
+// endLiveAccess is the second half of every access-narrowing mutation: the
+// cache bust stops the next handshake, this ends the connection that already
+// completed one.
+//
+// ORDER MATTERS AND IS THE CALLER'S RESPONSIBILITY — every call site busts the
+// cache first. The client reacts to the close by reconnecting, and that
+// reconnect re-reads the access set; if the notification overtook the bust,
+// the reconnect could be served the pre-mutation set and re-open the very
+// stream the close just ended.
+//
+// Best-effort by construction. A nil notifier, an empty grantee id, or a
+// grantee who simply is not connected are all ordinary no-ops — the mutation
+// itself has already committed and the owner's 200 does not depend on anyone
+// being online to hear about it.
+func (h *ShareInviteHandler) endLiveAccess(granteeUserID, vehicleID, reason string) {
+	if h.sockets == nil || granteeUserID == "" {
+		return
+	}
+	h.sockets.ShareAccessRevoked(granteeUserID, vehicleID, reason)
 }
 
 // linkCtx assembles the signing context for one request: the key plus the
