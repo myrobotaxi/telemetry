@@ -191,12 +191,16 @@ func TestRideRequestHandler_Accept_PausedVehicle(t *testing.T) {
 	}
 }
 
-// TestRideRequestHandler_Accept_ScheduledPauseKeepsTheFailOpenRead is the
-// MYR-313 interaction that is easy to break. A scheduled accept whose vehicle
-// read FAILS still proceeds (fail-open) — that is the shape MYR-313 installed
-// to stop a lookup hiccup stranding an owner, and adding the pause check must
-// not quietly convert it to fail-closed. An unknown pause state does not block.
-func TestRideRequestHandler_Accept_ScheduledPauseKeepsTheFailOpenRead(t *testing.T) {
+// TestRideRequestHandler_Accept_ScheduledUnknownPauseStateBlocks is the MYR-372
+// inversion of this test.
+//
+// It used to pin the opposite: a scheduled accept whose vehicle read FAILED
+// still proceeded, so an UNKNOWN pause state never blocked. That was not a
+// decision about pauses at all — it was a side effect of the MYR-313 fail-open
+// early return, which the pause check happened to sit behind. MYR-372 made that
+// read fail closed, and the consequence lands here: an owner's pause can no
+// longer be sailed past by a database blip. Unknown blocks.
+func TestRideRequestHandler_Accept_ScheduledUnknownPauseStateBlocks(t *testing.T) {
 	scheduled := fixtureRideData(rideUserID, rideStatusRequested)
 	when := scheduled.CreatedAt.AddDate(0, 0, 3)
 	scheduled.ScheduledFor = &when
@@ -206,8 +210,11 @@ func TestRideRequestHandler_Accept_ScheduledPauseKeepsTheFailOpenRead(t *testing
 
 	rec := doRequest(t, rideMux(h), http.MethodPost, "/api/ride-requests/"+rideID+"/accept", "", rideAuthOK)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("a scheduled accept must still fail OPEN on a vehicle-read failure: got %d. body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("a scheduled accept must fail CLOSED on a vehicle-read failure: got %d. body=%s", rec.Code, rec.Body.String())
+	}
+	if store.updateCalls != 0 {
+		t.Errorf("an unreadable vehicle must not accept the reservation, got %d transition calls", store.updateCalls)
 	}
 }
 

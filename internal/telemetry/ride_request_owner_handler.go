@@ -146,8 +146,10 @@ func (h *RideRequestHandler) loadForOwnerDecision(ctx context.Context, w http.Re
 
 // vehicleStatusOffline is the persisted status for a vehicle the server
 // cannot currently reach. Together with serviceStatusInService it is the
-// blocked set for an owner accept (MYR-277): neither state can fulfill a ride.
-// `parked`/`driving`/`charging` are dispatchable and pass the gate.
+// blocked set for a dispatch (MYR-277): neither state can fulfill a ride.
+// `parked`/`driving`/`charging` are dispatchable. The set itself is spelled
+// once, in vehicle_availability.go, which both this gate and the reservation
+// sweeper read.
 const vehicleStatusOffline = "offline"
 
 // rejectIfVehicleUnavailable is the MYR-277 dispatch-capability gate on
@@ -182,22 +184,28 @@ const vehicleStatusOffline = "offline"
 // reasoning assumed and did not have — "a reservation days out says nothing
 // about the car's status today" is true, but nothing made the reservation be
 // days out. Consequently a scheduled accept now DOES read the vehicle (MYR-313
-// short-circuited before the read), and the read FAILS OPEN for scheduled rides
-// so a lookup failure cannot resurrect the MYR-313 defect.
+// short-circuited before the read).
+//
+// MYR-372 MAKES THAT READ FAIL CLOSED FOR SCHEDULED ACCEPTS TOO. It used to
+// fail open — an unreadable vehicle left the reservation UNBOUND rather than
+// refused — on the argument that refusing it would resurrect the MYR-313
+// stranding. That argument does not survive contact with what the two failures
+// actually are. MYR-313 was a PERMANENT 409: the car was in service, so every
+// retry that day refused, and the owner had no way through. A lookup failure is
+// a TRANSIENT 500: the owner retries and it succeeds. Trading a retry for the
+// silent grant of a reservation that may sit inside a service visit for days —
+// with a first-beta rider on the other end and no insider to explain it — is
+// not a trade worth making. Unknown now blocks, on every path, for every ride.
+//
+// Two consequences follow from the same change, and both are wanted. The
+// MYR-342 pause check and the MYR-369 grant backstop below ride this read, so
+// an unknown pause state and an unreadable grant now block a scheduled accept
+// as well; previously the early return meant neither could. And §7.22's
+// advisory picker read is DELIBERATELY untouched — it is a client-side hint
+// about a calendar, not a gate, and it stays fail-open by design.
 func (h *RideRequestHandler) rejectIfVehicleUnavailable(ctx context.Context, w http.ResponseWriter, rec RideRequestData) bool {
 	row, err := h.vehicles.GetByID(ctx, rec.VehicleID)
 	if err != nil {
-		if rec.ScheduledFor != nil {
-			// Fail OPEN: the MYR-316 bound is advisory, and refusing a
-			// reservation because we could not read the car is exactly the
-			// stranding MYR-313 exists to prevent.
-			h.logger.Warn("ride-request accept: vehicle lookup failed; scheduled accept proceeds unbounded",
-				slog.String("ride_request_id", rec.ID),
-				slog.String("vehicle_id", rec.VehicleID),
-				slog.String("error", err.Error()),
-			)
-			return false
-		}
 		h.logger.Error("ride-request accept: vehicle status lookup failed",
 			slog.String("ride_request_id", rec.ID),
 			slog.String("vehicle_id", rec.VehicleID),
@@ -221,10 +229,10 @@ func (h *RideRequestHandler) rejectIfVehicleUnavailable(ctx context.Context, w h
 	// car its owner has withdrawn indefinitely leaves the request in the owner's
 	// queue and the rider expecting a car that is not coming.
 	//
-	// It rides the read ABOVE rather than adding one, which is also what keeps
-	// the MYR-313 fail-open shape intact: a lookup failure on a scheduled accept
-	// returns early up there, so an UNKNOWN pause state never blocks. Unknown is
-	// not paused.
+	// It rides the read ABOVE rather than adding one. Since MYR-372 that read
+	// fails closed for scheduled accepts too, so an UNKNOWN pause state now
+	// blocks rather than sailing past on the early return — the fail-closed
+	// reading this gate would have chosen for itself.
 	if rejectIfRideSharePaused(w, h.logger, "ride-request accept", row, rec.OwnerID) {
 		return true
 	}
@@ -245,12 +253,11 @@ func (h *RideRequestHandler) rejectIfVehicleUnavailable(ctx context.Context, w h
 		return false
 	}
 
-	switch row.Status {
-	case serviceStatusInService:
-		h.writeError(w, http.StatusConflict, wserrors.ErrCodeVehicleUnavailable, "Vehicle is in service and can't be dispatched")
-		return true
-	case vehicleStatusOffline:
-		h.writeError(w, http.StatusConflict, wserrors.ErrCodeVehicleUnavailable, "Vehicle is offline and can't be dispatched")
+	// The shared MYR-277 predicate (vehicle_availability.go). The sweeper asks
+	// the identical question at the reservation's due instant, which is what
+	// makes the MYR-313 exemption a DEFERRAL rather than a hole.
+	if dispatchable, refusal := vehicleAvailability(row.Status); !dispatchable {
+		h.writeError(w, http.StatusConflict, wserrors.ErrCodeVehicleUnavailable, refusal)
 		return true
 	}
 	return false
