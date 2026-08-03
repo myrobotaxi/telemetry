@@ -128,7 +128,15 @@ paths:
           $ref: '#/components/responses/InternalError'
       x-role-masks:
         owner: ['*']
-        viewer: ['*', '!name']
+        # MYR-184 removed the `name` subtraction (the rider UI renders
+        # "{Owner}'s {Vehicle}", and `name` is `required` in
+        # vehicle-summary.schema.json, so stripping it made every viewer row
+        # invalid). This line still said '!name'; corrected in MYR-435 while
+        # auditing every viewer mask statement in the contracts.
+        # The viewer row is the owner row PLUS sharePermission, minus nothing.
+        # MYR-435 did not narrow this resource -- the thin catalog never
+        # carried media, cabin or controls state (rest-api.md section 5.2.0).
+        viewer: ['*', '+sharePermission']
 
   /vehicles/{vehicleId}/snapshot:
     get:
@@ -215,9 +223,65 @@ paths:
       x-role-masks:
         owner: ['*']
         viewer:
-          description: All VehicleState fields except the full vin, which is owner-only (party-scoped) per MYR-279. softwareVersion and trim stay visible to viewers (P0, non-identifying), as do their MYR-320 siblings trimLabel and fsdVersion (same tier, same treatment -- the viewer list is derived as owner-minus-vin, so they are inherited rather than separately granted), and so does licensePlate -- MYR-286 put it in BOTH role masks by deliberate product decision, because the plate exists so a rider can identify the correct car at pickup.
-          excludes:
-            - vin
+          description: >-
+            An EXPLICIT ALLOW-LIST since MYR-435 (client decision 2026-08-02:
+            "Remove media/cabin and any vehicle controls"). This mask was
+            previously owner-minus-vin, a subtraction under which every field
+            added to the owner list reached viewers by default -- the MYR-427
+            audit finding. Viewers now receive location, navigation/route,
+            identity, charge, availability and freshness, and receive NO media,
+            NO cabin climate (including interiorTemp and exteriorTemp) and NO
+            vehicle-controls state. licensePlate stays viewer-visible (MYR-286,
+            deliberate -- a rider identifies the car at pickup); the full vin
+            stays owner-only (MYR-279). Canonical enumeration with per-field
+            reasoning is rest-api.md section 5.2.1.1. NOTE for consumers with
+            generated bindings -- interiorTemp and exteriorTemp were moved out
+            of the vehicle-state schema's `required` list in the same change;
+            regenerate before this ships or a viewer snapshot fails to decode
+            (rest-api.md section 5.2.1.2).
+          allows:
+            - vehicleId
+            - name
+            - model
+            - year
+            - color
+            - softwareVersion
+            - trim
+            - trimLabel
+            - fsdVersion
+            - licensePlate
+            - chargeLevel
+            - chargeState
+            - estimatedRange
+            - timeToFull
+            - status
+            - gearPosition
+            - speed
+            - heading
+            - latitude
+            - longitude
+            - locationName
+            - locationAddress
+            - serviceEstimatedEndAt
+            - rideShareEnabled
+            - odometerMiles
+            - fsdMilesSinceReset
+            - destinationName
+            - destinationAddress
+            - destinationLatitude
+            - destinationLongitude
+            - originLatitude
+            - originLongitude
+            - etaMinutes
+            - tripDistanceRemaining
+            - navRouteCoordinates
+            - navDestinationName
+            - navDestinationLocation
+            - navOriginLocation
+            - navEtaMinutes
+            - navTripDistanceRemaining
+            - driveTrailCoordinates
+            - lastUpdated
         limited_viewer:
           description: FR-5.5 extension seam -- NOT implemented in v1. Documented for future readiness. It still excludes licensePlate even though the full `viewer` role now receives it (MYR-286) -- an invited viewer waiting at a pickup needs the plate, whereas the limited_viewer seam is the deliberately-degraded tier that also loses precise GPS and the whole navigation group.
           excludes:

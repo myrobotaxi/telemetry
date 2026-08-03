@@ -676,6 +676,23 @@ The mask matrix is the **same matrix used by the REST handler layer** (`rest-api
 
 **Empty-payload suppression.** If a role's mask projection yields a payload with no remaining fields (every field in the original frame was masked away), the hub MUST omit the frame for that role rather than send an empty `vehicle_update`. Sending an empty broadcast would leak "something happened on this vehicle" to a viewer who shouldn't even know the field existed.
 
+This matters more after MYR-435 than it did before: a frame carrying only cabin or media deltas now projects to **nothing** for a viewer, so suppression is the difference between silence and a stream of empty frames that would let a viewer infer "the owner is adjusting something in the cabin" from timing alone.
+
+#### 4.6.1 What a `viewer` receives on `vehicle_update` (MYR-435)
+
+> **Client decision, 2026-08-02 ([MYR-435](https://linear.app/myrobotaxi/issue/MYR-435)):** *"Remove media/cabin and any vehicle controls."*
+
+The viewer arm of the `vehicle_state` mask is an **explicit allow-list**, not "owner minus `vin`". The [MYR-427](https://linear.app/myrobotaxi/issue/MYR-427) privacy audit found the subtraction shape was itself the defect: every field added to the owner list reached viewers by default. The full enumeration — kept and withheld, with per-group reasoning — is canonical in [`rest-api.md`](rest-api.md) §5.2.1.1 and is **not duplicated here**, because two copies of a field list is how the two transports would drift.
+
+What matters at this layer:
+
+- **A viewer receives** location/heading/speed, the navigation group and route/trail, vehicle identity (incl. `licensePlate`, excl. the full `vin`), charge and charging state, availability (`status`, `rideShareEnabled`, `serviceEstimatedEndAt`), and `lastUpdated`.
+- **A viewer receives NO** media/now-playing field, **no** cabin-climate field (including `interiorTemp` and `exteriorTemp`), and **no** vehicle-controls state (`locked`, `chargePortDoorOpen`, `frunkOpen`, `trunkOpen`, `virtualKeyPaired`).
+- **Absent, not nulled.** A withheld field's JSON key is omitted from `payload.fields` entirely. Emitting `null` would tell the viewer the field exists. `vehicle_update.fields` is a sparse map by contract (§4.1), so a consumer decoding a frame needs no change for this — unlike the REST snapshot, whose generated bindings do (see `rest-api.md` §5.2.1.2).
+- **One table, both transports.** The hub's `buildRoleFrames` (`internal/ws/hub_masked.go`), the connect-time snapshot replay `enqueueSnapshotFrame` (`internal/ws/snapshot.go`), and the REST `/snapshot` handler all resolve `mask.For(ResourceVehicleState, role)`. There is no WS-specific matrix; `TestBothDeliverySurfacesShareTheVehicleStateTable` pins that a per-surface branch cannot be added without failing.
+
+Note the **connect-time snapshot replay** specifically (§2.4): it is a WS path that carries snapshot-sourced fields, so it is the one place where "the socket is masked" and "the snapshot is masked" have to be the same statement. It is, because it calls the same table.
+
 ### 4.7 `ride_request_created`
 
 > **Anchored:** FR-9.3, NFR-3.21.

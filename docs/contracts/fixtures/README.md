@@ -126,7 +126,8 @@ let cleaned = try JSONSerialization.data(withJSONObject: dict)
 | `vehicles_list.json` | `rest.openapi.yaml#/components/schemas/VehiclesListResponse` | happy-path | Owner-tier two-vehicle catalog from GET /api/vehicles (MYR-91) |
 | `vehicles_list_empty.json` | `rest.openapi.yaml#/components/schemas/VehiclesListResponse` | edge-case | Empty list — user with no linked vehicles or v1 viewer-tier caller |
 | `vehicles_list_viewer.json` | `rest.openapi.yaml#/components/schemas/VehiclesListResponse` | forward-looking | Viewer projection: `name` stripped; other VehicleSummary fields visible. PLANNED — server returns empty until invite-read pathway lands |
-| `snapshot.json` | `vehicle-state.schema.json` (VehicleState) | happy-path | Full VehicleState from GET /api/vehicles/{vehicleId}/snapshot |
+| `snapshot.json` | `vehicle-state.schema.json` (VehicleState) | happy-path | Full VehicleState from GET /api/vehicles/{vehicleId}/snapshot (OWNER projection) |
+| `snapshot.viewer.json` | `vehicle-state.schema.json` (VehicleState) | happy-path | VIEWER projection of the same car/moment as `snapshot.json` (MYR-435). What is ABSENT is the point: no media, no cabin state (incl. `interiorTemp`/`exteriorTemp`), no vehicle-controls state, no `vin`. Validating against the same schema proves a masked viewer document stays valid for its consumer |
 | `drives.json` | `rest.openapi.yaml#/components/schemas/PaginatedDrives` | happy-path | Paginated drive list (2 items, hasMore=true) |
 | `drive_detail.json` | `rest.openapi.yaml#/components/schemas/DriveDetail` | happy-path | Full FR-3.4 drive record from GET /api/drives/{driveId} |
 | `drive_route.json` | `rest.openapi.yaml#/components/schemas/DriveRoute` | happy-path | Drive route polyline from GET /api/drives/{driveId}/route |

@@ -19,8 +19,6 @@
     "longitude",
     "locationName",
     "locationAddress",
-    "interiorTemp",
-    "exteriorTemp",
     "odometerMiles",
     "fsdMilesSinceReset",
     "lastUpdated"
@@ -168,13 +166,13 @@
     },
     "interiorTemp": {
       "type": "integer",
-      "description": "Cabin interior temperature. Rounded to nearest integer.",
+      "description": "Cabin interior temperature. Rounded to nearest integer. OWNER-ONLY since MYR-435 (client decision 2026-08-02: remove cabin state from viewers) — cabin temperature is a live occupancy signal. Moved OUT of `required` in the same change: a field the viewer mask omits MUST be optional here, or every viewer document fails its own schema.",
       "x-unit": "fahrenheit",
       "x-classification": "P0"
     },
     "exteriorTemp": {
       "type": "integer",
-      "description": "Ambient exterior temperature. Rounded to nearest integer.",
+      "description": "Ambient exterior temperature. Rounded to nearest integer. OWNER-ONLY since MYR-435 — the ambiguous case, resolved toward removal: it is delivered in the climate atomic group and has no viewer-facing consumer. Moved OUT of `required` in the same change, for the same reason as interiorTemp.",
       "x-unit": "fahrenheit",
       "x-classification": "P0"
     },
