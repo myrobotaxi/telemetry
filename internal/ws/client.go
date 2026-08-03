@@ -74,7 +74,25 @@ type Client struct {
 	// just pulled must not receive another GPS frame during that handshake.
 	// Read on the broadcast hot path via hasVehicle; an atomic rather than a
 	// mutex so the fan-out stays lock-free per client.
-	revoked    atomic.Bool
+	revoked atomic.Bool
+	// done is closed exactly once, by markRevoked, to wake writePump when a
+	// session is torn down for an access reason.
+	//
+	// It exists because the revoked flag alone DEADLOCKS the teardown. Once
+	// enqueue refuses everything, nothing can ever arrive on c.send again,
+	// and writePump blocks on exactly three things: ctx.Done, c.send closing,
+	// and a failed write. None of them can happen. gctx is cancelled only
+	// after g.Wait() returns (handler.go), g.Wait() waits for writePump, and
+	// Unregister — the only closer of c.send — runs after that. Circular
+	// wait: the session's goroutines and its hub entry survive forever.
+	//
+	// Before the enqueue guard, the 15s heartbeat was the accidental escape
+	// hatch: BroadcastAll reached c.send, writePump woke, the write failed on
+	// the dead connection, and teardown followed. The guard closed that door,
+	// so the wake-up has to be explicit.
+	done     chan struct{}
+	doneOnce sync.Once
+
 	remoteAddr string
 	send       chan []byte
 	hub        *Hub
@@ -87,11 +105,27 @@ func newClient(conn *websocket.Conn, hub *Hub, logger *slog.Logger) *Client {
 	return &Client{
 		conn:         conn,
 		send:         make(chan []byte, sendBufSize),
+		done:         make(chan struct{}),
 		vehicleRoles: make(map[string]auth.Role),
 		subscribed:   make(map[string]struct{}),
 		hub:          hub,
 		logger:       logger,
 	}
+}
+
+// markRevoked cuts this session off and wakes its writePump, in that order.
+//
+// The two halves are inseparable and that is why this is one method rather
+// than two statements at the call site: setting the flag without signalling
+// strands writePump forever (see the `done` field), and signalling without
+// setting the flag would let a frame slip out between the two.
+//
+// Idempotent — a second revocation, or the backstop sweep landing on top of a
+// nudge, must not panic on a double close. `done` is separate from `send`, so
+// this never races Unregister's or Stop's close of the send channel.
+func (c *Client) markRevoked() {
+	c.revoked.Store(true)
+	c.doneOnce.Do(func() { close(c.done) })
 }
 
 // roleFor returns the role this client holds against vehicleID. Resolution
@@ -115,12 +149,21 @@ func (c *Client) roleFor(vehicleID string) auth.Role {
 }
 
 // writePump reads messages from the send channel and writes them to the
-// WebSocket connection. It exits when the send channel is closed or the
-// context is cancelled.
+// WebSocket connection. It exits when the send channel is closed, the
+// context is cancelled, or the session is revoked (MYR-373).
+//
+// The revocation case is not a nicety: a revoked session can never receive
+// another message on c.send, so without an out-of-band signal this loop would
+// park forever and hold the whole teardown behind it — see Client.done.
 func (c *Client) writePump(ctx context.Context, writeTimeout time.Duration) {
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-c.done:
+			// Revoked. The 4002 close frame is written by RevokeUserAccess
+			// directly on the connection, not through this pump, so there is
+			// nothing left to flush and nothing to say on the way out.
 			return
 		case msg, ok := <-c.send:
 			if !ok {

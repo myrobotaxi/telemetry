@@ -107,24 +107,78 @@ func expectStillOpen(t *testing.T, conn *websocket.Conn, who string) {
 	}
 }
 
-// waitForNewClient polls until a client appears that was not in before, and
-// returns it. Needed because a torn-down session lingers in the hub until its
-// readPump notices the close, so "the only client" is ambiguous right after a
-// revocation.
-func waitForNewClient(t *testing.T, hub *Hub, before map[*Client]struct{}) *Client {
+// TestRevokeUserAccess_UnregistersTheSession is the leak regression.
+//
+// Cutting a session off is only half a teardown. The revoked flag makes
+// enqueue refuse everything, which means writePump can never again be woken
+// by a message — and writePump holds g.Wait(), which holds Unregister. Before
+// the `done` signal, a revoked session's two pump goroutines and its hub entry
+// survived FOREVER: on a long-lived machine every revocation leaked them, the
+// connected-clients gauge only ever climbed, and the backstop sweep re-examined
+// the phantom every 60 seconds for the life of the process.
+//
+// The 15s heartbeat used to paper over this by failing a write on the dead
+// connection. Relying on that was never a design; the enqueue guard removed it
+// and made the deadlock total.
+func TestRevokeUserAccess_UnregistersTheSession(t *testing.T) {
+	hub := NewHub(newSilentLogger(), NoopHubMetrics{})
+	defer hub.Stop()
+
+	srv := newTestServer(t, hub, &testAuth{userID: "viewer", vehicleIDs: []string{"veh-1"}})
+	defer srv.Close()
+
+	conn := dialAndAuth(t, srv.URL, "tok")
+	defer conn.Close(websocket.StatusNormalClosure, "test done")
+	waitForClients(t, hub, 1)
+
+	hub.RevokeUserAccess("viewer", "veh-1", "suspended")
+	expectClosed4002(t, conn, "viewer")
+
+	// No heartbeat is broadcast here, deliberately: the teardown must not
+	// depend on unrelated traffic arriving to shake it loose.
+	waitForClients(t, hub, 0)
+}
+
+// TestRevokeUserAccess_UnregistersEvenIfThePeerIgnoresTheClose is the hostile
+// -peer case. The client never reads, so it never echoes the close frame and
+// the graceful handshake runs to the library's timeout. The session must still
+// drain out on its own.
+func TestRevokeUserAccess_UnregistersEvenIfThePeerIgnoresTheClose(t *testing.T) {
+	hub := NewHub(newSilentLogger(), NoopHubMetrics{})
+	defer hub.Stop()
+
+	srv := newTestServer(t, hub, &testAuth{userID: "viewer", vehicleIDs: []string{"veh-1"}})
+	defer srv.Close()
+
+	// Dialled and authenticated, then deliberately never read from again.
+	conn := dialAndAuth(t, srv.URL, "tok")
+	defer conn.Close(websocket.StatusNormalClosure, "test done")
+	waitForClients(t, hub, 1)
+
+	hub.RevokeUserAccess("viewer", "veh-1", "suspended")
+
+	// writePump exits on the signal immediately; readPump exits once the
+	// library gives up on the echo and closes the connection underneath it,
+	// which bounds this at the close-handshake timeout rather than forever.
+	waitForClientsWithin(t, hub, 0, 10*time.Second)
+}
+
+// waitForClientsWithin is waitForClients with a caller-chosen deadline, for
+// the teardown paths bounded by the WebSocket close-handshake timeout rather
+// than by anything this package controls.
+func waitForClientsWithin(t *testing.T, hub *Hub, want int, within time.Duration) {
 	t.Helper()
-	deadline := time.After(2 * time.Second)
-	tick := time.NewTicker(5 * time.Millisecond)
+	deadline := time.After(within)
+	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		for _, c := range hub.snapshotClients() {
-			if _, seen := before[c]; !seen {
-				return c
-			}
+		if got := hub.ClientCount(); got == want {
+			return
 		}
 		select {
 		case <-deadline:
-			t.Fatal("timed out waiting for a newly registered client")
+			t.Fatalf("timed out after %s waiting for %d clients, got %d — the revoked "+
+				"session never unregistered", within, want, hub.ClientCount())
 		case <-tick.C:
 		}
 	}
@@ -376,11 +430,6 @@ func TestReconnectAfterSuspensionGetsReducedAccessSet(t *testing.T) {
 	conn := dialAndAuth(t, srv.URL, "tok")
 	waitForClients(t, hub, 1)
 
-	before := make(map[*Client]struct{})
-	for _, c := range hub.snapshotClients() {
-		before[c] = struct{}{}
-	}
-
 	// The owner suspends the veh-1 grant: the access set narrows, then the
 	// socket is torn down.
 	authn.set([]string{"veh-2"}, nil)
@@ -388,14 +437,18 @@ func TestReconnectAfterSuspensionGetsReducedAccessSet(t *testing.T) {
 	expectClosed4002(t, conn, "viewer")
 	_ = conn.Close(websocket.StatusNormalClosure, "test done")
 
-	// The client reconnects, as the SDK does automatically on a close. The
-	// OLD session may still be registered: Unregister runs when the readPump
-	// notices, which trails the graceful close handshake. So the assertion
-	// targets the client that was not there before rather than "the" client.
+	// The revoked session LEAVES THE HUB. An earlier version of this test
+	// tolerated it lingering and asserted against "the client that was not
+	// here before" — which quietly documented a goroutine leak as expected
+	// behavior. It unregisters, so assert that.
+	waitForClients(t, hub, 0)
+
+	// The client reconnects, as the SDK does automatically on a close.
 	reconn := dialAndAuth(t, srv.URL, "tok")
 	defer reconn.Close(websocket.StatusNormalClosure, "test done")
+	waitForClients(t, hub, 1)
 
-	fresh := waitForNewClient(t, hub, before)
+	fresh := hub.snapshotClients()[0]
 
 	// It must NOT have veh-1 back. Asserted through the hub's own view of the
 	// new client rather than the wire, because the reduced set is what every

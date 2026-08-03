@@ -92,7 +92,13 @@ func (h *Hub) RevokeUserAccess(userID, vehicleID, reason string) int {
 		// close window. sendSnapshot and handleSubscribeFrame check the flag
 		// too, so the refusal happens before the database read rather than at
 		// the channel.
-		client.revoked.Store(true)
+		//
+		// markRevoked also wakes writePump. That is load-bearing, not
+		// housekeeping: once enqueue refuses everything, writePump can never
+		// be woken by a message again, and it holds g.Wait() — and therefore
+		// Unregister — behind it. Setting the flag alone leaks the session's
+		// goroutines and its hub entry permanently.
+		client.markRevoked()
 
 		if client.conn != nil {
 			conn := client.conn
