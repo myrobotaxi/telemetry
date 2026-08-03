@@ -495,7 +495,18 @@ Stated as an **allow-list** rather than as a set of subtractions, per the MYR-42
 
 ##### 5.2.1.2 Consumer migration note (MYR-435)
 
-Any client that decodes `VehicleState` from a **generated** binding compiled against the pre-MYR-435 schema will treat `interiorTemp` / `exteriorTemp` as non-optional and **fail to decode a viewer snapshot entirely** — not degrade, fail. The failure mode is a viewer whose live map never populates. Consumers MUST regenerate against the relaxed schema before a server carrying this change reaches them. Fields dropped from the *frame* path are safe either way, because `vehicle_update.fields` is a sparse map by contract (§4.1).
+Any client that decodes `VehicleState` from a **generated** binding compiled against the pre-MYR-435 schema will treat `interiorTemp` / `exteriorTemp` as non-optional and **fail to decode a viewer snapshot entirely** — not degrade, fail. The failure mode is a viewer whose live map never populates. Fields dropped from the *frame* path are safe either way, because `vehicle_update.fields` is a sparse map by contract (§4.1) — `VehicleUpdatePayload.fields` declares no `required` properties.
+
+**The hazard set is exactly two fields, and it is closed.** Of the 34 fields MYR-435 withholds from viewers, only `interiorTemp` and `exteriorTemp` were in the schema's `required` list, and only those two are non-optional in the generated Swift `VehicleState` (`public var interiorTemp: Int` / `public var exteriorTemp: Int`). The other 31 — every media field, every other cabin field, `locked` / `chargePortDoorOpen` / `frunkOpen` / `trunkOpen`, and `vin` — are already `Optional` and decode to `nil` when absent. `virtualKeyPaired` is not declared on the generated `VehicleState` at all. No other generated type declares either temp.
+
+**This repo's `schemas/` copy is NOT the artifact consumers build against.** The relaxation in this PR lands only in telemetry's `docs/contracts/schemas/`. The published package is **`myrobotaxi/contracts`** (SwiftPM, `@myrobotaxi/contracts`), whose `main` still marks both temps `required` as of **v0.28.0** — the latest tag. Because SwiftPM resolves by **git tag**, a commit on that repo's `main` is not enough:
+
+1. Relax `required` in `myrobotaxi/contracts` `schemas/vehicle-state.schema.json` and regenerate `Sources/MyRobotaxiContracts/Generated/VehicleState.swift` so both temps become `Int?`.
+2. Bump the package version **0.28.0 → 0.29.0** and **tag `v0.29.0`** — an untagged commit is invisible to SwiftPM.
+3. Bump the iOS pin, which currently sits at **0.13.0** in `Packages/MyRoboTaxiKit/Package.resolved`, to a range that admits v0.29.0.
+4. Only then deploy a telemetry server carrying this change.
+
+Steps 1–3 are a separate PR in a separate repo and are **not** included here.
 
 #### 5.2.2 Drive list (`GET /api/vehicles/{vehicleId}/drives`)
 
