@@ -237,6 +237,14 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	//     things still alive at this point (the DB pool, which closes at step 4;
 	//     the hub, whose Broadcast is a no-op once its client set is empty), and
 	//     because of what step 2 actually is.
+	//
+	//     NOT EVERY SUBSCRIBER APPEARS HERE. The vehicle_deleted and
+	//     share_access_revoked dispatchers subscribe and never unsubscribe, so
+	//     they have no Stop to order — step 2 is what signals and drains them.
+	//     I1 is a constraint on consumers that DO unsubscribe, not a
+	//     requirement that every subscriber be stopped first. Both dispatchers'
+	//     handlers are no-ops by then anyway: each acts on the hub, whose
+	//     client set hub.Stop has just emptied.
 	//  2. bus.Close — two jobs, and the second is the one that is easy to miss.
 	//
 	//     Subscriber channels are BUFFERED (EventBufferSize, 1000 in prod), so
@@ -538,6 +546,18 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	// and this dispatcher closes the grantee's live sessions with 4002. Wired
 	// unconditionally — unlike the caches above it needs nothing from the
 	// authenticator, so it works in dev mode too.
+	// SHUTDOWN PLACEMENT (against the I1–I4 block above, because a later
+	// reorder needs to know what this depends on):
+	//
+	//   - This dispatcher SUBSCRIBES and never unsubscribes, exactly like the
+	//     vehicle_deleted one above it. I1 constrains consumers that call
+	//     Unsubscribe in a Stop; neither of these does, so both are signalled
+	//     and drained by bus.Close at step 2 instead. There is nothing to stop
+	//     at step 1, so nothing to order.
+	//   - Its handler is SAFE to run inside that step-2 drain. hub.Stop has
+	//     already run (step 1) and empties the client set, so a revocation
+	//     arriving at shutdown finds no sessions and RevokeUserAccess returns
+	//     0. It touches no pool, so I3 cannot be violated by it either.
 	shareAccessLogger := logger.With(slog.String("component", "share-access"))
 	shareAccessNotifier := newShareAccessBusNotifier(bus, shareAccessLogger)
 	if _, err := newShareAccessDispatcher(hub, shareAccessLogger).Subscribe(bus); err != nil {
@@ -551,6 +571,17 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	// a future write path that forgets to publish. Needs a real authenticator
 	// to resolve against, so dev mode (NoopAuthenticator, all-access wildcard)
 	// runs without it and loses nothing: there is no set to narrow there.
+	//
+	// SHUTDOWN PLACEMENT: this one is BUS-INDEPENDENT — a plain ticker that
+	// reads the database — so it has no Stop in step 1 and no bearing on I1 or
+	// I2. It stops on ctx, which SIGTERM cancels before srv.Start returns and
+	// therefore before the shutdown closure runs at all. It is deliberately
+	// NOT given a drain Wait: it only ever READS, and once ctx is cancelled
+	// the per-call timeout in resolve derives from a cancelled parent, so an
+	// in-progress sweep gets context.Canceled from the pool immediately and
+	// fails open rather than lingering into db.Close (I3). It adds nothing to
+	// the shutdown closure, so shutdownDrainBudget and fly.toml's kill_timeout
+	// arithmetic are unchanged.
 	if jwtAuth != nil {
 		revalidator := ws.NewAccessRevalidator(hub, jwtAuth, ws.DefaultRevalidateInterval, shareAccessLogger)
 		go revalidator.Run(ctx)
