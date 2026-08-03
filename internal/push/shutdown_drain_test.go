@@ -2,6 +2,7 @@ package push
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -60,11 +61,60 @@ func TestShutdownSequenceDeliversEventAcceptedJustBeforeExit(t *testing.T) {
 	}
 }
 
+// blockingSender holds every Send until released, so a drain can be observed
+// giving up on work that is genuinely still in flight.
+type blockingSender struct{ release chan struct{} }
+
+func (b *blockingSender) Send(ctx context.Context, _ Notification) error {
+	select {
+	case <-b.release:
+	case <-ctx.Done():
+	}
+	return nil
+}
+
+// TestNotifierWaitContextReportsAbandonedFanouts pins the bounded shutdown
+// drain (MYR-410).
+//
+// A fan-out runs on a fresh Background context bounded only by cfg.Timeout,
+// which SIGTERM cannot shorten, and bus.Close hands this drain the whole
+// buffered backlog at once. Unbounded, shutdown outlives the platform's kill
+// timeout and is SIGKILLed mid-push. Bounded, it loses the same pushes but says
+// how many — which is the difference between a dropped notification you can
+// find in the logs and one you cannot.
+func TestNotifierWaitContextReportsAbandonedFanouts(t *testing.T) {
+	sender := &blockingSender{release: make(chan struct{})}
+	defer close(sender.release)
+	n := newTestNotifier(t, sender, &fakeVehicleNamer{name: "Blue Whale"})
+
+	const stuck = 3
+	for i := 0; i < stuck; i++ {
+		n.handleCreated(createdEvent(nil, nil))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	inFlight, err := n.WaitContext(ctx)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want context.DeadlineExceeded", err)
+	}
+	if inFlight != stuck {
+		t.Errorf("in-flight = %d, want %d — an abandoned drain must report what it dropped", inFlight, stuck)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("WaitContext took %v — it waited on cfg.Timeout instead of its deadline", elapsed)
+	}
+}
+
 // TestNotifierWaitAloneMissesBufferedEvents is the deterministic proof that the
 // drain is NOT the guarantee on its own — the correction MYR-410's first pass
 // needed.
 //
-// Subscriber channels are buffered (256 by default), so an event Publish has
+// Subscriber channels are buffered (1000 in prod), so an event Publish has
 // accepted can sit in the buffer with its handler never entered. Nothing has
 // been counted yet, so a drain reads zero and returns — byte-for-byte the
 // sync.WaitGroup outcome the counter was supposed to fix. Only bus.Close makes
