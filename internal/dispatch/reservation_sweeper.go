@@ -61,6 +61,16 @@ type ReservationStore interface {
 	// VehicleHasActiveInstantRide reports whether the vehicle is mid-ride on
 	// an active INSTANT ride (the MYR-266 per-vehicle busy predicate).
 	VehicleHasActiveInstantRide(ctx context.Context, vehicleID string) (bool, error)
+	// VehicleDispatchable reports whether the vehicle can be dispatched RIGHT
+	// NOW (MYR-372) — false when it is in service or offline. It is the
+	// owner-accept availability predicate, asked again at the reservation's
+	// due instant, and the adapter answers it with the very same function the
+	// accept path uses so the two can never disagree.
+	//
+	// An unknown vehicle id IS an error here, unlike VehicleRideShareEnabled
+	// below: this question is about the vehicle row itself, where absence is a
+	// real fact rather than a missing opinion. Either way the sweeper holds.
+	VehicleDispatchable(ctx context.Context, vehicleID string) (bool, error)
 	// VehicleRideShareEnabled reports whether the vehicle's OWNER currently
 	// accepts ride requests against it (MYR-342). False means the owner has
 	// PAUSED the car — nothing about the vehicle itself.

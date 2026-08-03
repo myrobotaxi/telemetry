@@ -142,6 +142,14 @@ type fakeReservationStore struct {
 	pauseErr error
 	pauseCnt int
 
+	// MYR-372 vehicle availability at the due instant. A vehicle ABSENT from
+	// the map IS dispatchable, so every pre-existing test keeps its meaning —
+	// and that matches production, where a parked/driving/charging car passes
+	// the predicate.
+	unavailable map[string]bool
+	availErr    error
+	availCnt    int
+
 	// MYR-369 rider ride capability. A (rider|vehicle) pair ABSENT from the
 	// map IS permitted, so every pre-existing test keeps its meaning — and
 	// that matches production for the common case, where the rider owns the
@@ -184,6 +192,34 @@ func (f *fakeReservationStore) VehicleHasActiveInstantRide(_ context.Context, ve
 		return false, f.busyErr
 	}
 	return f.busy[vehicleID], nil
+}
+
+func (f *fakeReservationStore) VehicleDispatchable(_ context.Context, vehicleID string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.availCnt++
+	// Deliberately NOT recorded in latch.callOrder, matching the pause and
+	// grant probes: callOrder pins the busy→claim adjacency, and the other
+	// probes assert their before-the-claim position by the ABSENCE of a claim.
+	if f.availErr != nil {
+		return false, f.availErr
+	}
+	return !f.unavailable[vehicleID], nil
+}
+
+func (f *fakeReservationStore) availCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.availCnt
+}
+
+func (f *fakeReservationStore) setUnavailable(vehicleID string, v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.unavailable == nil {
+		f.unavailable = map[string]bool{}
+	}
+	f.unavailable[vehicleID] = v
 }
 
 func (f *fakeReservationStore) VehicleRideShareEnabled(_ context.Context, vehicleID string) (bool, error) {

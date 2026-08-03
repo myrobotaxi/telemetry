@@ -9,6 +9,7 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/dispatch"
 	"github.com/myrobotaxi/telemetry/internal/events"
 	"github.com/myrobotaxi/telemetry/internal/store"
+	"github.com/myrobotaxi/telemetry/internal/telemetry"
 )
 
 // Reservation-time dispatch wiring (MYR-179). Composes the sweeper that fires
@@ -88,9 +89,11 @@ func startReservationSweeper(
 // accept path's RideAcceptedEvent carries them).
 type reservationStoreAdapter struct {
 	repo *store.RideRequestRepo
-	// vehicles serves the MYR-342 pause probe. The switch lives on the Go-owned
-	// control-state side table, not on any ride row, so the sweeper's store seam
-	// spans two repos — one question to each, both before the claim.
+	// vehicles serves the MYR-342 pause probe and the MYR-372 availability
+	// re-check. Neither fact lives on a ride row — the pause switch is on the
+	// Go-owned control-state side table and the status is on the Prisma
+	// "Vehicle" row — so the sweeper's store seam spans repos, asking each its
+	// own question before the claim.
 	vehicles *store.VehicleRepo
 	// shares serves the MYR-369 rider-grant probe. Neither repo above owns
 	// go_vehicle_shares, so the seam spans three — one question to each,
@@ -137,6 +140,27 @@ func (a *reservationStoreAdapter) ListDueReservations(
 
 func (a *reservationStoreAdapter) VehicleHasActiveInstantRide(ctx context.Context, vehicleID string) (bool, error) {
 	return a.repo.VehicleHasActiveInstantRide(ctx, vehicleID)
+}
+
+// VehicleDispatchable answers the MYR-372 availability re-check at a
+// reservation's due instant.
+//
+// This adapter method is the WHOLE POINT of putting the probe here rather than
+// in internal/dispatch: it reads the status from the store and hands it to
+// telemetry.VehicleStatusDispatchable — the identical function the owner-accept
+// gate's 409 is built from. cmd/ is the only layer that can see both, so it is
+// the only place the two surfaces can be made to share one predicate instead of
+// two copies that drift.
+//
+// A vehicle that has vanished surfaces as ErrVehicleNotFound from the repo, and
+// the sweeper holds on any error — the right answer for a car nobody can look
+// up, and one the lateness ceiling resolves within the window.
+func (a *reservationStoreAdapter) VehicleDispatchable(ctx context.Context, vehicleID string) (bool, error) {
+	status, err := a.vehicles.GetStatus(ctx, vehicleID)
+	if err != nil {
+		return false, err
+	}
+	return telemetry.VehicleStatusDispatchable(string(status)), nil
 }
 
 // VehicleRideShareEnabled reads the owner's ride-sharing switch (MYR-342).

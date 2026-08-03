@@ -739,3 +739,218 @@ func TestSweep_GrantedRiderStillDispatches(t *testing.T) {
 		t.Fatalf("a permitted rider must still be dispatched, got %d pushes", len(exec.calls()))
 	}
 }
+
+// --- MYR-372: vehicle availability at the due instant ----------------------
+
+// TestSweep_UnavailableVehicleIsHeldNotClaimed is the gap MYR-370 found: the
+// accept gate deliberately does NOT ask "can this car be dispatched?" of a
+// reservation — a car in service today says nothing about next Saturday — and
+// its own comment names the sweeper as the party that must ask instead. Until
+// MYR-372 nobody did, so a car that entered service between accept and the due
+// instant was nav-dialled anyway.
+//
+// HOLD, NOT EXPIRE, matching the busy, pause and grant probes: the claim is
+// irreversible, holding is free, and a car back from service inside the
+// lateness window still gets its dispatch (see the sibling test below).
+func TestSweep_UnavailableVehicleIsHeldNotClaimed(t *testing.T) {
+	r := testReservation()
+	latch := newLatchStore()
+	resStore := &fakeReservationStore{
+		due:         []DueReservation{r},
+		busy:        map[string]bool{},
+		unavailable: map[string]bool{r.VehicleID: true},
+	}
+	s, exec := newSweeperHarness(t, latch, resStore, &fakeBus{}, func() time.Time { return testSweepNow }, true)
+
+	res := s.sweepOnce(context.Background())
+
+	if res.held != 1 || res.dispatched != 0 {
+		t.Errorf("sweep = %+v, want the reservation HELD, not dispatched", res)
+	}
+	for _, call := range latch.order() {
+		if strings.HasPrefix(call, "claim:") {
+			t.Fatalf("the claim ran despite a car that cannot be dispatched: %v", latch.order())
+		}
+	}
+	if len(exec.calls()) != 0 {
+		t.Errorf("a car in service must receive no nav push, got %d", len(exec.calls()))
+	}
+	if resStore.availCount() == 0 {
+		t.Error("the vehicle's availability must be probed at all")
+	}
+	_, _, recorded := latch.snapshot()
+	if len(recorded) != 0 {
+		t.Errorf("a HELD reservation records no dispatch outcome, got %v", recorded)
+	}
+}
+
+// TestSweep_UnavailableVehicleDispatchesOnceItReturns is the other half of the
+// semantics, and the reason "hold" is the honest answer rather than a new
+// failure status: the reservation stays `accepted` and RETRIES on the next
+// tick, so a car that comes back from service inside the lateness window still
+// takes the ride. Bounded retry, not refusal.
+func TestSweep_UnavailableVehicleDispatchesOnceItReturns(t *testing.T) {
+	r := testReservation()
+	latch := newLatchStore()
+	resStore := &fakeReservationStore{
+		due:         []DueReservation{r},
+		busy:        map[string]bool{},
+		unavailable: map[string]bool{r.VehicleID: true},
+	}
+	s, exec := newSweeperHarness(t, latch, resStore, &fakeBus{}, func() time.Time { return testSweepNow }, true)
+
+	if res := s.sweepOnce(context.Background()); res.held != 1 {
+		t.Fatalf("first sweep = %+v, want the in-service car HELD", res)
+	}
+
+	// The car comes back from service, still inside the lateness window.
+	resStore.setUnavailable(r.VehicleID, false)
+
+	res := s.sweepOnce(context.Background())
+	if res.dispatched != 1 {
+		t.Fatalf("second sweep = %+v, want the returned car DISPATCHED", res)
+	}
+	if len(exec.calls()) != 1 {
+		t.Errorf("nav pushes = %d, want exactly 1 once the car is available", len(exec.calls()))
+	}
+}
+
+// TestSweep_UnavailableVehicleExpiresAtTheCeiling closes the loop on a car
+// that never comes back: no new resolution path was needed, because the
+// existing lateness ceiling resolves it honestly as `reservation_expired` —
+// the same outcome a permanently-busy car already produces, and one §7.8 and
+// the client already know how to render.
+func TestSweep_UnavailableVehicleExpiresAtTheCeiling(t *testing.T) {
+	r := testReservation()
+	latch := newLatchStore()
+	resStore := &fakeReservationStore{
+		due:         []DueReservation{r},
+		busy:        map[string]bool{},
+		unavailable: map[string]bool{r.VehicleID: true},
+	}
+	var (
+		clockMu sync.Mutex
+		clock   = testSweepNow
+	)
+	s, exec := newSweeperHarness(t, latch, resStore, &fakeBus{}, func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return clock
+	}, true)
+
+	if res := s.sweepOnce(context.Background()); res.held != 1 {
+		t.Fatalf("first sweep = %+v, want HELD", res)
+	}
+
+	clockMu.Lock()
+	clock = r.ScheduledFor.Add(testMaxLateness + time.Second)
+	clockMu.Unlock()
+
+	res := s.sweepOnce(context.Background())
+	if res.expired != 1 {
+		t.Fatalf("ceiling sweep = %+v, want the reservation EXPIRED", res)
+	}
+	_, _, recorded := latch.snapshot()
+	if len(recorded) != 1 {
+		t.Fatalf("recorded = %v, want exactly one outcome", recorded)
+	}
+	if recorded[0].status != OutcomeFailed || recorded[0].code != codeReservationExpired {
+		t.Errorf("recorded = %+v, want failed/%s", recorded[0], codeReservationExpired)
+	}
+	if len(exec.calls()) != 0 {
+		t.Errorf("an expired reservation is never pushed, got %d", len(exec.calls()))
+	}
+}
+
+// TestSweep_AvailabilityProbeErrorHoldsRatherThanBurning mirrors every other
+// probe in the worker: an unreadable status HOLDS. We cannot tell whether
+// pushing would dial a car on a lift, and a held reservation is recoverable
+// where a wrong push is not.
+func TestSweep_AvailabilityProbeErrorHoldsRatherThanBurning(t *testing.T) {
+	latch := newLatchStore()
+	resStore := &fakeReservationStore{
+		due:      []DueReservation{testReservation()},
+		busy:     map[string]bool{},
+		availErr: errors.New("db down"),
+	}
+	s, exec := newSweeperHarness(t, latch, resStore, &fakeBus{}, func() time.Time { return testSweepNow }, true)
+
+	res := s.sweepOnce(context.Background())
+
+	if res.held != 1 {
+		t.Errorf("sweep = %+v, want HELD on an unreadable status", res)
+	}
+	for _, call := range latch.order() {
+		if strings.HasPrefix(call, "claim:") {
+			t.Fatalf("an unreadable status must not be claimed: %v", latch.order())
+		}
+	}
+	if len(exec.calls()) != 0 {
+		t.Errorf("an unreadable status must produce no push, got %d", len(exec.calls()))
+	}
+}
+
+// TestSweep_AvailabilityIsCheckedBeforeTheClaim pins the ORDER, on the same
+// safety argument as the busy, pause and grant probes: every "may this car be
+// dispatched right now?" question must be answered BEFORE the irreversible
+// claim, never after.
+func TestSweep_AvailabilityIsCheckedBeforeTheClaim(t *testing.T) {
+	r := testReservation()
+	latch := newLatchStore()
+	resStore := &fakeReservationStore{
+		due:         []DueReservation{r},
+		busy:        map[string]bool{},
+		unavailable: map[string]bool{r.VehicleID: true},
+	}
+	s, _ := newSweeperHarness(t, latch, resStore, &fakeBus{}, func() time.Time { return testSweepNow }, true)
+
+	s.sweepOnce(context.Background())
+
+	if got := latch.order(); len(got) != 1 || !strings.HasPrefix(got[0], "busy:") {
+		t.Fatalf("an unavailable car must be probed and then HELD — no claim, no record. call order = %v", got)
+	}
+}
+
+// TestSweep_AvailableVehicleStillDispatches is the counter-assertion: the new
+// probe must not become a blanket hold. Absence from the map means
+// dispatchable, which is also the production shape — a parked, driving or
+// charging car passes the predicate.
+func TestSweep_AvailableVehicleStillDispatches(t *testing.T) {
+	latch := newLatchStore()
+	resStore := &fakeReservationStore{due: []DueReservation{testReservation()}, busy: map[string]bool{}}
+	s, exec := newSweeperHarness(t, latch, resStore, &fakeBus{}, func() time.Time { return testSweepNow }, true)
+
+	s.sweepOnce(context.Background())
+
+	if len(exec.calls()) != 1 {
+		t.Fatalf("an available car must still be dispatched, got %d pushes", len(exec.calls()))
+	}
+	if resStore.availCount() == 0 {
+		t.Error("the availability probe must run on the happy path too")
+	}
+}
+
+// TestSweep_ExpiryIsJudgedBeforeAvailability keeps the ordering invariant
+// handleDue's doc comment rests on: the lateness ceiling is evaluated FIRST,
+// so a long-dead reservation resolves honestly instead of being held forever
+// behind a car that is in service and may never leave.
+func TestSweep_ExpiryIsJudgedBeforeAvailability(t *testing.T) {
+	r := testReservation()
+	latch := newLatchStore()
+	resStore := &fakeReservationStore{
+		due:         []DueReservation{r},
+		busy:        map[string]bool{},
+		unavailable: map[string]bool{r.VehicleID: true},
+	}
+	past := r.ScheduledFor.Add(testMaxLateness + time.Second)
+	s, _ := newSweeperHarness(t, latch, resStore, &fakeBus{}, func() time.Time { return past }, true)
+
+	res := s.sweepOnce(context.Background())
+
+	if res.expired != 1 {
+		t.Fatalf("sweep = %+v, want EXPIRED — the ceiling outranks the availability hold", res)
+	}
+	if resStore.availCount() != 0 {
+		t.Errorf("availability was probed %d times past the ceiling; expiry must short-circuit first", resStore.availCount())
+	}
+}
