@@ -14,8 +14,15 @@ import (
 // SIBLINGS, which is how the choice was made rather than reasoning about them
 // afresh: trimLabel is an equipment fact of the same tier as trim/model/year,
 // fsdVersion a software designation of the same tier as softwareVersion — and
-// all four of those are already viewer-visible, because the viewer list is
-// owner-minus-`vin` and nothing else.
+// all four of those are viewer-visible.
+//
+// MYR-435 narrowed the viewer arm hard (media, cabin, and all controls state
+// are gone) but deliberately did NOT touch these four: they describe the CAR's
+// equipment and software, which is neither media, cabin, nor a control tile.
+// Note the contrast with seatCoolingCapable, which IS an equipment fact and was
+// still removed — because its only consumer was a control tile viewers no
+// longer render. Equipment-ness alone is not the test; having a viewer-facing
+// consumer is.
 //
 // The `vin` assertion is in the same test on purpose. It is the ONE owner-only
 // snapshot field, precisely because it links to the physical car and its
@@ -61,25 +68,65 @@ func TestMYR320DetailFieldsAreNotOnTheVehiclesList(t *testing.T) {
 	}
 }
 
-// The viewer list is built by EXCLUSION from the owner list (removeField), which
-// is what stops the two drifting apart every time a field is added. This asserts
-// the invariant directly rather than trusting the construction to stay that way.
-func TestVehicleStateViewerIsOwnerMinusVINOnly(t *testing.T) {
+// TestVehicleStateRoleListsPartitionOwnerFields is the anti-rot invariant that
+// replaced "the viewer list is owner minus vin" when MYR-435 made the viewer
+// arm an explicit allow-list.
+//
+// The MYR-427 audit's finding was that a SUBTRACTION mask rots: every field
+// added to the owner list reaches viewers by default, decided by whoever did
+// not think about it. An explicit allow-list fixes that but introduces the
+// opposite failure — a field added to the owner list and to NEITHER role list
+// is simply invisible to viewers, silently, which is safe but undocumented.
+//
+// So the two lists must PARTITION the owner list exactly:
+//
+//	set(owner) == set(viewer) ⊎ set(ownerOnly)
+//
+// Adding a field to vehicleStateOwnerFields now fails this test until it is
+// placed in one list or the other. That failure IS the classification
+// conversation the audit found had never happened.
+func TestVehicleStateRoleListsPartitionOwnerFields(t *testing.T) {
 	owner := For(ResourceVehicleState, auth.RoleOwner)
 	viewer := For(ResourceVehicleState, auth.RoleViewer)
 
-	for field := range owner.Allowed {
-		if field == "vin" {
-			continue
+	ownerOnly := make(map[string]struct{}, len(vehicleStateOwnerOnlyFields))
+	for _, f := range vehicleStateOwnerOnlyFields {
+		if _, dup := ownerOnly[f]; dup {
+			t.Errorf("%q appears twice in vehicleStateOwnerOnlyFields", f)
 		}
-		if !viewer.allows(field) {
-			t.Errorf("%s is owner-visible but viewer-denied — the viewer list must be "+
-				"owner minus `vin` and NOTHING else", field)
+		ownerOnly[f] = struct{}{}
+	}
+
+	// Every owner field is classified exactly once.
+	for field := range owner.Allowed {
+		_, isViewer := viewer.Allowed[field]
+		_, isOwnerOnly := ownerOnly[field]
+		switch {
+		case isViewer && isOwnerOnly:
+			t.Errorf("%q is in BOTH the viewer allow-list and the owner-only list — "+
+				"the classification is contradictory", field)
+		case !isViewer && !isOwnerOnly:
+			t.Errorf("%q is owner-visible but classified NEITHER viewer-visible nor "+
+				"owner-only. Add it to vehicleStateViewerFields or to "+
+				"vehicleStateOwnerOnlyFields — MYR-435 requires every field to be "+
+				"consciously classified, not defaulted", field)
 		}
 	}
+
+	// No viewer field is invented: a typo in the explicit allow-list would
+	// otherwise sit there allowing a name nothing emits.
 	for field := range viewer.Allowed {
 		if !owner.allows(field) {
-			t.Errorf("%s is viewer-visible but owner-denied, which cannot be right", field)
+			t.Errorf("%q is viewer-visible but owner-denied, which cannot be right — "+
+				"likely a typo in vehicleStateViewerFields", field)
+		}
+	}
+
+	// No owner-only entry names a field that no longer exists upstream.
+	for field := range ownerOnly {
+		if !owner.allows(field) {
+			t.Errorf("%q is listed owner-only but is not in the owner allow-list — "+
+				"stale entry, remove it", field)
 		}
 	}
 }

@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -10,8 +11,13 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/auth"
 )
 
-// mediaSnapshotWireKeys is the full MYR-303/308 wire key set. Both roles must
-// receive every one of them (see the mask rationale in internal/mask/tables.go).
+// mediaSnapshotWireKeys is the full MYR-303/308 wire key set.
+//
+// MYR-435 (client decision, 2026-08-02) made these OWNER-ONLY. They used to be
+// a both-roles set; the rationale for the reversal lives in
+// internal/mask/tables.go (vehicleStateOwnerOnlyFields). Every assertion in this
+// file that used to loop over both roles is now split: owner keeps the block,
+// viewer must not receive a single one of these keys.
 var mediaSnapshotWireKeys = []string{
 	"mediaNowPlayingTitle",
 	"mediaNowPlayingArtist",
@@ -86,43 +92,84 @@ func populateMediaRow(row *VehicleSnapshotRow) {
 	row.SeatCoolingCapable = &capable
 }
 
-// TestVehicleSnapshotHandler_MediaNowPlayingBothRoles is the MYR-303/308
-// handler-level proof. Emitting the five free-text P1 fields to the VIEWER role
-// is a deliberate product decision, not an oversight: a rider in the car can
-// already hear what is playing, so a now-playing panel that blanks for the
-// passenger is the feature failing. This test pins that decision so a later
-// "tighten the viewer mask" change has to argue with it explicitly.
-func TestVehicleSnapshotHandler_MediaNowPlayingBothRoles(t *testing.T) {
-	for _, role := range []auth.Role{auth.RoleOwner, auth.RoleViewer} {
-		t.Run(string(role)+" receives the full now-playing block", func(t *testing.T) {
-			row := fixtureSnapshotRow(mediaFixtureUserID)
-			populateMediaRow(&row)
+// TestVehicleSnapshotHandler_MediaNowPlayingOwnerOnly is the MYR-303/308
+// handler-level proof, rewritten for the MYR-435 client decision.
+//
+// It used to assert that BOTH roles received the five free-text P1 fields, on
+// the reasoning that a rider in the car can already hear what is playing. The
+// client reversed that on 2026-08-02 ("Remove media/cabin and any vehicle
+// controls"), and the reasoning that had to give way is worth keeping here: a
+// share grant is durable and REMOTE, so a viewer is frequently not in the car
+// at all — the "they can already hear it" defense only ever held for the
+// minutes someone was in the passenger seat, and the mask cannot tell.
+//
+// This is the REST snapshot half of the both-surfaces check; the WS half is in
+// internal/ws, and both consult the same table (internal/mask/tables.go).
+func TestVehicleSnapshotHandler_MediaNowPlayingOwnerOnly(t *testing.T) {
+	t.Run("owner receives the full now-playing block", func(t *testing.T) {
+		row := fixtureSnapshotRow(mediaFixtureUserID)
+		populateMediaRow(&row)
 
-			body := decodeSnapshotBodyForRole(t, row, role)
+		body := decodeSnapshotBodyForRole(t, row, auth.RoleOwner)
 
-			want := map[string]any{
-				"mediaNowPlayingTitle":      "Summertime Friends",
-				"mediaNowPlayingArtist":     "The Chainsmokers",
-				"mediaNowPlayingAlbum":      "Summertime Friends",
-				"mediaNowPlayingStation":    "Alt Nation",
-				"mediaPlaybackSource":       "Spotify",
-				"mediaNowPlayingDurationMs": float64(214000),
-				"mediaNowPlayingElapsedMs":  float64(42000),
-				"mediaVolumeMax":            float64(11),
-				"seatCoolingCapable":        true,
+		want := map[string]any{
+			"mediaNowPlayingTitle":      "Summertime Friends",
+			"mediaNowPlayingArtist":     "The Chainsmokers",
+			"mediaNowPlayingAlbum":      "Summertime Friends",
+			"mediaNowPlayingStation":    "Alt Nation",
+			"mediaPlaybackSource":       "Spotify",
+			"mediaNowPlayingDurationMs": float64(214000),
+			"mediaNowPlayingElapsedMs":  float64(42000),
+			"mediaVolumeMax":            float64(11),
+			"seatCoolingCapable":        true,
+		}
+		for key, exp := range want {
+			got, ok := body[key]
+			if !ok {
+				t.Errorf("%s: key missing from the owner projection — MYR-435 narrowed "+
+					"the VIEWER arm only", key)
+				continue
 			}
-			for key, exp := range want {
-				got, ok := body[key]
-				if !ok {
-					t.Errorf("%s: key missing from the %s projection", key, role)
-					continue
-				}
-				if got != exp {
-					t.Errorf("%s: got %v (%T), want %v (%T)", key, got, got, exp, exp)
-				}
+			if got != exp {
+				t.Errorf("%s: got %v (%T), want %v (%T)", key, got, got, exp, exp)
 			}
-		})
-	}
+		}
+	})
+
+	t.Run("viewer receives no media key at all", func(t *testing.T) {
+		row := fixtureSnapshotRow(mediaFixtureUserID)
+		populateMediaRow(&row)
+
+		body := decodeSnapshotBodyForRole(t, row, auth.RoleViewer)
+
+		// Absent, not nulled (rest-api.md §5.1): the KEY must be gone. A null
+		// would still tell the viewer the field exists.
+		for _, key := range mediaSnapshotWireKeys {
+			if got, present := body[key]; present {
+				t.Errorf("%s: present in the viewer snapshot (value %v) — MYR-435 removes "+
+					"media and cabin state from viewers entirely", key, got)
+			}
+		}
+
+		// The values themselves must not survive under any key. Re-encode the
+		// decoded body and search the bytes, so a rename or a nesting change
+		// could not hide the leak from the key check above.
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("re-marshal viewer body: %v", err)
+		}
+		for _, secret := range []string{"The Chainsmokers", "Alt Nation", "Spotify", "Summertime Friends"} {
+			if bytes.Contains(encoded, []byte(secret)) {
+				t.Errorf("viewer snapshot leaks media content %q: %s", secret, encoded)
+			}
+		}
+
+		// Sanity: the viewer still got a usable snapshot. A mask bug that
+		// emptied the whole body would otherwise pass every assertion above.
+		if _, ok := body["chargeLevel"]; !ok {
+			t.Error("viewer snapshot has no chargeLevel — the narrowing removed too much")
+		}
+	})
 }
 
 // TestVehicleSnapshotHandler_MediaNeverSeenIsExplicitNull matches the sibling
@@ -130,23 +177,23 @@ func TestVehicleSnapshotHandler_MediaNowPlayingBothRoles(t *testing.T) {
 // never-observed field is an explicit JSON null — never an omitted key and never
 // a fabricated value. For seatCoolingCapable that null specifically must not be
 // a fabricated `false`, which would tell clients the car has no cooled seats.
+//
+// OWNER ONLY since MYR-435. For a viewer the distinction does not arise: the key
+// is absent whether or not the car ever reported it, which is the point — a
+// viewer cannot tell a silent radio from a masked one, and should not be able to.
 func TestVehicleSnapshotHandler_MediaNeverSeenIsExplicitNull(t *testing.T) {
-	for _, role := range []auth.Role{auth.RoleOwner, auth.RoleViewer} {
-		t.Run(string(role), func(t *testing.T) {
-			// fixtureSnapshotRow leaves all nine nil — the never-observed car.
-			body := decodeSnapshotBodyForRole(t, fixtureSnapshotRow(mediaFixtureUserID), role)
+	// fixtureSnapshotRow leaves all nine nil — the never-observed car.
+	body := decodeSnapshotBodyForRole(t, fixtureSnapshotRow(mediaFixtureUserID), auth.RoleOwner)
 
-			for _, key := range mediaSnapshotWireKeys {
-				got, ok := body[key]
-				if !ok {
-					t.Errorf("%s: key missing; siblings keep the key with a null value", key)
-					continue
-				}
-				if got != nil {
-					t.Errorf("%s: got %v, want explicit null (honest-unknown)", key, got)
-				}
-			}
-		})
+	for _, key := range mediaSnapshotWireKeys {
+		got, ok := body[key]
+		if !ok {
+			t.Errorf("%s: key missing; siblings keep the key with a null value", key)
+			continue
+		}
+		if got != nil {
+			t.Errorf("%s: got %v, want explicit null (honest-unknown)", key, got)
+		}
 	}
 }
 
