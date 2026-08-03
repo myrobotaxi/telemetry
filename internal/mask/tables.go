@@ -15,8 +15,16 @@ import (
 var masksByResource = map[ResourceType]map[auth.Role]ResourceMask{
 	// rest-api.md §5.2.1 — Vehicle snapshot. Owners see every field
 	// in docs/contracts/schemas/vehicle-state.schema.json (the v1
-	// VehicleState shape). Viewers see the same set EXCEPT the full
-	// `vin`, which MYR-279 gated to the owner role.
+	// VehicleState shape).
+	//
+	// MYR-435 (client decision, 2026-08-02): the viewer arm is NO LONGER
+	// "owner minus vin". It is an explicit allow-list — location, route,
+	// identity, charge, availability, freshness — with media, cabin
+	// climate, and all vehicle-controls state withheld. Both delivery
+	// surfaces read THIS table (the WS hub's BroadcastMasked /
+	// enqueueSnapshotFrame and the REST GET /snapshot handler), so the
+	// narrowing applies to both by construction; that is pinned by
+	// TestBothDeliverySurfacesShareTheVehicleStateTable.
 	//
 	// MYR-286: `licensePlate` is in BOTH role allow-lists. That is a
 	// DELIBERATE PRODUCT DECISION, not an oversight, and it reverses
@@ -127,18 +135,17 @@ var vehicleStateOwnerFields = []string{
 	// siblings exactly rather than being reasoned about afresh: `trimLabel` is
 	// an equipment/trim fact, the same tier as `trim`/`model`/`year`, and
 	// `fsdVersion` is a software designation, the same tier as
-	// `softwareVersion` — all four of which are already viewer-visible (the
-	// viewer list below removes ONLY `vin`). Nothing here identifies a person
-	// or links to a physical car, which is the property that makes `vin` the
-	// one owner-only snapshot field. Snapshot-only (REST-derived; Tesla streams
-	// neither), and deliberately NOT on the vehicles-list row.
+	// `softwareVersion` — all four of which are viewer-visible. Nothing here
+	// identifies a person or links to a physical car. MYR-435 did not touch
+	// them: they are identity/equipment, not media, cabin, or controls.
+	// Snapshot-only (REST-derived; Tesla streams neither), and deliberately NOT
+	// on the vehicles-list row.
 	"trimLabel",
 	"fsdVersion",
 	// licensePlate (MYR-286) — owner-entered, P1, and in the VIEWER
-	// allow-list too (vehicleStateViewerFields removes only `vin`).
-	// Deliberate product decision: the plate exists so a rider can
-	// identify the car at pickup. Do NOT "fix" this to owner-only by
-	// analogy with `vin` above — see the ResourceVehicleState comment.
+	// allow-list too. Deliberate product decision: the plate exists so a
+	// rider can identify the car at pickup. Do NOT "fix" this to owner-only
+	// by analogy with `vin` above — see the ResourceVehicleState comment.
 	"licensePlate",
 	// Charge atomic group.
 	"chargeLevel",
@@ -155,7 +162,9 @@ var vehicleStateOwnerFields = []string{
 	"longitude",
 	"locationName",
 	"locationAddress",
-	// Climate / cabin.
+	// Climate / cabin. OWNER-ONLY since MYR-435 — see
+	// vehicleStateOwnerOnlyFields for the client decision and the
+	// `exteriorTemp` ambiguity call.
 	"interiorTemp",
 	"exteriorTemp",
 	// Cabin controls read-back (MYR-252). Individually-delivered
@@ -166,6 +175,10 @@ var vehicleStateOwnerFields = []string{
 	// tier as chargeLevel/speed/gearPosition). rest-api.md §5.2.1 mirrors
 	// this list. Not currently emitted on the DB-backed /snapshot (WS-live
 	// only in this iteration — see rest-api.md §7.1).
+	//
+	// MYR-435: this entire block is OWNER-ONLY. P0 was never the question —
+	// these fields exist to render the owner's control tiles, and a viewer
+	// has no control tiles to render.
 	"locked",
 	"hvacPower",
 	"isClimateOn",
@@ -187,34 +200,26 @@ var vehicleStateOwnerFields = []string{
 	"trunkOpen",
 	"mediaPlaybackStatus",
 	"mediaVolume",
-	// MYR-303 media NOW-PLAYING block.
+	// MYR-303 media NOW-PLAYING block. OWNER-ONLY since MYR-435.
 	//
 	// The five free-text fields (title/artist/album/station/playbackSource) are
 	// P1, not P0 like the rest of this cabin block — they are free-text USER
 	// CONTENT, and an accumulated stream of them reveals listening habits
 	// (taste, and by inference language, mood, politics, religion).
 	//
-	// They are nonetheless in BOTH role allow-lists, and that is the whole
-	// point of the feature rather than an oversight: a RIDER sitting in the car
-	// can hear what is playing, so showing it to them reveals nothing they do
-	// not already know, and a now-playing panel that goes blank for the
-	// passenger is the feature failing. Same reasoning as `licensePlate`
-	// (MYR-286) — the asymmetry that matters is who NEEDS the value, not the
-	// tier. Contrast `vin`, which stays the one owner-only snapshot field.
+	// They used to be in BOTH role allow-lists on the reasoning that a rider in
+	// the car can already hear what is playing. MYR-435 retired that argument —
+	// a share grant is durable and remote, so a "viewer" is frequently not in
+	// the car at all. The full reasoning lives in vehicleStateOwnerOnlyFields.
 	//
-	// What P1 DOES buy here is handled outside this table: never log the values
-	// (presence/length only — see data-classification.md §1.13), never emit
-	// them outside the vehicle's party, never aggregate or retain them as a
-	// listening history.
+	// What P1 buys here is still handled outside this table: never log the
+	// values (presence/length only — see data-classification.md §1.13), never
+	// emit them outside the vehicle's party, never aggregate or retain them as
+	// a listening history.
 	//
-	// NOTE for the FR-5.5 `limited_viewer` seam (rest-api.md §5.2.1): these five
-	// MUST be EXCLUDED from that tier when it is implemented, alongside precise
-	// GPS and the navigation group. limited_viewer is the deliberately-degraded
-	// tier for someone who is NOT in the car — the "they can already hear it"
-	// justification above evaporates, and free-text listening data is exactly
-	// what that tier exists to withhold. The three numerics below are P0 and may
-	// stay. v1 has no limited_viewer role, so there is nothing to encode here
-	// yet; this comment is the standing instruction for whoever adds it.
+	// The FR-5.5 `limited_viewer` seam no longer needs a standing note about
+	// these five: MYR-435 excluded them for EVERY non-owner role, so a future
+	// limited_viewer inherits the exclusion by construction.
 	"mediaNowPlayingTitle",
 	"mediaNowPlayingArtist",
 	"mediaNowPlayingAlbum",
@@ -222,12 +227,14 @@ var vehicleStateOwnerFields = []string{
 	"mediaPlaybackSource",
 	// P0 numerics — a bare track length, playback offset, or volume ceiling
 	// identifies nothing on its own (same tier as the sibling mediaVolume).
+	// Owner-only anyway since MYR-435: elapsed + duration is a live "someone
+	// is listening right now" occupancy signal even without the track name.
 	"mediaNowPlayingDurationMs",
 	"mediaNowPlayingElapsedMs",
 	"mediaVolumeMax",
-	// MYR-308 — ventilated-seat capability. P0 both roles: an equipment/trim
-	// fact about the car, the same tier as `trim`/`model`/`year` and reasoned
-	// about the same way. Snapshot-only (Tesla does not stream it).
+	// MYR-308 — ventilated-seat capability. An equipment/trim fact, but
+	// OWNER-ONLY since MYR-435: unlike trim/model it has exactly one consumer,
+	// the owner's seat-cooling control tile, which viewers no longer render.
 	"seatCoolingCapable",
 	// MYR-316 — service window. P0 both roles: operational timing about the
 	// car, the same tier as the sibling `status` it qualifies, and a rider
@@ -239,13 +246,14 @@ var vehicleStateOwnerFields = []string{
 	// EXPLICITLY not owner-private, and the reasoning is the inverse of the
 	// usual one — a viewer is the party the value is ABOUT. A rider who cannot
 	// see that the car shared with them is paused discovers it from a 409 after
-	// filling in a pickup and a dropoff, which is the feature failing. The
-	// viewer list below inherits it (it subtracts only `vin`).
+	// filling in a pickup and a dropoff, which is the feature failing.
+	// MYR-435 kept it viewer-visible for exactly that reason.
 	"rideShareEnabled",
-	// Odometer / FSD.
+	// Odometer / FSD. Both roles — neither media, cabin, nor a control.
 	"odometerMiles",
 	"fsdMilesSinceReset",
-	// Misc identity / pairing flags.
+	// Misc identity / pairing flags. `virtualKeyPaired` is OWNER-ONLY since
+	// MYR-435 — it gates whether COMMANDS can be sent, and viewers send none.
 	"virtualKeyPaired",
 	// Navigation atomic group. Wire field names per
 	// vehicle-state.schema.json (destinationName, destinationAddress,
@@ -281,19 +289,203 @@ var vehicleStateOwnerFields = []string{
 	"lastUpdated",
 }
 
-// vehicleStateViewerFields is owner minus the full vin (MYR-279) — and
-// NOTHING else. The full VIN is owner-only (party-scoped): a viewer with shared
-// access sees model/year/color/softwareVersion/trim but NOT the full VIN, which
-// links to the physical car / its location history (data-classification.md
-// §1.3, §2.1). softwareVersion and trim stay visible to viewers (P0,
-// non-identifying, same tier as model), and since MYR-320 so do their siblings
-// trimLabel and fsdVersion, for exactly the same reason.
+// vehicleStateViewerFields is the v1 VIEWER allow-list for the vehicle
+// snapshot and every masked WS vehicle_update frame.
 //
-// MYR-286 REMOVED the previous `licensePlate` exclusion. The plate is now a
-// both-roles field by deliberate product decision (a rider must be able to read
-// the plate of the car pulling up); `vin` is the one field that stays
-// owner-only. Built by exclusion to avoid drift.
-var vehicleStateViewerFields = removeField(vehicleStateOwnerFields, "vin")
+// MYR-435 (CLIENT DECISION, 2026-08-02) REBUILT THIS LIST AND INVERTED HOW IT
+// IS CONSTRUCTED. It used to be `removeField(vehicleStateOwnerFields, "vin")` —
+// owner-minus-VIN, a SUBTRACTION. The MYR-427 privacy audit found that shape is
+// the defect, not the contents: under subtraction, every field added to the
+// owner list reaches viewers by DEFAULT, silently, with the decision made by
+// whoever forgot to think about it. That is how a viewer came to receive the
+// owner's now-playing track and cabin temperature.
+//
+// This is now an EXPLICIT ALLOW-LIST written out in full. The cost is that a
+// new owner field does not reach viewers until someone adds it here; that cost
+// is the point (fail-closed). TestVehicleStateRoleListsPartitionOwnerFields
+// makes the omission LOUD rather than silent: every owner field must appear in
+// either this list or vehicleStateOwnerOnlyFields, so a new field cannot be
+// added without classifying it.
+//
+// The client's instruction was: "Remove media/cabin and any vehicle controls."
+// What a viewer KEEPS is what the viewing/riding features actually consume —
+// where the car is, where it is going, which car it is, and whether it can make
+// the trip. See vehicleStateOwnerOnlyFields below for the removals and the
+// per-group reasoning.
+var vehicleStateViewerFields = []string{
+	// Identity. `vin` is absent (MYR-279, still owner-only); the rest of the
+	// identity block is how a rider recognizes the car at the curb.
+	// `licensePlate` is here by deliberate product decision (MYR-286) — it is
+	// literally the label the rider is standing on the sidewalk reading.
+	"vehicleId",
+	"name",
+	"model",
+	"year",
+	"color",
+	"softwareVersion",
+	"trim",
+	"trimLabel",
+	"fsdVersion",
+	"licensePlate",
+	// Charge atomic group. A rider deciding whether this car can make the trip
+	// needs the level, the range, and whether it is plugged in and climbing.
+	// NOTE the boundary drawn against `chargePortDoorOpen`, which is removed:
+	// "is it charging" is trip-planning state, "is the flap open" is an owner
+	// control tile.
+	"chargeLevel",
+	"chargeState",
+	"estimatedRange",
+	"timeToFull",
+	// Gear atomic group. `status` is the availability/in-service value the
+	// rider UI badges from; `gearPosition` is its atomic-group sibling and is
+	// motion state (P/R/N/D), not a control the viewer could actuate. Splitting
+	// an atomic group is its own contract violation (rest-api.md §5.4), so the
+	// pair travels together.
+	"status",
+	"gearPosition",
+	// Speed / GPS atomic group — the entire point of a shared live map.
+	"speed",
+	"heading",
+	"latitude",
+	"longitude",
+	"locationName",
+	"locationAddress",
+	// Service window and the ride-sharing switch. Both are operational
+	// availability of the car, and the viewer is the party they are ABOUT: a
+	// rider who cannot see them discovers a paused car from a 409 after
+	// composing a whole trip request.
+	"serviceEstimatedEndAt",
+	"rideShareEnabled",
+	// Odometer / FSD lifetime counters. Kept: these are neither media, cabin,
+	// nor a control tile, so MYR-435 does not reach them, and `odometerMiles` /
+	// `fsdMilesSinceReset` are both `required` in vehicle-state.schema.json.
+	"odometerMiles",
+	"fsdMilesSinceReset",
+	// Navigation atomic group — "where is this car taking me" is the other half
+	// of the shared-viewing feature (FR-5.1).
+	"destinationName",
+	"destinationAddress",
+	"destinationLatitude",
+	"destinationLongitude",
+	"originLatitude",
+	"originLongitude",
+	"etaMinutes",
+	"tripDistanceRemaining",
+	"navRouteCoordinates",
+	// Snapshot-aliased forms of the same navigation group (rest-api.md §7.1).
+	"navDestinationName",
+	"navDestinationLocation",
+	"navOriginLocation",
+	"navEtaMinutes",
+	"navTripDistanceRemaining",
+	// The accumulated live GPS trail behind the car on the map. Distinct from
+	// the DRIVES resource, which MYR-369 made owner-only — this is the live
+	// polyline of the trip the viewer is watching or sitting in, not the
+	// vehicle's stored history.
+	"driveTrailCoordinates",
+	// Wire freshness marker. A viewer must be able to tell live from stale.
+	"lastUpdated",
+}
+
+// vehicleStateOwnerOnlyFields enumerates every owner field that MYR-435 (and
+// MYR-279 before it, for `vin`) withholds from viewers. It exists so the
+// removals are STATED rather than inferred from the gap between two lists, and
+// so TestVehicleStateRoleListsPartitionOwnerFields can prove the two lists
+// together account for the owner list exactly — no field silently unclassified,
+// no name here that no longer exists upstream.
+//
+// Client decision (2026-08-02): "Remove media/cabin and any vehicle controls."
+var vehicleStateOwnerOnlyFields = []string{
+	// MYR-279 — the full 17-char VIN. Party-scoped: it identifies the physical
+	// car and links to its location history (data-classification.md §1.3,
+	// §2.1). Predates MYR-435 and is unchanged by it.
+	"vin",
+
+	// --- Cabin climate (MYR-435) ------------------------------------------
+	// The cabin is the owner's private space. Interior temperature is the
+	// sharpest case after media: it is a live occupancy signal — it says
+	// someone has been sitting in that car with the heat on.
+	"interiorTemp",
+	// `exteriorTemp` is the AMBIGUOUS one, and it is removed deliberately.
+	// The argument to keep it: ambient air outside the car is not cabin
+	// state and reveals nothing about the occupant — it is closer to weather
+	// than to privacy. The argument that wins: a rider standing next to the
+	// car already knows the weather, no viewer-facing surface renders it, and
+	// it is delivered by the same climate read-back as its cabin siblings —
+	// so for a viewer it is data with no consumer. Per the issue: default to
+	// REMOVE when in doubt. (It is NOT in a declared x-atomic-group, so
+	// removing it splits nothing — checked against vehicle-state.schema.json.)
+	"exteriorTemp",
+	"hvacPower",
+	"isClimateOn",
+	"fanSpeed",
+	"driverTempSetting",
+	"passengerTempSetting",
+	"hvacAutoMode",
+	"hvacAcEnabled",
+	"seatHeaterLeft",
+	"seatHeaterRight",
+	"seatHeaterRearLeft",
+	"seatHeaterRearCenter",
+	"seatHeaterRearRight",
+	"seatCoolerLeft",
+	"seatCoolerRight",
+	"seatVentEnabled",
+	// `seatCoolingCapable` is an equipment fact, which by the MYR-320 sibling
+	// rule would sit with trim/model. It is removed anyway: its ONLY consumer
+	// is the owner's seat-cooling control tile, deciding whether to draw the
+	// control at all. With the seat controls gone for viewers, the capability
+	// flag is a dangling dependency of a UI a viewer cannot reach.
+	"seatCoolingCapable",
+
+	// --- Vehicle controls state (MYR-435) ---------------------------------
+	// Everything that exists to drive the OWNER's control tiles. A viewer
+	// cannot actuate any of these (commands are owner-only at the routing
+	// layer), so the state exists purely to render a control they do not
+	// have — while telling them whether the owner's car is standing
+	// unlocked, and whether its trunk is open.
+	"locked",
+	"chargePortDoorOpen",
+	"frunkOpen",
+	"trunkOpen",
+	// `virtualKeyPaired` is the pairing flag the owner app reads to decide
+	// whether commands can be sent at all. It is controls INFRASTRUCTURE: a
+	// viewer sends no commands, so it is the same dangling dependency as
+	// `seatCoolingCapable`.
+	"virtualKeyPaired",
+
+	// --- Media / now-playing (MYR-435) ------------------------------------
+	// The audit's sharpest example. The five free-text fields are P1 USER
+	// CONTENT, and an accumulated stream of them reveals listening habits
+	// (taste, and by inference language, mood, politics, religion).
+	//
+	// The previous justification for showing them to viewers was "a rider in
+	// the car can already hear it." That reasoning is now retired, and it is
+	// worth naming WHY rather than leaving it to be rediscovered: a viewer is
+	// not necessarily a rider. A share grant is durable and remote — it keeps
+	// streaming while the grantee is at home and the owner is driving alone.
+	// The "they can already hear it" defense only holds for the minutes
+	// someone is actually in the passenger seat, and the mask cannot tell the
+	// difference. The standing FR-5.5 note that these MUST be excluded from a
+	// future `limited_viewer` tier is thereby resolved early and for every
+	// viewer: this IS that exclusion.
+	"mediaNowPlayingTitle",
+	"mediaNowPlayingArtist",
+	"mediaNowPlayingAlbum",
+	"mediaNowPlayingStation",
+	"mediaPlaybackSource",
+	// The numerics are individually P0 — a bare track length or volume
+	// ceiling identifies nothing. They go with the block anyway: elapsed and
+	// duration together are a live "someone is listening right now, and is
+	// 2:14 into it" signal, and playback status plus volume is the same
+	// occupancy tell. The client said media, not "the identifying half of
+	// media."
+	"mediaPlaybackStatus",
+	"mediaVolume",
+	"mediaVolumeMax",
+	"mediaNowPlayingDurationMs",
+	"mediaNowPlayingElapsedMs",
+}
 
 // vehicleSummaryOwnerFields is the v1 owner allow-list for the
 // vehicles-list catalog response (rest-api.md §5.2.0 / §7.0). Thin
@@ -517,19 +709,4 @@ func setFromFields(fields []string) ResourceMask {
 		allowed[f] = struct{}{}
 	}
 	return ResourceMask{Allowed: allowed}
-}
-
-// removeField returns a copy of fields with all occurrences of name
-// removed. Used to derive viewer allow-lists from owner allow-lists by
-// exclusion (e.g., owner minus `vin`). The loop never breaks on
-// match — every input element that equals name is filtered out.
-func removeField(fields []string, name string) []string {
-	out := make([]string, 0, len(fields))
-	for _, f := range fields {
-		if f == name {
-			continue
-		}
-		out = append(out, f)
-	}
-	return out
 }
