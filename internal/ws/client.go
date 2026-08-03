@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -66,6 +67,32 @@ type Client struct {
 	// readPump.
 	subscribed map[string]struct{}
 	subMu      sync.RWMutex
+	// revoked marks this session as torn down for an access reason
+	// (MYR-373). Set the instant a revocation is processed and BEFORE the
+	// close frame is written, because the graceful WebSocket close waits for
+	// the peer to echo — up to five seconds — and a viewer whose grant was
+	// just pulled must not receive another GPS frame during that handshake.
+	// Read on the broadcast hot path via hasVehicle; an atomic rather than a
+	// mutex so the fan-out stays lock-free per client.
+	revoked atomic.Bool
+	// done is closed exactly once, by markRevoked, to wake writePump when a
+	// session is torn down for an access reason.
+	//
+	// It exists because the revoked flag alone DEADLOCKS the teardown. Once
+	// enqueue refuses everything, nothing can ever arrive on c.send again,
+	// and writePump blocks on exactly three things: ctx.Done, c.send closing,
+	// and a failed write. None of them can happen. gctx is cancelled only
+	// after g.Wait() returns (handler.go), g.Wait() waits for writePump, and
+	// Unregister — the only closer of c.send — runs after that. Circular
+	// wait: the session's goroutines and its hub entry survive forever.
+	//
+	// Before the enqueue guard, the 15s heartbeat was the accidental escape
+	// hatch: BroadcastAll reached c.send, writePump woke, the write failed on
+	// the dead connection, and teardown followed. The guard closed that door,
+	// so the wake-up has to be explicit.
+	done     chan struct{}
+	doneOnce sync.Once
+
 	remoteAddr string
 	send       chan []byte
 	hub        *Hub
@@ -78,11 +105,27 @@ func newClient(conn *websocket.Conn, hub *Hub, logger *slog.Logger) *Client {
 	return &Client{
 		conn:         conn,
 		send:         make(chan []byte, sendBufSize),
+		done:         make(chan struct{}),
 		vehicleRoles: make(map[string]auth.Role),
 		subscribed:   make(map[string]struct{}),
 		hub:          hub,
 		logger:       logger,
 	}
+}
+
+// markRevoked cuts this session off and wakes its writePump, in that order.
+//
+// The two halves are inseparable and that is why this is one method rather
+// than two statements at the call site: setting the flag without signalling
+// strands writePump forever (see the `done` field), and signalling without
+// setting the flag would let a frame slip out between the two.
+//
+// Idempotent — a second revocation, or the backstop sweep landing on top of a
+// nudge, must not panic on a double close. `done` is separate from `send`, so
+// this never races Unregister's or Stop's close of the send channel.
+func (c *Client) markRevoked() {
+	c.revoked.Store(true)
+	c.doneOnce.Do(func() { close(c.done) })
 }
 
 // roleFor returns the role this client holds against vehicleID. Resolution
@@ -106,12 +149,21 @@ func (c *Client) roleFor(vehicleID string) auth.Role {
 }
 
 // writePump reads messages from the send channel and writes them to the
-// WebSocket connection. It exits when the send channel is closed or the
-// context is cancelled.
+// WebSocket connection. It exits when the send channel is closed, the
+// context is cancelled, or the session is revoked (MYR-373).
+//
+// The revocation case is not a nicety: a revoked session can never receive
+// another message on c.send, so without an out-of-band signal this loop would
+// park forever and hold the whole teardown behind it — see Client.done.
 func (c *Client) writePump(ctx context.Context, writeTimeout time.Duration) {
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-c.done:
+			// Revoked. The 4002 close frame is written by RevokeUserAccess
+			// directly on the connection, not through this pump, so there is
+			// nothing left to flush and nothing to say on the way out.
 			return
 		case msg, ok := <-c.send:
 			if !ok {
@@ -161,7 +213,24 @@ func (c *Client) readPump(ctx context.Context, writeTimeout time.Duration) {
 // enqueue adds a message to the client's send buffer. If the buffer is
 // full, it drops the oldest message to make room (drop-oldest policy).
 // Returns true if a message was dropped.
+//
+// THIS IS THE ONLY WRITER TO c.send, which is what makes the revoked check
+// below a real choke point rather than one of several (MYR-373). An earlier
+// version of this fix guarded `hasVehicle` instead and was WRONG: the
+// snapshot-on-subscribe path (snapshot.go `sendSnapshot`) reaches `enqueue`
+// without ever consulting `hasVehicle`, so a revoked session could still pull
+// live GPS by sending a `subscribe` frame during the close-handshake window.
+// Guarding the channel itself is the version of this claim that cannot be
+// bypassed by a path somebody adds later.
+//
+// A refusal returns FALSE, not true: `true` means "a message was dropped
+// because this client is slow" and feeds `IncMessagesDropped`. A revoked
+// session is not a slow client, and counting it as one would make a
+// revocation look like backpressure on the dashboards.
 func (c *Client) enqueue(msg []byte) bool {
+	if c.revoked.Load() {
+		return false
+	}
 	select {
 	case c.send <- msg:
 		return false
@@ -189,7 +258,14 @@ func (c *Client) enqueue(msg []byte) bool {
 // from vehicleIDs at handshake and modified by subscribe/unsubscribe
 // (DV-07 / MYR-46). An empty vehicleIDs slice with allVehicles=false
 // means deny-all (NFR-3.21).
+//
+// A session marked revoked (MYR-373) is deny-all for EVERY vehicle, including
+// the dev-mode wildcard, and the check comes first for that reason: it is the
+// one condition that must beat every other way of being authorized.
 func (c *Client) hasVehicle(vehicleID string) bool {
+	if c.revoked.Load() {
+		return false
+	}
 	if c.allVehicles {
 		return true
 	}

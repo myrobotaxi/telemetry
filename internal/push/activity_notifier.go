@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/myrobotaxi/telemetry/internal/drain"
 	"github.com/myrobotaxi/telemetry/internal/events"
 )
 
@@ -141,12 +142,11 @@ type ActivityNotifier struct {
 	mu   sync.Mutex
 	subs []events.Subscription
 	bus  events.Bus
-	// inflight counts the detached workers async has started and not yet
-	// retired; idle broadcasts when the last one leaves. Both are guarded by
-	// mu — see activity_drain.go for why a sync.WaitGroup cannot hold this
-	// job (MYR-398).
-	inflight int
-	idle     *sync.Cond
+	// workers counts the detached sends async has started and not yet retired,
+	// plus the caller-goroutine work track covers. See activity_drain.go, and
+	// internal/drain for why a sync.WaitGroup cannot hold this job (MYR-398,
+	// MYR-410).
+	workers drain.Group
 }
 
 // NewActivityNotifier builds the Live Activity consumer.
@@ -166,7 +166,7 @@ func NewActivityNotifier(
 		logger = slog.New(slog.NewTextHandler(discardWriter{}, nil))
 	}
 	cfg = cfg.withDefaults()
-	a := &ActivityNotifier{
+	return &ActivityNotifier{
 		sender: sender,
 		store:  store,
 		prefs:  prefs,
@@ -175,8 +175,6 @@ func NewActivityNotifier(
 		now:    time.Now,
 		sem:    make(chan struct{}, cfg.MaxConcurrent),
 	}
-	a.idle = sync.NewCond(&a.mu)
-	return a
 }
 
 // active reports whether a send would actually reach Apple.

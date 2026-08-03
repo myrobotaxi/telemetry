@@ -51,13 +51,18 @@ func (a *shareInviteAdapter) ListInvitesForVehicle(ctx context.Context, vehicleI
 	return out, nil
 }
 
-// RevokeInvite tombstones a row and reports whose access ended.
-func (a *shareInviteAdapter) RevokeInvite(ctx context.Context, inviteID, ownerUserID string) (string, error) {
-	viewerID, err := a.repo.RevokeInvite(ctx, inviteID, ownerUserID)
+// RevokeInvite tombstones a row and reports whose access ended, and on which
+// vehicle — the handler needs both to bust the right cache entry and close the
+// right live socket.
+func (a *shareInviteAdapter) RevokeInvite(ctx context.Context, inviteID, ownerUserID string) (telemetry.RevokedGrant, error) {
+	revoked, err := a.repo.RevokeInvite(ctx, inviteID, ownerUserID)
 	if err != nil {
-		return "", translateShareError(err)
+		return telemetry.RevokedGrant{}, translateShareError(err)
 	}
-	return viewerID, nil
+	return telemetry.RevokedGrant{
+		ViewerUserID: revoked.ViewerUserID,
+		VehicleID:    revoked.VehicleID,
+	}, nil
 }
 
 // PatchInvite applies an owner edit to one accepted grant (MYR-369) and reports

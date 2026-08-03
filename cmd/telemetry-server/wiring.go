@@ -216,6 +216,13 @@ type httpRouteDeps struct {
 	// authenticator; separate from it so the sharing handlers depend on the
 	// one-method interface rather than the whole authenticator.
 	accessInvalidator telemetry.AccessCacheInvalidator
+	// shareAccessNotifier ends a grantee's LIVE WebSocket sessions when their
+	// grant is revoked or suspended (MYR-373). The companion to
+	// accessInvalidator and not a substitute for it: the invalidator stops the
+	// next handshake, this one stops the connection that already completed
+	// one. Nil leaves an open socket streaming until it reconnects or the
+	// revalidation backstop catches it.
+	shareAccessNotifier telemetry.ShareAccessNotifier
 	// sessionInvalidator drops BOTH auth caches for a user whose account has
 	// just been deleted (MYR-355) — the user-existence cache as well as the
 	// access set, so an unexpired access token stops validating immediately

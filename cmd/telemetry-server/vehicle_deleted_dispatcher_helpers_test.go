@@ -45,7 +45,12 @@ func newWSTestServer(t *testing.T, hub *ws.Hub, a ws.Authenticator) *httptest.Se
 	return httptest.NewServer(handler)
 }
 
-func dialWSAuth(t *testing.T, baseURL, token string) *websocket.Conn {
+// token stays a parameter rather than a constant on purpose: fakeAuth accepts
+// any non-empty token, so every caller passes the same placeholder, but the
+// handshake under test is the token-bearing one and a helper that hid the
+// token would stop looking like it.
+func dialWSAuth(t *testing.T, baseURL, token string) *websocket.Conn { //nolint:unparam // see above
+
 	t.Helper()
 	wsURL := strings.Replace(baseURL, "http://", "ws://", 1) + "/api/ws"
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

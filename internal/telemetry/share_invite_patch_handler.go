@@ -75,6 +75,27 @@ func (h *ShareInviteHandler) ServePatch(w http.ResponseWriter, r *http.Request) 
 		h.access.InvalidateVehicles(granteeID)
 	}
 
+	// AND TEAR DOWN A LIVE SOCKET, but only when the patch left the grant
+	// SUSPENDED (MYR-373). The bust above is unconditional for the reason
+	// given there; this is not, and the asymmetry is deliberate:
+	//
+	//   - Suspension is the only flag on this endpoint that removes the
+	//     grant from the viewer-merge access set, which is the single thing
+	//     the WS handshake resolves through. Losing it is what has to stop a
+	//     live stream.
+	//   - allowRides governs the §7.8 ride surface and has NO WebSocket
+	//     effect whatsoever. Closing a socket over it would drop a viewer's
+	//     live map for a change that does not touch the live map.
+	//
+	// Read off the ROW the database returned rather than off the request, so
+	// an already-suspended grant patched for some other reason still closes
+	// (harmless, and the alternative is trusting the request to describe the
+	// resulting state). A patch that lifts a suspension leaves Suspended
+	// false and closes nothing — restoring access has no socket to end.
+	if row.Grant.Suspended {
+		h.endLiveAccess(granteeID, row.VehicleID, "suspended")
+	}
+
 	// The invite id and what changed — never the label (P1), and there is no
 	// code on an accepted row to leak.
 	h.logger.Info("share invite patched",

@@ -505,9 +505,21 @@ The `AuditLog.userId` column is **not** a foreign key to the User table. This is
 
 ## 5. Pruning job spec (NFR-3.27)
 
+> **IMPLEMENTED by [MYR-439](https://linear.app/myrobotaxi/issue/MYR-439) (2026-08-02).** This section was a specification with no implementation behind it from Phase 1 until now — the policy existed and nothing enforced it, which is the [MYR-427](https://linear.app/myrobotaxi/issue/MYR-427) privacy-audit finding that prompted the work. It now describes shipped behaviour. Where the as-built differs from the original spec, the difference is called out inline and marked **AS-BUILT**.
+>
+> **No data was ever over-retained.** The gap was an unenforced policy, not a violated one: production holds 315 `Drive` rows as of 2026-08-02, the oldest created **2026-03-08**, so nothing has yet reached 365 days. The platform is younger than its own retention window.
+>
+> **⚠️ THE SWEEP DELETES NOTHING UNTIL 2027-03-08.** Every pass before that date claims zero rows and exits. This matters to whoever is reading in March 2027: the audit grouping, the `SKIP LOCKED` contention path, and Postgres TOAST reclamation of the deleted route blobs will have run **only against the test suite** up to that point, never against production data. The first pass that actually deletes something is the real first run — watch `telemetry_pruner_drives_deleted_total` and the batch-error counter that night.
+>
+> Code: `store.DrivePruner` (`internal/store/drive_pruner.go`) is the batch; `retention.Pruner` (`internal/retention/`) is the cadence, budget and retries; `startDrivePruner` (`cmd/telemetry-server/wiring_retention.go`) is the composition root.
+>
+> **The 365-day window is `store.DriveRetentionDays`, and that is the only place it is written.** Compile-time constant, unreachable from configuration per CG-DL-4. The `DRIVE_RETENTION_PRUNER_ENABLED` kill-switch stops the sweep; it cannot change the window.
+
 ### 5.1 Purpose
 
 A background job that enforces the 1-year rolling retention window for Drive records. Drives with `createdAt` older than 365 days are deleted in batches.
+
+**Scope of one deletion.** `DELETE FROM "Drive"` is the whole job. No table in either the Prisma schema or the `go_*` namespace is keyed by a drive id — there is no drive-keyed sidecar, derivative, summary or blob table, and a Go migration could not declare an FK to `Drive` even if one were wanted (CG-DL-9). The route/GPS trail is two columns ON the drive row (`routePoints` plaintext, `routePointsEnc` ciphertext), so the row delete destroys ciphertext and plaintext together and leaves no orphan. The pruner's statements therefore **name no column**, which is also what makes them invariant under [MYR-433](https://linear.app/myrobotaxi/issue/MYR-433)'s retirement of the plaintext copy.
 
 ### 5.2 Schedule
 
@@ -526,6 +538,10 @@ CREATE INDEX "Drive_createdAt_vehicleId_idx" ON "Drive" ("createdAt", "vehicleId
 ```
 
 This index should be added alongside the pruning job implementation. It covers the `WHERE createdAt < ... ORDER BY createdAt ASC LIMIT 100` scan and allows the job to efficiently resolve the vehicle owner for the audit log entry.
+
+> **AS-BUILT — the index is NOT shipped with MYR-439, and cannot be.** `"Drive"` is Prisma-owned and CG-DL-9 names `CREATE INDEX ON "Drive"` in Go migration SQL as a violation, so this index has to land as a Prisma migration in `myrobotaxi/react-frontend`. Tracked as **[MYR-442](https://linear.app/myrobotaxi/issue/MYR-442)**.
+>
+> **Hard deadline: 2027-03-08** — the date the first drive becomes eligible and the claim query starts doing real work. This is not a "before the table grows" nice-to-have with an open end. Until then the claim scans `createdAt` and returns zero rows, which is affordable at any size; from that date forward every 03:00 UTC pass runs the range scan for real, and the audit grouping resolves an owner per batch. The index must be in place before that pass, not after it.
 
 ### 5.4 Execution
 
@@ -558,39 +574,67 @@ FOR each batch:
   4. Continue to next batch
 ```
 
+> **AS-BUILT — open drives are IN SCOPE, deliberately.** The claim filters on `createdAt` alone and does **not** exclude rows with a null/empty `endTime`. This is a decision, not an oversight: a drive still "open" 365 days after it was created is corrupt state, not an in-progress trip (the longest real drive is bounded by `MaxDriveDuration`, and `cmd/cleanup-stuck-drives` exists precisely because stuck-open rows happen). Deleting it is the correct outcome. If the detector somehow still held a reference, the failure is loud rather than silent — `Complete` / `AppendRoutePoints` return `ErrDriveNotFound`, which the writer logs as a warning and steps over.
+
+> **AS-BUILT — `Exhausted` requires an EMPTY claim, not a short one.** §5.4's step 2 says "IF no rows returned → job complete", and that is exactly what shipped, but it is worth stating why the obvious optimisation is wrong. A batch that returns fewer than `LIMIT` rows looks done, and under `SKIP LOCKED` it is not: a short claim means "no more rows *I* can take", which a peer holding the remainder also satisfies. Treating that as completion would let one replica declare the backlog drained over rows a dying peer is about to roll back — and advance the freshness gauge on work nobody did. The loop therefore always pays one extra empty claim to confirm.
+
 ### 5.5 Batch configuration
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
 | Batch size | 100 drives | Balances transaction size with throughput. Large enough for efficiency, small enough to avoid long-held locks. |
 | Audit granularity | One audit entry per batch per vehicle owner | Groups pruned drives by owner for readable audit history |
-| Iteration limit | None (runs until no eligible drives remain) | Daily schedule means at most ~365 new eligible drives per vehicle per run |
+| Iteration limit | **AS-BUILT: 500 batches per pass** (was: none) | 50,000 drives a night. **This is deliberate headroom, not a response to an existing backlog — there is no backlog** (315 rows, nothing eligible until 2027-03-08). An unbounded "runs until no eligible drives remain" loop is a ceiling nobody set; adding one now costs a constant, whereas adding it after a pathological pass has pinned a connection until morning costs an incident. The budget is a ceiling, not a throttle, and a pass that hits it logs a warning naming the cap. Nothing is lost: the claim is always oldest-first, so the next pass resumes exactly where this one stopped. |
+| **AS-BUILT: concurrency** | `FOR UPDATE OF d SKIP LOCKED` on the claim | Replaces §5.8's leader election with something that needs no coordinator. Two replicas waking at 03:00 claim disjoint batches; a replica that dies mid-batch releases its claim on rollback. Correct here because the work set is unordered with respect to correctness — any expired drive may be deleted by anyone. |
+| **AS-BUILT: transaction boundary** | Claim, audit and delete are ONE transaction | §5.4's pseudocode SELECTs before `BEGIN`. Folding the claim inside the transaction is what makes `SKIP LOCKED` meaningful and removes the window in which a claimed id could be deleted by another path before this one's audit row was written. |
 
 ### 5.6 Failure handling
 
 | Scenario | Behavior |
 |----------|----------|
-| Batch transaction fails | Retry with exponential backoff: wait 1s, 2s, 4s (3 attempts max) |
-| All 3 retries fail for a batch | Log error at `slog.Error` level, skip to next batch. The failed batch will be retried on the next daily run. |
+| Batch transaction fails | Retry with exponential backoff, **3 attempts max**. **AS-BUILT: the waits are 1s then 2s**, not "1s, 2s, 4s" — three attempts have only two gaps between them, so a 4s wait would imply a fourth attempt the same row forbids. Cancellation during a backoff aborts immediately rather than burning the remaining attempts. |
+| All 3 retries fail for a batch | **AS-BUILT: log at `slog.Error`, increment `telemetry_pruner_batch_errors_total`, and END THE PASS** (was: skip to next batch). "Skip to next batch" is not expressible: the claim is deterministic — always the oldest expired rows — so the "next" batch after a failure is the SAME batch, and continuing would spin. Ending the pass is the honest form of the same intent, and costs nothing because the sweep is idempotent and the next daily run retries from the same position. |
 | Database connection lost | Abort the job. Next daily run will pick up where this one left off (idempotent — only deletes drives older than 365 days). |
 | Audit log insert fails | The entire batch transaction rolls back. No drives are deleted without an audit trail. |
-| Job takes longer than expected | No hard timeout. The job processes all eligible drives. If this becomes a concern, the batch size can be tuned. |
+| Job takes longer than expected | **AS-BUILT: bounded three ways** — a 30s timeout on each batch transaction, a 500-batch ceiling per pass, and cancellation honoured at every batch boundary. There is still no timeout on the pass as a whole; the budget is what bounds it. |
+| **AS-BUILT: process shutdown mid-pass** | The pass stops at the next batch boundary. Each batch is its own transaction, so the one in flight rolls back whole — there is no partially-pruned state and nothing to drain. The sweep is context-only on shutdown, matching every other timer-driven worker in the process. |
 
 ### 5.7 Observability
 
 The pruning job emits the following metrics:
 
+**AS-BUILT:** all five ship, carrying the `telemetry_` prefix this service uses for every metric, and the gauge carries the `_seconds` unit suffix Prometheus convention requires.
+
 | Metric | Type | Description |
 |--------|------|-------------|
-| `pruner_drives_deleted_total` | Counter | Total drives deleted across all batches in this run |
-| `pruner_batches_processed_total` | Counter | Number of batches processed |
-| `pruner_batch_errors_total` | Counter | Number of batch failures (after retries) |
-| `pruner_run_duration_seconds` | Histogram | Wall-clock time for the entire pruning run |
-| `pruner_last_success_timestamp` | Gauge | Unix timestamp of last successful completion |
+| `telemetry_pruner_drives_deleted_total` | Counter | Total drives deleted across all batches, cumulative. **Expect a flat zero until 2027-03-08** — that is the correct reading, not a stalled sweep. Distinguish "nothing to do" from "not running" with the freshness gauge below, never with this counter. |
+| `telemetry_pruner_batches_processed_total` | Counter | Number of batches committed |
+| `telemetry_pruner_batch_errors_total` | Counter | Number of batch failures (after retries). **Alert on any increase.** |
+| `telemetry_pruner_run_duration_seconds` | Histogram | Wall-clock time for one pass |
+| `telemetry_pruner_last_success_timestamp_seconds` | Gauge | Unix timestamp of the last pass that completed without a batch error. **Alert when `now() - this > ~48h`:** the window is a privacy commitment, so a silently stalled sweep is a compliance problem, not a missed cron. A budget-capped pass still advances this gauge — it made progress; only a failed pass leaves it stale. **This is the sweep's ONLY liveness signal** for as long as the deleted-drives counter is legitimately zero (i.e. until 2027-03-08), so it carries the whole alert. **Seeding:** the gauge is published as `0` at process start rather than left absent, so the staleness expression evaluates from boot instead of silently matching no series — meaning it reads as *firing* from startup until the first 03:00 UTC pass. That is intended (a process that never reaches 03:00 is exactly the failure being caught); damp the startup window with an alert `for:` longer than a day, **not** by special-casing zero. |
 
 ### 5.8 Deployment
 
 The pruning job runs as a scheduled task within the telemetry server process (not a separate service). On Fly.io, this is implemented as a goroutine with a `time.Ticker` that fires daily at 03:00 UTC. The job is leader-elected if multiple instances are running (only one instance executes the prune).
+
+> **AS-BUILT — no leader election.** The goroutine ships as described (a `time.Timer` re-armed to the next 03:00 UTC slot, plus up to five minutes of jitter so replicas do not stampede the pool), but there is **no leader**. `SKIP LOCKED` on the claim makes concurrent replicas safe by construction: they take disjoint batches and the work simply finishes sooner. A leader election would have added a coordinator, a lease, and a failure mode where the leader dies and nothing prunes until the lease expires — all to serialise work that is already safe to parallelise.
+>
+> **Kill-switch:** `DRIVE_RETENTION_PRUNER_ENABLED` (defaults ON, fail-fast on a non-boolean value). Turning it off is not a neutral degraded mode — the 365-day window is a promise made to owners in the privacy policy, so the sweep being off means that promise is unmet for as long as it stays off. It exists for stopping a misbehaving sweep, not for deferring one.
+
+### 5.9 Read-path behaviour after a prune (AS-BUILT)
+
+A drive id that a client still holds — a cached `drive_ended` WebSocket payload, a deep link, a stale page — may refer to a drive that has since been pruned. Every path degrades cleanly; **none errors**:
+
+| Path | Behaviour on a pruned id |
+|------|--------------------------|
+| `GET /api/drives/{driveId}` (§7.3) | `404 not_found` via the ordinary `store.ErrDriveNotFound` → `sdk.ErrNotFound` chain. Returned *before* the ownership check, so a pruned drive 404s rather than 403s. |
+| `GET /api/drives/{driveId}/route` (§7.4) | Same `404 not_found`. |
+| `GET /api/vehicles/{vehicleId}/drives` (§7.2) | The row is simply absent from the page. `items` is built as an empty slice, so a fully-pruned history serialises as `[]`, never `null`. The 404 on this endpoint means a missing *vehicle*, never a missing drive. |
+| Cursor pagination (§7.2) | Safe. The keyset predicate `("startTime","id") < ($2,$3)` is a pure value comparison and never looks the anchor row up, so a cursor pointing at a pruned drive still returns the correct next page — it cannot 400 or 500. |
+| Ride → drive joins | **None exist.** The MYR-265 drive/ride correlation was removed by MYR-270; `go_ride_requests` has no drive-id column. The only join involving `"Drive"` anywhere is `Drive → Vehicle`. |
+| `AuditLog.targetId` | Never a drive id — every emitter passes the vehicle id, including the `drives_pruned` row itself. No audit row can dangle. |
+
+**One caveat on §7.2's "disappearing from the tail".** The prune orders by `createdAt` (a `timestamptz`) while the list orders by `startTime` (a Prisma `String`, compared lexicographically). For rows with clock skew or a malformed `startTime` the two orders can diverge, so a pruned row may vanish from the **middle** of a cursor scan rather than its tail. The effect is still only a gap in a page — no error, no cursor corruption — but the guarantee is "items may disappear from a scan", not specifically from its tail.
 
 ---
 

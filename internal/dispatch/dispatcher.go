@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/commands"
+	"github.com/myrobotaxi/telemetry/internal/drain"
 	"github.com/myrobotaxi/telemetry/internal/events"
 )
 
@@ -114,8 +114,10 @@ type Dispatcher struct {
 	cfg      Config
 	logger   *slog.Logger
 
-	sem chan struct{}  // concurrency cap for in-flight dispatches
-	wg  sync.WaitGroup // tracks in-flight dispatch goroutines
+	sem chan struct{} // concurrency cap for in-flight dispatches
+	// workers counts the in-flight dispatch goroutines. Not a sync.WaitGroup —
+	// see Wait, and internal/drain for the argument (MYR-410).
+	workers drain.Group
 }
 
 // New builds a Dispatcher. logger may be nil (a discard logger is used).
@@ -165,9 +167,28 @@ func (d *Dispatcher) Subscribe(bus events.Bus) (events.Subscription, error) {
 	return sub, nil
 }
 
-// Wait blocks until all in-flight dispatches finish. Call after unsubscribing
-// (bus.Close) on shutdown to drain cleanly; also used by tests.
-func (d *Dispatcher) Wait() { d.wg.Wait() }
+// Wait blocks until all in-flight dispatches finish. Call AFTER bus.Close on
+// shutdown, never before; also used by tests.
+//
+// It is NOT backed by a sync.WaitGroup, and cannot be (MYR-410). Wait runs on
+// whichever goroutine is shutting down, while dispatchAsync's counting runs on
+// the bus's delivery goroutine, and nothing orders the two — so a ride.accepted
+// the bus has already accepted can still be on its way into dispatchAsync when
+// Wait looks. A WaitGroup read in that window is silently empty: the drain ends
+// early and a pickup that was mid-flight never reaches the car. internal/drain
+// counts under the mutex the waiter blocks on, which has no such window. Same
+// bug, same fix as the Live Activity notifier in MYR-398.
+//
+// The ordering above is load-bearing, not advisory. This Wait covers dispatches
+// that have STARTED; an event still in this subscriber's buffered channel has
+// not reached handle, so nothing is counted and Wait returns over it. bus.Close
+// is what makes that backlog started work. The pair is the guarantee.
+//
+// NOTE: cmd/telemetry-server does not call this yet — setupNavDispatcher never
+// returns the dispatcher. Wiring it needs a BOUNDED wait, because one dispatch
+// may run for OverallTimeout (2 minutes) against a 10s deploy grace period.
+// That is MYR-431.
+func (d *Dispatcher) Wait() { d.workers.Wait() }
 
 // handle is the events.Handler: it type-asserts and hands the event to a
 // worker goroutine, returning immediately so the bus's serial per-subscriber
@@ -203,10 +224,14 @@ func (d *Dispatcher) handleStarted(evt events.Event) {
 // dispatchAsync runs fn on a bounded worker goroutine under a fresh
 // OverallTimeout-bounded context, shared by both legs. Returns immediately so
 // the bus's serial per-subscriber loop is never blocked by a slow dispatch.
+//
+// The dispatch is counted HERE, on the bus's delivery goroutine, and not inside
+// the worker: counting after the go statement would reopen the window Wait
+// exists to close.
 func (d *Dispatcher) dispatchAsync(fn func(context.Context)) {
-	d.wg.Add(1)
+	done := d.workers.Track()
 	go func() {
-		defer d.wg.Done()
+		defer done()
 		// Acquire a worker slot (bounds concurrency to MaxConcurrent). This
 		// runs off the bus loop, so delivery has already returned.
 		d.sem <- struct{}{}

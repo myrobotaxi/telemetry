@@ -116,8 +116,17 @@ const (
 	// by the account_deleted row, whose targetId is the caller's own cuid
 	// (data-lifecycle.md §3.1, MYR-355).
 	auditTargetTypeUser = "user"
+	// auditTargetTypeDrive marks drive records as the affected entity — used by
+	// the drives_pruned row (MYR-439, NFR-3.27). Note the targetId paired with
+	// it is the VEHICLE id, not a drive id: the row records a batch of drives,
+	// grouped by the car they belong to, and the drive ids it covers no longer
+	// exist by the time anyone reads it (data-lifecycle.md §5.4).
+	auditTargetTypeDrive = "drive"
 	// auditInitiatorUser marks an action the end user triggered via UI/API.
 	auditInitiatorUser = "user"
+	// auditInitiatorSystemPruner marks an action initiated by the background
+	// retention pruning job (data-lifecycle.md §4.2 initiator enum).
+	auditInitiatorSystemPruner = "system_pruner"
 )
 
 // AuditEntry mirrors the AuditLog table one-to-one. Every field maps to a

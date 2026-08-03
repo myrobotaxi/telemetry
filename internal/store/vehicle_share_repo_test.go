@@ -191,12 +191,18 @@ func TestVehicleShareRepo_ListRevokeResend(t *testing.T) {
 		cleanVehicleShares(t)
 		row := mustCreateInvite(t, repo, shareOwnerA, vehA1, []string{vehA1}, store.SharePermissionLive)
 
-		viewerID, err := repo.RevokeInvite(ctx, row.ID, shareOwnerA)
+		revoked, err := repo.RevokeInvite(ctx, row.ID, shareOwnerA)
 		if err != nil {
 			t.Fatalf("first revoke: %v", err)
 		}
-		if viewerID != "" {
-			t.Errorf("revoking a PENDING invite reported viewer %q, want empty — nobody held access", viewerID)
+		if revoked.ViewerUserID != "" {
+			t.Errorf("revoking a PENDING invite reported viewer %q, want empty — nobody held access", revoked.ViewerUserID)
+		}
+		// The vehicle IS reported even for a pending row: the UPDATE matched,
+		// and the id is what scopes the MYR-373 socket teardown when a viewer
+		// did hold the grant.
+		if revoked.VehicleID != vehA1 {
+			t.Errorf("revoke reported vehicle %q, want %q", revoked.VehicleID, vehA1)
 		}
 
 		// Idempotent: a retried DELETE must not 404.
@@ -523,12 +529,17 @@ func TestVehicleShareRepo_AccessLookups(t *testing.T) {
 	})
 
 	t.Run("revoking removes the access immediately", func(t *testing.T) {
-		viewerID, err := repo.RevokeInvite(ctx, row.ID, shareOwnerA)
+		revoked, err := repo.RevokeInvite(ctx, row.ID, shareOwnerA)
 		if err != nil {
 			t.Fatalf("revoke: %v", err)
 		}
-		if viewerID != shareViewer1 {
-			t.Errorf("revoke reported viewer %q, want %q — the caller needs it to bust that person's cache", viewerID, shareViewer1)
+		if revoked.ViewerUserID != shareViewer1 {
+			t.Errorf("revoke reported viewer %q, want %q — the caller needs it to bust that person's cache", revoked.ViewerUserID, shareViewer1)
+		}
+		// And the vehicle, which is what scopes the MYR-373 live-socket close
+		// to the car they lost instead of every session they hold.
+		if revoked.VehicleID != vehA1 {
+			t.Errorf("revoke reported vehicle %q, want %q", revoked.VehicleID, vehA1)
 		}
 		if _, err := repo.ShareGrantFor(ctx, shareViewer1, vehA1); !errors.Is(err, sdk.ErrNotFound) {
 			t.Errorf("a revoked viewer still resolves a grant: err = %v", err)

@@ -138,9 +138,23 @@ type fakeReservationStore struct {
 	// so every pre-existing test keeps its meaning without being touched —
 	// which is also the production default (the store COALESCEs a missing
 	// control-state row to enabled).
-	paused   map[string]bool
-	pauseErr error
-	pauseCnt int
+	paused map[string]bool
+
+	// stateErr/stateCnt cover the SINGLE vehicle read that serves both the
+	// service arm and the pause arm (MYR-372 collapsed the two probes into
+	// one). An unreadable vehicle is therefore one condition, not two — which
+	// is exactly what production now sees.
+	stateErr error
+	stateCnt int
+
+	// MYR-372 vehicle service state at the due instant. A vehicle ABSENT from
+	// the map is NOT in service, so every pre-existing test keeps its meaning —
+	// and that matches production, where a parked/driving/charging car passes.
+	//
+	// There is deliberately no `offline` knob: the sweeper does not ask about
+	// `offline` at all (holdIfVehicleBlocked explains why), so a fake that
+	// could express it would be modelling a question production never poses.
+	inService map[string]bool
 
 	// MYR-369 rider ride capability. A (rider|vehicle) pair ABSENT from the
 	// map IS permitted, so every pre-existing test keeps its meaning — and
@@ -186,14 +200,41 @@ func (f *fakeReservationStore) VehicleHasActiveInstantRide(_ context.Context, ve
 	return f.busy[vehicleID], nil
 }
 
-func (f *fakeReservationStore) VehicleRideShareEnabled(_ context.Context, vehicleID string) (bool, error) {
+// VehicleDispatchState serves both the MYR-372 service arm and the MYR-342
+// pause arm from one call, as production does.
+//
+// Deliberately NOT recorded in latch.callOrder, matching the grant probe:
+// callOrder pins the busy→claim adjacency, and the other probes assert their
+// before-the-claim position by the ABSENCE of a claim.
+func (f *fakeReservationStore) VehicleDispatchState(
+	_ context.Context,
+	vehicleID string,
+) (VehicleDispatchState, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.pauseCnt++
-	if f.pauseErr != nil {
-		return false, f.pauseErr
+	f.stateCnt++
+	if f.stateErr != nil {
+		return VehicleDispatchState{}, f.stateErr
 	}
-	return !f.paused[vehicleID], nil
+	return VehicleDispatchState{
+		InService:        f.inService[vehicleID],
+		RideShareEnabled: !f.paused[vehicleID],
+	}, nil
+}
+
+func (f *fakeReservationStore) stateCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stateCnt
+}
+
+func (f *fakeReservationStore) setInService(vehicleID string, v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.inService == nil {
+		f.inService = map[string]bool{}
+	}
+	f.inService[vehicleID] = v
 }
 
 func (f *fakeReservationStore) RiderMayRequestRides(_ context.Context, riderID, vehicleID string) (bool, error) {
@@ -212,11 +253,11 @@ func (f *fakeReservationStore) grantCount() int {
 	return f.grantCnt
 }
 
-func (f *fakeReservationStore) pauseCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.pauseCnt
-}
+// pauseCount is an alias for stateCount: since MYR-372 the pause arm and the
+// service arm are answered by the same read, so "was the pause probed" and
+// "was the vehicle probed" are one question. Kept under both names so the
+// MYR-342 tests still read in their own vocabulary.
+func (f *fakeReservationStore) pauseCount() int { return f.stateCount() }
 
 func (f *fakeReservationStore) ClaimReservationDispatch(ctx context.Context, rideID string) (bool, error) {
 	return f.latch.ClaimReservationDispatch(ctx, rideID)
