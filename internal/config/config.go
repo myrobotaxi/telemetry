@@ -34,6 +34,8 @@ type Config struct {
 	// MYR-394 ride-scoped position poll knobs.
 	ridePollEnabled  bool
 	ridePollInterval time.Duration
+	// drivePrunerEnabled is the MYR-439 drive-retention sweep kill-switch.
+	drivePrunerEnabled bool
 }
 
 // MonitoringConfig holds observability probe settings.
@@ -302,6 +304,19 @@ func (c *Config) DispatchEnabled() bool { return c.dispatchEnabled }
 // affecting instant rides. Defaults to true; set
 // RESERVATION_DISPATCH_ENABLED=false to disable without a deploy.
 func (c *Config) ReservationDispatchEnabled() bool { return c.reservationDispatchEnabled }
+
+// DrivePrunerEnabled is the MYR-439 drive-retention sweep kill-switch. When
+// false the daily sweep does not run and drives accumulate past the documented
+// 365-day window — recoverable, because the sweep is idempotent and the next
+// enabled pass simply finds more work, but it is a PRIVACY COMMITMENT going
+// unmet, not a deferred chore. The switch exists for the case where the sweep
+// itself is misbehaving in production; watch
+// telemetry_pruner_last_success_timestamp_seconds while it is off. Defaults to
+// true; set DRIVE_RETENTION_PRUNER_ENABLED=false to disable without a deploy.
+//
+// Note what this does NOT do: it cannot change the retention window. That is a
+// compile-time constant (store.DriveRetentionDays) per CG-DL-4.
+func (c *Config) DrivePrunerEnabled() bool { return c.drivePrunerEnabled }
 
 // ServiceRepollEnabled is the MYR-320 in-service re-poll kill-switch. False
 // leaves the ServiceStatusMonitor reading on connectivity / ServiceMode EDGES

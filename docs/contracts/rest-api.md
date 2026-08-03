@@ -959,7 +959,13 @@ The SDK MUST NOT re-fetch the list when a `drive_ended` frame arrives -- the fra
 
 #### Retention
 
-Drives older than 365 days are pruned by the background retention job per NFR-3.27 (see [`data-lifecycle.md`](data-lifecycle.md) §5). A cursor scan that straddles a prune event MAY observe items disappearing from the tail -- this is acceptable.
+Drives older than 365 days are pruned by the background retention job per NFR-3.27 (see [`data-lifecycle.md`](data-lifecycle.md) §5). **Implemented and running daily since [MYR-439](https://linear.app/myrobotaxi/issue/MYR-439) (2026-08-02);** before that the policy existed with nothing enforcing it. No drive has yet been pruned and none will be until **2027-03-08** — the oldest production drive dates to 2026-03-08, so the platform is still younger than its own retention window.
+
+A cursor scan that straddles a prune event MAY observe items disappearing -- this is acceptable, and it cannot corrupt the scan: the keyset cursor is a pure value comparison that never dereferences its anchor row, so a cursor naming a since-pruned drive still returns the correct next page.
+
+> Earlier revisions of this note said items disappear "from the tail". That is slightly stronger than the schema guarantees: the prune orders by `createdAt` while this list orders by `startTime` (a `String`, compared lexicographically), so for rows with clock skew the two orders can diverge and an item may vanish from the middle of a scan. Either way the client sees a gap, never an error.
+
+A pruned drive simply stops appearing here. In-window drives are entirely unaffected -- the pruner touches nothing inside the window.
 
 ---
 
@@ -1019,9 +1025,13 @@ This is a `DriveDetail` object as defined in §8 and in the OpenAPI spec. It con
 |------|--------------|------|
 | 401 | `auth_failed` | Missing/malformed/invalid token |
 | 403 | `vehicle_not_owned` | Caller has no access to the drive's vehicle |
-| 404 | `not_found` | `driveId` does not exist (or is not visible) |
+| 404 | `not_found` | `driveId` does not exist (or is not visible) -- **including a drive pruned by the 365-day retention job** |
 | 429 | `rate_limited` | REST rate limit breached |
 | 500 | `internal_error` | Store-layer error, decryption failure |
+
+#### Retention
+
+This endpoint is the tap-through target for a `drive_ended` frame the SDK cached earlier, so a client can hold a drive id for arbitrarily long. Once that drive passes 365 days it is deleted (NFR-3.27, [`data-lifecycle.md`](data-lifecycle.md) §5 and §5.9) and this endpoint returns `404 not_found` -- the ordinary not-found path, not a distinct error. Note the 404 is evaluated **before** the ownership check, so a pruned drive 404s rather than 403s. Clients MUST treat 404 here as "this drive is gone", not as a transient failure to retry.
 
 #### RBAC
 
@@ -1083,9 +1093,13 @@ This is explicitly NOT an OOM concern -- a single drive's polyline fits in any v
 |------|--------------|------|
 | 401 | `auth_failed` | Missing/malformed/invalid token |
 | 403 | `vehicle_not_owned` | Caller has no access to the drive's vehicle |
-| 404 | `not_found` | `driveId` does not exist (or is not visible) |
+| 404 | `not_found` | `driveId` does not exist (or is not visible) -- **including a drive pruned by the 365-day retention job** |
 | 429 | `rate_limited` | REST rate limit breached |
 | 500 | `internal_error` | Store-layer error, decryption failure |
+
+#### Retention
+
+The GPS trail this endpoint serves is the single most sensitive artifact the platform stores, and it is deleted with its parent drive at 365 days (NFR-3.27, [`data-lifecycle.md`](data-lifecycle.md) §5). There is no separate route-blob table and no independent route retention policy: `routePoints` and its ciphertext shadow are columns on the drive row, so they die exactly when it does. Requests for a pruned drive's route return `404 not_found` on the same path as any unknown id.
 
 #### RBAC
 
