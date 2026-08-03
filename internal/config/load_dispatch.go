@@ -41,6 +41,19 @@ func applyDispatchEnvOverrides(fc *fileConfig) error {
 	}
 	fc.reservationDispatchEnabled = reservation
 
+	// DRIVE_RETENTION_PRUNER_ENABLED is the MYR-439 retention-sweep
+	// kill-switch. It rides along in this loader because it is the same KIND of
+	// thing — a background sweeper an operator must be able to stop without a
+	// deploy — and the fail-fast parse above is exactly the property it needs:
+	// a `DRIVE_RETENTION_PRUNER_ENABLED=off` typo silently reading as "on"
+	// would be the good failure, but reading as "off" would silently suspend a
+	// privacy commitment, so neither is acceptable and both are rejected.
+	pruner, err := parseKillSwitchEnv("DRIVE_RETENTION_PRUNER_ENABLED")
+	if err != nil {
+		return err
+	}
+	fc.drivePrunerEnabled = pruner
+
 	return nil
 }
 

@@ -3,7 +3,6 @@ package telemetry
 import (
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
 )
@@ -49,7 +48,7 @@ const maxVehicleIDLen = 64
 // already authenticated; userID is the JWT subject and is the ONLY owner
 // scoping applied — the query string cannot widen it.
 func (h *RideRequestHandler) serveUpcomingForVehicle(w http.ResponseWriter, r *http.Request, userID string) {
-	vehicleID, ok := h.parseUpcomingVehicle(w, r)
+	vehicleID, ok := h.parseVehicleFilter(w, r, queryUpcomingForVehicle)
 	if !ok {
 		return
 	}
@@ -81,21 +80,6 @@ func (h *RideRequestHandler) serveUpcomingForVehicle(w http.ResponseWriter, r *h
 	}
 
 	h.writeJSON(w, http.StatusOK, buildUpcomingRidePage(page))
-}
-
-// parseUpcomingVehicle validates the `upcomingForVehicle` value. Empty,
-// whitespace-only or oversized is 400 invalid_request — the same class as a
-// bad `limit`/`cursor`. An id that is well-formed but unknown or owned by
-// somebody else is NOT rejected here: it flows into the query and yields an
-// empty page, so this endpoint never confirms whether a vehicle exists.
-func (h *RideRequestHandler) parseUpcomingVehicle(w http.ResponseWriter, r *http.Request) (string, bool) {
-	vehicleID := strings.TrimSpace(r.URL.Query().Get(queryUpcomingForVehicle))
-	if vehicleID == "" || len(vehicleID) > maxVehicleIDLen {
-		h.writeError(w, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest,
-			queryUpcomingForVehicle+" must be a vehicle id")
-		return "", false
-	}
-	return vehicleID, true
 }
 
 // buildUpcomingRidePage projects the slice into the unchanged

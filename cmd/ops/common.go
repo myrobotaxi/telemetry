@@ -15,9 +15,12 @@ import (
 )
 
 // loadEncryptor builds a cryptox.Encryptor from the same env-var schema
-// the server uses (ENCRYPTION_KEY or the versioned shape). Required for
-// every helper that constructs an AccountRepo: the dual-write contract
-// in MYR-62 enforces a non-nil encryptor.
+// the server uses (ENCRYPTION_KEY or the versioned shape).
+//
+// MYR-433 made this mandatory for every repo that touches location data,
+// not just AccountRepo. Since the plaintext columns are no longer read,
+// an ops command without a key can no longer "degrade to plaintext" — it
+// would simply print blanks. Failing at construction says so plainly.
 func loadEncryptor() (cryptox.Encryptor, error) {
 	ks, err := cryptox.LoadKeySetFromEnv()
 	if err != nil {
@@ -40,6 +43,29 @@ func newAccountRepo(db *store.DB) (*store.AccountRepo, error) {
 		return nil, err
 	}
 	return store.NewAccountRepo(db.Pool(), enc), nil
+}
+
+// newVehicleRepo is the canonical constructor for ops subcommands that
+// read Vehicle rows. It always wires the encryptor: since MYR-433 the
+// GPS and nav-route columns are ciphertext-only, so a keyless
+// VehicleRepo silently reports every car at (0, 0) with no destination.
+func newVehicleRepo(db *store.DB, logger *slog.Logger) (*store.VehicleRepo, error) {
+	enc, err := loadEncryptor()
+	if err != nil {
+		return nil, err
+	}
+	return store.NewVehicleRepoWithEncryption(db.Pool(), store.NoopMetrics{}, enc, logger), nil
+}
+
+// newDriveRepo is the canonical constructor for ops subcommands that read
+// Drive rows, on the same MYR-433 reasoning as newVehicleRepo: a keyless
+// DriveRepo reads every GPS trail as empty.
+func newDriveRepo(db *store.DB, logger *slog.Logger) (*store.DriveRepo, error) {
+	enc, err := loadEncryptor()
+	if err != nil {
+		return nil, err
+	}
+	return store.NewDriveRepoWithEncryption(db.Pool(), store.NoopMetrics{}, enc, logger), nil
 }
 
 // newLogger returns a text-handler slog logger writing to stderr so

@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -22,6 +23,7 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/drives"
 	"github.com/myrobotaxi/telemetry/internal/events"
 	"github.com/myrobotaxi/telemetry/internal/mask"
+	"github.com/myrobotaxi/telemetry/internal/push"
 	"github.com/myrobotaxi/telemetry/internal/server"
 	"github.com/myrobotaxi/telemetry/internal/store"
 	"github.com/myrobotaxi/telemetry/internal/telemetry"
@@ -57,6 +59,23 @@ const routeBlobGaugeInterval = 1 * time.Hour
 // process level. MYR-138 wired this in after MYR-132 found the
 // testbench had no pool visibility.
 const storePoolStatsInterval = 15 * time.Second
+
+// busDrainTimeout bounds step 2 of the shutdown sequence: running the event
+// bus's buffered backlog through the handlers (MYR-410).
+const busDrainTimeout = 5 * time.Second
+
+// shutdownDrainBudget is the END-TO-END ceiling on the shutdown closure — the
+// bus drain plus the push drains that follow it (MYR-410).
+//
+// A ceiling is required, not merely tidy. The push workers being waited on run
+// on fresh Background contexts that SIGTERM cannot shorten: each fan-out is
+// bounded only by the notifier's own Timeout, several run at once, and
+// bus.Close hands the drain a whole backlog it did not have a moment earlier.
+// Unbounded, that wait can outlast fly.toml's kill_timeout and be SIGKILLed
+// mid-push — which loses the same pushes as giving up, minus the log line
+// saying so. Both constants are sized inside kill_timeout; the arithmetic lives
+// in fly.toml next to it.
+const shutdownDrainBudget = 15 * time.Second
 
 // Build-time variables set via ldflags (see .goreleaser.yml).
 var (
@@ -180,6 +199,131 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 		BufferSize: cfg.Telemetry().EventBufferSize,
 	}, events.NoopBusMetrics{}, logger.With(slog.String("component", "events")))
 
+	// --- Shutdown order (MYR-410) ---
+	//
+	// The push drains are useless without the bus Close that precedes them, and
+	// that Close is unsafe without the consumer Stops that precede IT. The three
+	// are one ordered sequence, stated here rather than left to be inferred from
+	// where each component happens to get built.
+	//
+	// INVARIANTS. Anything that reorders this — including a merge that moves a
+	// defer — has to keep all four:
+	//
+	//   I1. Every consumer that calls bus.Unsubscribe in its Stop runs BEFORE
+	//       bus.Close. Close signals each subscriber it still knows about; a
+	//       Stop that unsubscribed afterwards would signal the same one twice.
+	//       (Close now deregisters as it signals, so this is a clean
+	//       ErrSubscriptionNotFound rather than a panic — but the order is
+	//       still the contract.)
+	//   I2. bus.Close runs BEFORE any drain Wait.
+	//   I3. Every drain Wait runs BEFORE db.Close.
+	//   I4. The whole closure stays inside shutdownDrainBudget, which stays
+	//       inside fly.toml's kill_timeout.
+	//
+	// What actually runs, once srv.Start returns — SIGTERM has cancelled ctx and
+	// all three HTTP servers have completed their own Shutdown, so nothing new
+	// is being published:
+	//
+	//  1. ridePoller.Stop, serviceStatusMonitor.Stop, broadcaster.Stop,
+	//     hub.Stop, writer.Stop, detector.Stop — every consumer that
+	//     unsubscribes itself. LIFO lands them here because each is deferred at
+	//     its construction site, all of which are below this line.
+	//
+	//     These Stops SIGNAL; they do not join. Unsubscribe deletes the
+	//     subscriber, closes its done channel and returns — the backlog drain
+	//     then runs asynchronously on that subscriber's own delivery goroutine.
+	//     So a handler can still be executing after its consumer's Stop has
+	//     returned. That is tolerable because every one of them only touches
+	//     things still alive at this point (the DB pool, which closes at step 4;
+	//     the hub, whose Broadcast is a no-op once its client set is empty), and
+	//     because of what step 2 actually is.
+	//
+	//     NOT EVERY SUBSCRIBER APPEARS HERE. The vehicle_deleted and
+	//     share_access_revoked dispatchers subscribe and never unsubscribe, so
+	//     they have no Stop to order — step 2 is what signals and drains them.
+	//     I1 is a constraint on consumers that DO unsubscribe, not a
+	//     requirement that every subscriber be stopped first. Both dispatchers'
+	//     handlers are no-ops by then anyway: each acts on the hub, whose
+	//     client set hub.Stop has just emptied.
+	//  2. bus.Close — two jobs, and the second is the one that is easy to miss.
+	//
+	//     Subscriber channels are BUFFERED (EventBufferSize, 1000 in prod), so
+	//     an event Publish already accepted can be sitting in a buffer with its
+	//     handler never entered: nothing has been counted, and a drain over it
+	//     returns instantly. Close signals the remaining subscribers and each
+	//     delivery goroutine runs its whole backlog through the handler
+	//     synchronously, converting accepted-but-unhandled work into STARTED
+	//     work — the only kind a drain can see.
+	//
+	//     Close also waits on the bus's WaitGroup, which tracks EVERY subscriber
+	//     goroutine ever started, including the ones step 1 unsubscribed. That
+	//     makes Close the single join point for all of them, which is what
+	//     makes step 1's signal-and-return safe.
+	//  3. The push drains, bounded — now, and only now, covering the workers
+	//     step 2's handlers just started. In the other order they read an empty
+	//     counter and return before the handler had even run.
+	//  4. db.Close — last, because every handler above can touch the pool.
+	//
+	// ACCEPTED CONSEQUENCE. Steps 2 and 3 are bounded, so a slow enough handler
+	// survives them and is still running at step 4, where its writes fail
+	// against a closed pool. That is deliberate: the alternative is an unbounded
+	// shutdown that gets SIGKILLed at the same point with nothing logged.
+	// Whatever is abandoned is counted and logged loudly below — handlers_live
+	// and events_undelivered from the bus, in-flight counts from each drain — so
+	// a deploy that dropped a push leaves a number behind.
+	//
+	// The nav dispatcher also survives to step 2 and has a Wait, deliberately
+	// not called here: one dispatch may run for OverallTimeout (2 minutes),
+	// which does not fit this budget, so it needs a bounded wait of its own.
+	// That, and the fact that step 2 now delivers buffered ride.accepted events
+	// into it at shutdown, are tracked on MYR-431.
+	var (
+		pushNotifier         *push.Notifier
+		liveActivityNotifier *push.ActivityNotifier
+	)
+	defer func() {
+		// FRESH contexts throughout, deliberately: ctx is already cancelled by
+		// the time this runs, and both Close and the drains derive their
+		// deadlines from what they are handed. Given the cancelled ctx they
+		// would each return immediately having done nothing, quietly
+		// reintroducing the bug this block exists to fix.
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownDrainBudget)
+		defer cancelShutdown()
+
+		// Step 2, capped by its own sub-budget and by whatever is left overall.
+		closeCtx, cancelClose := context.WithTimeout(shutdownCtx, busDrainTimeout)
+		err := bus.Close(closeCtx)
+		cancelClose()
+		var incomplete *events.DrainIncompleteError
+		switch {
+		case errors.As(err, &incomplete):
+			logger.Error("event bus drain incomplete at shutdown — events were dropped",
+				slog.Int("handlers_live", incomplete.HandlersLive),
+				slog.Int("events_undelivered", incomplete.EventsUndrained),
+			)
+		case err != nil:
+			logger.Error("event bus close failed", slog.String("error", err.Error()))
+		}
+
+		// Step 3, sharing the remainder of the end-to-end budget.
+		if pushNotifier != nil {
+			if inFlight, waitErr := pushNotifier.WaitContext(shutdownCtx); waitErr != nil {
+				logger.Error("alert push drain abandoned at deadline — notifications were dropped",
+					slog.Int("fanouts_in_flight", inFlight),
+					slog.String("reason", waitErr.Error()),
+				)
+			}
+		}
+		if liveActivityNotifier != nil {
+			if inFlight, waitErr := liveActivityNotifier.WaitContext(shutdownCtx); waitErr != nil {
+				logger.Error("live activity drain abandoned at deadline — updates were dropped",
+					slog.Int("updates_in_flight", inFlight),
+					slog.String("reason", waitErr.Error()),
+				)
+			}
+		}
+	}()
+
 	// --- Telemetry receiver ---
 	recv := telemetry.NewReceiver(
 		telemetry.NewDecoder(),
@@ -249,6 +393,11 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	// refreshes on its own goroutine until the rollouts complete. See
 	// startPlaintextGauges in wiring.go.
 	startPlaintextGauges(ctx, reg, db.Pool(), accountTokenGaugeInterval, vehicleGPSGaugeInterval, routeBlobGaugeInterval, logger)
+
+	// --- Drive retention sweep (MYR-439, NFR-3.27) ---
+	// Daily at 03:00 UTC: deletes drives — rows, GPS trails and all — past the
+	// documented 365-day window, in audited batches. See wiring_retention.go.
+	startDrivePruner(ctx, cfg, reg, db.Pool(), logger)
 
 	// --- TLS endpoint cert monitor (MYR-188) ---
 	// Probes the served leaf cert on each configured public endpoint so an
@@ -396,6 +545,53 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	}
 	runNotifyListener(ctx, cfg.Database().URL, bus, logger)
 
+	// --- Mid-connection share revocation (MYR-373, websocket-protocol.md §10
+	// DV-09) ---
+	// The PRIMARY mechanism: the sharing handlers publish on revoke/suspend
+	// and this dispatcher closes the grantee's live sessions with 4002. Wired
+	// unconditionally — unlike the caches above it needs nothing from the
+	// authenticator, so it works in dev mode too.
+	// SHUTDOWN PLACEMENT (against the I1–I4 block above, because a later
+	// reorder needs to know what this depends on):
+	//
+	//   - This dispatcher SUBSCRIBES and never unsubscribes, exactly like the
+	//     vehicle_deleted one above it. I1 constrains consumers that call
+	//     Unsubscribe in a Stop; neither of these does, so both are signalled
+	//     and drained by bus.Close at step 2 instead. There is nothing to stop
+	//     at step 1, so nothing to order.
+	//   - Its handler is SAFE to run inside that step-2 drain. hub.Stop has
+	//     already run (step 1) and empties the client set, so a revocation
+	//     arriving at shutdown finds no sessions and RevokeUserAccess returns
+	//     0. It touches no pool, so I3 cannot be violated by it either.
+	shareAccessLogger := logger.With(slog.String("component", "share-access"))
+	shareAccessNotifier := newShareAccessBusNotifier(bus, shareAccessLogger)
+	if _, err := newShareAccessDispatcher(hub, shareAccessLogger).Subscribe(bus); err != nil {
+		return fmt.Errorf("subscribe share_access_revoked dispatcher: %w", err)
+	}
+
+	// The BACKSTOP: a periodic sweep that re-derives every connected user's
+	// access set from the database and closes anyone holding a vehicle they
+	// can no longer see. It covers what the nudge structurally cannot — an
+	// event dropped by bus backpressure, a mutation served by another machine,
+	// a future write path that forgets to publish. Needs a real authenticator
+	// to resolve against, so dev mode (NoopAuthenticator, all-access wildcard)
+	// runs without it and loses nothing: there is no set to narrow there.
+	//
+	// SHUTDOWN PLACEMENT: this one is BUS-INDEPENDENT — a plain ticker that
+	// reads the database — so it has no Stop in step 1 and no bearing on I1 or
+	// I2. It stops on ctx, which SIGTERM cancels before srv.Start returns and
+	// therefore before the shutdown closure runs at all. It is deliberately
+	// NOT given a drain Wait: it only ever READS, and once ctx is cancelled
+	// the per-call timeout in resolve derives from a cancelled parent, so an
+	// in-progress sweep gets context.Canceled from the pool immediately and
+	// fails open rather than lingering into db.Close (I3). It adds nothing to
+	// the shutdown closure, so shutdownDrainBudget and fly.toml's kill_timeout
+	// arithmetic are unchanged.
+	if jwtAuth != nil {
+		revalidator := ws.NewAccessRevalidator(hub, jwtAuth, ws.DefaultRevalidateInterval, shareAccessLogger)
+		go revalidator.Run(ctx)
+	}
+
 	// --- Push notifications (MYR-186) ---
 	// Subscribes to ride.request.created / ride.status.changed / ride.due and
 	// alerts the relevant party's registered phones. Gated by PUSH_ENABLED;
@@ -418,7 +614,10 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	if err != nil {
 		return fmt.Errorf("setting up push notifier: %w", err)
 	}
-	defer notifier.Wait()
+	// Drained by the shutdown block above, AFTER bus.Close — not here. A
+	// `defer notifier.Wait()` at this line would run before the bus had handed
+	// the handler its buffered backlog (MYR-410).
+	pushNotifier = notifier
 
 	// --- Live Activity push updates (MYR-172) ---
 	// The lifecycle consumer subscribes to ride.status.changed and replaces the
@@ -430,7 +629,8 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	if err != nil {
 		return fmt.Errorf("setting up live activity notifier: %w", err)
 	}
-	defer activityNotifier.Wait()
+	// Drained by the shutdown block above, after bus.Close — see MYR-410.
+	liveActivityNotifier = activityNotifier
 	startLiveActivityTicker(ctx, cfg, activityNotifier, liveActivityRepo, logger)
 
 	// --- Nav-dispatch (MYR-176) ---
@@ -494,6 +694,8 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 		// The authenticator owns the access-set cache the sharing handlers
 		// bust on redeem and revoke.
 		accessInvalidator: accessInvalidator,
+		// MYR-373: and the live-socket teardown that the cache bust cannot do.
+		shareAccessNotifier: shareAccessNotifier,
 		// The same authenticator also owns the user-existence cache the
 		// account-deletion endpoint must drop (MYR-355).
 		sessionInvalidator: sessionInvalidator,

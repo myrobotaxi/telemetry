@@ -87,11 +87,17 @@ ORDER BY created_at DESC, id DESC`
 // RETURNING carries the accepted_by_user_id (empty for a pending row) so the
 // caller can bust that viewer's cached access set immediately — otherwise a
 // revoked viewer keeps resolving the vehicle for up to the cache TTL.
+//
+// It also carries vehicle_id, which is what lets the caller tear down the
+// revoked viewer's LIVE WebSocket for that one car rather than every session
+// they hold (MYR-373, websocket-protocol.md §10 DV-09). Read in the same
+// statement that did the revoking, so a concurrent edit cannot make the id and
+// the revocation disagree.
 const queryRevokeShare = `
 UPDATE go_vehicle_shares
 SET status = 'revoked', revoked_at = NOW()
 WHERE id = $1 AND owner_user_id = $2 AND status <> 'revoked'
-RETURNING COALESCE(accepted_by_user_id, '')`
+RETURNING COALESCE(accepted_by_user_id, ''), vehicle_id`
 
 // queryShareExistsForOwner probes whether a row exists AND belongs to the
 // caller. Used only to disambiguate a zero-row conditional update.

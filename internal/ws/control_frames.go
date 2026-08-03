@@ -12,16 +12,17 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
 )
 
-// closeCodePermissionRevoked is the WebSocket close code emitted after
-// a permission_denied / vehicle_not_owned error frame, per
-// websocket-protocol.md §6.2 (DV-07 target). 4002 lives in the RFC 6455
-// 4000-4999 application-specific range.
-const closeCodePermissionRevoked websocket.StatusCode = 4002
+// A `vehicle_not_owned` subscribe no longer closes the connection, so the
+// 4002 close code this file used to declare is gone from here. The only
+// remaining producer of 4002 is the hub's revocation path
+// (closeCodeVehicleAccessRevoked in hub.go), which closes the whole session
+// because access itself ended rather than because one frame was refused.
+// See websocket-protocol.md §6.1.1 / §6.2 and MYR-373.
 
 // handleClientFrame parses one client->server frame and dispatches it
 // to the appropriate handler. Returns false when the connection MUST
-// close after the dispatch (today only the vehicle_not_owned subscribe
-// path); the caller (readPump) exits in that case. Returns true for
+// close after the dispatch (today only a session whose access was revoked
+// mid-connection); the caller (readPump) exits in that case. Returns true for
 // every other outcome — including parse errors and unknown frame
 // types, which are logged-and-ignored so an out-of-spec frame from a
 // future SDK does not poison an otherwise-healthy connection.
@@ -71,19 +72,41 @@ func (c *Client) handleSubscribeFrame(ctx context.Context, raw json.RawMessage, 
 		return true
 	}
 
+	// A session whose access was revoked mid-connection is already being torn
+	// down; it must not be able to talk its way back into the stream on the
+	// way out (MYR-373). This check comes BEFORE owns() precisely because
+	// owns() would say yes: it reads the handshake-frozen vehicleIDs, which
+	// still contains the vehicle the owner just took away. Returning false
+	// exits the readPump; no error frame and no close are needed because
+	// RevokeUserAccess has already closed this connection with 4002.
+	if c.revoked.Load() {
+		return false
+	}
+
 	if !c.owns(p.VehicleID) {
-		// Per websocket-protocol.md §6.1.1 + §6.2 (DV-07 target):
-		// emit the typed error frame, then close with code 4002.
+		// Typed `vehicle_not_owned` error frame, and the connection STAYS
+		// OPEN (behavior change, MYR-373 — see websocket-protocol.md §6.1.1).
+		//
+		// This used to close with 4002, which became actively harmful the
+		// moment revocation started closing sockets: a viewer who loses a
+		// grant reconnects, re-handshakes into the correctly reduced set,
+		// re-sends the `subscribe` its local state still lists, and gets
+		// closed again — a reconnect loop the SERVER drives, on a connection
+		// that is otherwise perfectly valid and may hold other vehicles the
+		// caller legitimately owns. Refusing one subscription is not grounds
+		// for destroying the session; the typed error already tells the
+		// client exactly what happened, which is what the SDK acts on.
+		// (The client half — dropping the stale vehicle from its subscription
+		// list — is MYR-432.)
 		errCtx, cancel := context.WithTimeout(ctx, writeTimeout)
 		defer cancel()
 		_ = sendError(errCtx, c.conn, wserrors.ErrCodeVehicleNotOwned,
 			"vehicle is not in the caller's ownership set", writeTimeout)
-		_ = c.conn.Close(closeCodePermissionRevoked, "vehicle_not_owned")
 		c.logger.Warn("subscribe: vehicle_not_owned",
 			slog.String("user_id", c.userID),
 			slog.String("vehicle_id", p.VehicleID),
 		)
-		return false
+		return true
 	}
 
 	c.subscribe(p.VehicleID)

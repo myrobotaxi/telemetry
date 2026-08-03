@@ -12,6 +12,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/events"
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
@@ -31,7 +32,7 @@ func (h *RideRequestHandler) ServeCreate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	in, reason := validateCreateBody(body)
+	in, reason := validateCreateBody(body, time.Now().UTC())
 	if reason != "" {
 		h.writeError(w, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest, reason)
 		return

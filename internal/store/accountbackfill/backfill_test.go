@@ -306,6 +306,127 @@ func TestBackfill_NoRowsToProcess(t *testing.T) {
 	}
 }
 
+// seedProvider is seed() with an explicit OAuth provider, so a test can
+// plant the non-Tesla rows this backfill used to skip.
+func seedProvider(t *testing.T, id, userID, provider string, accessPT, refreshPT, idPT *string) {
+	t.Helper()
+	_, err := testPool.Exec(context.Background(),
+		`INSERT INTO "Account" ("id","userId","type","provider","providerAccountId",
+            "access_token","refresh_token","id_token") VALUES ($1,$2,'oauth',$3,$4,$5,$6,$7)`,
+		id, userID, provider, id+"-acct", accessPT, refreshPT, idPT,
+	)
+	if err != nil {
+		t.Fatalf("seed %s: %v", provider, err)
+	}
+}
+
+// TestBackfill_SealsEveryProvider is the regression test for the residual
+// the first production purge surfaced (MYR-433).
+//
+// The scan was `WHERE "provider" = 'tesla'`, which was right for MYR-62's
+// scope and wrong for the acceptance bar: 7 Apple Sign-in rows sat in
+// production holding a plaintext access_token and identity id_token that
+// nothing had sealed, so the purge correctly refused to scrub them and
+// they stayed readable to anyone with a database connection.
+//
+// An Apple id_token is an identity JWT. It meets the same bar as the
+// Tesla pair, and "this server does not read it" is not a reason to leave
+// it legible.
+func TestBackfill_SealsEveryProvider(t *testing.T) {
+	requirePool(t)
+	if !dockerAvailable {
+		t.Skip("Docker not available")
+	}
+	cleanAccount(t)
+
+	enc := newEncryptor(t)
+
+	// The shapes production actually holds: a Tesla row with the full
+	// triple, and an Apple row with access + id and no refresh.
+	seedProvider(t, "p_tesla", "u_tesla", "tesla", ptr("tesla-access"), ptr("tesla-refresh"), nil)
+	seedProvider(t, "p_apple", "u_apple", "apple", ptr("apple-access"), nil, ptr("apple-id-jwt"))
+	seedProvider(t, "p_google", "u_google", "google", nil, nil, ptr("google-id-jwt"))
+
+	res, err := accountbackfill.New(testPool, enc, silentLogger()).Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.RowsScanned != 3 {
+		t.Errorf("RowsScanned = %d, want 3 — a provider filter is still excluding rows", res.RowsScanned)
+	}
+
+	// Every planted plaintext value must now have a ciphertext sibling
+	// that decrypts back to it.
+	for _, tc := range []struct {
+		id, col, want string
+	}{
+		{"p_tesla", "access_token", "tesla-access"},
+		{"p_tesla", "refresh_token", "tesla-refresh"},
+		{"p_apple", "access_token", "apple-access"},
+		{"p_apple", "id_token", "apple-id-jwt"},
+		{"p_google", "id_token", "google-id-jwt"},
+	} {
+		t.Run(tc.id+"/"+tc.col, func(t *testing.T) {
+			var ct *string
+			//nolint:gosec // column name is a test constant, not user input
+			q := `SELECT "` + tc.col + `_enc" FROM "Account" WHERE "id" = $1`
+			if err := testPool.QueryRow(context.Background(), q, tc.id).Scan(&ct); err != nil {
+				t.Fatalf("read ciphertext: %v", err)
+			}
+			if ct == nil {
+				t.Fatalf("%s.%s_enc is NULL — the row was never sealed, so the purge "+
+					"will refuse it and the plaintext stays readable", tc.id, tc.col)
+			}
+			got, err := enc.DecryptString(*ct)
+			if err != nil {
+				t.Fatalf("decrypt %s.%s_enc: %v", tc.id, tc.col, err)
+			}
+			if got != tc.want {
+				t.Errorf("%s.%s_enc decrypts to %q, want %q", tc.id, tc.col, got, tc.want)
+			}
+		})
+	}
+
+	// And the gauge must agree that nothing is left, across all providers.
+	// A gauge that reads zero while Apple rows sit unsealed is worse than
+	// no gauge — it is the signal an operator uses to call the rollout
+	// done, and it is how this residual survived the first pass.
+	for _, col := range accountbackfill.TokenColumns {
+		if got := res.PlaintextRemaining[col]; got != 0 {
+			t.Errorf("PlaintextRemaining[%s] = %d, want 0", col, got)
+		}
+	}
+}
+
+// TestCountPlaintextRemaining_CountsEveryProvider pins the gauge half
+// independently of the scan half: both had the provider filter, and
+// fixing only one would leave the other lying.
+func TestCountPlaintextRemaining_CountsEveryProvider(t *testing.T) {
+	requirePool(t)
+	if !dockerAvailable {
+		t.Skip("Docker not available")
+	}
+	cleanAccount(t)
+
+	seedProvider(t, "c_apple", "u_capple", "apple", ptr("apple-access"), nil, ptr("apple-id"))
+
+	counts, err := accountbackfill.CountPlaintextRemaining(context.Background(), testPool)
+	if err != nil {
+		t.Fatalf("CountPlaintextRemaining: %v", err)
+	}
+	if counts["access_token"] != 1 {
+		t.Errorf("access_token remaining = %d, want 1 — an unsealed Apple row must be counted",
+			counts["access_token"])
+	}
+	if counts["id_token"] != 1 {
+		t.Errorf("id_token remaining = %d, want 1 — an unsealed Apple row must be counted",
+			counts["id_token"])
+	}
+	if counts["refresh_token"] != 0 {
+		t.Errorf("refresh_token remaining = %d, want 0", counts["refresh_token"])
+	}
+}
+
 func TestPlaintextGauge_RegistersAndCounts(t *testing.T) {
 	requirePool(t)
 	if !dockerAvailable {

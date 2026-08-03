@@ -7,13 +7,26 @@ import (
 	"time"
 )
 
+// TestBuildTelemetryUpdate_ClearFields pins how a "navigation cancelled"
+// event turns into SQL.
+//
+// ClearFields is still keyed on PLAINTEXT column names — that is the
+// vocabulary the nav-field tables and the writer speak — but MYR-433
+// changed which column the clause lands on. For the seven location
+// columns the server now owns only the ciphertext, so the clear must NULL
+// the *Enc sibling and leave the plaintext column alone. That is not
+// cosmetic: "latitude"/"longitude" are NOT NULL on the Prisma schema, so
+// a `"latitude" = NULL` clause would fail the whole UPDATE and drop the
+// telemetry tick. Non-location columns (destinationName, etaMinutes, …)
+// hold no coordinates and still clear in place.
 func TestBuildTelemetryUpdate_ClearFields(t *testing.T) {
 	tests := []struct {
 		name         string
 		vin          string
 		update       VehicleUpdate
 		wantOK       bool
-		wantNulls    []string // column names expected in "col" = NULL clauses
+		wantNulls    []string // columns expected in "col" = NULL clauses
+		wantNoNulls  []string // columns that must NOT be NULLed
 		wantNoParams bool     // true if no parameterized SET clauses expected (only NULLs + lastUpdated)
 	}{
 		{
@@ -35,8 +48,9 @@ func TestBuildTelemetryUpdate_ClearFields(t *testing.T) {
 				ClearFields: []string{"originLatitude", "originLongitude"},
 				LastUpdated: time.Now(),
 			},
-			wantOK:    true,
-			wantNulls: []string{"originLatitude", "originLongitude"},
+			wantOK:      true,
+			wantNulls:   []string{"originLatitudeEnc", "originLongitudeEnc"},
+			wantNoNulls: []string{"originLatitude", "originLongitude"},
 		},
 		{
 			name: "no ClearFields and no regular fields returns not ok",
@@ -63,9 +77,17 @@ func TestBuildTelemetryUpdate_ClearFields(t *testing.T) {
 			},
 			wantOK: true,
 			wantNulls: []string{
+				// Non-location columns clear in place…
 				"destinationName",
 				"etaMinutes",
 				"tripDistanceRemaining",
+				// …location columns clear their ciphertext sibling.
+				"destinationLatitudeEnc",
+				"destinationLongitudeEnc",
+				"originLatitudeEnc",
+				"originLongitudeEnc",
+			},
+			wantNoNulls: []string{
 				"destinationLatitude",
 				"destinationLongitude",
 				"originLatitude",
@@ -89,6 +111,14 @@ func TestBuildTelemetryUpdate_ClearFields(t *testing.T) {
 				nullClause := `"` + col + `" = NULL`
 				if !strings.Contains(query, nullClause) {
 					t.Errorf("query missing NULL clause for %q:\n%s", col, query)
+				}
+			}
+			// …and that the retired plaintext columns are not touched.
+			for _, col := range tt.wantNoNulls {
+				nullClause := `"` + col + `" = NULL`
+				if strings.Contains(query, nullClause) {
+					t.Errorf("query NULLs retired plaintext column %q; the clear belongs on %qEnc:\n%s",
+						col, col, query)
 				}
 			}
 
@@ -155,35 +185,72 @@ func TestBuildTelemetryUpdate_NewNavFields(t *testing.T) {
 	}
 }
 
+// TestBuildTelemetryUpdate_NavRouteCoordinates pins where a nav route
+// lands in SQL after MYR-433: the ciphertext the caller pre-computed goes
+// into navRouteCoordinatesEnc as a plain TEXT parameter, and the jsonb
+// column the route used to be written to never appears in the statement.
+//
+// The route is a polyline of where the driver is about to go, so the
+// absence of the plaintext column is the assertion carrying the security
+// property. The dropped ::jsonb cast follows from that — ciphertext is
+// opaque TEXT, and Postgres could not parse it as JSON anyway.
 func TestBuildTelemetryUpdate_NavRouteCoordinates(t *testing.T) {
 	coords := json.RawMessage(`[[-96.77,32.87],[-96.78,32.88]]`)
 	update := VehicleUpdate{
 		NavRouteCoordinates: &coords,
 		LastUpdated:         time.Now(),
 	}
+	const navCT = "v1:ciphertext-blob"
 
-	query, args, ok := buildTelemetryUpdate("TEST_VIN", update, nil)
+	query, args, ok := buildTelemetryUpdate("TEST_VIN", update,
+		map[string]string{"navRouteCoordinatesEnc": navCT})
 	if !ok {
 		t.Fatal("expected ok=true")
 	}
 
-	// Verify the column appears with ::jsonb cast.
-	if !strings.Contains(query, `"navRouteCoordinates"`) {
-		t.Errorf("query missing navRouteCoordinates column:\n%s", query)
+	if !strings.Contains(query, `"navRouteCoordinatesEnc"`) {
+		t.Errorf("query missing navRouteCoordinatesEnc column:\n%s", query)
 	}
-	if !strings.Contains(query, "::jsonb") {
-		t.Errorf("query missing ::jsonb cast:\n%s", query)
+	if strings.Contains(query, `"navRouteCoordinates"`) {
+		t.Errorf("query writes the retired plaintext navRouteCoordinates column:\n%s", query)
+	}
+	if strings.Contains(query, "::jsonb") {
+		t.Errorf("query casts ciphertext to jsonb:\n%s", query)
 	}
 
-	// args should be: navRouteCoordinates value, lastUpdated, VIN.
+	// args should be: navRouteCoordinatesEnc ciphertext, lastUpdated, VIN.
 	if len(args) != 3 {
 		t.Fatalf("args = %d values, want 3", len(args))
+	}
+	if args[0] != navCT {
+		t.Errorf("first arg = %v, want the ciphertext %q", args[0], navCT)
 	}
 	if args[len(args)-1] != "TEST_VIN" {
 		t.Errorf("last arg = %v, want TEST_VIN", args[len(args)-1])
 	}
 }
 
+// TestBuildTelemetryUpdate_NavRouteWithoutShadowWritesNothing is the
+// companion guard: with no ciphertext supplied (no Encryptor wired), a
+// NavRouteCoordinates update produces NO statement at all rather than
+// quietly falling back to the plaintext column. Losing the route is the
+// intended outcome — writing it readable is what MYR-433 forbids.
+func TestBuildTelemetryUpdate_NavRouteWithoutShadowWritesNothing(t *testing.T) {
+	coords := json.RawMessage(`[[-96.77,32.87]]`)
+	query, _, ok := buildTelemetryUpdate("TEST_VIN", VehicleUpdate{
+		NavRouteCoordinates: &coords,
+		LastUpdated:         time.Now(),
+	}, nil)
+	if ok {
+		t.Errorf("ok = true, want false; query wrote the route without an encryptor:\n%s", query)
+	}
+}
+
+// TestBuildTelemetryUpdate_NavRouteCoordinatesClear verifies a
+// navigation-cancelled clear NULLs the ciphertext column — the only copy
+// the read path consults. Clearing the plaintext column instead would
+// leave the stale encrypted route live and the app would keep drawing a
+// route the driver already ended.
 func TestBuildTelemetryUpdate_NavRouteCoordinatesClear(t *testing.T) {
 	update := VehicleUpdate{
 		ClearFields: []string{"navRouteCoordinates"},
@@ -195,8 +262,10 @@ func TestBuildTelemetryUpdate_NavRouteCoordinatesClear(t *testing.T) {
 		t.Fatal("expected ok=true for ClearFields-only update")
 	}
 
-	// Verify navRouteCoordinates is set to NULL.
-	if !strings.Contains(query, `"navRouteCoordinates" = NULL`) {
-		t.Errorf("query missing NULL clause for navRouteCoordinates:\n%s", query)
+	if !strings.Contains(query, `"navRouteCoordinatesEnc" = NULL`) {
+		t.Errorf("query missing NULL clause for navRouteCoordinatesEnc:\n%s", query)
+	}
+	if strings.Contains(query, `"navRouteCoordinates" = NULL`) {
+		t.Errorf("query NULLs the retired plaintext column:\n%s", query)
 	}
 }

@@ -6,7 +6,6 @@
 package store
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -21,6 +20,19 @@ type updateColumn struct {
 
 // updateColumns returns the list of column/value pairs for a VehicleUpdate.
 // Values are dereferenced so callers can check for nil uniformly.
+//
+// MYR-433: the seven location columns ("latitude", "longitude",
+// "destinationLatitude", "destinationLongitude", "originLatitude",
+// "originLongitude", "navRouteCoordinates") are deliberately ABSENT from
+// this list. Coordinates are written only as ciphertext, by
+// appendGPSShadowSets and appendNavRouteShadowSet. Re-adding any of them
+// here re-opens the exact hole MYR-433 closed: it would make a user's
+// live position readable to anyone with a database connection.
+//
+// The plaintext columns are left untouched rather than cleared because
+// this server no longer owns them — `cmd/purge-plaintext-columns` is what
+// scrubs their pre-MYR-433 residue, once it has verified the ciphertext
+// sibling decrypts.
 func updateColumns(u VehicleUpdate) []updateColumn {
 	return []updateColumn{
 		{"speed", derefInt(u.Speed), ""},
@@ -30,8 +42,6 @@ func updateColumns(u VehicleUpdate) []updateColumn {
 		{"timeToFull", derefFloat(u.TimeToFull), ""},
 		{"gearPosition", derefString(u.GearPosition), ""},
 		{"heading", derefInt(u.Heading), ""},
-		{"latitude", derefFloat(u.Latitude), ""},
-		{"longitude", derefFloat(u.Longitude), ""},
 		{"interiorTemp", derefInt(u.InteriorTemp), ""},
 		{"exteriorTemp", derefInt(u.ExteriorTemp), ""},
 		{"odometerMiles", derefInt(u.OdometerMiles), ""},
@@ -40,13 +50,8 @@ func updateColumns(u VehicleUpdate) []updateColumn {
 		{"locationAddress", derefString(u.LocationAddr), ""},
 		{"destinationName", derefString(u.DestinationName), ""},
 		{"destinationAddress", derefString(u.DestinationAddress), ""},
-		{"destinationLatitude", derefFloat(u.DestinationLatitude), ""},
-		{"destinationLongitude", derefFloat(u.DestinationLongitude), ""},
-		{"originLatitude", derefFloat(u.OriginLatitude), ""},
-		{"originLongitude", derefFloat(u.OriginLongitude), ""},
 		{"etaMinutes", derefInt(u.EtaMinutes), ""},
 		{"tripDistanceRemaining", derefFloat(u.TripDistRemaining), ""},
-		{"navRouteCoordinates", derefJSON(u.NavRouteCoordinates), "::jsonb"},
 	}
 }
 
@@ -67,13 +72,6 @@ func derefFloat(p *float64) any {
 }
 
 func derefString(p *string) any {
-	if p == nil {
-		return nil
-	}
-	return *p
-}
-
-func derefJSON(p *json.RawMessage) any {
 	if p == nil {
 		return nil
 	}
@@ -197,29 +195,38 @@ func appendNavRouteShadowSet(
 }
 
 // appendClearFieldSets emits an explicit `SET NULL` for every
-// ClearFields entry, plus the matching *Enc shadow when the column has
-// one. This keeps the dual-write invariant intact through navigation
-// cancellation: a NULL plaintext + stale ciphertext would surface as a
-// corrupt half-pair on read.
+// ClearFields entry, so a "navigation cancelled" event actually empties
+// the row.
+//
+// MYR-433 split the behaviour by column family. ClearFields is keyed on
+// PLAINTEXT column names (that is the vocabulary navFieldColumns and
+// applyRouteLine speak), but for the location columns this server no
+// longer owns the plaintext copy — it owns the ciphertext. So:
+//
+//   - A location column (one with an *Enc sibling) clears the *Enc
+//     column ONLY. Clearing the plaintext column too would be a write to
+//     a column we otherwise never touch, and for "latitude"/"longitude"
+//     it would fail outright — they are NOT NULL on the Prisma schema.
+//   - Every other column (destinationName, etaMinutes, …) clears as
+//     before; those hold no coordinates and this server still owns them.
+//
+// The invariant that matters is unchanged: after a cancel, no stale
+// route or destination survives in the column the read path consults.
 func appendClearFieldSets(setClauses, clearFields []string) []string {
 	for _, col := range clearFields {
-		setClauses = append(setClauses, fmt.Sprintf("%q = NULL", col))
-		if encCol, ok := plaintextToEncColumn[col]; ok {
+		if encCol, isLocation := plaintextToEncColumn[col]; isLocation {
 			setClauses = append(setClauses, fmt.Sprintf("%q = NULL", encCol))
+			continue
 		}
+		setClauses = append(setClauses, fmt.Sprintf("%q = NULL", col))
 	}
 	return setClauses
 }
 
-// plaintextToEncColumn maps each plaintext column to its *Enc
-// shadow. Used by buildTelemetryUpdate to extend ClearFields-driven
-// `SET NULL` to the encrypted shadow so a navigation-cancelled row
-// doesn't end up with a NULL plaintext + stale ciphertext (the same
-// half-pair corruption mode the read path warns about).
-//
-// MYR-64 adds the navRouteCoordinates → navRouteCoordinatesEnc pair so
-// a "navigation cancelled" event clears the route blob shadow alongside
-// its plaintext column.
+// plaintextToEncColumn maps each retired plaintext location column to the
+// *Enc shadow that replaced it. Membership in this map is what marks a
+// column as "ciphertext-owned" for appendClearFieldSets and
+// appendGPSShadowSets.
 var plaintextToEncColumn = map[string]string{
 	"latitude":             "latitudeEnc",
 	"longitude":            "longitudeEnc",

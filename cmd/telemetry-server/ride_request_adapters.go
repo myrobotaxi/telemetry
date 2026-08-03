@@ -185,6 +185,17 @@ func (a *rideRequestStoreAdapter) ListUpcomingByOwnerVehiclePage(ctx context.Con
 	return fromStorePage(page), nil
 }
 
+// ListActiveByOwnerVehiclePage passes the MYR-400 active-rides slice through.
+// It reuses toStoreCursor — the slice keeps the feed's DESCENDING (createdAt,
+// id) ordering, so there is no third cursor translation at this boundary.
+func (a *rideRequestStoreAdapter) ListActiveByOwnerVehiclePage(ctx context.Context, ownerID, vehicleID string, cursor telemetry.RideRequestListCursor, limit int) (telemetry.RideRequestListPage, error) {
+	page, err := a.repo.ListActiveByOwnerVehiclePage(ctx, ownerID, vehicleID, toStoreCursor(cursor), limit)
+	if err != nil {
+		return telemetry.RideRequestListPage{}, fmt.Errorf("list active rides by owner vehicle: %w", err)
+	}
+	return fromStorePage(page), nil
+}
+
 // ListBookedWindows passes the MYR-385 picker read through. A one-for-one
 // field copy, deliberately: the store has ALREADY resolved each window's
 // endpoints against store.RideConflictWindow, and this boundary must not

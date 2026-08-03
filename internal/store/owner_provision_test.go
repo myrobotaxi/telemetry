@@ -2,11 +2,13 @@ package store_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
 	"testing"
 
+	"github.com/myrobotaxi/telemetry/internal/cryptox"
 	"github.com/myrobotaxi/telemetry/internal/store"
 )
 
@@ -73,8 +75,50 @@ CREATE TABLE IF NOT EXISTS go_removed_vehicles (
 
 func newTestProvisioner(t *testing.T) *store.OwnerProvisioner {
 	t.Helper()
-	return store.NewOwnerProvisioner(testPool, newTestEncryptor(t),
-		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	prov, _ := newTestProvisionerWithEncryptor(t)
+	return prov
+}
+
+// newTestProvisionerWithEncryptor also hands back the Encryptor the
+// provisioner was built with. MYR-433 made the *_enc columns the only
+// place Tesla tokens land, so a test that wants to assert on what was
+// written has to decrypt it — the plaintext column it used to read is
+// deliberately NULL.
+func newTestProvisionerWithEncryptor(t *testing.T) (*store.OwnerProvisioner, cryptox.Encryptor) {
+	t.Helper()
+	enc := newTestEncryptor(t)
+	return store.NewOwnerProvisioner(testPool, enc,
+		slog.New(slog.NewTextHandler(io.Discard, nil))), enc
+}
+
+// assertTokenSealed reads one Account token column pair and asserts the
+// MYR-433 shape: plaintext NULL, ciphertext decrypting to want.
+//
+// Both halves matter. The ciphertext check proves the token survived the
+// write; the NULL check proves the server did not also deposit a
+// fleet-control credential in a column any operator with a database dump
+// can read. Before MYR-433 both columns were written, and the plaintext
+// one is what made a dump equivalent to being able to drive the car.
+func assertTokenSealed(t *testing.T, enc cryptox.Encryptor, whereCol, whereVal, ptCol, encCol, want string) {
+	t.Helper()
+	var pt, ct *string
+	q := fmt.Sprintf(`SELECT %q, %q FROM "Account" WHERE %q = $1`, ptCol, encCol, whereCol)
+	if err := testPool.QueryRow(context.Background(), q, whereVal).Scan(&pt, &ct); err != nil {
+		t.Fatalf("read %s/%s: %v", ptCol, encCol, err)
+	}
+	if pt != nil {
+		t.Errorf("%s plaintext = %q, want NULL (MYR-433: tokens are ciphertext-only)", ptCol, *pt)
+	}
+	if ct == nil || *ct == "" {
+		t.Fatalf("%s is null/empty; the token was not persisted at all", encCol)
+	}
+	got, err := enc.DecryptString(*ct)
+	if err != nil {
+		t.Fatalf("decrypt %s: %v", encCol, err)
+	}
+	if got != want {
+		t.Errorf("%s decrypts to %q, want %q", encCol, got, want)
+	}
 }
 
 func ensureOwnerSchema(t *testing.T) {
@@ -139,7 +183,7 @@ func TestOwnerProvisioner_ProvisionTeslaOwner(t *testing.T) {
 		t.Skip("Docker not available; skipping OwnerProvisioner integration test")
 	}
 	ensureOwnerSchema(t)
-	prov := newTestProvisioner(t)
+	prov, enc := newTestProvisionerWithEncryptor(t)
 	ctx := context.Background()
 
 	t.Run("new user creates all three rows", func(t *testing.T) {
@@ -171,18 +215,9 @@ func TestOwnerProvisioner_ProvisionTeslaOwner(t *testing.T) {
 			t.Error("teslaLinked = false, want true")
 		}
 
-		var accessPT, accessEnc *string
-		if err := testPool.QueryRow(ctx,
-			`SELECT "access_token","access_token_enc" FROM "Account" WHERE "userId"=$1`, uid).
-			Scan(&accessPT, &accessEnc); err != nil {
-			t.Fatalf("read account: %v", err)
-		}
-		if accessPT == nil || *accessPT != "access-"+uid {
-			t.Errorf("access_token plaintext = %v, want access-%s", accessPT, uid)
-		}
-		if accessEnc == nil || *accessEnc == "" {
-			t.Error("access_token_enc is null/empty; dual-write not applied")
-		}
+		// MYR-433: provisioning seals both tokens and writes no readable copy.
+		assertTokenSealed(t, enc, `userId`, uid, "access_token", "access_token_enc", "access-"+uid)
+		assertTokenSealed(t, enc, `userId`, uid, "refresh_token", "refresh_token_enc", "refresh-"+uid)
 	})
 
 	t.Run("returning user is idempotent (no duplicates, tokens refreshed)", func(t *testing.T) {
@@ -202,14 +237,9 @@ func TestOwnerProvisioner_ProvisionTeslaOwner(t *testing.T) {
 		if got := countRows(t, `"Account"`, `"userId"`, uid); got != 1 {
 			t.Errorf("Account rows = %d, want 1 (no dup)", got)
 		}
-		var accessPT *string
-		if err := testPool.QueryRow(ctx,
-			`SELECT "access_token" FROM "Account" WHERE "userId"=$1`, uid).Scan(&accessPT); err != nil {
-			t.Fatalf("read account: %v", err)
-		}
-		if accessPT == nil || *accessPT != "access-rotated" {
-			t.Errorf("access_token = %v, want access-rotated", accessPT)
-		}
+		// The rotated token lands in the ciphertext column; the plaintext
+		// column stays NULL across the re-link rather than being refreshed.
+		assertTokenSealed(t, enc, `userId`, uid, "access_token", "access_token_enc", "access-rotated")
 	})
 
 	t.Run("Apple-verified email matches existing web user -> adopt, one User row", func(t *testing.T) {
@@ -343,14 +373,12 @@ func TestOwnerProvisioner_ProvisionTeslaOwner(t *testing.T) {
 			t.Errorf("B apple binding = %s, want %s", boundTo, ownerA)
 		}
 		// Tokens updated on A's account (owner keeps ownership, tokens refreshed).
-		var access string
-		if err := testPool.QueryRow(ctx,
-			`SELECT "access_token" FROM "Account" WHERE "providerAccountId"=$1`, teslaSub).Scan(&access); err != nil {
-			t.Fatalf("read tokens: %v", err)
-		}
-		if access != "b-new-access" {
-			t.Errorf("access_token = %q, want b-new-access", access)
-		}
+		// The row was seeded with a pre-MYR-433 plaintext access_token; the
+		// re-link must scrub it to NULL rather than refresh it in place —
+		// re-linking is the one moment this server can clean up a legacy
+		// credential it would otherwise leave sitting readable forever.
+		assertTokenSealed(t, enc, `providerAccountId`, teslaSub,
+			"access_token", "access_token_enc", "b-new-access")
 		// Only A's Settings flipped; B's Settings must not be created stale.
 		if got := countRows(t, `"Settings"`, `"userId"`, ownerA); got != 1 {
 			t.Errorf("A Settings = %d, want 1", got)

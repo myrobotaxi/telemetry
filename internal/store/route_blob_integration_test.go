@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"reflect"
@@ -39,10 +40,11 @@ func silentRouteBlobLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// readNavRouteShadows pulls the (plaintext, ciphertext) pair for one
-// VIN directly via SQL so tests can assert on the exact column shapes
-// the dual-write path produced. Bypasses VehicleRepo so a Read-fallback
-// test can't be fooled by the same Read code that wrote the row.
+// readNavRouteShadows pulls the (plaintext, ciphertext) pair for one VIN
+// directly via SQL. After MYR-433 the plaintext column is neither written
+// nor selected by VehicleRepo, so raw SQL is the only way to prove it
+// stayed empty — reading through the repo could not distinguish "never
+// written" from "not projected".
 func readNavRouteShadows(t *testing.T, pool *pgxpool.Pool, vin string) (plain json.RawMessage, ct *string) {
 	t.Helper()
 	if err := pool.QueryRow(context.Background(),
@@ -53,11 +55,17 @@ func readNavRouteShadows(t *testing.T, pool *pgxpool.Pool, vin string) (plain js
 	return plain, ct
 }
 
-// TestVehicleRepo_NavRoute_DualWriteOnUpdate exercises the happy path:
-// an UPDATE through the encryption-aware repo writes BOTH the
-// plaintext jsonb column and the navRouteCoordinatesEnc shadow, and a
-// subsequent GetByVIN returns the encrypted-then-decrypted value.
-func TestVehicleRepo_NavRoute_DualWriteOnUpdate(t *testing.T) {
+// TestVehicleRepo_NavRoute_WritesCiphertextOnly exercises the happy
+// path: an UPDATE through the encryption-aware repo writes
+// navRouteCoordinatesEnc and leaves the plaintext jsonb column NULL, and
+// a subsequent GetByVIN returns the encrypted-then-decrypted value.
+//
+// A nav route is a polyline of where the driver is about to go. MYR-433
+// made the ciphertext the only copy, so the assertion that the plaintext
+// column stays NULL is the one carrying the security property — the
+// decrypt round trip alone would still pass if a readable copy were being
+// deposited beside it.
+func TestVehicleRepo_NavRoute_WritesCiphertextOnly(t *testing.T) {
 	if !dockerAvailable {
 		t.Skip("Docker not available")
 	}
@@ -77,8 +85,8 @@ func TestVehicleRepo_NavRoute_DualWriteOnUpdate(t *testing.T) {
 	}
 
 	plain, ct := readNavRouteShadows(t, testPool, "5YJ3E1EA1NF00NAV1")
-	if !jsonEqual(t, plain, rawCoords) {
-		t.Errorf("plaintext = %s, want %s", plain, rawCoords)
+	if plain != nil {
+		t.Errorf("navRouteCoordinates plaintext = %s, want NULL — the server must not write a readable copy", plain)
 	}
 	if ct == nil || *ct == "" {
 		t.Fatal("navRouteCoordinatesEnc not written")
@@ -134,21 +142,27 @@ func TestVehicleRepo_NavRoute_PrefersCiphertextOnRead(t *testing.T) {
 	}
 }
 
-// TestVehicleRepo_NavRoute_DecryptFailureFallsBackToPlaintext seeds a
-// corrupt ciphertext (non-base64 garbage) alongside valid plaintext.
-// The read MUST return the plaintext rather than 500 the request.
-func TestVehicleRepo_NavRoute_DecryptFailureFallsBackToPlaintext(t *testing.T) {
+// TestVehicleRepo_NavRoute_DecryptFailureYieldsNoRoute seeds a corrupt
+// ciphertext (non-base64 garbage) alongside a valid plaintext decoy.
+//
+// The read must degrade to NO route: not an error (a key-rotation slip
+// must not 500 every snapshot), and emphatically not the plaintext. The
+// pre-MYR-433 fallback is what this inverts — a read path willing to use
+// the plaintext column is a read path that requires the plaintext column
+// to remain readable, which is the leak the issue closes. The decoy below
+// is deliberately valid so a resurrected fallback fails loudly here.
+func TestVehicleRepo_NavRoute_DecryptFailureYieldsNoRoute(t *testing.T) {
 	if !dockerAvailable {
 		t.Skip("Docker not available")
 	}
 	cleanTables(t, testPool)
 	seedVehicle(t, testPool, "veh_nav_003", "5YJ3E1EA1NF00NAV3")
 
-	plain := json.RawMessage(`[[-96.80,33.10]]`)
+	decoy := json.RawMessage(`[[-96.80,33.10]]`)
 	corruptCT := "not-base64-at-all"
 	if _, err := testPool.Exec(context.Background(),
 		`UPDATE "Vehicle" SET "navRouteCoordinates"=$1::jsonb, "navRouteCoordinatesEnc"=$2 WHERE "vin"=$3`,
-		plain, corruptCT, "5YJ3E1EA1NF00NAV3"); err != nil {
+		decoy, corruptCT, "5YJ3E1EA1NF00NAV3"); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -157,8 +171,9 @@ func TestVehicleRepo_NavRoute_DecryptFailureFallsBackToPlaintext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByVIN: %v", err)
 	}
-	if !jsonEqual(t, got.NavRouteCoordinates, plain) {
-		t.Errorf("read = %s, want plaintext fallback %s", got.NavRouteCoordinates, plain)
+	if len(got.NavRouteCoordinates) != 0 && string(got.NavRouteCoordinates) != "null" {
+		t.Errorf("read = %s, want no route — an undecryptable blob must not fall back to the plaintext decoy %s",
+			got.NavRouteCoordinates, decoy)
 	}
 }
 
@@ -204,9 +219,11 @@ func TestVehicleRepo_NavRoute_ClearAlsoClearsShadow(t *testing.T) {
 }
 
 // TestVehicleRepo_NavRoute_LegacyConstructorSkipsDualWrite asserts the
-// legacy NewVehicleRepo constructor (no encryptor) writes only the
-// plaintext column and reads only plaintext, leaving the *Enc column
-// untouched. Lets old callers keep compiling.
+// legacy NewVehicleRepo constructor (no encryptor) leaves the *Enc column
+// untouched. It exists so callers with no Encryptor in scope keep
+// compiling; after MYR-433 that means they persist no route at all rather
+// than persisting a readable one, because the plaintext column dropped
+// out of the write path along with the read path.
 func TestVehicleRepo_NavRoute_LegacyConstructorSkipsDualWrite(t *testing.T) {
 	if !dockerAvailable {
 		t.Skip("Docker not available")
@@ -231,10 +248,18 @@ func TestVehicleRepo_NavRoute_LegacyConstructorSkipsDualWrite(t *testing.T) {
 	}
 }
 
-// TestDriveRepo_RoutePoints_DualWriteOnAppend verifies AppendRoutePoints
-// concatenates the plaintext array AND re-encrypts the full array into
-// routePointsEnc.
-func TestDriveRepo_RoutePoints_DualWriteOnAppend(t *testing.T) {
+// TestDriveRepo_RoutePoints_AppendWritesCiphertextOnly verifies that
+// AppendRoutePoints lands the trail in routePointsEnc and leaves the
+// plaintext routePoints column at the literal '[]' the INSERT seeded it
+// with.
+//
+// The drive trail is the most sensitive non-credential data in this
+// database — a minute-by-minute record of where somebody drove — and
+// MYR-433's acceptance bar was that an operator with a database dump
+// cannot read it. The '[]' assertion is what enforces that: the column
+// still exists (Prisma declares it NOT NULL) but must never accumulate
+// points again.
+func TestDriveRepo_RoutePoints_AppendWritesCiphertextOnly(t *testing.T) {
 	if !dockerAvailable {
 		t.Skip("Docker not available")
 	}
@@ -259,7 +284,7 @@ func TestDriveRepo_RoutePoints_DualWriteOnAppend(t *testing.T) {
 		t.Fatalf("AppendRoutePoints: %v", err)
 	}
 
-	// Plaintext jsonb has two points.
+	// Plaintext jsonb stays at the '[]' the INSERT wrote.
 	var rawArr json.RawMessage
 	var ct *string
 	if err := testPool.QueryRow(ctx,
@@ -267,8 +292,8 @@ func TestDriveRepo_RoutePoints_DualWriteOnAppend(t *testing.T) {
 	).Scan(&rawArr, &ct); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	if string(rawArr) == "[]" {
-		t.Errorf("routePoints jsonb empty after append")
+	if !jsonEqual(t, rawArr, []byte(`[]`)) {
+		t.Errorf("routePoints jsonb = %s, want [] — the append must not deposit a readable trail", rawArr)
 	}
 	if ct == nil || *ct == "" {
 		t.Fatal("routePointsEnc not written")
@@ -284,13 +309,20 @@ func TestDriveRepo_RoutePoints_DualWriteOnAppend(t *testing.T) {
 		t.Errorf("decoded = %+v", got)
 	}
 
-	// GetByID prefers ciphertext.
+	// GetByID reconstructs the trail from the ciphertext alone.
 	d, err := repo.GetByID(ctx, "drv1")
 	if err != nil {
 		t.Fatalf("GetByID: %v", err)
 	}
-	if string(d.RoutePoints) == "[]" {
-		t.Errorf("GetByID returned empty routePoints")
+	var readBack []store.RoutePointRecord
+	if err := json.Unmarshal(d.RoutePoints, &readBack); err != nil {
+		t.Fatalf("GetByID routePoints unmarshal: %v (raw=%s)", err, d.RoutePoints)
+	}
+	if len(readBack) != 2 {
+		t.Fatalf("GetByID routePoints = %d points, want 2 (decrypted from routePointsEnc)", len(readBack))
+	}
+	if readBack[0].Latitude != 33.1 || readBack[1].Longitude != -96.9 {
+		t.Errorf("GetByID routePoints = %+v", readBack)
 	}
 }
 
@@ -341,9 +373,16 @@ func TestDriveRepo_RoutePoints_AppendIsIncremental(t *testing.T) {
 	}
 }
 
-// TestDriveRepo_RoutePoints_PlaintextFallbackOnDecryptFailure: a
-// corrupt ciphertext returns the plaintext jsonb on read.
-func TestDriveRepo_RoutePoints_PlaintextFallbackOnDecryptFailure(t *testing.T) {
+// TestDriveRepo_RoutePoints_DecryptFailureYieldsEmptyTrail: a corrupt
+// ciphertext reads as an EMPTY trail, never as the plaintext jsonb.
+//
+// The seed below deliberately puts a real point in the plaintext column
+// (the shape a pre-MYR-433 row has) before stomping the shadow, so a
+// regression that restores the fallback surfaces that point and fails
+// here. Serving nothing is the correct answer for an unreadable trail:
+// the alternative requires the plaintext column to stay readable, which
+// is the property MYR-433 exists to remove.
+func TestDriveRepo_RoutePoints_DecryptFailureYieldsEmptyTrail(t *testing.T) {
 	if !dockerAvailable {
 		t.Skip("Docker not available")
 	}
@@ -357,14 +396,15 @@ func TestDriveRepo_RoutePoints_PlaintextFallbackOnDecryptFailure(t *testing.T) {
 	if err := repo.Create(ctx, store.DriveRecord{
 		ID: "drv3", VehicleID: "veh_drv_003",
 		Date: "2026-05-09", StartTime: "2026-05-09T12:00:00Z",
-		RoutePoints: json.RawMessage(`[{"lat":1,"lng":2,"speed":3,"heading":4,"timestamp":"seed"}]`),
 	}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	// Stomp the shadow with corrupt data.
+	// Plant a legacy-shaped row: a readable plaintext trail beside a
+	// ciphertext the repo cannot decrypt.
+	decoy := json.RawMessage(`[{"lat":1,"lng":2,"speed":3,"heading":4,"timestamp":"seed"}]`)
 	if _, err := testPool.Exec(ctx,
-		`UPDATE "Drive" SET "routePointsEnc" = $1 WHERE "id" = $2`,
-		"not-base64", "drv3"); err != nil {
+		`UPDATE "Drive" SET "routePoints" = $1::jsonb, "routePointsEnc" = $2 WHERE "id" = $3`,
+		decoy, "not-base64", "drv3"); err != nil {
 		t.Fatalf("stomp: %v", err)
 	}
 
@@ -372,16 +412,24 @@ func TestDriveRepo_RoutePoints_PlaintextFallbackOnDecryptFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByID: %v", err)
 	}
-	// Plaintext seeded above must be what GetByID returns.
-	if string(d.RoutePoints) == "" || string(d.RoutePoints) == "[]" {
-		t.Errorf("expected plaintext fallback, got %s", d.RoutePoints)
+	if len(d.RoutePoints) != 0 {
+		t.Errorf("GetByID returned %s, want an empty trail — the plaintext decoy must never be surfaced",
+			d.RoutePoints)
 	}
 }
 
-// TestDriveRepo_RoutePoints_LegacyConstructorPlaintextOnly verifies
-// the legacy NewDriveRepo path leaves the *Enc column NULL on every
-// write and reads only plaintext.
-func TestDriveRepo_RoutePoints_LegacyConstructorPlaintextOnly(t *testing.T) {
+// TestDriveRepo_RoutePoints_LegacyConstructorRefusesAppend pins the
+// MYR-433 fail-closed contract for the legacy NewDriveRepo path: with no
+// Encryptor there is nowhere legitimate to put a trail, so
+// AppendRoutePoints refuses outright with ErrEncryptionRequired.
+//
+// The old behaviour — write the points to the plaintext column and leave
+// the shadow NULL — is precisely the leak the issue closes, and it would
+// be a silent one: the caller would see a successful append. Failing the
+// call instead surfaces the misconfiguration to whoever wired the repo,
+// and the caller keeps its buffer and can retry once a key is present.
+// Both columns must be left exactly as the INSERT wrote them.
+func TestDriveRepo_RoutePoints_LegacyConstructorRefusesAppend(t *testing.T) {
 	if !dockerAvailable {
 		t.Skip("Docker not available")
 	}
@@ -397,19 +445,24 @@ func TestDriveRepo_RoutePoints_LegacyConstructorPlaintextOnly(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := repo.AppendRoutePoints(ctx, "drv4", []store.RoutePointRecord{
+	err := repo.AppendRoutePoints(ctx, "drv4", []store.RoutePointRecord{
 		{Latitude: 1, Longitude: 2, Speed: 3, Heading: 4, Timestamp: "t1"},
-	}); err != nil {
-		t.Fatalf("AppendRoutePoints: %v", err)
+	})
+	if !errors.Is(err, store.ErrEncryptionRequired) {
+		t.Fatalf("AppendRoutePoints error = %v, want ErrEncryptionRequired", err)
 	}
 
+	var plain json.RawMessage
 	var ct *string
 	if err := testPool.QueryRow(ctx,
-		`SELECT "routePointsEnc" FROM "Drive" WHERE "id"=$1`, "drv4",
-	).Scan(&ct); err != nil {
+		`SELECT "routePoints", "routePointsEnc" FROM "Drive" WHERE "id"=$1`, "drv4",
+	).Scan(&plain, &ct); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
 	if ct != nil {
-		t.Errorf("legacy repo wrote *Enc shadow: %v", ct)
+		t.Errorf("legacy repo wrote *Enc shadow: %v", *ct)
+	}
+	if !jsonEqual(t, plain, []byte(`[]`)) {
+		t.Errorf("routePoints = %s, want [] — a refused append must not leave plaintext points behind", plain)
 	}
 }

@@ -19,11 +19,12 @@ var queryDurationBuckets = []float64{
 // timings and the connection pool gauges land on a single coherent
 // observability surface under the telemetry_store_* prefix.
 type PrometheusMetrics struct {
-	queryDuration *prometheus.HistogramVec
-	queryErrors   *prometheus.CounterVec
-	poolAcquired  prometheus.Gauge
-	poolIdle      prometheus.Gauge
-	poolTotal     prometheus.Gauge
+	queryDuration   *prometheus.HistogramVec
+	queryErrors     *prometheus.CounterVec
+	decryptFailures *prometheus.CounterVec
+	poolAcquired    prometheus.Gauge
+	poolIdle        prometheus.Gauge
+	poolTotal       prometheus.Gauge
 }
 
 var _ Metrics = (*PrometheusMetrics)(nil)
@@ -52,6 +53,12 @@ func NewPrometheusMetrics(reg prometheus.Registerer) *PrometheusMetrics {
 	}, []string{"operation"})
 	reg.MustRegister(queryErrors)
 
+	decryptFailures := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "telemetry_store_decrypt_failures_total",
+		Help: "Count of at-rest ciphertext columns that failed to decrypt on a read, labelled by column. Since MYR-433 these reads are fail-soft — a column that will not decrypt surfaces as absent rather than an error — so this counter is the ONLY signal that a wrong ENCRYPTION_KEY or a corrupt row is silently blanking user data. Alert on rate > 0.",
+	}, []string{"column"})
+	reg.MustRegister(decryptFailures)
+
 	poolAcquired := prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "telemetry_store_pool_acquired_conns",
 		Help: "Connections currently checked out of the pgxpool by in-flight queries. Sustained values at MaxConns indicate the pool is the bottleneck and queries are queuing.",
@@ -71,11 +78,12 @@ func NewPrometheusMetrics(reg prometheus.Registerer) *PrometheusMetrics {
 	reg.MustRegister(poolTotal)
 
 	return &PrometheusMetrics{
-		queryDuration: queryDuration,
-		queryErrors:   queryErrors,
-		poolAcquired:  poolAcquired,
-		poolIdle:      poolIdle,
-		poolTotal:     poolTotal,
+		queryDuration:   queryDuration,
+		queryErrors:     queryErrors,
+		decryptFailures: decryptFailures,
+		poolAcquired:    poolAcquired,
+		poolIdle:        poolIdle,
+		poolTotal:       poolTotal,
 	}
 }
 
@@ -88,6 +96,12 @@ func (m *PrometheusMetrics) ObserveQueryDuration(operation string, seconds float
 // IncQueryError increments the error counter for the given operation.
 func (m *PrometheusMetrics) IncQueryError(operation string) {
 	m.queryErrors.WithLabelValues(operation).Inc()
+}
+
+// IncDecryptFailure increments the decrypt-failure counter for the given
+// at-rest column.
+func (m *PrometheusMetrics) IncDecryptFailure(column string) {
+	m.decryptFailures.WithLabelValues(column).Inc()
 }
 
 // SetPoolStats updates the three connection-pool gauges. Called from

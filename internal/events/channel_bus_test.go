@@ -446,6 +446,42 @@ func TestChannelBus_CloseIdempotent(t *testing.T) {
 	}
 }
 
+// TestChannelBus_UnsubscribeAfterCloseDoesNotPanic pins MYR-410.
+//
+// Close signals every subscriber by closing its done channel. It used to leave
+// them registered afterwards, so a consumer that unsubscribes itself on
+// shutdown would find its subscription still there and close the SAME channel a
+// second time — `panic: close of closed channel`, during shutdown, in whichever
+// consumer happened to stop last.
+//
+// That was latent only because nothing called Close. Wiring Close into main's
+// shutdown made it reachable by five consumers (the writer, broadcaster,
+// detector, service-status monitor and ride-position poller all unsubscribe in
+// Stop), plus any live debug-fields WebSocket, whose unsubscribe is deferred on
+// a hijacked connection that http.Server.Shutdown does not wait for.
+//
+// Close now deregisters what it signals, so a later Unsubscribe reports
+// ErrSubscriptionNotFound — which every caller already handles.
+func TestChannelBus_UnsubscribeAfterCloseDoesNotPanic(t *testing.T) {
+	bus := testBus(16)
+
+	sub, err := bus.Subscribe(TopicVehicleTelemetry, func(Event) {})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	if err := bus.Close(context.Background()); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Must not panic. The subscriber is gone, so this is a not-found, not a
+	// second close of an already-closed channel.
+	err = bus.Unsubscribe(sub)
+	if !errors.Is(err, ErrSubscriptionNotFound) {
+		t.Errorf("unsubscribe after close: got %v, want %v", err, ErrSubscriptionNotFound)
+	}
+}
+
 func TestChannelBus_GracefulShutdownDrains(t *testing.T) {
 	bus := testBus(64)
 
@@ -879,12 +915,28 @@ func TestChannelBus_CloseWithDrainTimeout(t *testing.T) {
 		}
 	}
 
-	// Close should return after DrainTimeout without hanging.
+	// Close should return after DrainTimeout without hanging, and must REPORT
+	// what it walked away from rather than returning nil (MYR-410). Returning
+	// nil told the caller the bus was quiet while handlers were still running,
+	// and the caller's next move is closing the database they write to.
 	start := time.Now()
-	if err := bus.Close(context.Background()); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	err = bus.Close(context.Background())
 	elapsed := time.Since(start)
+
+	var incomplete *DrainIncompleteError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("close on a timed-out drain: got %v, want a *DrainIncompleteError", err)
+	}
+	if !errors.Is(err, ErrDrainIncomplete) {
+		t.Errorf("errors.Is(err, ErrDrainIncomplete) = false, want true")
+	}
+	if incomplete.HandlersLive != 1 {
+		t.Errorf("HandlersLive = %d, want 1 (the blocked handler)", incomplete.HandlersLive)
+	}
+	// One event is in the handler; the rest never left the buffer.
+	if incomplete.EventsUndrained != 4 {
+		t.Errorf("EventsUndrained = %d, want 4", incomplete.EventsUndrained)
+	}
 
 	// Should complete roughly around DrainTimeout, not 2s+.
 	if elapsed > 500*time.Millisecond {

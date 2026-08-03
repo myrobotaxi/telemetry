@@ -112,10 +112,11 @@ type ShareInviteStore interface {
 	// ListInvitesForVehicle returns the owner's pending invites and
 	// accepted grants for one vehicle, newest first. Revoked rows excluded.
 	ListInvitesForVehicle(ctx context.Context, vehicleID, ownerUserID string) ([]ShareInviteRow, error)
-	// RevokeInvite tombstones a row. Idempotent. The returned user id is
-	// whoever lost access (empty if the row was still pending), for cache
-	// invalidation.
-	RevokeInvite(ctx context.Context, inviteID, ownerUserID string) (string, error)
+	// RevokeInvite tombstones a row. Idempotent. The returned RevokedGrant
+	// names whoever lost access and the vehicle they lost — for cache
+	// invalidation and for closing their live socket. Its zero value means
+	// the call removed nothing (a pending row, or an already-revoked one).
+	RevokeInvite(ctx context.Context, inviteID, ownerUserID string) (RevokedGrant, error)
 	// ResendInvite re-mints the code and resets the expiry on a pending row.
 	ResendInvite(ctx context.Context, inviteID, ownerUserID string) (ShareInviteRow, error)
 	// PatchInvite applies an owner edit to one ACCEPTED grant and returns
@@ -153,12 +154,52 @@ type ShareInviteCreateInput struct {
 	Permission    string
 }
 
+// RevokedGrant is what a revocation removed: the grantee who lost access and
+// the vehicle they lost it on. The zero value means the call removed nothing —
+// a still-pending invite nobody had redeemed, or the idempotent second DELETE
+// of an already-revoked row. Callers MUST check ViewerUserID before acting on
+// it; an empty id is not a wildcard.
+type RevokedGrant struct {
+	ViewerUserID string
+	VehicleID    string
+}
+
 // AccessCacheInvalidator lets the sharing handlers bust a user's cached
 // vehicle access set the moment it changes. Satisfied by
 // *auth.JWTAuthenticator. Optional everywhere — a nil invalidator means the
 // change becomes visible on the next cache expiry instead of immediately.
 type AccessCacheInvalidator interface {
 	InvalidateVehicles(userID string)
+}
+
+// ShareAccessNotifier announces that a grantee has LOST access to a vehicle,
+// so a live WebSocket carrying that car's telemetry to them can be torn down
+// now instead of at the next reconnect (MYR-373, closing
+// websocket-protocol.md §10 DV-09).
+//
+// Busting the cache is not enough on its own and that is the whole point of
+// this interface. The cache is what the HANDSHAKE consults; a socket that
+// already completed its handshake never consults anything again, because the
+// access set is frozen on the Client at that moment. So suspend and revoke
+// need two signals: one to stop the next connection (the invalidator above)
+// and one to end the current one (this).
+//
+// Defined at the consumer site and deliberately primitive-valued so this
+// package does not take a dependency on internal/events. The adapter in
+// cmd/telemetry-server publishes an events.ShareAccessRevokedEvent; the hub's
+// dispatcher does the closing.
+//
+// Optional, like the invalidator: a nil notifier leaves the pre-MYR-373
+// behavior in place — the grant is gone everywhere except an already-open
+// socket, which lapses at reconnect or at the revalidation backstop.
+//
+// MUST NOT BLOCK. It is called on the request path with the owner waiting on
+// their 200; implementations publish to an in-process bus and return.
+type ShareAccessNotifier interface {
+	// ShareAccessRevoked announces that granteeUserID has lost access to
+	// vehicleID. reason is "revoked" or "suspended" and is for the server
+	// log only — a viewer is never told which lever the owner pulled.
+	ShareAccessRevoked(granteeUserID, vehicleID, reason string)
 }
 
 // createShareInviteRequest is the POST /api/vehicles/{vehicleId}/invites body.
