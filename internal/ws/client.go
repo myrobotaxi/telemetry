@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -66,6 +67,14 @@ type Client struct {
 	// readPump.
 	subscribed map[string]struct{}
 	subMu      sync.RWMutex
+	// revoked marks this session as torn down for an access reason
+	// (MYR-373). Set the instant a revocation is processed and BEFORE the
+	// close frame is written, because the graceful WebSocket close waits for
+	// the peer to echo — up to five seconds — and a viewer whose grant was
+	// just pulled must not receive another GPS frame during that handshake.
+	// Read on the broadcast hot path via hasVehicle; an atomic rather than a
+	// mutex so the fan-out stays lock-free per client.
+	revoked    atomic.Bool
 	remoteAddr string
 	send       chan []byte
 	hub        *Hub
@@ -189,7 +198,14 @@ func (c *Client) enqueue(msg []byte) bool {
 // from vehicleIDs at handshake and modified by subscribe/unsubscribe
 // (DV-07 / MYR-46). An empty vehicleIDs slice with allVehicles=false
 // means deny-all (NFR-3.21).
+//
+// A session marked revoked (MYR-373) is deny-all for EVERY vehicle, including
+// the dev-mode wildcard, and the check comes first for that reason: it is the
+// one condition that must beat every other way of being authorized.
 func (c *Client) hasVehicle(vehicleID string) bool {
+	if c.revoked.Load() {
+		return false
+	}
 	if c.allVehicles {
 		return true
 	}
