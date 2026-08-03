@@ -225,7 +225,7 @@ func (p *Pruner) pruneOneBatch(ctx context.Context) (BatchOutcome, error) {
 			select {
 			case <-ctx.Done():
 				timer.Stop()
-				return BatchOutcome{}, ctx.Err()
+				return BatchOutcome{}, fmt.Errorf("retention.PruneBatch: cancelled during backoff: %w", ctx.Err())
 			case <-timer.C:
 			}
 			backoff *= 2
@@ -240,8 +240,8 @@ func (p *Pruner) pruneOneBatch(ctx context.Context) (BatchOutcome, error) {
 		lastErr = err
 
 		// A cancelled parent is shutdown, not a fault — do not burn retries on it.
-		if ctx.Err() != nil {
-			return BatchOutcome{}, ctx.Err()
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return BatchOutcome{}, fmt.Errorf("retention.PruneBatch: cancelled: %w", ctxErr)
 		}
 		p.logger.Warn("drive retention pruner: batch attempt failed",
 			slog.Int("attempt", attempt),

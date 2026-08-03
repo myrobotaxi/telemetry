@@ -300,7 +300,7 @@ func TestUntilNextRunTargetsTheDailySlot(t *testing.T) {
 			wantMax: 24*time.Hour + runJitter,
 		},
 		{
-			name:    "a non-UTC clock is normalised, not taken at face value",
+			name: "a non-UTC clock is normalised, not taken at face value",
 			// 01:00+05:00 is 2026-08-01 20:00 UTC, so the next 03:00 UTC slot is
 			// seven hours out — NOT the two hours a naive read of the wall clock
 			// would give.

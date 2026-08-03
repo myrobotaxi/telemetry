@@ -384,9 +384,7 @@ func buildConfig(fc *fileConfig) *Config {
 			RedirectBaseURL: fc.teslaLinkRedirect,
 			AppRedirectURL:  fc.teslaLinkAppRedirect,
 		},
-		monitoring: MonitoringConfig{
-			CertEndpoints: fc.certMonitorEndpoints,
-		},
+		monitoring:                 MonitoringConfig{CertEndpoints: fc.certMonitorEndpoints},
 		push:                       buildPushConfig(fc),
 		mapboxToken:                fc.mapboxToken,
 		teslaPublicKey:             fc.teslaPublicKey,
