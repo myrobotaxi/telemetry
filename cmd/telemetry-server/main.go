@@ -399,6 +399,12 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	// documented 365-day window, in audited batches. See wiring_retention.go.
 	startDrivePruner(ctx, cfg, reg, db.Pool(), logger)
 
+	// --- Ride retention sweep (MYR-447) ---
+	// Daily at 03:00 UTC: deletes TERMINAL ride requests past the documented
+	// 365-day window and scrubs the deprecated booked-for-passenger columns at
+	// terminal + 30 days, in audited batches. See wiring_retention_rides.go.
+	startRidePruner(ctx, cfg, reg, db.Pool(), logger)
+
 	// --- TLS endpoint cert monitor (MYR-188) ---
 	// Probes the served leaf cert on each configured public endpoint so an
 	// impending expiry pages BEFORE it takes down customer traffic —
