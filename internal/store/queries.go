@@ -438,10 +438,28 @@ LIMIT $4`
 // be re-geocoded. Running `backfill-location-labels` first seals those
 // rows and removes them from the result set, which is both cheaper and
 // preserves the original geocode.
-const queryDriveMissingAddresses = `SELECT "id", "startAddressEnc", "endAddressEnc", "endTime", "routePointsEnc"
-FROM "Drive"
-WHERE "startAddressEnc" IS NULL OR ("endAddressEnc" IS NULL AND NOT ("endTime" IS NULL OR "endTime" = ''))
-ORDER BY "createdAt" ASC`
+//
+// MYR-447 (audit follow-up): the projection also carries the drive's
+// vehicleId and that vehicle's OWNER, joined in from "Vehicle". Neither is
+// used to select rows — the discovery predicate is byte-for-byte the one
+// described above — they exist because `ops geocode backfill` decrypts
+// every matching row fleet-wide and must write an operator_decrypt audit
+// row naming the data SUBJECT before it transmits a single coordinate to
+// Mapbox. The subject of a Drive is the owner of the car that drove it,
+// and there is no other column on "Drive" that names them.
+//
+// The join is INNER, and that is safe rather than lossy: "Drive"."vehicleId"
+// is NOT NULL with a foreign key to "Vehicle"."id", so every Drive row has
+// exactly one matching Vehicle and the join cannot drop a row the old
+// single-table SELECT would have returned. A row it DID drop would be a
+// row with no identifiable owner — which the backfill must not decrypt
+// anyway, because it could not be audited.
+const queryDriveMissingAddresses = `SELECT d."id", d."startAddressEnc", d."endAddressEnc", d."endTime", d."routePointsEnc",
+       d."vehicleId", v."userId"
+FROM "Drive" d
+JOIN "Vehicle" v ON v."id" = d."vehicleId"
+WHERE d."startAddressEnc" IS NULL OR (d."endAddressEnc" IS NULL AND NOT (d."endTime" IS NULL OR d."endTime" = ''))
+ORDER BY d."createdAt" ASC`
 
 // queryDriveUpdateAddresses writes whichever of the four location
 // columns the caller supplies; COALESCE leaves the rest untouched. Every

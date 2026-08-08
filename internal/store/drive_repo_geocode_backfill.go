@@ -33,8 +33,18 @@ import (
 // rows from matching on an empty endAddress — see queries.go for why a
 // still-open drive's routePoints last entry is the car's current,
 // still-changing position and must never be written as endAddress.
+//
+// VehicleID and UserID exist for the MYR-447 operator audit, not for the
+// geocode itself: this projection is DECRYPTED, fleet-wide, across every
+// user, so the caller has to name a data subject and a target record per
+// group before it uses any of it. UserID is the owner of the car the drive
+// belongs to; VehicleID is the Vehicle cuid — never the VIN, which is
+// restricted outside the owner's own snapshot (data-classification.md
+// §1.3, §2.1) and would be the wrong thing to put in a P0 audit column.
 type DriveBackfillRow struct {
 	ID           string
+	VehicleID    string
+	UserID       string
 	StartAddress string
 	EndAddress   string
 	EndTime      string
@@ -59,6 +69,14 @@ type DriveBackfillRow struct {
 // plaintext column. A backfill run without a usable ENCRYPTION_KEY
 // therefore does nothing at all, which is why cmd/ops/geocode.go now
 // requires the key up front instead of silently degrading.
+//
+// MYR-447: every returned row also names its vehicle and that vehicle's
+// owner, joined in from "Vehicle". This method DECRYPTS three P1 labels per
+// row (routePoints, startAddress, endAddress) for drives belonging to every
+// user in the fleet, so the caller cannot audit the access without knowing
+// whose data it just opened — see cmd/ops/geocode_audit.go, which groups
+// these rows by (owner, vehicle) and writes the operator_decrypt rows before
+// anything is geocoded.
 func (r *DriveRepo) ListMissingAddresses(ctx context.Context) ([]DriveBackfillRow, error) {
 	start := time.Now()
 	rows, err := r.pool.Query(ctx, queryDriveMissingAddresses)
@@ -74,7 +92,8 @@ func (r *DriveRepo) ListMissingAddresses(ctx context.Context) ([]DriveBackfillRo
 		var d DriveBackfillRow
 		var routePointsEnc *string
 		var startAddrEnc, endAddrEnc *string
-		if scanErr := rows.Scan(&d.ID, &startAddrEnc, &endAddrEnc, &d.EndTime, &routePointsEnc); scanErr != nil {
+		if scanErr := rows.Scan(&d.ID, &startAddrEnc, &endAddrEnc, &d.EndTime, &routePointsEnc,
+			&d.VehicleID, &d.UserID); scanErr != nil {
 			r.metrics.IncQueryError("drive.list_missing_addresses")
 			r.metrics.ObserveQueryDuration("drive.list_missing_addresses", time.Since(start).Seconds())
 			return nil, fmt.Errorf("DriveRepo.ListMissingAddresses: scan: %w", scanErr)

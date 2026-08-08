@@ -41,11 +41,25 @@ func runGeocode(ctx context.Context, args []string) error {
 // dedicated start/end lat/lng columns). Respects the geocoder's
 // rate limiter (the default MapboxGeocoder construction below: 10 req/s,
 // burst 10, same as the running server) and honors --dry-run.
+//
+// MYR-447: this is the widest decrypt in the CLI — it opens the GPS trail
+// and both sealed address labels of every unaddressed drive in the fleet,
+// across all users, and then sends the coordinates to Mapbox, a third
+// party. It therefore requires OPS_OPERATOR and writes operator_decrypt
+// audit rows, grouped by (owner, vehicle), before it geocodes anything.
 func runGeocodeBackfill(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("geocode backfill", flag.ContinueOnError)
 	dryRun := fs.Bool("dry-run", false, "log what would change without writing to the database")
 	limit := fs.Int("limit", 0, "stop after this many rows are processed (0 = no limit)")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	// Resolved FIRST, before the database is opened, exactly as
+	// `ops auth token` does it: an unattributable fleet-wide decrypt is
+	// the thing being prevented, and the operator should learn that
+	// OPS_OPERATOR is missing without a connection attempt in between.
+	operator, err := requireOperator()
+	if err != nil {
 		return err
 	}
 
@@ -72,8 +86,26 @@ func runGeocodeBackfill(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("list rows missing addresses: %w", err)
 	}
+
+	// FAIL-CLOSED (MYR-447). Audited after the read, before any USE of what
+	// the read decrypted — the same post-read/pre-use posture `ops fields
+	// snapshot` takes, and for the same reason: the subjects are not
+	// knowable until the query returns. State the cost plainly:
+	// ListMissingAddresses has ALREADY decrypted routePoints and both
+	// address labels by this line. What has not happened yet is any use of
+	// them — nothing printed, nothing written back, nothing sent to
+	// Mapbox — and a failed insert aborts the run before any of that.
+	//
+	// --dry-run audits too: it decrypts exactly the same rows and differs
+	// only in skipping the write-back, so the access happened either way.
+	groups, err := auditGeocodeBackfill(ctx, newOperatorAuditor(db), operator, rows)
+	if err != nil {
+		return fmt.Errorf("record operator decrypt: %w", err)
+	}
+
 	logger.Info("geocode backfill: starting",
 		slog.Int("rows_found", len(rows)),
+		slog.Int("audit_rows_written", groups),
 		slog.Bool("dry_run", *dryRun),
 		slog.Int("limit", *limit),
 	)
