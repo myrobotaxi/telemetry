@@ -34,8 +34,13 @@ const (
 const maxNameRunes = 32
 
 // Ride statuses that are worth waking a phone for. Every other transition
-// (`requested`, `enroute`, `completed`, `cancelled`) is either the rider's own
-// action or invisible to them, so it sends nothing.
+// (`requested`, `completed`, `cancelled`) is either the recipient's own action
+// or invisible to them, so it sends nothing.
+//
+// `enroute` is the one status that speaks to the OWNER and not the rider: the
+// rider pressed Start ride themselves, so telling them is noise, but it is the
+// owner's only signal that their car has left the kerb with somebody in it.
+// See ownerStatusAlert (MYR-462).
 const (
 	statusAccepted = "accepted"
 	statusDeclined = "declined"
@@ -115,6 +120,40 @@ func statusAlert(status, vehicleName string, scheduled bool) (alert, bool) {
 	}
 }
 
+// ownerStatusAlert is the OWNER's copy for a lifecycle transition, or ok=false
+// when the transition is not the owner's business (MYR-462).
+//
+// It exists because statusAlert answers a different question. That function is
+// the RIDER's side of the ladder, and its silence on `enroute` is correct there
+// — the rider is the person who just pressed Start ride, and a phone that
+// buzzes to report your own tap is noise. But the same transition is the single
+// most consequential piece of news the OWNER gets all ride: their car has left
+// the pickup with a passenger aboard. Until this function existed no send site
+// anywhere in the service had the owner as a recipient except the new-request
+// push, so an owner who lent their car out learned the trip had started only by
+// opening the app and waiting for a refresh to land. In external beta that read
+// as a 66-minute lag between the rider starting and the owner's banner moving.
+//
+// It obeys the same payload policy as its rider-side twin: a requester's FIRST
+// NAME and nothing else about the ride. No pickup, no dropoff, no address —
+// this lands on a locked screen, and the owner refetches over authenticated
+// REST for the places.
+func ownerStatusAlert(status string, requesterName *string) (alert, bool) {
+	if status != statusEnroute {
+		return alert{}, false
+	}
+	if name := displayName(requesterName); name != "" {
+		return alert{
+			title: name + " started the ride",
+			body:  bodyFollowAlong,
+		}, true
+	}
+	return alert{
+		title: "Your rider started the ride",
+		body:  bodyFollowAlong,
+	}, true
+}
+
 // dueAlert is the RIDER's copy for a scheduled ride whose pickup nav has
 // reached the car.
 func dueAlert(vehicleName string) alert {
@@ -128,6 +167,7 @@ func dueAlert(vehicleName string) alert {
 const (
 	bodyReviewRequest = "Open MyRoboTaxi to accept or decline."
 	bodySeeDetails    = "Open MyRoboTaxi to see the details."
+	bodyFollowAlong   = "Open MyRoboTaxi to follow the trip."
 )
 
 // vehicleLabel renders a vehicle nickname, falling back to a generic label

@@ -108,6 +108,64 @@ func TestStatusAlertSelectsOnlyNotifiableTransitions(t *testing.T) {
 	}
 }
 
+// TestOwnerStatusAlertSelectsOnlyEnroute is the MYR-462 companion to the table
+// above, and the two together are what keep the audiences from drifting: the
+// owner's copy function must speak on `enroute` and stay silent on every other
+// status, including the ones the RIDER's function speaks on. An owner does not
+// need a banner telling them about their own accept, decline or arrival taps.
+func TestOwnerStatusAlertSelectsOnlyEnroute(t *testing.T) {
+	// Every status in the go_ride_requests CHECK enum.
+	all := []string{"requested", "accepted", "declined", "enroute", "arrived", "completed", "cancelled"}
+
+	for _, status := range all {
+		t.Run(status, func(t *testing.T) {
+			a, ok := ownerStatusAlert(status, nil)
+			want := status == statusEnroute
+			if ok != want {
+				t.Fatalf("ownerStatusAlert(%q) notifies = %v, want %v", status, ok, want)
+			}
+			if !ok {
+				return
+			}
+			if a.title == "" || a.body == "" {
+				t.Errorf("ownerStatusAlert(%q) = %+v, want both a title and a body", status, a)
+			}
+		})
+	}
+}
+
+// TestOwnerStatusAlertNamesOnlyTheFirstName pins the payload policy on the new
+// send site: the owner's banner may carry the rider's FIRST name and nothing
+// else. A nil or blank name must degrade to the generic sentence rather than
+// producing a ragged " started the ride".
+func TestOwnerStatusAlertNamesOnlyTheFirstName(t *testing.T) {
+	tests := []struct {
+		name      string
+		requester *string
+		wantTitle string
+	}{
+		{name: "nil name", requester: nil, wantTitle: "Your rider started the ride"},
+		{name: "blank name", requester: strptr("   "), wantTitle: "Your rider started the ride"},
+		{name: "first name only", requester: strptr("Aarthi"), wantTitle: "Aarthi started the ride"},
+		{name: "full name is trimmed to first", requester: strptr("Aarthi Sivasankar"), wantTitle: "Aarthi started the ride"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a, ok := ownerStatusAlert(statusEnroute, tt.requester)
+			if !ok {
+				t.Fatal("ownerStatusAlert(enroute) produced no alert")
+			}
+			if a.title != tt.wantTitle {
+				t.Errorf("title = %q, want %q", a.title, tt.wantTitle)
+			}
+			if a.body != bodyFollowAlong {
+				t.Errorf("body = %q, want %q", a.body, bodyFollowAlong)
+			}
+		})
+	}
+}
+
 // TestStatusAlertDeclinedNamesTheReservation is the MYR-360 copy fix. An owner
 // declining an ACCEPTED reservation is a new transition, and the pre-existing
 // declined copy — "can't take this ride" — reads as a reply to a request the

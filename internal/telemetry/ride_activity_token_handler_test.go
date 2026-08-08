@@ -488,6 +488,46 @@ func TestActivityToken_ExpiredReservationIsRefused(t *testing.T) {
 	}
 }
 
+// TestActivityToken_RescuedExpiredReservationRegisters is MYR-461, and it is
+// the test that has to exist at THIS layer rather than only in the store.
+//
+// The scoped predicate lives in two places by necessity — the friendly
+// sub-coded refusal here, and the guard inside the write that actually holds
+// under a race. Scoping only the statement left this handler refusing first,
+// so the store's fix was unreachable and its own green test proved nothing
+// about the endpoint. Whichever of the two is stricter silently wins.
+//
+// The scenario: a reservation the sweeper gave up on, which the humans then
+// drove anyway. The owner confirms the kerb (`arrived`), the rider starts
+// (`enroute`). The dispatch columns are latched and still say the reservation
+// expired — they will say so for the rest of the ride — but the ride is
+// visibly happening and the rider's lock screen must be allowed back.
+func TestActivityToken_RescuedExpiredReservationRegisters(t *testing.T) {
+	for _, status := range []string{rideStatusArrived, rideStatusEnroute} {
+		t.Run(status, func(t *testing.T) {
+			rescued := expiredReservationRide()
+			rescued.Status = status
+
+			registry := newFakeActivityRegistry()
+			store := &fakeRideStore{getRec: rescued}
+			h := newActivityHandler(store, registry, rideUserID)
+
+			rec := httptest.NewRecorder()
+			activityMux(h).ServeHTTP(rec, activityRequest(http.MethodPost, `{"activityToken":"cafe01"}`))
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d registering on a rescued %s ride, want 200 (body %s) — "+
+					"the rider is in the car and the lock screen is locked out",
+					rec.Code, status, rec.Body.String())
+			}
+			if registry.riderToken() != "cafe01" {
+				t.Errorf("registered token = %q, want the posted one — the Activity cannot be "+
+					"refreshed by the ETA ticker until it is registered", registry.riderToken())
+			}
+		})
+	}
+}
+
 // TestActivityToken_OtherDispatchFailuresStillRegister is the counterweight,
 // and it is why the guard reads BOTH dispatch columns rather than just the
 // status.
