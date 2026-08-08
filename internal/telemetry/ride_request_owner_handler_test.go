@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -422,8 +423,15 @@ func TestRideRequestHandler_Accept_VehicleAlreadyOnRide(t *testing.T) {
 
 // TestRideRequestHandler_Accept_DispatchSeamPayload asserts the ride.accepted
 // event carries everything MYR-176 needs for the Tesla navigation_request:
-// both places (with address flattening), the booked-for passenger contact,
-// scheduledFor, and the accepted_at stamp.
+// both places (with address flattening), scheduledFor, and the accepted_at
+// stamp.
+//
+// It also asserts what the event must NOT carry. The record below still has a
+// booked-for passenger name and phone — legacy rows do — and MYR-447 removed
+// those two fields from the event because nothing ever read them. The
+// reflection check below is the regression guard: re-adding a passenger field
+// to events.RideAcceptedEvent puts P1 PII back on the internal bus, and doing
+// it by accident is exactly how it got there the first time.
 func TestRideRequestHandler_Accept_DispatchSeamPayload(t *testing.T) {
 	const owner = rideOtherUsr
 	ride := fixtureRideData(owner, rideStatusRequested)
@@ -462,8 +470,16 @@ func TestRideRequestHandler_Accept_DispatchSeamPayload(t *testing.T) {
 	if ev.Dropoff.Label != "Caltrain" || ev.Dropoff.Address != "" {
 		t.Errorf("dropoff (nil address must flatten to empty): %+v", ev.Dropoff)
 	}
-	if ev.PassengerName != name || ev.PassengerPhone != phone {
-		t.Errorf("passenger: %q / %q", ev.PassengerName, ev.PassengerPhone)
+	// MYR-447: the passenger contact stays on the RECORD and must never reach
+	// the bus. Asserted structurally rather than by value, because the honest
+	// claim is "this type has no passenger field at all", not "this one instance
+	// happens to be empty".
+	evType := reflect.TypeOf(ev)
+	for i := range evType.NumField() {
+		if strings.Contains(evType.Field(i).Name, "Passenger") {
+			t.Errorf("RideAcceptedEvent.%s reintroduces booked-for passenger PII on the internal bus (MYR-447)",
+				evType.Field(i).Name)
+		}
 	}
 	if ev.ScheduledFor == nil || !ev.ScheduledFor.Equal(sched) {
 		t.Errorf("scheduledFor: %v", ev.ScheduledFor)

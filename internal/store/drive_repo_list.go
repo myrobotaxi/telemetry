@@ -111,7 +111,7 @@ func (r *DriveRepo) ListByVehicleID(ctx context.Context, vehicleID string, curso
 
 	out := make([]DriveSummaryRow, 0, probe)
 	for rows.Next() {
-		d, scanErr := scanDriveSummaryRow(rows)
+		d, scanErr := r.scanDriveSummaryRow(rows)
 		if scanErr != nil {
 			r.metrics.IncQueryError("drive.list_by_vehicle")
 			r.metrics.ObserveQueryDuration("drive.list_by_vehicle", time.Since(start).Seconds())
@@ -133,21 +133,28 @@ func (r *DriveRepo) ListByVehicleID(ctx context.Context, vehicleID string, curso
 	return DriveListPage{Items: out, HasMore: hasMore}, nil
 }
 
-// scanDriveSummaryRow scans the lean projection into a
-// DriveSummaryRow. Pure stdlib — no encryptor, no routePoints
-// resolution.
-func scanDriveSummaryRow(row rowScanner) (DriveSummaryRow, error) {
+// scanDriveSummaryRow scans the lean projection into a DriveSummaryRow.
+// No routePoints resolution — that stays out of the list path.
+//
+// MYR-447 made this a METHOD. The four location labels arrive as
+// ciphertext (driveSummarySelectColumns selects the `*Enc` columns), so
+// the scan needs the repo's Encryptor to hand the caller the same four
+// plain strings it always did. The wire shape of
+// GET /api/vehicles/{id}/drives is unchanged; what changed is that this
+// path now needs a key, exactly as GetByID already did for the trail.
+func (r *DriveRepo) scanDriveSummaryRow(row rowScanner) (DriveSummaryRow, error) {
 	var d DriveSummaryRow
+	var startLocEnc, startAddrEnc, endLocEnc, endAddrEnc *string
 	if err := row.Scan(
 		&d.ID,
 		&d.VehicleID,
 		&d.Date,
 		&d.StartTime,
 		&d.EndTime,
-		&d.StartLocation,
-		&d.StartAddress,
-		&d.EndLocation,
-		&d.EndAddress,
+		&startLocEnc,
+		&startAddrEnc,
+		&endLocEnc,
+		&endAddrEnc,
 		&d.DistanceMiles,
 		&d.DurationMinutes,
 		&d.AvgSpeedMph,
@@ -159,6 +166,12 @@ func scanDriveSummaryRow(row rowScanner) (DriveSummaryRow, error) {
 		&d.CreatedAt,
 	); err != nil {
 		return DriveSummaryRow{}, fmt.Errorf("scan drive summary: %w", err)
+	}
+	if r.encryptor != nil {
+		d.StartLocation = r.openDriveLabel(startLocEnc, "startLocationEnc")
+		d.StartAddress = r.openDriveLabel(startAddrEnc, "startAddressEnc")
+		d.EndLocation = r.openDriveLabel(endLocEnc, "endLocationEnc")
+		d.EndAddress = r.openDriveLabel(endAddrEnc, "endAddressEnc")
 	}
 	return d, nil
 }

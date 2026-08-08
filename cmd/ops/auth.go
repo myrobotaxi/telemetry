@@ -50,6 +50,10 @@ func runAuthToken(ctx context.Context, args []string) error {
 	if err := requireFlag("user-id", *userID); err != nil {
 		return err
 	}
+	operator, err := requireOperator()
+	if err != nil {
+		return err
+	}
 
 	logger := newLogger()
 	db, err := openDB(ctx, logger)
@@ -61,6 +65,22 @@ func runAuthToken(ctx context.Context, args []string) error {
 	accountRepo, err := newAccountRepo(db)
 	if err != nil {
 		return err
+	}
+
+	// FAIL-CLOSED (MYR-447): the audit row is written BEFORE the token is
+	// decrypted — not merely before it is printed — because the refresh
+	// path below also TRANSMITS the refresh token to Tesla. If the insert
+	// fails the command aborts non-zero having read and emitted nothing.
+	// An access that could not be recorded must not happen (cf. CG-DL-3).
+	if err := newOperatorAuditor(db).RecordDecrypt(ctx, store.OperatorAccess{
+		Operator:   operator,
+		Command:    "ops auth token",
+		UserID:     *userID,
+		TargetType: store.OperatorTargetUser,
+		TargetID:   *userID,
+		Fields:     teslaTokenAuditFields,
+	}); err != nil {
+		return fmt.Errorf("record operator decrypt: %w", err)
 	}
 
 	tok, err := accountRepo.GetTeslaToken(ctx, *userID)

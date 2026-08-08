@@ -1,12 +1,15 @@
 // Package plaintextpurge scrubs the retired plaintext copies of every
-// column the telemetry server now stores as ciphertext (MYR-433).
+// column the telemetry server now stores as ciphertext (MYR-433,
+// MYR-447).
 //
-// It is the closing step of the MYR-62/63/64 encryption rollout. The
-// backfills (accountbackfill, vehiclegpsbackfill, routeblobbackfill)
-// sealed each legacy value into its `*Enc` / `*_enc` sibling; the repos
-// then stopped reading and writing the plaintext columns. What remains is
-// the residue: real Tesla tokens and real coordinates still sitting in
-// columns nothing consults. This package removes them.
+// It is the closing step of the MYR-62/63/64 encryption rollout and of
+// the MYR-447 label rollout that finished it. The backfills
+// (accountbackfill, vehiclegpsbackfill, routeblobbackfill,
+// locationlabelbackfill) sealed each legacy value into its `*Enc` /
+// `*_enc` sibling; the repos then stopped reading and writing the
+// plaintext columns. What remains is the residue: real Tesla tokens, real
+// coordinates and the street addresses those coordinates resolve to,
+// still sitting in columns nothing consults. This package removes them.
 //
 // # Why this is a command and not a migration
 //
@@ -141,60 +144,6 @@ func (t Target) hasDataPredicate() string {
 		parts = append(parts, "("+m.HasData+")")
 	}
 	return strings.Join(parts, " OR ")
-}
-
-// Targets is the full set of plaintext columns MYR-433 retires, in a
-// deliberate order: Tesla OAuth tokens first.
-//
-// The token columns are the sharpest item in the database. Vehicle GPS
-// and route blobs reveal where someone went; a Tesla access/refresh token
-// grants control of their car. If a purge run is interrupted, the
-// credentials should already be gone.
-var Targets = []Target{
-	{Table: "Account", Name: "access_token", Members: []Member{
-		{Plaintext: "access_token", Encrypted: "access_token_enc", Kind: KindString,
-			ScrubSQL: "NULL", HasData: `"access_token" IS NOT NULL`},
-	}},
-	{Table: "Account", Name: "refresh_token", Members: []Member{
-		{Plaintext: "refresh_token", Encrypted: "refresh_token_enc", Kind: KindString,
-			ScrubSQL: "NULL", HasData: `"refresh_token" IS NOT NULL`},
-	}},
-	{Table: "Account", Name: "id_token", Members: []Member{
-		{Plaintext: "id_token", Encrypted: "id_token_enc", Kind: KindString,
-			ScrubSQL: "NULL", HasData: `"id_token" IS NOT NULL`},
-	}},
-
-	// The three GPS pairs. Each is one target so a half-verifying pair
-	// cannot leave one readable coordinate behind.
-	{Table: "Vehicle", Name: "latitude+longitude", Members: []Member{
-		{Plaintext: "latitude", Encrypted: "latitudeEnc", Kind: KindFloat,
-			ScrubSQL: "0", HasData: `"latitude" IS NOT NULL AND "latitude" <> 0`},
-		{Plaintext: "longitude", Encrypted: "longitudeEnc", Kind: KindFloat,
-			ScrubSQL: "0", HasData: `"longitude" IS NOT NULL AND "longitude" <> 0`},
-	}},
-	{Table: "Vehicle", Name: "destinationLatitude+destinationLongitude", Members: []Member{
-		{Plaintext: "destinationLatitude", Encrypted: "destinationLatitudeEnc", Kind: KindFloat,
-			ScrubSQL: "NULL", HasData: `"destinationLatitude" IS NOT NULL`},
-		{Plaintext: "destinationLongitude", Encrypted: "destinationLongitudeEnc", Kind: KindFloat,
-			ScrubSQL: "NULL", HasData: `"destinationLongitude" IS NOT NULL`},
-	}},
-	{Table: "Vehicle", Name: "originLatitude+originLongitude", Members: []Member{
-		{Plaintext: "originLatitude", Encrypted: "originLatitudeEnc", Kind: KindFloat,
-			ScrubSQL: "NULL", HasData: `"originLatitude" IS NOT NULL`},
-		{Plaintext: "originLongitude", Encrypted: "originLongitudeEnc", Kind: KindFloat,
-			ScrubSQL: "NULL", HasData: `"originLongitude" IS NOT NULL`},
-	}},
-
-	{Table: "Vehicle", Name: "navRouteCoordinates", Members: []Member{
-		{Plaintext: "navRouteCoordinates", Encrypted: "navRouteCoordinatesEnc", Kind: KindJSON,
-			ScrubSQL: "NULL",
-			HasData:  `"navRouteCoordinates" IS NOT NULL AND "navRouteCoordinates"::text NOT IN ('[]', 'null')`},
-	}},
-	{Table: "Drive", Name: "routePoints", Members: []Member{
-		{Plaintext: "routePoints", Encrypted: "routePointsEnc", Kind: KindJSON,
-			ScrubSQL: `'[]'::jsonb`,
-			HasData:  `"routePoints" IS NOT NULL AND "routePoints"::text NOT IN ('[]', 'null')`},
-	}},
 }
 
 // TargetResult is the per-target outcome of a purge pass.

@@ -42,14 +42,17 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
         -o /telemetry-server \
         ./cmd/telemetry-server
 
-# Operator binaries for the MYR-433 seal-then-purge sequence. They ship in the
-# image because the secrets they need (DATABASE_URL, ENCRYPTION_KEY) exist only
-# as Fly app secrets — running them anywhere else would mean exporting the key,
-# which is the custody the purge exists to protect. Run via `fly ssh console`.
+# Operator binaries for the MYR-433 / MYR-447 seal-then-purge sequence. They
+# ship in the image because the secrets they need (DATABASE_URL,
+# ENCRYPTION_KEY) exist only as Fly app secrets — running them anywhere else
+# would mean exporting the key, which is the custody the purge exists to
+# protect. Run via `fly ssh console`.
 RUN CGO_ENABLED=0 GOOS=linux go build -o /backfill-account-tokens ./cmd/backfill-account-tokens \
  && CGO_ENABLED=0 GOOS=linux go build -o /backfill-vehicle-gps ./cmd/backfill-vehicle-gps \
  && CGO_ENABLED=0 GOOS=linux go build -o /backfill-route-blobs ./cmd/backfill-route-blobs \
- && CGO_ENABLED=0 GOOS=linux go build -o /purge-plaintext-columns ./cmd/purge-plaintext-columns
+ && CGO_ENABLED=0 GOOS=linux go build -o /backfill-location-labels ./cmd/backfill-location-labels \
+ && CGO_ENABLED=0 GOOS=linux go build -o /purge-plaintext-columns ./cmd/purge-plaintext-columns \
+ && CGO_ENABLED=0 GOOS=linux go build -o /scrub-passenger-fields ./cmd/scrub-passenger-fields
 
 # Stage 2: Runtime
 # Minimal Alpine image — only ca-certificates and the static binary.
@@ -66,7 +69,9 @@ COPY --from=builder /telemetry-server /usr/local/bin/telemetry-server
 COPY --from=builder /backfill-account-tokens /usr/local/bin/backfill-account-tokens
 COPY --from=builder /backfill-vehicle-gps /usr/local/bin/backfill-vehicle-gps
 COPY --from=builder /backfill-route-blobs /usr/local/bin/backfill-route-blobs
+COPY --from=builder /backfill-location-labels /usr/local/bin/backfill-location-labels
 COPY --from=builder /purge-plaintext-columns /usr/local/bin/purge-plaintext-columns
+COPY --from=builder /scrub-passenger-fields /usr/local/bin/scrub-passenger-fields
 COPY --from=proxy-builder /tesla-http-proxy /usr/local/bin/tesla-http-proxy
 
 # Entrypoint wrapper that starts the proxy sidecar alongside the telemetry server.

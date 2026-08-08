@@ -98,10 +98,16 @@ func (r *DriveRepo) Create(ctx context.Context, drive DriveRecord) error {
 		return fmt.Errorf("DriveRepo.Create(%s): %w", drive.ID, err)
 	}
 
+	labels, err := r.sealDriveLabels(
+		drive.StartLocation, drive.StartAddress, drive.EndLocation, drive.EndAddress)
+	if err != nil {
+		return fmt.Errorf("DriveRepo.Create(%s): %w", drive.ID, err)
+	}
+
 	start := time.Now()
 	_, err = r.pool.Exec(ctx, queryDriveInsert,
 		drive.ID, drive.VehicleID, drive.Date, drive.StartTime, drive.EndTime,
-		drive.StartLocation, drive.StartAddress, drive.EndLocation, drive.EndAddress,
+		labels[0], labels[1], labels[2], labels[3],
 		drive.DistanceMiles, drive.DurationMinutes, drive.AvgSpeedMph, drive.MaxSpeedMph,
 		drive.EnergyUsedKwh, drive.StartChargeLevel, drive.EndChargeLevel,
 		drive.FsdMiles, drive.FsdPercentage, drive.Interventions,
@@ -282,10 +288,21 @@ func (r *DriveRepo) encryptRoutePointsRaw(raw json.RawMessage) (*string, error) 
 }
 
 // Complete updates a drive with its final stats when the drive ends.
+//
+// MYR-447: the two end labels are sealed before they leave this method
+// and land in "endLocationEnc"/"endAddressEnc". Fail-closed — an encrypt
+// error aborts the completion rather than writing a drive whose endpoint
+// silently lost its address; the caller logs and the row stays open for
+// the startup reconciler.
 func (r *DriveRepo) Complete(ctx context.Context, driveID string, stats DriveCompletion) error {
+	endLoc, endAddr, err := r.sealEndLabels(stats.EndLocation, stats.EndAddress)
+	if err != nil {
+		return fmt.Errorf("DriveRepo.Complete(%s): %w", driveID, err)
+	}
+
 	start := time.Now()
 	tag, err := r.pool.Exec(ctx, queryDriveComplete,
-		driveID, stats.EndTime, stats.EndLocation, stats.EndAddress,
+		driveID, stats.EndTime, endLoc, endAddr,
 		stats.DistanceMiles, stats.DurationMinutes,
 		stats.AvgSpeedMph, stats.MaxSpeedMph, stats.EnergyUsedKwh,
 		stats.EndChargeLevel, stats.FsdMiles, stats.FsdPercentage,
@@ -315,9 +332,10 @@ func (r *DriveRepo) GetByID(ctx context.Context, id string) (DriveRecord, error)
 
 	var d DriveRecord
 	var routePointsEnc *string
+	var startLocEnc, startAddrEnc, endLocEnc, endAddrEnc *string
 	err := row.Scan(
 		&d.ID, &d.VehicleID, &d.Date, &d.StartTime, &d.EndTime,
-		&d.StartLocation, &d.StartAddress, &d.EndLocation, &d.EndAddress,
+		&startLocEnc, &startAddrEnc, &endLocEnc, &endAddrEnc,
 		&d.DistanceMiles, &d.DurationMinutes, &d.AvgSpeedMph, &d.MaxSpeedMph,
 		&d.EnergyUsedKwh, &d.StartChargeLevel, &d.EndChargeLevel,
 		&d.FsdMiles, &d.FsdPercentage, &d.Interventions, &d.CreatedAt,
@@ -333,6 +351,7 @@ func (r *DriveRepo) GetByID(ctx context.Context, id string) (DriveRecord, error)
 		return DriveRecord{}, fmt.Errorf("DriveRepo.GetByID(%s): %w", id, err)
 	}
 	r.applyResolvedRoutePoints(&d, routePointsEnc)
+	r.applyResolvedDriveLabels(&d, startLocEnc, startAddrEnc, endLocEnc, endAddrEnc)
 	return d, nil
 }
 
