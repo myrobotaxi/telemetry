@@ -1,0 +1,54 @@
+-- 0032_vehicle_share_grant_updated_at.up.sql
+--
+-- MYR-451: `updated_at` on go_vehicle_shares — the column whose absence made an
+-- urgent external-beta permissions incident impossible to triage.
+--
+-- WHAT HAPPENED. An owner reported that a grantee whose per-grant "Rides"
+-- toggle was OFF had nonetheless requested and received a ride. The grant row
+-- was recovered from production intact: `permission = 'rides'` (the invite-time
+-- preset, deliberately never patchable) alongside `allow_rides = false`. Those
+-- two values together PROVE a PATCH landed — redemption derives the flag from
+-- the preset, so a row that redeemed as `rides` and now reads `false` can only
+-- have been narrowed afterwards by the owner's toggle. The write committed. The
+-- create gate is correct and refuses that grant.
+--
+-- The one thing nobody could establish was WHEN the flag moved, and therefore
+-- whether the rides the grantee did take preceded the toggle (correct) or
+-- followed it (a live authorization bypass). Those are opposite conclusions
+-- with opposite remediations, and the row could not distinguish them.
+--
+-- WHY THE EXISTING TIMESTAMPS DO NOT ANSWER IT. The table records `created_at`,
+-- `accepted_at`, `revoked_at` and `suspended_at` — a timestamp for every
+-- lifecycle transition and for one capability (suspension), but NONE for
+-- `allow_rides`. The suspension flag got a timestamp precisely because 0024's
+-- author wanted to record WHEN; the ride capability, sitting beside it in the
+-- same UPDATE and governing the same grant, silently got a bare boolean. That
+-- asymmetry is the gap. A boolean records the verdict and destroys the history.
+--
+-- WHY A ROW TIMESTAMP RATHER THAN A PER-FLAG ONE. `allow_rides_changed_at`
+-- would answer this incident precisely and nothing else, and the next flag
+-- added to this table would reopen the same hole. `updated_at` covers every
+-- mutation the row will ever accept, including ones not yet written, and the
+-- flags' current values are already in the row — "these values, as of this
+-- instant" is the complete statement. Correlating it with the request log is
+-- what turns a disputed grant into a settled timeline.
+--
+-- DEFAULT now() AND BACKFILL. Existing rows are stamped at migration time
+-- rather than left NULL. NULL would mean "never modified", which for a row that
+-- may well have been patched before this column existed is a claim we cannot
+-- support; the migration instant is honest as a LOWER BOUND on our knowledge —
+-- it says "not observed since here", which is exactly true. NOT NULL keeps
+-- every reader free of a nil branch.
+--
+-- MAINTAINED BY queryPatchShare ALONE, which stamps NOW() unconditionally on
+-- every successful patch, in the same single statement that moves the flags —
+-- so the timestamp cannot disagree with the values it dates. There is no
+-- trigger: a trigger would also fire for redemption and revocation, which have
+-- their own dedicated timestamps, and two mechanisms writing one column is how
+-- a timestamp starts lying.
+
+ALTER TABLE go_vehicle_shares
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
+COMMENT ON COLUMN go_vehicle_shares.updated_at IS
+    'MYR-451: when this grant''s capability flags were last modified by an owner patch. Stamped by queryPatchShare only; lifecycle transitions keep their own timestamps.';
