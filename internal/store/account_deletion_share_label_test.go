@@ -16,8 +16,11 @@ import (
 // seedShareGrantLabelled is seedShareGrant with the label under the test's
 // control. The shared helper hardcodes 'Guest', which is useless here: the
 // whole point is which label survives and which does not.
-func seedShareGrantLabelled(t *testing.T, id, vehicleID, ownerID, acceptedBy, status, label string) {
+// The owner is fixed: every case here varies who REDEEMED the grant and what
+// the owner called them, never who owns the car.
+func seedShareGrantLabelled(t *testing.T, id, vehicleID, acceptedBy, status, label string) {
 	t.Helper()
+	const ownerID = delUserOwner
 	if _, err := testPool.Exec(context.Background(), `
 		INSERT INTO go_vehicle_shares
 			(id, vehicle_id, owner_user_id, label, permission, code, status,
@@ -51,12 +54,12 @@ func TestScrubSharesReceivedLabel_ErasesEveryGrantTheUserRedeemed(t *testing.T) 
 	// row is needed to make this predicate meaningful.
 	//
 	// Three grants redeemed by the departing user, in three different states.
-	seedShareGrantLabelled(t, "cshr447accepted", "cveh447a", delUserOwner, delUserApple, "accepted", "Mira Chen")
-	seedShareGrantLabelled(t, "cshr447revoked", "cveh447b", delUserOwner, delUserApple, "revoked", "Mira Chen (old phone)")
+	seedShareGrantLabelled(t, "cshr447accepted", "cveh447a", delUserApple, "accepted", "Mira Chen")
+	seedShareGrantLabelled(t, "cshr447revoked", "cveh447b", delUserApple, "revoked", "Mira Chen (old phone)")
 	// A grant redeemed by SOMEBODY ELSE, on the same owner's car. Must survive
 	// untouched: it is a different person's name in a record that is not going
 	// anywhere.
-	seedShareGrantLabelled(t, "cshr447bystander", "cveh447a", delUserOwner, delUserOther, "accepted", "Roommate")
+	seedShareGrantLabelled(t, "cshr447bystander", "cveh447a", delUserOther, "accepted", "Roommate")
 
 	n, err := deleter.ScrubSharesReceivedLabel(context.Background(), delUserApple)
 	if err != nil {
@@ -84,7 +87,7 @@ func TestScrubSharesReceivedLabel_IsIdempotent(t *testing.T) {
 	deleter := newAccountDeleter(t)
 	ctx := context.Background()
 
-	seedShareGrantLabelled(t, "cshr447idem", "cveh447c", delUserOwner, delUserApple, "accepted", "Mira Chen")
+	seedShareGrantLabelled(t, "cshr447idem", "cveh447c", delUserApple, "accepted", "Mira Chen")
 
 	first, err := deleter.ScrubSharesReceivedLabel(ctx, delUserApple)
 	if err != nil {

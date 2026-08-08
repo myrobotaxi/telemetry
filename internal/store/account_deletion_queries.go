@@ -38,7 +38,7 @@ WHERE accepted_by_user_id = $1 AND status <> 'revoked'`
 // the empty string rather than NULL — chosen over widening the column because
 // `store.CreateInvite` rejects a blank label at the door, which makes the empty
 // string an unambiguous scrubbed-here sentinel that no live row can hold. The
-// `label <> ''` predicate then makes a re-run affect zero rows, so the step is
+// `label <> ”` predicate then makes a re-run affect zero rows, so the step is
 // idempotent on the same terms as every other step in the sequence.
 //
 // NO WIRE EFFECT. A revoked grant is never serialized to any client (`status`
