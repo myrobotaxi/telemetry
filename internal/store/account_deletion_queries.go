@@ -136,18 +136,46 @@ SELECT 1 FROM go_users WHERE id = ANY($1) FOR UPDATE`
 SELECT apple_sub FROM go_identity_apple WHERE user_id = ANY($1) FOR UPDATE`
 )
 
-// queryConvergenceTarget reads the canonical id a pre-convergence go_users row
-// was re-pointed to (MYR-452). NULL — the overwhelmingly common case — returns
-// no row, and the caller stands for itself.
-const queryConvergenceTarget = `
-SELECT converged_to FROM go_users WHERE id = $1 AND converged_to IS NOT NULL`
+// queryConvergenceClosure walks go_identity_convergence out from the caller's
+// subject, treating the graph as UNDIRECTED (MYR-452).
+//
+// Both directions matter, for different reasons. Forward finds the id the
+// account was moved to, when the caller presents an abandoned subject. Reverse
+// finds the abandoned subjects, when the caller signed in again after
+// converging and so presents the right id while the old ones still carry rows.
+//
+// `UNION` (not UNION ALL) is what terminates the recursion: it deduplicates
+// against the rows already produced, so a 2-cycle — reachable by re-linking the
+// same Tesla under the new canonical id — closes instead of spinning. The CASE
+// is what lets ONE recursive self-reference cover both directions, which
+// Postgres requires (it permits only a single reference to the recursive term).
+//
+// $2 bounds the result one above the scope cap, so an implausibly large closure
+// is detected and refused rather than silently truncated to a set that would
+// delete some of a person's rows and leave the rest.
+const queryConvergenceClosure = `
+WITH RECURSIVE closure(id) AS (
+    SELECT $1::text
+  UNION
+    SELECT CASE WHEN c.from_user_id = cl.id THEN c.to_user_id ELSE c.from_user_id END
+    FROM go_identity_convergence c
+    JOIN closure cl ON cl.id = c.from_user_id OR cl.id = c.to_user_id
+)
+SELECT id FROM closure LIMIT $2`
 
-// queryConvergenceAliases reads the reverse direction: the abandoned ids that
-// were converged ONTO this one. Needed because a person who signed in again
-// after converging presents the canonical subject, while their alias rows — and
-// the P1 email on them — are still sitting there.
-const queryConvergenceAliases = `
-SELECT id FROM go_users WHERE converged_to = $1`
+// queryConvergenceCanonical finds which member of the closure the Apple binding
+// is filed under — the id that IS the account. It returns no rows for an
+// account whose binding is already gone (a re-run), where the caller stands for
+// itself.
+const queryConvergenceCanonical = `
+SELECT DISTINCT user_id FROM go_identity_apple WHERE user_id = ANY($1)`
+
+// queryDeleteConvergenceEdges removes the account's convergence edges. They are
+// pure identity plumbing: once the ids they connect are gone, an edge is a
+// dangling grant of delete authority over a cuid that resolves to nothing.
+const queryDeleteConvergenceEdges = `
+DELETE FROM go_identity_convergence
+WHERE from_user_id = ANY($1) OR to_user_id = ANY($1)`
 
 // queryDeleteAppleIdentity removes every Apple sub bound to the user. Plural
 // by construction: the schema indexes user_id precisely because one person may

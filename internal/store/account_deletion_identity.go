@@ -68,6 +68,15 @@ func (a *AccountDeleter) DeleteIdentity(ctx context.Context, scope DeletionScope
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op after Commit
 
+	// Re-walk the convergence closure under this transaction. The scope handed
+	// in was resolved at step 0, before ten other steps ran and on another
+	// snapshot; a link that converged in that window would otherwise leave this
+	// transaction deleting the wrong id and reporting success.
+	scope, err = unionScopeWithin(ctx, tx, scope)
+	if err != nil {
+		return AccountIdentityResult{}, err
+	}
+
 	prismaUser, goUser, appleIdentity, err := probeAccountIdentity(ctx, tx, scope)
 	if err != nil {
 		return AccountIdentityResult{}, err
@@ -167,6 +176,7 @@ func deleteIdentityRows(ctx context.Context, tx pgx.Tx, scope DeletionScope) err
 		{"delete apple identity", queryDeleteAppleIdentity},
 		{"delete provider accounts", queryDeleteProviderAccounts},
 		{"delete settings", queryDeleteSettings},
+		{"delete convergence edges", queryDeleteConvergenceEdges},
 		{"delete go user", queryDeleteGoUser},
 		{"delete prisma user", queryDeletePrismaUser},
 	}
