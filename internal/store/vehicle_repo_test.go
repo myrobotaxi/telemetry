@@ -261,6 +261,11 @@ func TestVehicleRepo_UpdateTelemetry(t *testing.T) {
 func TestVehicleRepo_CatalogFields(t *testing.T) {
 	cleanTables(t, testPool)
 
+	// MYR-447: locationName / locationAddress / destinationAddress are
+	// read from ciphertext, so the seed and the repo have to share one
+	// key or every label reads back empty.
+	enc := newTestEncryptor(t)
+
 	seedVehicleWithCatalog(t, testPool, "veh_cat_001", "5YJ3E1EA1NF000C01", catalogFields{
 		model:              "Model 3",
 		year:               2024,
@@ -269,7 +274,7 @@ func TestVehicleRepo_CatalogFields(t *testing.T) {
 		locationAddress:    "123 Market St, San Francisco, CA",
 		fsdMilesSinceReset: 412.7,
 		destinationAddress: strPtr("2001 Market St, San Francisco, CA 94114"),
-	})
+	}, enc)
 	// Second vehicle: minimal catalog (defaults) + null destinationAddress to
 	// exercise the nullable branch of the scan.
 	seedVehicleWithCatalog(t, testPool, "veh_cat_002", "5YJ3E1EA1NF000C02", catalogFields{
@@ -280,9 +285,9 @@ func TestVehicleRepo_CatalogFields(t *testing.T) {
 		locationAddress:    "",
 		fsdMilesSinceReset: 0,
 		destinationAddress: nil,
-	})
+	}, enc)
 
-	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+	repo := store.NewVehicleRepoWithEncryption(testPool, store.NoopMetrics{}, enc, testLogger())
 	ctx := context.Background()
 
 	tests := []struct {

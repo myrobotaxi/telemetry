@@ -15,6 +15,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/myrobotaxi/telemetry/internal/config"
+	"github.com/myrobotaxi/telemetry/internal/cryptox"
 	"github.com/myrobotaxi/telemetry/internal/store"
 )
 
@@ -256,8 +257,19 @@ func seedVehicle(t *testing.T, pool *pgxpool.Pool, id, vin string) {
 // seedVehicleWithCatalog inserts a test vehicle and also sets the seven
 // catalog columns promoted by MYR-24. Used by TestVehicleRepo_CatalogFields
 // to verify the SELECT / scan path loads every column.
+//
+// MYR-447: three of those columns (locationName, locationAddress,
+// destinationAddress) are read from `*Enc` ciphertext now, so a seed that
+// wrote only the plaintext side would be invisible to every read path.
+// Pass the SAME Encryptor the repo under test was built with and the
+// helper writes both halves — plaintext (so purge/operator tests still
+// have legacy residue to find) and ciphertext (so the reads work).
+//
+// A nil Encryptor writes the plaintext side only. That is the right
+// choice for callers seeding empty labels, where there is nothing to
+// seal and the repo's key is generated independently.
 func seedVehicleWithCatalog(
-	t *testing.T, pool *pgxpool.Pool, id, vin string, cat catalogFields,
+	t *testing.T, pool *pgxpool.Pool, id, vin string, cat catalogFields, enc cryptox.Encryptor,
 ) {
 	t.Helper()
 	ctx := context.Background()
@@ -280,6 +292,45 @@ func seedVehicleWithCatalog(
 	)
 	if err != nil {
 		t.Fatalf("seed vehicle with catalog: %v", err)
+	}
+	if enc == nil {
+		return
+	}
+	sealCatalogLabels(t, pool, id, cat, enc)
+}
+
+// sealCatalogLabels writes the MYR-447 `*Enc` half of a catalog seed.
+// Split out so seedVehicleWithCatalog stays readable.
+func sealCatalogLabels(
+	t *testing.T, pool *pgxpool.Pool, id string, cat catalogFields, enc cryptox.Encryptor,
+) {
+	t.Helper()
+	ctx := context.Background()
+
+	seal := func(plain string) *string {
+		if plain == "" {
+			return nil
+		}
+		ct, err := enc.EncryptString(plain)
+		if err != nil {
+			t.Fatalf("seal catalog label: %v", err)
+		}
+		return &ct
+	}
+	var destAddr *string
+	if cat.destinationAddress != nil {
+		destAddr = seal(*cat.destinationAddress)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE "Vehicle" SET
+			"locationNameEnc" = $2,
+			"locationAddressEnc" = $3,
+			"destinationAddressEnc" = $4
+		WHERE "id" = $1`,
+		id, seal(cat.locationName), seal(cat.locationAddress), destAddr,
+	); err != nil {
+		t.Fatalf("seal catalog labels: %v", err)
 	}
 }
 

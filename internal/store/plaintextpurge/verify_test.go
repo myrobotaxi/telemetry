@@ -284,6 +284,13 @@ func TestTargetsCoverEveryRetiredColumn(t *testing.T) {
 		"destinationLatitude", "destinationLongitude",
 		"originLatitude", "originLongitude",
 		"navRouteCoordinates", "routePoints",
+		// MYR-447 — the geocoded rendering of the coordinates above. A
+		// street address left readable makes the sealed coordinate beside
+		// it decorative, so these are in scope for the same purge.
+		"locationName", "locationAddress",
+		"destinationName", "destinationAddress",
+		"startLocation", "startAddress",
+		"endLocation", "endAddress",
 	}
 
 	got := map[string]bool{}

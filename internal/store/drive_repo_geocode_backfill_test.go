@@ -125,7 +125,11 @@ func TestDriveRepo_UpdateAddresses(t *testing.T) {
 	cleanTables(t, testPool)
 	seedVehicle(t, testPool, "veh_021", "5YJ3E1EA1NF000021")
 
-	repo := store.NewDriveRepo(testPool, store.NoopMetrics{})
+	// MYR-447: the four address columns are ciphertext-only, so this path
+	// needs a key on both the seeding Create and the read-back — exactly
+	// as MYR-433 already required for the route trail.
+	repo := store.NewDriveRepoWithEncryption(
+		testPool, store.NoopMetrics{}, newTestEncryptor(t), testLogger())
 	ctx := context.Background()
 
 	seed := store.DriveRecord{

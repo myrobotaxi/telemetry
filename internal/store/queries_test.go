@@ -36,8 +36,12 @@ func TestBuildTelemetryUpdate_ClearFields(t *testing.T) {
 				ClearFields: []string{"destinationName", "etaMinutes"},
 				LastUpdated: time.Now(),
 			},
-			wantOK:       true,
-			wantNulls:    []string{"destinationName", "etaMinutes"},
+			wantOK: true,
+			// MYR-447: destinationName is a label column now, so the clear
+			// lands on its ciphertext sibling and the retired plaintext
+			// column is left for the purge.
+			wantNulls:    []string{"destinationNameEnc", "etaMinutes"},
+			wantNoNulls:  []string{"destinationName"},
 			wantNoParams: true,
 		},
 		{
@@ -78,16 +82,19 @@ func TestBuildTelemetryUpdate_ClearFields(t *testing.T) {
 			wantOK: true,
 			wantNulls: []string{
 				// Non-location columns clear in place…
-				"destinationName",
 				"etaMinutes",
 				"tripDistanceRemaining",
-				// …location columns clear their ciphertext sibling.
+				// …location columns clear their ciphertext sibling. MYR-447
+				// put destinationName in that family: the place name of a
+				// cancelled destination is location data too.
+				"destinationNameEnc",
 				"destinationLatitudeEnc",
 				"destinationLongitudeEnc",
 				"originLatitudeEnc",
 				"originLongitudeEnc",
 			},
 			wantNoNulls: []string{
+				"destinationName",
 				"destinationLatitude",
 				"destinationLongitude",
 				"originLatitude",
