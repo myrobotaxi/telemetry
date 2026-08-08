@@ -204,22 +204,35 @@ func TestNotifierScheduledCopyOmitsTheTime(t *testing.T) {
 	}
 }
 
-// TestNotifierStatusChangedNotifiesRider covers which transitions speak, which
-// stay silent, and the copy for each.
-func TestNotifierStatusChangedNotifiesRider(t *testing.T) {
+// TestNotifierStatusChanged covers which transitions speak, WHICH PARTY each
+// one speaks to, which stay silent, and the copy for each.
+//
+// The audience column is the point of the table, not decoration. One
+// `ride.status.changed` event feeds two different copy functions with two
+// different recipients: the rider hears the OWNER's actions (accept, decline,
+// arrive) and the owner hears the RIDER's one action (`enroute` — MYR-462).
+// A transition that is silent is silent for BOTH, and the assertion below
+// checks the total send count, so a regression that leaks a push to the wrong
+// party fails here rather than in production.
+func TestNotifierStatusChanged(t *testing.T) {
 	tests := []struct {
 		name        string
 		status      string
 		vehicleName string
-		wantSent    bool
+		wantDevice  string // "" means neither party is notified
 		wantTitle   string
+		// wantSandbox is the recipient device's own flag, which the sender must
+		// receive verbatim. It tracks the fixture in newTestNotifier — the
+		// rider's device is a sandbox one and the owner's is not — so this
+		// column also proves the flag follows the DEVICE and not the send site.
+		wantSandbox bool
 	}{
-		{name: "accepted", status: "accepted", vehicleName: "Blue Whale", wantSent: true, wantTitle: "Your ride is confirmed"},
-		{name: "declined names the car", status: "declined", vehicleName: "Blue Whale", wantSent: true, wantTitle: "Blue Whale can't take this ride"},
-		{name: "declined falls back", status: "declined", wantSent: true, wantTitle: "Your car can't take this ride"},
-		{name: "arrived", status: "arrived", wantSent: true, wantTitle: "Your car is here — your turn to start"},
+		{name: "accepted reaches the rider", status: "accepted", vehicleName: "Blue Whale", wantDevice: riderDevice, wantTitle: "Your ride is confirmed", wantSandbox: true},
+		{name: "declined names the car", status: "declined", vehicleName: "Blue Whale", wantDevice: riderDevice, wantTitle: "Blue Whale can't take this ride", wantSandbox: true},
+		{name: "declined falls back", status: "declined", wantDevice: riderDevice, wantTitle: "Your car can't take this ride", wantSandbox: true},
+		{name: "arrived reaches the rider", status: "arrived", wantDevice: riderDevice, wantTitle: "Your car is here — your turn to start", wantSandbox: true},
+		{name: "enroute reaches the OWNER", status: "enroute", wantDevice: ownerDevice, wantTitle: "Your rider started the ride", wantSandbox: false},
 		{name: "requested is silent", status: "requested"},
-		{name: "enroute is silent", status: "enroute"},
 		{name: "completed is silent", status: "completed"},
 		{name: "cancelled is silent", status: "cancelled"},
 	}
@@ -233,25 +246,79 @@ func TestNotifierStatusChangedNotifiesRider(t *testing.T) {
 			n.Wait()
 
 			sent := sender.Sent()
-			if !tt.wantSent {
+			if tt.wantDevice == "" {
 				if len(sent) != 0 {
 					t.Fatalf("sent %d notifications for %q, want silence", len(sent), tt.status)
 				}
 				return
 			}
 			if len(sent) != 1 {
-				t.Fatalf("sent %d notifications, want 1", len(sent))
+				t.Fatalf("sent %d notifications, want exactly 1", len(sent))
 			}
-			if sent[0].DeviceToken != riderDevice {
-				t.Errorf("device = %q, want the RIDER's device", sent[0].DeviceToken)
+			if sent[0].DeviceToken != tt.wantDevice {
+				t.Errorf("device = %q, want %q", sent[0].DeviceToken, tt.wantDevice)
 			}
-			if !sent[0].Sandbox {
-				t.Error("sandbox = false, want the device row's flag to reach the sender")
+			if sent[0].Sandbox != tt.wantSandbox {
+				t.Errorf("sandbox = %v, want %v — the device row's flag must reach the sender", sent[0].Sandbox, tt.wantSandbox)
 			}
 			if sent[0].Title != tt.wantTitle {
 				t.Errorf("title = %q, want %q", sent[0].Title, tt.wantTitle)
 			}
 		})
+	}
+}
+
+// TestNotifierEnrouteNamesTheRider is the MYR-462 copy path: when the event
+// carries the rider's resolved display name the owner's banner uses it, and
+// only the FIRST name, per the payload policy in copy.go.
+func TestNotifierEnrouteNamesTheRider(t *testing.T) {
+	sender := NewFakeSender()
+	n := newTestNotifier(t, sender, &fakeVehicleNamer{name: "Blue Whale"})
+
+	name := "Aarthi Sivasankar"
+	n.handleStatusChanged(events.NewEvent(events.RideStatusChangedEvent{
+		RideRequestID: testRideID,
+		VehicleID:     testVehicleID,
+		RiderID:       testRiderID,
+		OwnerID:       testOwnerID,
+		Status:        "enroute",
+		RequesterName: &name,
+	}))
+	n.Wait()
+
+	sent := sender.Sent()
+	if len(sent) != 1 {
+		t.Fatalf("sent %d notifications, want 1", len(sent))
+	}
+	if sent[0].DeviceToken != ownerDevice {
+		t.Errorf("device = %q, want the OWNER's device", sent[0].DeviceToken)
+	}
+	if got, want := sent[0].Title, "Aarthi started the ride"; got != want {
+		t.Errorf("title = %q, want %q", got, want)
+	}
+	if strings.Contains(sent[0].Title, "Sivasankar") {
+		t.Errorf("title = %q leaks the surname — copy is first-name-only", sent[0].Title)
+	}
+}
+
+// TestNotifierEnrouteSilentWhenOwnerIsTheRider guards the self-ride case, which
+// on this platform is the common one: an owner riding their own car must not be
+// told they started a ride they are sitting in and started themselves.
+func TestNotifierEnrouteSilentWhenOwnerIsTheRider(t *testing.T) {
+	sender := NewFakeSender()
+	n := newTestNotifier(t, sender, &fakeVehicleNamer{name: "Blue Whale"})
+
+	n.handleStatusChanged(events.NewEvent(events.RideStatusChangedEvent{
+		RideRequestID: testRideID,
+		VehicleID:     testVehicleID,
+		RiderID:       testOwnerID, // one person, both roles
+		OwnerID:       testOwnerID,
+		Status:        "enroute",
+	}))
+	n.Wait()
+
+	if sent := sender.Sent(); len(sent) != 0 {
+		t.Fatalf("sent %d notifications to a self-rider, want silence (titles: %v)", len(sent), sent)
 	}
 }
 

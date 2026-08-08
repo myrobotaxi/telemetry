@@ -101,6 +101,94 @@ func TestLiveActivityRepo_RegisterRefusesAnExpiredReservation(t *testing.T) {
 	}
 }
 
+// TestLiveActivityRepo_RegisterAllowsARescuedExpiredReservation is MYR-461, and
+// it is the counterweight to the test above in exactly the way
+// RegisterAllowsOrdinaryDispatchFailures is the counterweight to the guard as a
+// whole.
+//
+// `reservation_expired` is a verdict on the DISPATCH — the car did not drive
+// itself to the pickup inside the lateness ceiling — and the sweeper leaves the
+// ride at `accepted` because nobody declined and nobody cancelled. The humans
+// can still rescue that ride by hand, and in external beta they did: the owner
+// tapped Picked up, the rider tapped Start ride, and the trip ran for another
+// hour. The unscoped guard answered 409 to every registration for the whole of
+// it, so the rider's lock screen stayed dark through a ride that was visibly
+// happening — the card appeared once at request time, the expiry prompt-ended
+// it, and nothing could ever bring it back.
+//
+// Once the ride advances past `accepted` the expiry verdict has been falsified
+// by events, and registration must be allowed again.
+func TestLiveActivityRepo_RegisterAllowsARescuedExpiredReservation(t *testing.T) {
+	for _, status := range []string{"arrived", "enroute"} {
+		t.Run(status, func(t *testing.T) {
+			ride := "cride0025r" + status[:1]
+			repo := setupLiveActivities(t, ride)
+			ctx := context.Background()
+
+			// The ride's whole history: registered, expired, ended by the
+			// reservation seam — and then rescued by hand.
+			if err := repo.RegisterActivity(ctx, ride, "rider-1", "token-a", false); err != nil {
+				t.Fatalf("RegisterActivity: %v", err)
+			}
+			expireReservation(t, ride)
+			if _, err := repo.EndActivitiesForRide(ctx, ride); err != nil {
+				t.Fatalf("EndActivitiesForRide: %v", err)
+			}
+
+			// While it is still nothing but an expired reservation, the refusal
+			// stands — that is MYR-172 and it must survive this fix.
+			if err := repo.RegisterActivity(ctx, ride, "rider-1", "token-early", false); !errors.Is(err, store.ErrLiveActivityRideClosed) {
+				t.Fatalf("RegisterActivity on an unrescued expired reservation = %v, want ErrLiveActivityRideClosed", err)
+			}
+
+			// The humans drive it anyway.
+			setRideStatus(t, ride, status)
+
+			if err := repo.RegisterActivity(ctx, ride, "rider-1", "token-rescued", false); err != nil {
+				t.Fatalf("RegisterActivity on a %s ride whose reservation expired: %v — "+
+					"the rider is in the car and the lock screen is locked out", status, err)
+			}
+
+			live, err := repo.ActivitiesForRide(ctx, ride)
+			if err != nil {
+				t.Fatalf("ActivitiesForRide: %v", err)
+			}
+			if len(live) != 1 || live[0].ActivityPushToken != "token-rescued" {
+				t.Fatalf("live rows = %+v, want one row holding the rescued token", live)
+			}
+
+			// The re-seed path is exactly what this fix makes newly reachable,
+			// so pin it. Registering on a TOMBSTONED row re-seeds the phase mark
+			// from the ride's status, and it must land on the rung the status
+			// names — `arrived` is 4, `enroute` is 5. Too low and the next push
+			// would re-announce a phase the app has just drawn locally,
+			// expanding an island over a card the rider is already looking at.
+			wantPhase := map[string]int16{"arrived": 4, "enroute": 5}[status]
+			if live[0].AlertedPhase != wantPhase {
+				t.Errorf("alerted_phase = %d after rescuing at %s, want %d",
+					live[0].AlertedPhase, status, wantPhase)
+			}
+
+			// And the ticker has to pick it back up, or the card is registered
+			// and still never updated — the starvation this issue was filed for.
+			legs, err := repo.ListActiveLegActivities(ctx, 50)
+			if err != nil {
+				t.Fatalf("ListActiveLegActivities: %v", err)
+			}
+			var seen bool
+			for _, leg := range legs {
+				if leg.RideRequestID == ride {
+					seen = true
+				}
+			}
+			if !seen {
+				t.Errorf("the ETA ticker does not see the rescued %s ride; the Activity would "+
+					"be registered and never refreshed", status)
+			}
+		})
+	}
+}
+
 // TestLiveActivityRepo_RegisterRefusesTerminalRides closes the race the handler
 // check cannot: the handler reads the status, then writes, and a POST arriving
 // mid-transition passes the read and lands after the terminal tombstone.

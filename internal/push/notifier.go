@@ -253,35 +253,79 @@ func (n *Notifier) handleCreated(evt events.Event) {
 	})
 }
 
-// handleStatusChanged notifies the RIDER about the transitions they care
-// about. Transitions that are the rider's own doing send nothing.
+// handleStatusChanged notifies the two parties to a ride about the transitions
+// each of them cares about. Transitions that are the recipient's own doing send
+// them nothing.
+//
+// The two audiences are resolved independently, because they answer to
+// different copy functions: the rider hears about `accepted`, `declined` and
+// `arrived` (statusAlert), the owner hears about `enroute` (ownerStatusAlert,
+// MYR-462). Those sets are DISJOINT, so at most one branch below runs on any
+// given event and no transition wakes both phones — which is also why the two
+// fan-outs can sit sequentially in one worker without sharing a timeout budget
+// in practice. They are still written as two independent branches rather than
+// an if/else, so that a future transition either party cares about is a copy
+// change here and not a restructuring.
 func (n *Notifier) handleStatusChanged(evt events.Event) {
 	ev, ok := evt.Payload.(events.RideStatusChangedEvent)
 	if !ok {
 		n.logUnexpectedPayload(evt)
 		return
 	}
-	// Cheap check before spending a worker slot: most transitions are silent.
-	// Which transitions speak does not depend on scheduling, so the probe can
-	// pass either value.
+	// Cheap checks before spending a worker slot: most transitions are silent
+	// for both parties. Which transitions speak does not depend on scheduling
+	// or on either name, so the probes can pass empty values.
 	scheduled := ev.ScheduledFor != nil
-	if _, notify := statusAlert(ev.Status, "", scheduled); !notify {
+	_, notifyRider := statusAlert(ev.Status, "", scheduled)
+	_, notifyOwner := ownerStatusAlert(ev.Status, nil)
+
+	// An owner riding their own car is both parties, and this platform makes
+	// that the COMMON case, not an edge one. "You started the ride" delivered
+	// to the person whose thumb just left the button is pure noise, so the
+	// owner-side push is suppressed whenever the two ids are the same person.
+	// The rider-side sends are unaffected: they report the OWNER's actions
+	// (accept, decline, arrive), which a self-rider still performs in the
+	// other role and may well be looking away from.
+	if ev.OwnerID == ev.RiderID {
+		notifyOwner = false
+	}
+	if !notifyRider && !notifyOwner {
 		return
 	}
+
 	n.async(func(ctx context.Context) {
-		a, _ := statusAlert(ev.Status, n.vehicleName(ctx, ev.VehicleID), scheduled)
-		n.fanOut(ctx, delivery{
-			userID:   ev.RiderID,
-			rideID:   ev.RideRequestID,
-			topic:    string(evt.Topic),
-			category: CategoryRideLifecycle,
-			// MYR-413 — the ONLY site that sets this. The rider is the party
-			// whose island expands, and a ride status is the only input the
-			// ladder is driven by; see notifier_activity_gate.go for why the
-			// owner's created push and the reservation's due push are not
-			// gated even though one of their statuses is on the ladder.
-			islandAlerts: carriesIslandAlert(ev.Status),
-		}, a)
+		if notifyRider {
+			a, _ := statusAlert(ev.Status, n.vehicleName(ctx, ev.VehicleID), scheduled)
+			n.fanOut(ctx, delivery{
+				userID:   ev.RiderID,
+				rideID:   ev.RideRequestID,
+				topic:    string(evt.Topic),
+				category: CategoryRideLifecycle,
+				// MYR-413 — the ONLY site that sets this. The rider is the
+				// party whose island expands, and a ride status is the only
+				// input the ladder is driven by; see notifier_activity_gate.go
+				// for why the owner's created push and the reservation's due
+				// push are not gated even though one of their statuses is on
+				// the ladder.
+				islandAlerts: carriesIslandAlert(ev.Status),
+			}, a)
+		}
+		if notifyOwner {
+			a, _ := ownerStatusAlert(ev.Status, ev.RequesterName)
+			n.fanOut(ctx, delivery{
+				userID:   ev.OwnerID,
+				rideID:   ev.RideRequestID,
+				topic:    string(evt.Topic),
+				category: CategoryRideLifecycle,
+				// islandAlerts stays FALSE, and not by oversight: the MYR-413
+				// gate suppresses a banner only when the recipient's own Live
+				// Activity is about to announce the same news, and the
+				// registration is keyed (ride, user) with only the rider
+				// registered today. An owner has no card to defer to, so
+				// marking this suppressible could only ever delete the
+				// notification rather than defer to a better one.
+			}, a)
+		}
 	})
 }
 
