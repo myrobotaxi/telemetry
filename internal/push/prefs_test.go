@@ -156,8 +156,11 @@ func TestPrefs_UnknownCategoryFailsOpen(t *testing.T) {
 // gate — a test that called fanOut with a hand-written delivery would pass even
 // if a handler forgot to name its category at all.
 func TestNotifier_RideLifecyclePrefOffSendsNothing(t *testing.T) {
-	// The recipient differs per topic: `ride.request.created` wakes the OWNER,
-	// the other two wake the RIDER. The gate must read the RECIPIENT's row.
+	// The recipient differs per topic AND, on `ride.status.changed`, per
+	// STATUS: `ride.request.created` wakes the OWNER, `ride.due` wakes the
+	// RIDER, and a status change wakes whichever party the transition is news
+	// to — the rider for accepted/declined/arrived, the owner for `enroute`
+	// (MYR-462). The gate must read the RECIPIENT's row in every one of them.
 	cases := []struct {
 		name      string
 		recipient string
@@ -182,6 +185,11 @@ func TestNotifier_RideLifecyclePrefOffSendsNothing(t *testing.T) {
 			name:      "ride.status.changed arrived (rider)",
 			recipient: testRiderID,
 			deliver:   func(n *Notifier) { n.handleStatusChanged(statusEvent("arrived")) },
+		},
+		{
+			name:      "ride.status.changed enroute (owner)",
+			recipient: testOwnerID,
+			deliver:   func(n *Notifier) { n.handleStatusChanged(statusEvent("enroute")) },
 		},
 		{
 			name:      "ride.due (rider)",
@@ -343,6 +351,31 @@ func TestNotifier_GateReadsTheRecipientNotTheOtherParty(t *testing.T) {
 		if got := sender.Sent(); len(got) != 1 {
 			t.Errorf("sent %d to the OWNER whose own switch is ON, want 1 — the RIDER's "+
 				"preference is silencing the owner's notification", len(got))
+		}
+	})
+
+	// The MYR-462 mirror. `enroute` is the first status transition whose
+	// recipient is the OWNER, so it is the one place a gate that assumed
+	// "status change ⇒ read the rider's row" would now silence the wrong
+	// person — and it would do so on the ride's most consequential push.
+	t.Run("rider silenced, owner on → enroute still sends to the owner", func(t *testing.T) {
+		prefs := newFakePrefStore()
+		riderOff := DefaultPrefs()
+		riderOff.RideLifecycle = false
+		prefs.byUser[testOwnerID] = DefaultPrefs()
+		prefs.byUser[testRiderID] = riderOff
+
+		n, sender := notifierWithPrefs(t, prefs)
+		n.handleStatusChanged(statusEvent("enroute"))
+		n.Wait()
+
+		got := sender.Sent()
+		if len(got) != 1 {
+			t.Fatalf("sent %d to the OWNER whose own switch is ON, want 1 — the RIDER's "+
+				"preference is silencing the owner's start-of-ride notification", len(got))
+		}
+		if got[0].DeviceToken != ownerDevice {
+			t.Errorf("device = %q, want the OWNER's device", got[0].DeviceToken)
 		}
 	})
 }
