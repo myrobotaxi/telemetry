@@ -51,6 +51,14 @@ func (h *AccountDeletionHandler) run(ctx context.Context, userID string) (accoun
 	// that is the exact failure this step was added to prevent.
 	scope, err := h.deps.Data.ResolveDeletionScope(ctx, userID)
 	if err != nil {
+		// A dedicated, greppable event. A refusal here means a person cannot
+		// delete their own account until an operator repairs the convergence
+		// graph, which is a privacy-commitment failure and must page someone
+		// rather than hide inside the generic 500 the caller sees.
+		h.logger.Error("account_deletion_scope_unresolved",
+			slog.String("event", "account_deletion_scope_unresolved"),
+			slog.String("caller_id", userID),
+			slog.String("error", err.Error()))
 		return accountDeletionResult{}, &accountDeletionError{step: "resolve_identity_scope", cause: err}
 	}
 	if scope.Converged() {

@@ -167,8 +167,11 @@ SELECT id FROM closure LIMIT $2`
 // is filed under — the id that IS the account. It returns no rows for an
 // account whose binding is already gone (a re-run), where the caller stands for
 // itself.
+// ORDER BY keeps the answer deterministic: without it the row order is
+// whatever the plan emits, and the audit row's target could differ between two
+// runs over the same data.
 const queryConvergenceCanonical = `
-SELECT DISTINCT user_id FROM go_identity_apple WHERE user_id = ANY($1)`
+SELECT DISTINCT user_id FROM go_identity_apple WHERE user_id = ANY($1) ORDER BY user_id`
 
 // queryDeleteConvergenceEdges removes the account's convergence edges. They are
 // pure identity plumbing: once the ids they connect are gone, an edge is a
@@ -201,14 +204,15 @@ DELETE FROM go_users WHERE id = ANY($1)`
 // name — all providers, not just Tesla.
 //
 // This is deliberately EXPLICIT rather than left to the Prisma
-// "User"→"Account" ON DELETE CASCADE. Two reasons. First, the cascade is
-// defined in the Next.js app's schema, in another repository, and a deletion
-// guarantee about live fleet-control credentials should not be enforced only by
-// a constraint this repo neither owns nor tests. Second, the cascade cannot fire
-// for a row whose "User" is already gone: the Tesla grant is otherwise removed
-// only by the LAST-vehicle arm of store.OwnerTeardown, so an owner who is linked
-// but holds zero Vehicle rows — exactly the MYR-448 cohort — had nothing at all
-// delete their tokens.
+// "User"→"Account" ON DELETE CASCADE, which does exist and does work. The
+// cascade is defined in the Next.js app's schema, in ANOTHER REPOSITORY, and a
+// deletion guarantee about live fleet-control credentials should not be
+// enforced only by a constraint this server neither owns, migrates, nor tests —
+// a schema change there would silently turn our promise off, and the failure
+// would be invisible until someone audited a database dump.
+//
+// It is redundant today and that is the point: the statement makes the
+// guarantee local and testable.
 //
 // It runs inside the identity transaction, long after the best-effort revoke at
 // Tesla (MYR-366) has had its turn with the refresh token.

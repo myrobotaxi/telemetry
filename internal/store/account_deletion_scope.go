@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -150,9 +151,10 @@ func convergenceClosure(ctx context.Context, q rowQuerier, callerID string) ([]s
 			callerID, len(ids), maxDeletionScopeIDs)
 	}
 	if len(ids) == 0 {
-		// The recursive term always yields the seed, so this is unreachable in
-		// practice. Treat it as "the caller stands for itself" rather than
-		// hand back an empty scope a caller could misread as "delete nothing".
+		// The ANCHOR term always yields the seed, so an empty result means the
+		// walk itself misbehaved. Fall back to "the caller stands for itself"
+		// rather than hand back an empty scope a caller could misread as
+		// "delete nothing".
 		ids = []string{callerID}
 	}
 	return ids, nil
@@ -160,6 +162,12 @@ func convergenceClosure(ctx context.Context, q rowQuerier, callerID string) ([]s
 
 // canonicalIDForScope picks the member of the closure that holds the Apple
 // binding — the id the account is actually filed under.
+//
+// Two live binding owners inside one closure is an even stronger "I cannot tell
+// whose account this is" signal than closure SIZE, and it gets the same answer:
+// refuse. Picking one and deleting them all is the failure the cap exists to
+// prevent, at a smaller number. The one benign multi-owner case is the caller's
+// own id being among them, where the caller is authoritative.
 func canonicalIDForScope(ctx context.Context, q rowQuerier, callerID string, ids []string) (string, error) {
 	rows, err := q.Query(ctx, queryConvergenceCanonical, ids)
 	if err != nil {
@@ -167,55 +175,80 @@ func canonicalIDForScope(ctx context.Context, q rowQuerier, callerID string, ids
 	}
 	defer rows.Close()
 
-	canonical := ""
+	var owners []string
 	for rows.Next() {
 		var owner string
 		if err := rows.Scan(&owner); err != nil {
 			return "", fmt.Errorf("store.ResolveDeletionScope(user=%s): scan binding owner: %w", callerID, err)
 		}
-		// One person's bindings should all sit under a single id. If they do
-		// not, prefer the caller's own — the audit row should name the id the
-		// person actually authenticated with.
-		if canonical == "" || owner == callerID {
-			canonical = owner
-		}
+		owners = append(owners, owner)
 	}
 	if err := rows.Err(); err != nil {
 		return "", fmt.Errorf("store.ResolveDeletionScope(user=%s): iterate binding owners: %w", callerID, err)
 	}
-	if canonical == "" {
-		canonical = callerID
+
+	switch {
+	case len(owners) == 0:
+		// No binding anywhere: an un-converged account, or a re-run after the
+		// binding is already gone. The caller stands for itself.
+		return callerID, nil
+	case containsID(owners, callerID):
+		return callerID, nil
+	case len(owners) == 1:
+		return owners[0], nil
+	default:
+		return "", fmt.Errorf(
+			"store.ResolveDeletionScope(user=%s): closure holds bindings under %d different ids and none is the caller; refusing to guess which account this is",
+			callerID, len(owners))
 	}
-	return canonical, nil
 }
 
-// unionScopeWithin re-walks the closure inside an open transaction and merges
-// anything new into the scope resolved at step 0.
+// ErrScopeChanged reports that the identity closure moved between step 0 and
+// the identity transaction. It is RETRYABLE: the endpoint re-runs the whole
+// sequence from step 0, which is the only way the newly-appeared ids get their
+// data steps as well as their identity rows.
+var ErrScopeChanged = errors.New("deletion scope changed mid-sequence")
+
+// revalidateScopeWithin re-walks the closure inside the open transaction and
+// insists it still matches the scope the sequence actually ran on.
 //
-// Step 0 runs before ten other steps, on a different connection and a different
-// snapshot. A Tesla link committing a convergence in that window would leave the
-// sequence keyed on a stale set — the MYR-452 failure re-expressed as a race.
-// Re-walking under the identity transaction closes it. The merge only ever ADDS
-// ids, so a closure that has since shrunk still deletes everything the sequence
-// set out to delete.
-func unionScopeWithin(ctx context.Context, tx pgx.Tx, scope DeletionScope) (DeletionScope, error) {
+// Step 0 resolves the scope before ten other steps, on a different connection
+// and a different snapshot. A Tesla link committing a convergence in that window
+// would leave this transaction keyed on a stale set — the MYR-452 failure
+// re-expressed as a race.
+//
+// Merging the newcomer in HERE would be worse than useless: steps 1-9 have
+// already run and will not run again, so the new id would have its identity
+// rows deleted while its push devices, saved places, share grants and refresh
+// tokens stayed — and nothing cascades, because no table carries an FK to
+// go_users (CG-DL-9). That is exactly the orphaned-ciphertext residue step 8
+// exists to prevent. So a grown closure aborts the transaction instead, and the
+// re-run picks up every id from the top.
+//
+// A SHRUNK closure is not an error: the sequence set out to delete those ids and
+// still should.
+func revalidateScopeWithin(ctx context.Context, tx pgx.Tx, scope DeletionScope) (DeletionScope, error) {
 	fresh, err := convergenceClosure(ctx, tx, scope.CallerID)
 	if err != nil {
 		return DeletionScope{}, err
 	}
-	merged := scope
 	for _, id := range fresh {
-		if !containsID(merged.IDs, id) {
-			merged.IDs = append(merged.IDs, id)
+		if !containsID(scope.IDs, id) {
+			return DeletionScope{}, fmt.Errorf(
+				"store.DeleteIdentity(user=%s): %w (id %s appeared after the sequence began); retry",
+				scope.CanonicalID, ErrScopeChanged, id)
 		}
 	}
-	if len(merged.IDs) > maxDeletionScopeIDs {
-		return DeletionScope{}, fmt.Errorf(
-			"store.DeleteIdentity(user=%s): closure grew to %d ids, past the %d-id cap; refusing to delete",
-			scope.CanonicalID, len(merged.IDs), maxDeletionScopeIDs)
+
+	// The binding may have MOVED within an unchanged closure, which changes
+	// which id is canonical and therefore which id the audit row names.
+	canonical, err := canonicalIDForScope(ctx, tx, scope.CallerID, scope.IDs)
+	if err != nil {
+		return DeletionScope{}, err
 	}
-	merged.IDs = orderScopeIDs(merged.CanonicalID, merged.IDs)
-	return merged, nil
+	scope.CanonicalID = canonical
+	scope.IDs = orderScopeIDs(canonical, scope.IDs)
+	return scope, nil
 }
 
 // containsID is a linear membership test. The closure is capped at

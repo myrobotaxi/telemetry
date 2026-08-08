@@ -58,8 +58,14 @@ type AccountIdentityResult struct {
 // miss the account entirely while still reporting success.
 func (a *AccountDeleter) DeleteIdentity(ctx context.Context, scope DeletionScope, counts AccountDeletionCounts) (AccountIdentityResult, error) {
 	userID := strings.TrimSpace(scope.CanonicalID)
-	if userID == "" || len(scope.IDs) == 0 {
-		return AccountIdentityResult{}, fmt.Errorf("store.DeleteIdentity: empty deletion scope")
+	if userID == "" || strings.TrimSpace(scope.CallerID) == "" || len(scope.IDs) == 0 {
+		return AccountIdentityResult{}, fmt.Errorf("store.DeleteIdentity: incomplete deletion scope")
+	}
+	// A canonical id outside its own closure would delete an id the sequence
+	// never ran a single data step against.
+	if !containsID(scope.IDs, userID) {
+		return AccountIdentityResult{}, fmt.Errorf(
+			"store.DeleteIdentity(user=%s): canonical id is not a member of its own scope %v", userID, scope.IDs)
 	}
 
 	tx, err := a.pool.Begin(ctx)
@@ -72,10 +78,11 @@ func (a *AccountDeleter) DeleteIdentity(ctx context.Context, scope DeletionScope
 	// in was resolved at step 0, before ten other steps ran and on another
 	// snapshot; a link that converged in that window would otherwise leave this
 	// transaction deleting the wrong id and reporting success.
-	scope, err = unionScopeWithin(ctx, tx, scope)
+	scope, err = revalidateScopeWithin(ctx, tx, scope)
 	if err != nil {
 		return AccountIdentityResult{}, err
 	}
+	userID = scope.CanonicalID
 
 	prismaUser, goUser, appleIdentity, err := probeAccountIdentity(ctx, tx, scope)
 	if err != nil {
