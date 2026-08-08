@@ -161,13 +161,22 @@ func runFleetConfigPush(ctx context.Context, args []string) error {
 		return err
 	}
 
-	return writeJSON(os.Stdout, fleetPushOutput{
+	if err := writeJSON(os.Stdout, fleetPushOutput{
 		VIN:             *vin,
 		UserID:          *userID,
 		Refreshed:       refreshed,
 		UpdatedVehicles: resp.Response.UpdatedVehicles,
 		SkippedVehicles: resp.Response.SkippedVehicles,
-	})
+	}); err != nil {
+		return err
+	}
+
+	// A skip is Tesla saying "200, and I did nothing" — most often because the
+	// owner has not paired the virtual key. Reporting that as success is the
+	// MYR-448 bug in CLI form: an operator runs the command, sees no error, and
+	// believes the car is configured. Exit non-zero so scripts and humans both
+	// notice. The JSON above is still written first so the reason is visible.
+	return telemetry.SkipErrorFor(resp, *vin)
 }
 
 // verifyVINOwnership fails fast if the VIN is not registered to the given

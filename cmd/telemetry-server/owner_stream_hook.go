@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -188,8 +189,25 @@ func (h *ownerStreamHook) provisionVehicle(ctx context.Context, userID, accessTo
 		return true // malformed VIN — nothing safe to push against
 	}
 	if err := h.pusher.PushForVIN(ctx, accessToken, vin); err != nil {
-		h.logger.Warn("owner stream setup: fleet-config push failed (owner still linked; retriable)",
-			slog.String("user_id", userID), slog.String("error", err.Error()))
+		// The EXPECTED outcome at link time: the owner cannot have paired the
+		// virtual key yet, because pairing is a later, Tesla-app-side step. This
+		// is not a fault and needs no operator attention — the MYR-448
+		// reconciler re-pushes once pairing lands. Logged so the state is
+		// visible rather than silent.
+		var skipped *telemetry.SkippedVehicleError
+		if errors.As(err, &skipped) && skipped.AwaitingVirtualKey() {
+			h.logger.Info("owner stream setup: config not applied, awaiting virtual-key pairing (reconciler will re-push)",
+				slog.String("event", "fleet_config_awaiting_virtual_key"),
+				slog.String("user_id", userID),
+				slog.String("vin", redactVIN(vin)),
+				slog.String("reason", skipped.Reason))
+			return true
+		}
+		h.logger.Warn("owner stream setup: fleet-config push failed (owner still linked; reconciler will retry)",
+			slog.String("event", "fleet_config_push_failed"),
+			slog.String("user_id", userID),
+			slog.String("vin", redactVIN(vin)),
+			slog.String("error", err.Error()))
 	}
 	return true
 }
@@ -232,6 +250,15 @@ func (p *realFleetPusher) PushForVIN(ctx context.Context, token, vin string) err
 			Exp:        &expTime,
 		},
 	}
-	_, err := p.client.PushTelemetryConfig(ctx, token, req)
-	return err
+	result, err := p.client.PushTelemetryConfig(ctx, token, req)
+	if err != nil {
+		return err
+	}
+	// A 200 from Tesla does NOT mean the config was applied (MYR-448). An
+	// unpaired car comes back as `skipped_vehicles: {vin: "missing_key"}` with
+	// updated_vehicles: 0. Before this check that was recorded as success, so
+	// the single automatic push in the whole system silently no-op'd for every
+	// new owner — the config push necessarily runs during the OAuth callback,
+	// which is always BEFORE the owner pairs the virtual key.
+	return telemetry.SkipErrorFor(result, vin)
 }

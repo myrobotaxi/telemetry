@@ -673,6 +673,16 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	}
 	defer ridePoller.Stop()
 
+	// --- Fleet-config reconciliation (MYR-448) ---
+	// The one automatic fleet-config push happens in the Tesla OAuth callback,
+	// which is always BEFORE the owner pairs the virtual key — so Tesla skips
+	// it (200 + skipped_vehicles) and the car never streams. This sweeps for
+	// provisioned-but-quiet cars, asks Tesla whether each one actually has a
+	// config, and re-pushes the ones that do not, healing every already-linked
+	// owner with no ops action. Off unless the signing proxy and telemetry
+	// endpoint are configured.
+	setupFleetConfigReconciler(ctx, cfg, vehicleRepo, accountRepo, logger)
+
 	// --- HTTP server + route registration ---
 	srv := server.New(cfg.Server(), logger, db, reg, cfg.TeslaPublicKey())
 	originPatterns := resolveWSOriginPatterns(cfg.WebSocket().AllowedOrigins, *devMode, logger)
