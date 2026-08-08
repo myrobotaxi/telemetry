@@ -23,6 +23,22 @@ type FleetConfigCandidate struct {
 	// has already had; 0 for a car never attempted. Drives the backoff the
 	// caller computes when recording the next attempt.
 	AttemptCount int
+	// LastOutcome is the label recorded by the previous attempt (''
+	// for a car never attempted). MYR-489 needs it to tell a FIRST
+	// synced-but-quiet observation from a REPEAT one — only the repeat earns
+	// an escalation.
+	LastOutcome string
+	// LastAttemptAt is when that previous attempt ran; zero when never
+	// attempted.
+	LastAttemptAt time.Time
+	// SignedCommandAt is when a signed vehicle command was last successfully
+	// APPLIED to this car — proof the virtual key is paired and the car was
+	// reachable then. Zero when never observed. Opens the pairing epoch.
+	SignedCommandAt time.Time
+	// ForcedRepushAt is when the reconciler last performed a forced
+	// (delete-then-create) config re-push. Zero when never. Compared against
+	// SignedCommandAt to ration escalations to one per epoch.
+	ForcedRepushAt time.Time
 }
 
 // queryFleetConfigCandidates lists owned vehicles that have gone quiet and are
@@ -58,9 +74,15 @@ type FleetConfigCandidate struct {
 //
 // A READ of the Prisma-owned "Vehicle" and "Account" tables; the
 // data-lifecycle.md §1.4 carve-outs constrain WRITES only.
+// The MYR-489 columns (last_outcome, last_attempt_at, signed_command_at,
+// forced_repush_at) come from the SAME left-joined row the backoff already
+// reads, so the escalation decision costs no extra query — and, because it is
+// one row, cannot be inconsistent with the attempt_count it is judged against.
 const queryFleetConfigCandidates = `
 SELECT v."id", v."vin", v."userId", v."lastUpdated",
-       COALESCE(fa.attempt_count, 0)
+       COALESCE(fa.attempt_count, 0),
+       COALESCE(fa.last_outcome, ''),
+       fa.last_attempt_at, fa.signed_command_at, fa.forced_repush_at
 FROM "Vehicle" v
 LEFT JOIN go_fleet_config_attempts fa ON fa.vehicle_id = v."id"
 WHERE length(v."vin") = 17
@@ -111,10 +133,20 @@ func (r *VehicleRepo) ListFleetConfigCandidates(
 	out := make([]FleetConfigCandidate, 0, limit)
 	for rows.Next() {
 		var c FleetConfigCandidate
-		if err := rows.Scan(&c.VehicleID, &c.VIN, &c.UserID, &c.LastUpdated, &c.AttemptCount); err != nil {
+		// The three schedule timestamps are NULL for a car never attempted (no
+		// joined row) and, for signed_command_at / forced_repush_at, NULL until
+		// the event they name actually happens. Scanned through pointers and
+		// left as the zero Time, which every caller reads as "never".
+		var lastAttemptAt, signedCommandAt, forcedRepushAt *time.Time
+		if err := rows.Scan(&c.VehicleID, &c.VIN, &c.UserID, &c.LastUpdated,
+			&c.AttemptCount, &c.LastOutcome,
+			&lastAttemptAt, &signedCommandAt, &forcedRepushAt); err != nil {
 			r.metrics.IncQueryError("vehicle.list_fleet_config_candidates")
 			return nil, fmt.Errorf("VehicleRepo.ListFleetConfigCandidates: scan: %w", err)
 		}
+		c.LastAttemptAt = derefTime(lastAttemptAt)
+		c.SignedCommandAt = derefTime(signedCommandAt)
+		c.ForcedRepushAt = derefTime(forcedRepushAt)
 		out = append(out, c)
 	}
 	if err := rows.Err(); err != nil {

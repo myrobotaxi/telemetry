@@ -1,0 +1,55 @@
+-- 0036_fleet_config_pairing_epoch.up.sql
+--
+-- MYR-489: give go_fleet_config_attempts a memory of the virtual-key pairing
+-- EPOCH, so the reconciler can escalate exactly once per epoch instead of
+-- either sleeping forever or re-pushing in a loop.
+--
+-- (Numbered 0036 rather than 0035: a parallel branch — feature/myr-488,
+-- go_refresh_tokens / identity convergence — is expected to claim 0035 and was
+-- not yet visible on origin when this was written. 0035 is deliberately left
+-- free for it.)
+--
+-- WHY TWO TIMESTAMPS AND NOT A BOOLEAN. MYR-448's reconciler has two proven
+-- holes, and both are really the same missing fact: nothing in the schedule
+-- records WHEN the car's state changed, only how many times we have failed.
+--
+--   * Hole 1 — a `Synced` config read makes the loop log
+--     `fleet_config_synced_not_streaming` and back off, forever. Tester Nabil's
+--     car was demonstrably AWAKE (signed commands applying) with Tesla
+--     reporting the config synced and zero receiver connections for two days.
+--     The heal is a forced re-push, and a boolean "already forced" would let it
+--     fire exactly once in the vehicle's lifetime — useless the second time an
+--     owner re-pairs.
+--   * Hole 2 — attempts made BEFORE the key existed ran attempt_count to 6,
+--     i.e. an 8-hour backoff, so the system was asleep at the precise moment
+--     the key finally paired. Nothing detected the state change.
+--
+-- signed_command_at is the state change. A SUCCESSFULLY APPLIED SIGNED vehicle
+-- command is proof — no new Tesla API required — that the virtual key is
+-- paired AND that the car was reachable at that instant. It therefore does
+-- double duty: it opens a new pairing epoch (resetting the backoff) and it is
+-- the "car has proven awake recently" evidence the escalation requires.
+--
+-- forced_repush_at is the bound. A forced re-push is delete-then-create
+-- against a real customer car, so it must be rationed: allowed only when
+-- forced_repush_at IS NULL, or when it predates signed_command_at (a NEW epoch
+-- opened since the last force). A car that is genuinely unreachable therefore
+-- gets at most one forced re-push and then falls back to ordinary exponential
+-- backoff — it cannot loop.
+--
+-- Both are NULLABLE with no default on purpose: NULL means "never observed",
+-- which is materially different from "observed at the epoch". Backfilling
+-- NOW() would hand every existing row a fake pairing epoch and an immediate
+-- escalation budget on the first pass after deploy.
+--
+-- No index. Neither column is ever a search predicate — both are read only for
+-- rows the candidate query has already selected by next_attempt_at, and
+-- written only by vehicle_id primary-key lookups.
+--
+-- CG-DL-9: go_-prefixed, Go-owned, snake_case, no FK onto a Prisma table.
+-- Classification: both are P0 server-side timestamps about our own scheduling.
+-- No VIN, no token, no coordinate, no PII. Not wire-exposed.
+
+ALTER TABLE go_fleet_config_attempts
+    ADD COLUMN IF NOT EXISTS signed_command_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS forced_repush_at  TIMESTAMPTZ;
