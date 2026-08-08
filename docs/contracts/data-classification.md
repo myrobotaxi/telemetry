@@ -605,6 +605,10 @@ No P2 fields exist in v1. When P2 fields are introduced:
 - Every read or write of a P2 column MUST emit an audit log entry containing: timestamp, actor user ID, operation (read/write), column name, and target record ID.
 - Audit log entries themselves are classified P0 (they contain only opaque IDs, not the actual P2 values).
 
+**Partial precedent (MYR-447).** No column's tier changed, but the mechanism this section describes now exists and is in use. Operator tooling that decrypts P1 columns emits a [`data-lifecycle.md`](data-lifecycle.md) §4.2 `operator_decrypt` row carrying the timestamp, the actor (`metadata.operator` — see §4.4 there on why the handle is P0, and note the actor is deliberately NOT the `userId` column, which remains the data subject), the operation (the action enum, a read), the column names (`metadata.fields`) and the target record id. A future P2 column should reuse `store.OperatorAuditor` rather than inventing a second access-log path.
+
+What MYR-447 does NOT do is extend this to the SERVER's own reads of P1 columns: the telemetry pipeline decrypts location on every broadcast, and a row per read would be a volume problem, not an audit trail. The operator audit covers *human* access through internal tooling, which is the unaccountable path the MYR-427 privacy audit actually found.
+
 ### 2.4 Role exposure — what a shared VIEWER may see (MYR-435)
 
 > **Client decision, 2026-08-02 ([MYR-435](https://linear.app/myrobotaxi/issue/MYR-435)):** *"Remove media/cabin and any vehicle controls."* Arising from the [MYR-427](https://linear.app/myrobotaxi/issue/MYR-427) privacy-policy audit.
@@ -729,6 +733,32 @@ Because three columns are NOT NULL on the Prisma schema, "scrubbed" is per-colum
 **Decrypt failures are now observable.** The at-rest read paths are deliberately fail-soft — a vehicle whose GPS ciphertext will not decrypt reports no location rather than 500ing the snapshot; a drive whose trail will not decrypt reports an empty trail. That is right for availability and dangerous for silence: a wrong `ENCRYPTION_KEY` would look exactly like "this car has never reported a position". Every such failure now increments `telemetry_store_decrypt_failures_total{column=...}` and logs at **Error**. Alert on rate > 0. The label is a column name (P2 operational metadata) and never carries a VIN, userId, or any decrypted value.
 
 **Gauge semantics unchanged but reinterpreted.** `*_plaintext_remaining_total` still counts rows whose plaintext is populated and whose ciphertext is NULL — i.e. *backfill* backlog. It reaching zero is the precondition for running the purge, not evidence the purge has run. The purge reports its own per-column `remaining` count, which is the number that must be zero for the bar above to hold.
+
+**A sentence in this section is easy to misread, so read it precisely.** The paragraph above says an operator with a database connection "could read a user's home, their route, and a credential that drives their car" — past tense, describing the hole MYR-433 closed. It is **not** a claim that operator access to plaintext no longer exists. §3.3.2 states what does.
+
+#### 3.3.2 Operator access to production data (MYR-447, 2026-08-07)
+
+MYR-433's bar was about a **database leak**: ciphertext in the dump, key outside it. That property holds. This section answers the different question a reader of the privacy page is actually asking — *can a person at this company read my data, and is it recorded?* — and the honest answer has two halves.
+
+**Yes, operator tooling can decrypt user data.** Not as a bug: the `ops` CLI exists to support production, and support requires reading. Three subcommands decrypt and expose P1 material — `ops auth token` (a user's Tesla access + refresh tokens, i.e. fleet control of their car), `ops fields snapshot` (a whole Vehicle row: coordinates, origin/destination, the geocoded labels sealed by this same issue, and the nav polyline), and `ops fleet-config push` (both, in service of a Tesla write). `ops geocode backfill` decrypts every drive trail that is missing an address, fleet-wide. Two of these are keyed on a bare user id or VIN with **no ownership check and no second factor**: possession of the key and the database URL is the whole authorization model.
+
+**Who holds the key.** `ENCRYPTION_KEY` is a Fly.io app secret (NFR-3.24), so the set of people who can decrypt is exactly the set who can reach that secret:
+
+1. **Anyone with Fly deploy or `fly ssh console` access to the telemetry app.** The seal/purge binaries are shipped *inside* the production image deliberately, so they can run against the ambient secret without exporting it.
+2. **CI.** The deploy workflow holds a `FLY_API_TOKEN` and auto-deploys on every push to `main`; a Fly API token is transitively read access to app secrets.
+3. **Any developer running the `ops` CLI**, which runs from a laptop with the key exported — the documented setup sources the sibling Next.js app's production-shaped env file.
+4. **The Next.js app's environment**, which is configured with the same key value so the two implementations interoperate.
+
+That is the truthful perimeter. It is small and it is human, and no technical control in this repo narrows it further — narrowing it is a Fly/IAM change, not a code change.
+
+**What MYR-447 adds is accountability, not restriction.** Every decrypting `ops` subcommand now writes an `operator_decrypt` audit row before the plaintext is printed or transmitted: **who** (the required `OPS_OPERATOR` handle — the command refuses to run without it, there is no default and no fallback to the OS username), **what** (the subcommand, the affected record, and the names of the fields exposed — never their values, CG-DL-5), and **when**. The write is **fail-closed**: if the audit insert fails the command aborts and prints nothing, the same posture CG-DL-3 requires of deletions. So operator access is no longer deniable, and "who read this account's data" is one indexed query.
+
+**What is still NOT covered, stated rather than omitted:**
+
+- **`GET /api/debug/fields`** streams raw decoded telemetry — including live GPS — for **every vehicle on the fleet**, authenticated by a single shared bearer secret with no user identity, no per-vehicle scope and no audit row, and it bypasses the role mask entirely because it subscribes to the raw event bus. It is **not mounted unless `DEBUG_FIELDS_TOKEN` is set**, so it does not exist on a default production deployment — but [`../ops-cli.md`](../ops-cli.md) documents setting it on production as a supported workflow. Treat enabling it as granting fleet-wide location access to the token holder. Giving it a per-operator identity and an audit row is the obvious follow-up and is not done here.
+- **The server's own reads are not audited**, by design — the telemetry pipeline decrypts location on every broadcast, and a row per read would be a volume problem rather than an audit trail (§2.3).
+- **The bulk maintenance binaries** (`purge-plaintext-columns` and the backfills) decrypt every row they scan. They emit no per-row audit entry. They expose no value — the reports are counts, and values are deliberately kept out of the logs — so the accountability gap is about the *run*, not the data; a run-scoped entry would be a reasonable addition.
+- **`ops auth link`** writes a freshly-sealed token rather than reading one, so it is not a decrypt path, but it is an operator action against a user's account and is unaudited.
 
 **Downstream doc change owed.** The `/privacy` page on myrobotaxi.app currently discloses the dual-write honestly — it says some data is stored both encrypted and in the clear. Once this is deployed and the purge has run, that storage section is no longer accurate and should be simplified to the plain claim that location data and Tesla credentials are encrypted at rest. That edit lives in the react-frontend repo and is **owned separately by Thomas**, not by this change. Do not simplify the disclosure before the purge reports zero remaining in production — until then the current wording is the true one.
 

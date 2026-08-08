@@ -440,6 +440,7 @@ CREATE INDEX "AuditLog_timestamp_idx" ON "AuditLog" ("timestamp");
 | `invite_revoked` | Sharing invite revoked | User |
 | `tokens_refreshed` | OAuth tokens rotated | System (token refresh) |
 | `mask_applied` | Role-based field mask removed at least one field from a REST response or WebSocket broadcast (sampled at 1%) | System (broadcast / handler layer); see [`rest-api.md`](rest-api.md) §5.3 |
+| `operator_decrypt` | An internal operator tool DECRYPTED user data (MYR-447). Emitted by `store.OperatorAuditor.RecordDecrypt` from the `ops` CLI, one row per invocation of a decrypting subcommand: `ops auth token` (Tesla access + refresh token), `ops fields snapshot` (the whole encrypted location/nav surface of a Vehicle row), `ops fleet-config push` (both of the above). **This is the only action in the enum that records a READ rather than a mutation** — nothing about the subject's data changed, only who saw it. `initiator` MUST be `operator`; `targetType` is `user` (targetId = the subject's cuid) when the material hangs off the account, or `vehicle` (targetId = the **Vehicle cuid, never the VIN** — §4.4 columns are P0 and a full VIN is restricted outside the owner's own snapshot per [`data-classification.md`](data-classification.md) §1.3/§2.1). `metadata` shape is exactly `{command, operator, fields, fieldCount}` — field NAMES and counts only, never a decrypted value (CG-DL-5). **Fail-closed ordering:** the row is written BEFORE the plaintext is printed or transmitted, and a failed insert aborts the command — the same posture CG-DL-3 requires of deletions | Operator (internal tooling; attributed by the required `OPS_OPERATOR` handle) |
 | `data_exported` | User-initiated portability export of every Prisma row owned by the caller (GDPR Art. 15 right of access / Art. 20 portability). Emitted by the Next.js `GET /api/users/me/export` handler ([Phase A: myrobotaxi/react-frontend#259](https://github.com/myrobotaxi/react-frontend/pull/259); MYR-75). One row per export — sampling 100% (not high-volume); retained indefinitely per NFR-3.29. `targetType` MUST be `user`, `targetId` MUST be the caller's `userId`, `initiator` MUST be `user`. `metadata` shape is exactly `{vehicleCount, driveCount, inviteCount, auditCount}` — P0 counts only per Rule CG-DL-5; never PII, GPS, addresses, or tokens. See [`rest-api.md`](rest-api.md) §7.7. | User (caller-initiated portability export per GDPR Art. 15 / Art. 20) |
 
 **`targetType` values:**
@@ -461,6 +462,7 @@ CREATE INDEX "AuditLog_timestamp_idx" ON "AuditLog" ("timestamp");
 | `user` | Action initiated by the user (via UI / API) |
 | `system_pruner` | Action initiated by the background pruning job |
 | `system_auth` | Action initiated by the system auth/token refresh flow |
+| `operator` | Action initiated by a human operator running internal tooling (MYR-447). Distinct from `user` (the data subject acting on their own data) and from the `system_*` initiators (unattended jobs). The operator is NOT the `userId` column — `userId` is the DATA SUBJECT throughout this table, which is what makes "everything that touched this person's data" one indexed lookup and what lets the row survive the subject's deletion (§4.5). The actor's handle rides in `metadata.operator` |
 
 ### 4.3 Append-only enforcement
 
@@ -509,6 +511,10 @@ Per `data-classification.md` Section 2.3: audit log entries are classified **P0*
 | `initiator` | P0 | Yes | Enum value |
 | `metadata` | P0 | Yes | Aggregate counts and opaque IDs only |
 | `createdAt` | P0 | Yes | Non-sensitive timestamp |
+
+**Operator handle (MYR-447).** `metadata.operator` on an `operator_decrypt` row carries the invoking operator's handle from the required `OPS_OPERATOR` environment variable. It is **P0**, and the write path enforces the shape that makes that true: `store.ValidateOperatorHandle` accepts `^[A-Za-z0-9][A-Za-z0-9._-]*$` up to 64 characters and therefore **rejects an email address** (no `@`). A directory handle like `jdoe` is an internal lookup key that resolves to a person only inside the company — the same character as the opaque cuids in the neighbouring columns. A work email is a routable personal identifier and is P1 by the same reasoning that makes `User.email` P1 in [`data-classification.md`](data-classification.md) §1.1; admitting one would quietly demote the whole table. Rejecting the email form at the write site, with an error that says why, is cheaper than discovering P1 in an append-only table that cannot be corrected by UPDATE or DELETE (§4.3).
+
+The same guard covers `metadata.fields`: entries must match a bare field identifier (`^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)*$`, ≤ 64 chars), which structurally excludes the value shapes CG-DL-5 forbids — a coordinate (`37.7749`) and an address (`1600 Amphitheatre Pkwy`) fail the leading-letter rule, a Tesla JWT fails the length bound. CG-DL-5 stops being a convention reviewers must remember and becomes a precondition callers cannot violate.
 
 ### 4.5 No FK to User (intentional design decision)
 
