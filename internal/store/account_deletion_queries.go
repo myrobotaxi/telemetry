@@ -120,37 +120,92 @@ WHERE user_id = $1 AND revoked = FALSE`
 // the selects that actually touch the rows. `go_identity_apple` is read as a
 // row set rather than a count for the same reason (an aggregate forbids FOR
 // UPDATE) — and correctly so, since one person may hold several bindings.
+//
+// Each probe takes the whole DeletionScope (MYR-452), not a single id: after an
+// identity convergence the caller's JWT subject and the id holding the rows are
+// different values, and a probe that saw only the subject would report
+// "already gone" over an account that is entirely intact.
 const (
 	queryLockPrismaUser = `
-SELECT 1 FROM "User" WHERE "id" = $1 FOR UPDATE`
+SELECT 1 FROM "User" WHERE "id" = ANY($1) FOR UPDATE`
 
 	queryLockGoUser = `
-SELECT 1 FROM go_users WHERE id = $1 FOR UPDATE`
+SELECT 1 FROM go_users WHERE id = ANY($1) FOR UPDATE`
 
 	queryLockAppleIdentities = `
-SELECT apple_sub FROM go_identity_apple WHERE user_id = $1 FOR UPDATE`
+SELECT apple_sub FROM go_identity_apple WHERE user_id = ANY($1) FOR UPDATE`
 )
+
+// queryConvergenceTarget reads the canonical id a pre-convergence go_users row
+// was re-pointed to (MYR-452). NULL — the overwhelmingly common case — returns
+// no row, and the caller stands for itself.
+const queryConvergenceTarget = `
+SELECT converged_to FROM go_users WHERE id = $1 AND converged_to IS NOT NULL`
+
+// queryConvergenceAliases reads the reverse direction: the abandoned ids that
+// were converged ONTO this one. Needed because a person who signed in again
+// after converging presents the canonical subject, while their alias rows — and
+// the P1 email on them — are still sitting there.
+const queryConvergenceAliases = `
+SELECT id FROM go_users WHERE converged_to = $1`
 
 // queryDeleteAppleIdentity removes every Apple sub bound to the user. Plural
 // by construction: the schema indexes user_id precisely because one person may
 // hold more than one binding.
+// It is keyed on the whole scope: the binding of a converged owner is filed
+// under the canonical id, NOT under the subject their token presents, and
+// leaving it standing is precisely what let a deleted account be recognised and
+// signed back into on the next Sign in with Apple (MYR-452).
 const queryDeleteAppleIdentity = `
-DELETE FROM go_identity_apple WHERE user_id = $1`
+DELETE FROM go_identity_apple WHERE user_id = ANY($1)`
 
-// queryDeleteGoUser removes the Apple-native user row. A legacy web user has
-// no row here (their cuid lives in "User"), so this affects zero rows for them.
+// queryDeleteGoUser removes the Apple-native user row, and — because it is
+// keyed on the whole scope — every abandoned alias row the person accumulated
+// through identity convergence. Those aliases hold the person's email and are
+// referenced by nothing; before MYR-452 they outlived the account.
+//
+// A legacy web user has no row here at all (their cuid lives in "User"), so
+// this affects zero rows for them.
 const queryDeleteGoUser = `
-DELETE FROM go_users WHERE id = $1`
+DELETE FROM go_users WHERE id = ANY($1)`
+
+// queryDeleteProviderAccounts removes every stored OAuth grant in the account's
+// name — all providers, not just Tesla.
+//
+// This is deliberately EXPLICIT rather than left to the Prisma
+// "User"→"Account" ON DELETE CASCADE. Two reasons. First, the cascade is
+// defined in the Next.js app's schema, in another repository, and a deletion
+// guarantee about live fleet-control credentials should not be enforced only by
+// a constraint this repo neither owns nor tests. Second, the cascade cannot fire
+// for a row whose "User" is already gone: the Tesla grant is otherwise removed
+// only by the LAST-vehicle arm of store.OwnerTeardown, so an owner who is linked
+// but holds zero Vehicle rows — exactly the MYR-448 cohort — had nothing at all
+// delete their tokens.
+//
+// It runs inside the identity transaction, long after the best-effort revoke at
+// Tesla (MYR-366) has had its turn with the refresh token.
+// #nosec G101 -- column/predicate SQL, not a credential (gosec greps the
+// literal 'Account' + 'token' shapes and misflags it).
+const queryDeleteProviderAccounts = `
+DELETE FROM "Account" WHERE "userId" = ANY($1)`
+
+// queryDeleteSettings removes the account's Settings row. The per-vehicle
+// teardown only RESETS the link/pairing flags (it upserts them to FALSE,
+// because the owner is still there); when the owner themselves is going, the
+// row goes.
+const queryDeleteSettings = `
+DELETE FROM "Settings" WHERE "userId" = ANY($1)`
 
 // queryDeletePrismaUser removes the sibling-schema "User" row, whose Prisma
-// cascades take Account / Settings / Invite / any residual Vehicle with it
-// (data-lifecycle.md §3.2). By the time this runs the owner's vehicles have
-// already been torn down one at a time by store.OwnerTeardown, so the cascade
-// normally has nothing left to do — it is the backstop, not the mechanism.
+// cascades take Invite / any residual Vehicle with it (data-lifecycle.md §3.2).
+// By the time this runs the owner's vehicles have already been torn down one at
+// a time by store.OwnerTeardown, so the cascade normally has nothing left to do
+// — it is the backstop, not the mechanism. Account and Settings are no longer
+// left to it at all; see the two statements above.
 //
 // Apple-native users have no row here at all and this affects zero rows.
 const queryDeletePrismaUser = `
-DELETE FROM "User" WHERE "id" = $1`
+DELETE FROM "User" WHERE "id" = ANY($1)`
 
 // queryCountUserDrives counts the drives still attached to the user's cars, for
 // the audit metadata. Read BEFORE the destructive steps by the handler; zero by
