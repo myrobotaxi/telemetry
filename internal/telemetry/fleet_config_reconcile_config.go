@@ -37,6 +37,30 @@ const (
 	// never pairs would otherwise cost a signed POST every interval forever;
 	// twelve hours still reaches them the same day they finally pair.
 	defaultFleetConfigMaxBackoff = 12 * time.Hour
+	// defaultFleetConfigAwaitingKeyMaxBackoff is a TIGHTER cap that applies
+	// only while Tesla is answering `missing_key` (MYR-489).
+	//
+	// The general 12h cap is right for "this car cannot be fixed": read
+	// failures, dead tokens, unknown skips. Awaiting-key is the opposite — it
+	// is the EXPECTED state of an owner who is mid-setup, the one state we most
+	// want to exit promptly, and the one where MYR-448's backoff did active
+	// harm: attempts made before the key existed pushed Nabil to an 8-hour gap
+	// that began exactly when he paired. The applied-command signal now resets
+	// that instantly, but only for an owner who sends a command; this bounds
+	// the silent owner's worst case to two hours instead of twelve, at a cost
+	// of at most 12 signed POSTs per unpaired car per day.
+	defaultFleetConfigAwaitingKeyMaxBackoff = 2 * time.Hour
+	// defaultFleetConfigSyncedQuietGrace is how long a car must remain silent
+	// AFTER a synced config read before the forced re-push is allowed. It sits
+	// at one Interval so, at default settings, the gate is "we saw synced, we
+	// waited a full cycle, it is still silent".
+	defaultFleetConfigSyncedQuietGrace = 15 * time.Minute
+	// defaultFleetConfigAwakeWindow is how recently a signed command must have
+	// applied for that alone to count as proof the car is alive. Beyond it the
+	// escalation pays for a GetVehicle read instead of trusting a stale stamp.
+	// A day is generous because the claim being made is only "this is a live
+	// car in active onboarding", not "it is awake this second".
+	defaultFleetConfigAwakeWindow = 24 * time.Hour
 )
 
 // FleetConfigReconcileConfig tunes the reconciler.
@@ -51,6 +75,31 @@ type FleetConfigReconcileConfig struct {
 	CallTimeout time.Duration
 	// MaxBackoff caps the exponential gap between attempts on one vehicle.
 	MaxBackoff time.Duration
+	// AwaitingKeyMaxBackoff caps it more tightly while Tesla reports the
+	// virtual key missing — the state an owner is actively working to leave.
+	AwaitingKeyMaxBackoff time.Duration
+	// SyncedQuietGrace is how long a synced-but-silent car must stay silent
+	// before the forced re-push escalation is permitted.
+	SyncedQuietGrace time.Duration
+	// AwakeWindow is how recently a signed command must have applied for that
+	// stamp alone to prove the car is alive.
+	AwakeWindow time.Duration
+}
+
+// backoffForOutcome is backoffFor with the MYR-489 awaiting-key override.
+//
+// Every other outcome keeps the MYR-448 curve exactly. Awaiting-key gets its
+// own, lower ceiling because it is a state the owner is actively trying to
+// leave, and being asleep in it is the failure this issue exists to fix.
+func (c FleetConfigReconcileConfig) backoffForOutcome(attemptCount int, outcome string) time.Duration {
+	d := c.backoffFor(attemptCount)
+	if outcome != outcomeAwaitingKey {
+		return d
+	}
+	if capped := c.withDefaults().AwaitingKeyMaxBackoff; d > capped {
+		return capped
+	}
+	return d
 }
 
 // backoffFor returns how long to wait before the next attempt on a vehicle
@@ -99,6 +148,24 @@ func (c FleetConfigReconcileConfig) withDefaults() FleetConfigReconcileConfig {
 		// A cap below the base would make the backoff shrink the retry gap.
 		c.MaxBackoff = c.Interval
 	}
+	if c.AwaitingKeyMaxBackoff <= 0 {
+		c.AwaitingKeyMaxBackoff = defaultFleetConfigAwaitingKeyMaxBackoff
+	}
+	if c.AwaitingKeyMaxBackoff < c.Interval {
+		c.AwaitingKeyMaxBackoff = c.Interval
+	}
+	if c.AwaitingKeyMaxBackoff > c.MaxBackoff {
+		// The awaiting-key ceiling only ever tightens the general one; a
+		// configuration that inverts them would silently retry an unpairable
+		// car MORE often than a dead one.
+		c.AwaitingKeyMaxBackoff = c.MaxBackoff
+	}
+	if c.SyncedQuietGrace <= 0 {
+		c.SyncedQuietGrace = defaultFleetConfigSyncedQuietGrace
+	}
+	if c.AwakeWindow <= 0 {
+		c.AwakeWindow = defaultFleetConfigAwakeWindow
+	}
 	return c
 }
 
@@ -113,9 +180,20 @@ func (c FleetConfigReconcileConfig) withDefaults() FleetConfigReconcileConfig {
 const startupDelay = 30 * time.Second
 
 // RunReconcileLoop runs a pass shortly after start and then every Interval,
-// until ctx is cancelled.
+// until ctx is cancelled. It ALSO drains the MYR-489 pairing inbox.
 //
 // A pass error is logged and the loop continues: the next tick is the retry.
+//
+// ONE GOROUTINE, ON PURPOSE. Ticks and pairing signals share this single
+// select, so a signed command applied WHILE a pass is running cannot race it:
+// the VIN waits in the buffered inbox and is handled the moment the pass
+// returns, reading the schedule row that pass has already written. Handling
+// signals on their own goroutine would have two writers on one vehicle's
+// schedule and could interleave a backoff reset with the very attempt that was
+// about to supersede it.
+//
+// The startup window is covered too — signals that arrive during startupDelay
+// or the first pass are buffered, not dropped.
 func (r *FleetConfigReconciler) RunReconcileLoop(ctx context.Context) {
 	select {
 	case <-ctx.Done():
@@ -133,6 +211,8 @@ func (r *FleetConfigReconciler) RunReconcileLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			r.runPass(ctx)
+		case vin := <-r.pairing:
+			r.handlePairingSignal(ctx, vin)
 		}
 	}
 }
