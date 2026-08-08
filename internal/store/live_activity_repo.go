@@ -101,6 +101,30 @@ type LiveActivityKey struct {
 // that is still genuinely happening (the owner can drive it manually), and its
 // Activity must keep rotating tokens.
 //
+// THE EXPIRED-RESERVATION REFUSAL IS SCOPED TO `accepted` (MYR-461), and that
+// third conjunct is the whole fix. `reservation_expired` is a verdict on the
+// DISPATCH — the car never drove itself to the pickup inside the lateness
+// ceiling — and the sweeper deliberately leaves the ride row at `accepted`
+// because nobody declined and nobody cancelled. Refusing registration on that
+// verdict alone conflated "the car never went by itself" with "the ride is
+// over", and the two come apart exactly when the humans rescue the ride by
+// hand: the owner taps Picked up, the rider taps Start ride, the owner taps
+// Dropped off. That ride runs for another hour with a rider on board, and the
+// unscoped guard locked its Live Activity out for good — every re-registration
+// answered 409 while the trip was visibly happening. Prod evidence: ride
+// c8b316c8… on 2026-08-03 expired at scheduledFor+30m, then went
+// arrived → enroute → completed over the following 99 minutes with the rider's
+// card dark the entire time.
+//
+// The ride's own status is the authority on whether a ride is over, and the
+// first conjunct already enforces it. So the expiry refusal now only holds
+// while the reservation is STILL nothing but an expired reservation. The
+// moment the ride advances to `arrived` or `enroute` the expiry verdict has
+// been falsified by events — the car is demonstrably at the kerb — and the
+// Activity is allowed back. A reservation nobody rescued stays refused, which
+// is the MYR-172 intent: no fresh card counting down to a pickup that will
+// never come.
+//
 // A FRESH REGISTRATION IS SEEDED AT THE RIDE'S CURRENT PHASE, not at zero
 // (MYR-398, migration 0029). The app starts the Activity locally and draws the
 // current state itself, so the island has just been in front of the rider —
@@ -148,7 +172,8 @@ FROM go_ride_requests r
 WHERE r.id = $2
   AND r.status NOT IN ('completed', 'declined', 'cancelled')
   AND NOT (COALESCE(r.dispatch_status, '') = 'failed'
-           AND COALESCE(r.dispatch_error, '') = 'reservation_expired')
+           AND COALESCE(r.dispatch_error, '') = 'reservation_expired'
+           AND r.status = 'accepted')
 ON CONFLICT (ride_request_id, user_id) DO UPDATE
 SET activity_push_token = EXCLUDED.activity_push_token,
     sandbox             = EXCLUDED.sandbox,
@@ -273,8 +298,9 @@ type VehicleActivityRide struct {
 }
 
 // ErrLiveActivityRideClosed is returned by RegisterActivity when the SQL guard
-// refuses the write: the ride has reached a terminal status, or its reservation
-// expired, and its Live Activity has been ended for good.
+// refuses the write: the ride has reached a terminal status, or it is an
+// unrescued expired reservation (still `accepted`, MYR-461), and its Live
+// Activity has been ended for good.
 //
 // Deliberately does NOT wrap sdk.ErrNotFound. The ride exists — the caller was
 // proven to be its rider before we got here — it is simply past the point where
