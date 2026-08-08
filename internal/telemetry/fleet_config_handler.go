@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -156,7 +157,15 @@ func (h *FleetConfigHandler) pushForVIN(ctx context.Context, w http.ResponseWrit
 		slog.Int("skipped", len(result.Response.SkippedVehicles)),
 	)
 
-	if reason, skipped := result.Response.SkippedVehicles[vin]; skipped {
+	// Shared with the link hook and the reconciler so all three agree on what
+	// "applied" means — including Tesla's case-shifted keys and the
+	// updated_vehicles: 0 backstop (MYR-448).
+	if skipErr := SkipErrorFor(result, vin); skipErr != nil {
+		var skipped *SkippedVehicleError
+		reason := "unknown"
+		if errors.As(skipErr, &skipped) {
+			reason = skipped.Reason
+		}
 		h.writeError(w, http.StatusConflict, wserrors.ErrCodeInvalidRequest, fmt.Sprintf("vehicle skipped: %s", reason))
 		return
 	}

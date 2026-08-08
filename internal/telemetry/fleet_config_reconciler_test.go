@@ -20,11 +20,36 @@ type fakeCandidateLister struct {
 }
 
 func (f *fakeCandidateLister) ListFleetConfigCandidates(
-	_ context.Context, cutoff time.Time, limit int,
+	_ context.Context, cutoff, _ time.Time, limit int,
 ) ([]FleetConfigCandidate, error) {
 	f.gotCutoff = cutoff
 	f.gotLimit = limit
 	return f.rows, f.err
+}
+
+// recordedAttempt is one call to RecordFleetConfigAttempt.
+type recordedAttempt struct {
+	vehicleID string
+	next      time.Time
+	outcome   string
+}
+
+type fakeAttemptRecorder struct {
+	recorded []recordedAttempt
+	cleared  []string
+	recErr   error
+}
+
+func (f *fakeAttemptRecorder) RecordFleetConfigAttempt(
+	_ context.Context, vehicleID string, _, nextAttemptAt time.Time, outcome string,
+) error {
+	f.recorded = append(f.recorded, recordedAttempt{vehicleID: vehicleID, next: nextAttemptAt, outcome: outcome})
+	return f.recErr
+}
+
+func (f *fakeAttemptRecorder) ClearFleetConfigAttempts(_ context.Context, vehicleID string) error {
+	f.cleared = append(f.cleared, vehicleID)
+	return nil
 }
 
 type fakeConfigReader struct {
@@ -71,9 +96,20 @@ func newTestReconciler(
 	writer *fakeConfigWriter,
 	tokens *fakeReconTokenResolver,
 ) *FleetConfigReconciler {
+	return newTestReconcilerWithAttempts(lister, reader, writer, tokens, &fakeAttemptRecorder{})
+}
+
+func newTestReconcilerWithAttempts(
+	lister *fakeCandidateLister,
+	reader *fakeConfigReader,
+	writer *fakeConfigWriter,
+	tokens *fakeReconTokenResolver,
+	attempts *fakeAttemptRecorder,
+) *FleetConfigReconciler {
 	return NewFleetConfigReconciler(
 		FleetConfigReconcilerDeps{
 			Candidates: lister,
+			Attempts:   attempts,
 			Reader:     reader,
 			Writer:     writer,
 			Tokens:     tokens,
@@ -171,10 +207,6 @@ func TestReconcileOutcomes(t *testing.T) {
 			check: func(t *testing.T, out ReconcileOutcome) {
 				if out.AlreadySynced != 1 {
 					t.Errorf("AlreadySynced = %d, want 1", out.AlreadySynced)
-				}
-				// Synced yet quiet is a DIFFERENT fault and must be surfaced.
-				if out.SyncedNotStream != 1 {
-					t.Errorf("SyncedNotStream = %d, want 1", out.SyncedNotStream)
 				}
 			},
 		},
@@ -406,4 +438,185 @@ func TestReconcileStopsOnContextCancel(t *testing.T) {
 	if out.Examined != 0 {
 		t.Errorf("Examined = %d, want 0 on an already-cancelled context", out.Examined)
 	}
+}
+
+// --- MYR-448 adversarial-review regressions ---------------------------------
+
+// C1: ordering by "Vehicle"."lastUpdated" would let unfixable cars occupy the
+// per-pass limit forever, because nothing the reconciler does moves that
+// column. Every non-repair outcome must therefore push the vehicle's own
+// schedule forward, or the next pass returns the identical rows.
+func TestEveryNonRepairOutcomeReschedules(t *testing.T) {
+	tests := []struct {
+		name        string
+		reader      *fakeConfigReader
+		writer      *fakeConfigWriter
+		tokens      *fakeReconTokenResolver
+		wantOutcome string
+	}{
+		{
+			name:        "awaiting virtual key",
+			reader:      &fakeConfigReader{synced: false},
+			writer:      skipWriter(SkipReasonMissingKey),
+			tokens:      okToken(),
+			wantOutcome: outcomeAwaitingKey,
+		},
+		{
+			name:        "unrecognised skip",
+			reader:      &fakeConfigReader{synced: false},
+			writer:      skipWriter("unsupported_hardware"),
+			tokens:      okToken(),
+			wantOutcome: outcomeSkippedOther,
+		},
+		{
+			name:        "config read failed",
+			reader:      &fakeConfigReader{err: errors.New("boom")},
+			writer:      &fakeConfigWriter{},
+			tokens:      okToken(),
+			wantOutcome: outcomeReadFailed,
+		},
+		{
+			name:        "push failed",
+			reader:      &fakeConfigReader{synced: false},
+			writer:      &fakeConfigWriter{err: errors.New("boom")},
+			tokens:      okToken(),
+			wantOutcome: outcomePushFailed,
+		},
+		{
+			name:        "token unusable",
+			reader:      &fakeConfigReader{},
+			writer:      &fakeConfigWriter{},
+			tokens:      &fakeReconTokenResolver{err: ErrTeslaTokenExpired},
+			wantOutcome: outcomeTokenFailed,
+		},
+		{
+			name:        "synced but quiet",
+			reader:      &fakeConfigReader{synced: true},
+			writer:      &fakeConfigWriter{},
+			tokens:      okToken(),
+			wantOutcome: outcomeSyncedQuiet,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			attempts := &fakeAttemptRecorder{}
+			r := newTestReconcilerWithAttempts(
+				&fakeCandidateLister{rows: oneCandidate()}, tc.reader, tc.writer, tc.tokens, attempts)
+
+			if _, err := r.Reconcile(context.Background()); err != nil {
+				t.Fatalf("Reconcile() error = %v", err)
+			}
+
+			if len(attempts.recorded) != 1 {
+				t.Fatalf("recorded %d attempts, want 1 — an un-rescheduled vehicle "+
+					"stays permanently due and starves the rest of the fleet", len(attempts.recorded))
+			}
+			got := attempts.recorded[0]
+			if got.vehicleID != "veh-1" {
+				t.Errorf("rescheduled %q, want veh-1", got.vehicleID)
+			}
+			if got.outcome != tc.wantOutcome {
+				t.Errorf("outcome = %q, want %q", got.outcome, tc.wantOutcome)
+			}
+			if !got.next.After(time.Now()) {
+				t.Errorf("next attempt %v is not in the future — that is a hot loop", got.next)
+			}
+			if len(attempts.cleared) != 0 {
+				t.Errorf("cleared %v on a non-repair outcome", attempts.cleared)
+			}
+		})
+	}
+}
+
+// A repair drops the schedule row: the car should stream now, and if it ever
+// goes quiet again it deserves a fresh count rather than an inherited backoff.
+func TestRepairClearsTheSchedule(t *testing.T) {
+	attempts := &fakeAttemptRecorder{}
+	writer := &fakeConfigWriter{result: &FleetConfigResponse{
+		Response: FleetConfigResult{UpdatedVehicles: 1},
+	}}
+	r := newTestReconcilerWithAttempts(
+		&fakeCandidateLister{rows: oneCandidate()},
+		&fakeConfigReader{synced: false}, writer, okToken(), attempts)
+
+	if _, err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if len(attempts.cleared) != 1 || attempts.cleared[0] != "veh-1" {
+		t.Errorf("cleared = %v, want [veh-1]", attempts.cleared)
+	}
+	if len(attempts.recorded) != 0 {
+		t.Errorf("recorded %v on a successful repair", attempts.recorded)
+	}
+}
+
+// H1: a car that can never be fixed must cost progressively less, or an
+// unpaired owner is ~96 signed POSTs a day against Tesla forever.
+func TestBackoffGrowsAndIsCapped(t *testing.T) {
+	cfg := FleetConfigReconcileConfig{}.withDefaults()
+
+	if got := cfg.backoffFor(0); got != cfg.Interval {
+		t.Errorf("backoffFor(0) = %v, want the base interval %v", got, cfg.Interval)
+	}
+	if got := cfg.backoffFor(1); got != 2*cfg.Interval {
+		t.Errorf("backoffFor(1) = %v, want %v", got, 2*cfg.Interval)
+	}
+
+	prev := cfg.backoffFor(0)
+	for n := 1; n <= 8; n++ {
+		got := cfg.backoffFor(n)
+		if got < prev {
+			t.Errorf("backoffFor(%d) = %v shrank from %v", n, got, prev)
+		}
+		if got > cfg.MaxBackoff {
+			t.Errorf("backoffFor(%d) = %v exceeds the cap %v", n, got, cfg.MaxBackoff)
+		}
+		prev = got
+	}
+
+	// A count read back from the DB must never overflow the shift into a zero
+	// or negative delay, which would mean "retry immediately, forever".
+	for _, n := range []int{31, 32, 63, 64, 1 << 20} {
+		got := cfg.backoffFor(n)
+		if got != cfg.MaxBackoff {
+			t.Errorf("backoffFor(%d) = %v, want the cap %v", n, got, cfg.MaxBackoff)
+		}
+	}
+}
+
+// M4: a pass cut short must not log identically to a complete one.
+func TestTruncatedPassIsFlagged(t *testing.T) {
+	lister := &fakeCandidateLister{rows: []FleetConfigCandidate{
+		{VehicleID: "veh-1", VIN: reconTestVIN, UserID: "user-1"},
+	}}
+	r := newTestReconciler(lister, &fakeConfigReader{synced: true}, &fakeConfigWriter{}, okToken())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	out, err := r.Reconcile(ctx)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if !out.Truncated {
+		t.Error("Truncated = false on a cancelled pass; an operator cannot tell it did nothing")
+	}
+
+	full, err := r.Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if full.Truncated {
+		t.Error("Truncated = true on a pass that examined every candidate")
+	}
+}
+
+func skipWriter(reason string) *fakeConfigWriter {
+	return &fakeConfigWriter{result: &FleetConfigResponse{
+		Response: FleetConfigResult{
+			UpdatedVehicles: 0,
+			SkippedVehicles: map[string]string{reconTestVIN: reason},
+		},
+	}}
 }

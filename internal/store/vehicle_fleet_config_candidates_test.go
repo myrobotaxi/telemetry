@@ -61,7 +61,7 @@ func TestVehicleRepo_ListFleetConfigCandidates(t *testing.T) {
 	cutoff := time.Now().Add(-30 * time.Minute)
 
 	t.Run("names quiet cars and nothing else", func(t *testing.T) {
-		rows, err := repo.ListFleetConfigCandidates(ctx, cutoff, 100)
+		rows, err := repo.ListFleetConfigCandidates(ctx, cutoff, time.Now(), 100)
 		if err != nil {
 			t.Fatalf("ListFleetConfigCandidates: %v", err)
 		}
@@ -87,7 +87,7 @@ func TestVehicleRepo_ListFleetConfigCandidates(t *testing.T) {
 	})
 
 	t.Run("carries the fields the reconciler needs", func(t *testing.T) {
-		rows, err := repo.ListFleetConfigCandidates(ctx, cutoff, 100)
+		rows, err := repo.ListFleetConfigCandidates(ctx, cutoff, time.Now(), 100)
 		if err != nil {
 			t.Fatalf("ListFleetConfigCandidates: %v", err)
 		}
@@ -102,7 +102,7 @@ func TestVehicleRepo_ListFleetConfigCandidates(t *testing.T) {
 	})
 
 	t.Run("longest-quiet car sorts first so it is never starved", func(t *testing.T) {
-		rows, err := repo.ListFleetConfigCandidates(ctx, cutoff, 1)
+		rows, err := repo.ListFleetConfigCandidates(ctx, cutoff, time.Now(), 1)
 		if err != nil {
 			t.Fatalf("ListFleetConfigCandidates: %v", err)
 		}
@@ -119,7 +119,7 @@ func TestVehicleRepo_ListFleetConfigCandidates(t *testing.T) {
 
 	t.Run("non-positive limit refuses to scan", func(t *testing.T) {
 		for _, limit := range []int{0, -1} {
-			rows, err := repo.ListFleetConfigCandidates(ctx, cutoff, limit)
+			rows, err := repo.ListFleetConfigCandidates(ctx, cutoff, time.Now(), limit)
 			if err != nil {
 				t.Fatalf("ListFleetConfigCandidates(limit=%d): %v", limit, err)
 			}
@@ -128,6 +128,177 @@ func TestVehicleRepo_ListFleetConfigCandidates(t *testing.T) {
 			}
 		}
 	})
+}
+
+// H3: "Vehicle"."teslaVehicleId" is NULLABLE, and a NULL makes the tombstone
+// equality NULL, which makes NOT EXISTS true and ADMITS the row. A guard that
+// opens when its join key is missing is inverted — and the consequence is
+// pushing config to a car its owner deliberately removed.
+func TestFleetConfigCandidates_TombstoneMatchesOnVINWhenTeslaIDIsNull(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping store integration test")
+	}
+	mustApplyGoMigrations(t)
+	mustApplyOwnerSchema(t)
+	cleanTables(t, testPool)
+	cleanFleetCandidateTables(t)
+
+	ctx := context.Background()
+	const owner = "user_tomb_null"
+	seedFCCAccount(t, "acct_tomb_null", owner, "tesla-sub-tomb")
+
+	quiet := time.Now().Add(-3 * time.Hour)
+	const vin = "7SAYGDED5TA736164"
+
+	// The Prisma-side sync can recreate a Vehicle row with no teslaVehicleId;
+	// it knows nothing about go_removed_vehicles (CG-DL-9).
+	_, err := testPool.Exec(ctx,
+		`INSERT INTO "Vehicle" ("id", "userId", "vin", "teslaVehicleId", "name", "status", "lastUpdated")
+		 VALUES ('veh_tomb_null', $1, $2, NULL, 'Tesla', 'offline', $3)`,
+		owner, vin, quiet)
+	if err != nil {
+		t.Fatalf("seed vehicle: %v", err)
+	}
+	// Tombstone recorded under the id the car had when it was removed.
+	seedFCCTombstone(t, owner, "tv_gone", vin)
+
+	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+	rows, err := repo.ListFleetConfigCandidates(ctx, time.Now().Add(-30*time.Minute), time.Now(), 100)
+	if err != nil {
+		t.Fatalf("ListFleetConfigCandidates: %v", err)
+	}
+	for _, r := range rows {
+		if r.VehicleID == "veh_tomb_null" {
+			t.Fatal("a tombstoned car with a NULL teslaVehicleId was admitted — " +
+				"the reconciler would resurrect a deliberately removed vehicle")
+		}
+	}
+}
+
+// M1: the "Account" unique index is (provider, providerAccountId), NOT
+// (userId, provider) — one user can hold several tesla rows. A plain JOIN
+// would emit the vehicle once per row, doubling the Tesla calls and eating
+// the per-pass budget.
+func TestFleetConfigCandidates_DuplicateTeslaAccountsDoNotFanOut(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping store integration test")
+	}
+	mustApplyGoMigrations(t)
+	mustApplyOwnerSchema(t)
+	cleanTables(t, testPool)
+	cleanFleetCandidateTables(t)
+
+	ctx := context.Background()
+	const owner = "user_dupe"
+	seedFCCAccount(t, "acct_dupe_1", owner, "tesla-sub-a")
+	seedFCCAccount(t, "acct_dupe_2", owner, "tesla-sub-b")
+
+	seedFleetCandidateVehicle(t, "veh_dupe", owner, "7SAYGDED5TA736164", "tv_dupe",
+		time.Now().Add(-3*time.Hour))
+
+	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+	rows, err := repo.ListFleetConfigCandidates(ctx, time.Now().Add(-30*time.Minute), time.Now(), 100)
+	if err != nil {
+		t.Fatalf("ListFleetConfigCandidates: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("len = %d, want 1 — two tesla Account rows must not duplicate the vehicle", len(rows))
+	}
+}
+
+// C1: the schedule is what guarantees coverage. A car that was just attempted
+// must drop out of the candidate set until its backoff elapses, otherwise the
+// same rows fill the LIMIT on every pass and later owners are never reached.
+func TestFleetConfigCandidates_RespectAttemptSchedule(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping store integration test")
+	}
+	mustApplyGoMigrations(t)
+	mustApplyOwnerSchema(t)
+	cleanTables(t, testPool)
+	cleanFleetCandidateTables(t)
+
+	ctx := context.Background()
+	const owner = "user_sched"
+	seedFCCAccount(t, "acct_sched", owner, "tesla-sub-sched")
+
+	quiet := time.Now().Add(-3 * time.Hour)
+	seedFleetCandidateVehicle(t, "veh_a", owner, "7SAYGDED5TA736164", "tv_a", quiet)
+	seedFleetCandidateVehicle(t, "veh_b", owner, "5YJ3E1EA1NF000001", "tv_b", quiet)
+
+	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+	cutoff := time.Now().Add(-30 * time.Minute)
+
+	rows, err := repo.ListFleetConfigCandidates(ctx, cutoff, time.Now(), 100)
+	if err != nil {
+		t.Fatalf("ListFleetConfigCandidates: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("len = %d, want 2 before any attempt", len(rows))
+	}
+	for _, r := range rows {
+		if r.AttemptCount != 0 {
+			t.Errorf("%s: AttemptCount = %d, want 0 for a never-attempted car", r.VehicleID, r.AttemptCount)
+		}
+	}
+
+	now := time.Now()
+	if err := repo.RecordFleetConfigAttempt(ctx, "veh_a", now, now.Add(time.Hour), "awaiting_virtual_key"); err != nil {
+		t.Fatalf("RecordFleetConfigAttempt: %v", err)
+	}
+
+	rows, err = repo.ListFleetConfigCandidates(ctx, cutoff, time.Now(), 100)
+	if err != nil {
+		t.Fatalf("ListFleetConfigCandidates: %v", err)
+	}
+	if len(rows) != 1 || rows[0].VehicleID != "veh_b" {
+		t.Fatalf("got %v, want only veh_b — veh_a is backed off until next_attempt_at", candidateIDs(rows))
+	}
+
+	// Once the backoff elapses the car is due again, carrying its count so the
+	// next gap is longer.
+	past := time.Now().Add(-time.Minute)
+	if err := repo.RecordFleetConfigAttempt(ctx, "veh_a", past, past, "awaiting_virtual_key"); err != nil {
+		t.Fatalf("RecordFleetConfigAttempt: %v", err)
+	}
+	rows, err = repo.ListFleetConfigCandidates(ctx, cutoff, time.Now(), 100)
+	if err != nil {
+		t.Fatalf("ListFleetConfigCandidates: %v", err)
+	}
+	var vehA *store.FleetConfigCandidate
+	for i := range rows {
+		if rows[i].VehicleID == "veh_a" {
+			vehA = &rows[i]
+		}
+	}
+	if vehA == nil {
+		t.Fatalf("veh_a should be due again, got %v", candidateIDs(rows))
+	}
+	if vehA.AttemptCount != 2 {
+		t.Errorf("AttemptCount = %d, want 2 — the count must accumulate to drive backoff", vehA.AttemptCount)
+	}
+
+	// A successful push clears the schedule entirely.
+	if err := repo.ClearFleetConfigAttempts(ctx, "veh_a"); err != nil {
+		t.Fatalf("ClearFleetConfigAttempts: %v", err)
+	}
+	rows, err = repo.ListFleetConfigCandidates(ctx, cutoff, time.Now(), 100)
+	if err != nil {
+		t.Fatalf("ListFleetConfigCandidates: %v", err)
+	}
+	for _, r := range rows {
+		if r.VehicleID == "veh_a" && r.AttemptCount != 0 {
+			t.Errorf("AttemptCount = %d after clear, want 0", r.AttemptCount)
+		}
+	}
+}
+
+func candidateIDs(rows []store.FleetConfigCandidate) []string {
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.VehicleID)
+	}
+	return out
 }
 
 func keysOf(m map[string]store.FleetConfigCandidate) []string {

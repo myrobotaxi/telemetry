@@ -16,10 +16,16 @@
 // event hook because there is no event to hang it on: pairing happens inside
 // Tesla's app and our server is never told.
 //
-// SHAPE. Sync pass at boot, then a slow loop — the wiring_ride_position_poll
-// idiom. Each pass asks Tesla for the authoritative per-VIN config state and
-// re-pushes only what is genuinely unconfigured, so a healthy fleet costs one
-// cheap read per stale car and zero writes.
+// SHAPE. A slow background loop. Each pass asks Tesla for the authoritative
+// per-VIN config state and re-pushes only what is genuinely unconfigured, so a
+// healthy fleet costs one cheap read per quiet car and zero writes.
+//
+// SCHEDULING LIVES IN OUR OWN TABLE, not in "Vehicle"."lastUpdated" — see
+// migration 0030. Ordering candidates by a column the reconciler cannot change
+// means every car it fails to fix sorts first forever and permanently occupies
+// the per-pass limit. go_fleet_config_attempts both guarantees coverage and
+// carries the exponential backoff that keeps an unpairable car from costing a
+// signed POST every 15 minutes for the rest of time.
 //
 // SAFETY. The reconciler performs a state-changing call against a real car, so
 // cmd/ constructs it ONLY when the tesla-http-proxy and telemetry endpoint are
@@ -36,6 +42,18 @@ import (
 	"time"
 )
 
+// Attempt outcome labels persisted to go_fleet_config_attempts.last_outcome.
+// Internal, never wire-exposed, and deliberately NOT a raw Tesla body — those
+// can echo a full VIN.
+const (
+	outcomeAwaitingKey  = "awaiting_virtual_key"
+	outcomeSkippedOther = "skipped_other"
+	outcomeReadFailed   = "read_failed"
+	outcomePushFailed   = "push_failed"
+	outcomeTokenFailed  = "token_failed"
+	outcomeSyncedQuiet  = "synced_not_streaming"
+)
+
 // FleetConfigCandidate is one vehicle that may be missing its telemetry
 // config. Declared here rather than imported so internal/telemetry stays
 // decoupled from internal/store (the ride-poller precedent); cmd/ adapts the
@@ -44,14 +62,23 @@ type FleetConfigCandidate struct {
 	VehicleID   string
 	VIN         string
 	UserID      string
-	LastUpdated time.Time // zero == never written
+	LastUpdated time.Time
+	// AttemptCount is the number of consecutive unsuccessful attempts already
+	// made against this vehicle, and is what the backoff is computed from.
+	AttemptCount int
 }
 
-// FleetConfigCandidateLister is the reconciler's view of "which cars look
-// like they are not streaming". Satisfied by *store.VehicleRepo via a cmd/
-// adapter.
+// FleetConfigCandidateLister is the reconciler's view of "which cars look like
+// they are not streaming and are due another try". Satisfied by
+// *store.VehicleRepo via a cmd/ adapter.
 type FleetConfigCandidateLister interface {
-	ListFleetConfigCandidates(ctx context.Context, cutoff time.Time, limit int) ([]FleetConfigCandidate, error)
+	ListFleetConfigCandidates(ctx context.Context, cutoff, now time.Time, limit int) ([]FleetConfigCandidate, error)
+}
+
+// FleetConfigAttemptRecorder persists the per-vehicle retry schedule.
+type FleetConfigAttemptRecorder interface {
+	RecordFleetConfigAttempt(ctx context.Context, vehicleID string, attemptedAt, nextAttemptAt time.Time, outcome string) error
+	ClearFleetConfigAttempts(ctx context.Context, vehicleID string) error
 }
 
 // fleetTelemetryConfigReader reads a VIN's current config state. This is an
@@ -70,8 +97,10 @@ type fleetTelemetryConfigWriter interface {
 // FleetConfigReconcilerDeps bundles the collaborators so the struct stays
 // under the no-God-struct bar and cmd/ names each one at the call site.
 type FleetConfigReconcilerDeps struct {
-	// Candidates is the DB view of cars that have gone quiet.
+	// Candidates is the DB view of cars that have gone quiet and are due.
 	Candidates FleetConfigCandidateLister
+	// Attempts persists the retry schedule and backoff.
+	Attempts FleetConfigAttemptRecorder
 	// Reader reads authoritative config state from the direct Fleet API.
 	Reader fleetTelemetryConfigReader
 	// Writer pushes the config through the signing proxy.
@@ -114,28 +143,33 @@ func NewFleetConfigReconciler(
 // ReconcileOutcome counts what one pass did, for the completion log line and
 // for tests to assert against.
 type ReconcileOutcome struct {
-	Examined        int
-	AlreadySynced   int
-	Repaired        int
-	AwaitingKey     int
-	SkippedOther    int
-	TokenFailures   int
-	ReadFailures    int
-	PushFailures    int
-	SyncedNotStream int
+	Examined      int
+	AlreadySynced int
+	Repaired      int
+	AwaitingKey   int
+	SkippedOther  int
+	TokenFailures int
+	ReadFailures  int
+	PushFailures  int
+	// Truncated is set when the pass ended early (shutdown or an expired
+	// budget) rather than after examining every candidate — without it a pass
+	// that did almost nothing logs identically to a complete one.
+	Truncated bool
 }
 
-// Reconcile runs ONE pass: list quiet cars, ask Tesla what each one's config
-// state actually is, and re-push the config for those that have none.
+// Reconcile runs ONE pass: list quiet, due cars, ask Tesla what each one's
+// config state actually is, and re-push the config for those that have none.
 //
 // A LIST failure returns the error and changes nothing — a DB blip must never
-// read as "no cars need healing". Every PER-CAR failure is logged and the pass
-// continues, so one owner's expired token cannot stall the whole fleet.
+// read as "no cars need healing". Every PER-CAR failure is logged, scheduled
+// for a backed-off retry, and the pass continues, so one owner's expired token
+// cannot stall the whole fleet.
 func (r *FleetConfigReconciler) Reconcile(ctx context.Context) (ReconcileOutcome, error) {
 	var out ReconcileOutcome
 
-	cutoff := r.now().Add(-r.cfg.Staleness)
-	candidates, err := r.deps.Candidates.ListFleetConfigCandidates(ctx, cutoff, r.cfg.MaxPerPass)
+	now := r.now()
+	cutoff := now.Add(-r.cfg.Staleness)
+	candidates, err := r.deps.Candidates.ListFleetConfigCandidates(ctx, cutoff, now, r.cfg.MaxPerPass)
 	if err != nil {
 		return out, fmt.Errorf("FleetConfigReconciler.Reconcile: list candidates: %w", err)
 	}
@@ -154,6 +188,8 @@ func (r *FleetConfigReconciler) Reconcile(ctx context.Context) (ReconcileOutcome
 		// an error being swallowed.
 		select {
 		case <-ctx.Done():
+			out.Truncated = true
+			r.logPassComplete(out)
 			return out, nil
 		default:
 		}
@@ -161,22 +197,26 @@ func (r *FleetConfigReconciler) Reconcile(ctx context.Context) (ReconcileOutcome
 		r.reconcileOne(ctx, c, &out)
 	}
 
+	r.logPassComplete(out)
+	return out, nil
+}
+
+func (r *FleetConfigReconciler) logPassComplete(out ReconcileOutcome) {
 	r.logger.Info("fleet-config reconcile: pass complete",
 		slog.Int("examined", out.Examined),
 		slog.Int("already_synced", out.AlreadySynced),
 		slog.Int("repaired", out.Repaired),
 		slog.Int("awaiting_virtual_key", out.AwaitingKey),
 		slog.Int("skipped_other", out.SkippedOther),
-		slog.Int("synced_but_not_streaming", out.SyncedNotStream),
 		slog.Int("token_failures", out.TokenFailures),
 		slog.Int("read_failures", out.ReadFailures),
-		slog.Int("push_failures", out.PushFailures))
-
-	return out, nil
+		slog.Int("push_failures", out.PushFailures),
+		slog.Bool("truncated", out.Truncated))
 }
 
 // reconcileOne heals a single candidate. It never returns an error: every
-// outcome is a counted, logged fact so a single bad car cannot abort the pass.
+// outcome is a counted, logged, rescheduled fact so a single bad car cannot
+// abort the pass.
 func (r *FleetConfigReconciler) reconcileOne(ctx context.Context, c FleetConfigCandidate, out *ReconcileOutcome) {
 	vin := redactVIN(c.VIN)
 
@@ -192,6 +232,7 @@ func (r *FleetConfigReconciler) reconcileOne(ctx context.Context, c FleetConfigC
 			slog.String("vehicle_id", c.VehicleID),
 			slog.String("vin", vin),
 			slog.Bool("token_expired", errors.Is(err, ErrTeslaTokenExpired)))
+		r.reschedule(ctx, c, outcomeTokenFailed)
 		return
 	}
 
@@ -200,10 +241,11 @@ func (r *FleetConfigReconciler) reconcileOne(ctx context.Context, c FleetConfigC
 		out.ReadFailures++
 		// Do NOT fall through to a blind push: the read is the cheap, safe
 		// call, and if it is failing the push is unlikely to fare better.
-		r.logger.Warn("fleet-config reconcile: config read failed (will retry next pass)",
+		r.logger.Warn("fleet-config reconcile: config read failed (will retry after backoff)",
 			slog.String("vehicle_id", c.VehicleID),
 			slog.String("vin", vin),
-			slog.String("error", err.Error()))
+			slog.String("error", redactedErrorText(err)))
+		r.reschedule(ctx, c, outcomeReadFailed)
 		return
 	}
 
@@ -213,33 +255,40 @@ func (r *FleetConfigReconciler) reconcileOne(ctx context.Context, c FleetConfigC
 		// different failure (asleep, or an mTLS/cert/reachability problem) and
 		// it used to be invisible. Say so out loud — this is the line that
 		// tells an operator to stop looking at fleet-config.
-		out.SyncedNotStream++
 		r.logger.Info("fleet-config reconcile: config already synced but vehicle is quiet",
 			slog.String("event", "fleet_config_synced_not_streaming"),
 			slog.String("vehicle_id", c.VehicleID),
 			slog.String("vin", vin),
 			slog.Time("last_updated", c.LastUpdated))
+		// Backed off like any other non-repair: re-reading a parked car every
+		// interval forever is exactly the waste the schedule exists to stop.
+		r.reschedule(ctx, c, outcomeSyncedQuiet)
 		return
 	}
 
-	r.push(callCtx, c, tok.AccessToken, vin, out)
+	r.push(callCtx, ctx, c, tok.AccessToken, vin, out)
 }
 
 // push sends the config for one unconfigured VIN and classifies the answer.
+//
+// callCtx bounds the Tesla call; schedCtx is the pass context used for the
+// bookkeeping write, so an attempt is still recorded when the per-vehicle
+// budget is what expired.
 func (r *FleetConfigReconciler) push(
-	ctx context.Context,
+	callCtx, schedCtx context.Context,
 	c FleetConfigCandidate,
 	accessToken, vin string,
 	out *ReconcileOutcome,
 ) {
-	result, err := r.deps.Writer.PushTelemetryConfig(ctx, accessToken, r.request(c.VIN))
+	result, err := r.deps.Writer.PushTelemetryConfig(callCtx, accessToken, r.request(c.VIN))
 	if err != nil {
 		out.PushFailures++
-		r.logger.Warn("fleet-config reconcile: push failed (will retry next pass)",
+		r.logger.Warn("fleet-config reconcile: push failed (will retry after backoff)",
 			slog.String("event", "fleet_config_push_failed"),
 			slog.String("vehicle_id", c.VehicleID),
 			slog.String("vin", vin),
-			slog.String("error", err.Error()))
+			slog.String("error", redactedErrorText(err)))
+		r.reschedule(schedCtx, c, outcomePushFailed)
 		return
 	}
 
@@ -256,6 +305,7 @@ func (r *FleetConfigReconciler) push(
 				slog.String("vehicle_id", c.VehicleID),
 				slog.String("vin", vin),
 				slog.String("reason", skipped.Reason))
+			r.reschedule(schedCtx, c, outcomeAwaitingKey)
 			return
 		}
 		out.SkippedOther++
@@ -264,6 +314,7 @@ func (r *FleetConfigReconciler) push(
 			slog.String("vehicle_id", c.VehicleID),
 			slog.String("vin", vin),
 			slog.String("error", skipErr.Error()))
+		r.reschedule(schedCtx, c, outcomeSkippedOther)
 		return
 	}
 
@@ -276,6 +327,31 @@ func (r *FleetConfigReconciler) push(
 		slog.String("vehicle_id", c.VehicleID),
 		slog.String("vin", vin),
 		slog.Int("updated_vehicles", result.Response.UpdatedVehicles))
+
+	// Success clears the schedule: the car should now stream, and if it ever
+	// goes quiet again it deserves a fresh count rather than an old backoff.
+	if err := r.deps.Attempts.ClearFleetConfigAttempts(schedCtx, c.VehicleID); err != nil {
+		r.logger.Warn("fleet-config reconcile: could not clear attempt schedule",
+			slog.String("vehicle_id", c.VehicleID),
+			slog.String("error", err.Error()))
+	}
+}
+
+// reschedule records an unsuccessful attempt and pushes the vehicle's next
+// eligibility out by the backoff for its attempt count.
+//
+// A bookkeeping failure is logged, never fatal — but it does matter: without
+// the row the car stays permanently due, so the pass would retry it at full
+// rate. That is the pre-backoff behaviour, i.e. degraded but not broken.
+func (r *FleetConfigReconciler) reschedule(ctx context.Context, c FleetConfigCandidate, outcome string) {
+	now := r.now()
+	next := now.Add(r.cfg.backoffFor(c.AttemptCount))
+	if err := r.deps.Attempts.RecordFleetConfigAttempt(ctx, c.VehicleID, now, next, outcome); err != nil {
+		r.logger.Warn("fleet-config reconcile: could not record attempt schedule (vehicle stays due)",
+			slog.String("vehicle_id", c.VehicleID),
+			slog.String("outcome", outcome),
+			slog.String("error", err.Error()))
+	}
 }
 
 // request builds the same config body the link hook, the REST handler and

@@ -20,6 +20,7 @@ package telemetry
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ErrVehicleSkipped is the sentinel behind every SkippedVehicleError, so
@@ -66,17 +67,53 @@ func (e *SkippedVehicleError) AwaitingVirtualKey() bool {
 	return e.Reason == SkipReasonMissingKey || e.Reason == SkipReasonNotPaired
 }
 
-// SkipErrorFor returns a *SkippedVehicleError when Tesla's push response
-// lists vin under skipped_vehicles, and nil when the config actually applied.
-// A nil result also yields nil — the transport error the caller already holds
-// is the better diagnosis in that case.
+// SkipReasonNotApplied is synthesised when Tesla reports that it updated no
+// vehicles but does not name ours in skipped_vehicles — see SkipErrorFor.
+const SkipReasonNotApplied = "not_applied"
+
+// SkipErrorFor returns a *SkippedVehicleError when Tesla did not apply the
+// config to vin, and nil when it did. A nil result also yields nil — the
+// transport error the caller already holds is the better diagnosis then.
+//
+// The question it answers is "did the config APPLY?", deliberately not "is my
+// exact string a key in the map". Two ways the narrower question gets it
+// wrong, both of which would silently recreate the MYR-448 bug one layer down:
+//
+//   - Key shape. Nothing in this codebase normalises VIN case, so the DB value
+//     is whatever the web sync wrote, while the map key is whatever Tesla
+//     echoes. An exact-match miss would be read as success.
+//   - A skip Tesla declines to itemise. `updated_vehicles: 0` on a single-VIN
+//     push means our car was not configured, whatever the map says.
+//
+// So the lookup is case-insensitive, and updated_vehicles == 0 is a backstop.
 func SkipErrorFor(result *FleetConfigResponse, vin string) error {
 	if result == nil {
 		return nil
 	}
-	reason, skipped := result.Response.SkippedVehicles[vin]
-	if !skipped {
-		return nil
+	if reason, skipped := lookupSkipReason(result.Response.SkippedVehicles, vin); skipped {
+		return &SkippedVehicleError{RedactedVIN: redactVIN(vin), Reason: reason}
 	}
-	return &SkippedVehicleError{RedactedVIN: redactVIN(vin), Reason: reason}
+	// Nothing was updated, so nothing was applied — including ours.
+	if result.Response.UpdatedVehicles == 0 {
+		return &SkippedVehicleError{RedactedVIN: redactVIN(vin), Reason: SkipReasonNotApplied}
+	}
+	return nil
+}
+
+// lookupSkipReason finds vin in Tesla's skipped_vehicles map, tolerating case
+// and surrounding-whitespace differences in the key.
+func lookupSkipReason(skipped map[string]string, vin string) (string, bool) {
+	if len(skipped) == 0 {
+		return "", false
+	}
+	if reason, ok := skipped[vin]; ok {
+		return reason, true
+	}
+	want := strings.ToUpper(strings.TrimSpace(vin))
+	for k, reason := range skipped {
+		if strings.ToUpper(strings.TrimSpace(k)) == want {
+			return reason, true
+		}
+	}
+	return "", false
 }

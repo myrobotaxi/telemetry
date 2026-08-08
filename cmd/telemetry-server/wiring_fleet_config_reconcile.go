@@ -22,6 +22,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -30,22 +31,23 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/telemetry"
 )
 
-// fleetConfigReconcileTimeout bounds the ONE synchronous startup pass. A
-// deploy is the moment an operator is most likely to be watching, so getting a
-// pass in early is worth a short wait — but never worth stalling the boot: a
-// pass that times out is retried by the loop within the interval.
-const fleetConfigReconcileTimeout = 60 * time.Second
-
-// setupFleetConfigReconciler builds the reconciler, runs one synchronous pass,
-// and starts the background loop.
+// setupFleetConfigReconciler builds the reconciler and starts its background
+// loop. It does NOT run a pass here.
+//
+// WHY NO SYNCHRONOUS BOOT PASS. A pass is up to MaxPerPass sequential
+// third-party HTTP round-trips. This function is called before server.New /
+// srv.Start, so anything it blocks on delays the bind of /healthz (which
+// fly.toml health-checks every 10s with a 10s grace) and — the part that
+// actually hurts — the Tesla mTLS listener on :8443, meaning real customer
+// cars get connection-refused for the whole window on every single deploy.
+// The loop takes its own first pass shortly after start instead, off the boot
+// path (see telemetry.startupDelay).
 //
 // SAFETY INVARIANT (self-serve-onboarding.md §5): this component pushes config
 // to a REAL car, so it is constructed only when both the signing proxy and the
 // telemetry endpoint are configured. Absent either, it logs and stays off —
 // the same runtime guard buildOwnerStreamHook uses to keep live pushes out of
 // dev and test processes.
-//
-// A pass failure never blocks startup.
 func setupFleetConfigReconciler(
 	ctx context.Context,
 	cfg *config.Config,
@@ -70,9 +72,11 @@ func setupFleetConfigReconciler(
 		HTTPClient: proxyHTTPClient(cfg.Proxy().URL, log),
 	}, log.With(slog.String("subcomponent", "fleet-push")))
 
+	adapter := &fleetConfigCandidateAdapter{repo: vehicleRepo}
 	reconciler := telemetry.NewFleetConfigReconciler(
 		telemetry.FleetConfigReconcilerDeps{
-			Candidates: &fleetConfigCandidateAdapter{repo: vehicleRepo},
+			Candidates: adapter,
+			Attempts:   vehicleRepo,
 			Reader:     reader,
 			Writer:     writer,
 			Tokens:     newTeslaTokenResolver(cfg, accountRepo, log),
@@ -88,19 +92,6 @@ func setupFleetConfigReconciler(
 
 	log.Info("fleet-config reconciler enabled")
 
-	passCtx, cancel := context.WithTimeout(ctx, fleetConfigReconcileTimeout)
-	out, err := reconciler.Reconcile(passCtx)
-	cancel()
-	if err != nil {
-		log.Warn("fleet-config reconcile: startup pass failed (non-fatal)",
-			slog.String("error", err.Error()))
-	} else {
-		log.Info("fleet-config reconcile: startup pass complete",
-			slog.Int("examined", out.Examined),
-			slog.Int("repaired", out.Repaired),
-			slog.Int("awaiting_virtual_key", out.AwaitingKey))
-	}
-
 	go reconciler.RunReconcileLoop(ctx)
 }
 
@@ -113,19 +104,20 @@ type fleetConfigCandidateAdapter struct {
 }
 
 func (a *fleetConfigCandidateAdapter) ListFleetConfigCandidates(
-	ctx context.Context, cutoff time.Time, limit int,
+	ctx context.Context, cutoff, now time.Time, limit int,
 ) ([]telemetry.FleetConfigCandidate, error) {
-	rows, err := a.repo.ListFleetConfigCandidates(ctx, cutoff, limit)
+	rows, err := a.repo.ListFleetConfigCandidates(ctx, cutoff, now, limit)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list fleet-config candidates: %w", err)
 	}
 	out := make([]telemetry.FleetConfigCandidate, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, telemetry.FleetConfigCandidate{
-			VehicleID:   r.VehicleID,
-			VIN:         r.VIN,
-			UserID:      r.UserID,
-			LastUpdated: r.LastUpdated,
+			VehicleID:    r.VehicleID,
+			VIN:          r.VIN,
+			UserID:       r.UserID,
+			LastUpdated:  r.LastUpdated,
+			AttemptCount: r.AttemptCount,
 		})
 	}
 	return out, nil
