@@ -116,6 +116,16 @@ type fakeAccountData struct {
 	identityErr    error
 	identityCalls  int
 	identityCounts AccountDeletionCounts
+	identityScope  AccountDeletionScope
+
+	// scopeExtraIDs are the abandoned ids an identity convergence left behind
+	// (MYR-452). Empty — the ordinary case — resolves the caller to itself.
+	scopeExtraIDs []string
+	scopeErr      error
+	// seenIDs records every id each step was actually invoked with, which is
+	// what proves the sequence covered the whole closure rather than just the
+	// subject the caller's token happened to carry.
+	seenIDs []string
 
 	order *[]string
 	calls []string
@@ -128,13 +138,25 @@ func (f *fakeAccountData) note(step string) {
 	}
 }
 
-func (f *fakeAccountData) CountUserDrives(_ context.Context, _ string) (int, error) {
+func (f *fakeAccountData) ResolveDeletionScope(_ context.Context, callerID string) (AccountDeletionScope, error) {
+	f.note("resolve_identity_scope")
+	if f.scopeErr != nil {
+		return AccountDeletionScope{}, f.scopeErr
+	}
+	scope := AccountDeletionScope{CallerID: callerID, CanonicalID: callerID, IDs: []string{callerID}}
+	scope.IDs = append(scope.IDs, f.scopeExtraIDs...)
+	return scope, nil
+}
+
+func (f *fakeAccountData) CountUserDrives(_ context.Context, id string) (int, error) {
 	f.note("count_drives")
+	f.seenIDs = append(f.seenIDs, id)
 	return f.driveCount, f.driveCountErr
 }
 
-func (f *fakeAccountData) RevokeSharesReceived(_ context.Context, _ string) (int, error) {
+func (f *fakeAccountData) RevokeSharesReceived(_ context.Context, id string) (int, error) {
 	f.note("revoke_shares")
+	f.seenIDs = append(f.seenIDs, id)
 	if f.sharesErr != nil {
 		return 0, f.sharesErr
 	}
@@ -143,8 +165,9 @@ func (f *fakeAccountData) RevokeSharesReceived(_ context.Context, _ string) (int
 	return n, nil
 }
 
-func (f *fakeAccountData) ScrubSharesReceivedLabel(_ context.Context, _ string) (int, error) {
+func (f *fakeAccountData) ScrubSharesReceivedLabel(_ context.Context, id string) (int, error) {
 	f.note("scrub_share_labels")
+	f.seenIDs = append(f.seenIDs, id)
 	if f.shareLabelsErr != nil {
 		return 0, f.shareLabelsErr
 	}
@@ -153,8 +176,9 @@ func (f *fakeAccountData) ScrubSharesReceivedLabel(_ context.Context, _ string) 
 	return n, nil
 }
 
-func (f *fakeAccountData) DeletePushDevices(_ context.Context, _ string) (int, error) {
+func (f *fakeAccountData) DeletePushDevices(_ context.Context, id string) (int, error) {
 	f.note("delete_devices")
+	f.seenIDs = append(f.seenIDs, id)
 	if f.devicesErr != nil {
 		return 0, f.devicesErr
 	}
@@ -163,8 +187,9 @@ func (f *fakeAccountData) DeletePushDevices(_ context.Context, _ string) (int, e
 	return n, nil
 }
 
-func (f *fakeAccountData) DeleteSavedPlaces(_ context.Context, _ string) (int, error) {
+func (f *fakeAccountData) DeleteSavedPlaces(_ context.Context, id string) (int, error) {
 	f.note("delete_saved_places")
+	f.seenIDs = append(f.seenIDs, id)
 	if f.placesErr != nil {
 		return 0, f.placesErr
 	}
@@ -173,8 +198,9 @@ func (f *fakeAccountData) DeleteSavedPlaces(_ context.Context, _ string) (int, e
 	return n, nil
 }
 
-func (f *fakeAccountData) RevokeRefreshTokens(_ context.Context, _ string) (int, error) {
+func (f *fakeAccountData) RevokeRefreshTokens(_ context.Context, id string) (int, error) {
 	f.note("revoke_tokens")
+	f.seenIDs = append(f.seenIDs, id)
 	if f.tokensErr != nil {
 		return 0, f.tokensErr
 	}
@@ -183,10 +209,11 @@ func (f *fakeAccountData) RevokeRefreshTokens(_ context.Context, _ string) (int,
 	return n, nil
 }
 
-func (f *fakeAccountData) DeleteIdentity(_ context.Context, _ string, counts AccountDeletionCounts) (AccountIdentityOutcome, error) {
+func (f *fakeAccountData) DeleteIdentity(_ context.Context, scope AccountDeletionScope, counts AccountDeletionCounts) (AccountIdentityOutcome, error) {
 	f.note("delete_identity")
 	f.identityCalls++
 	f.identityCounts = counts
+	f.identityScope = scope
 	if f.identityErr != nil {
 		return AccountIdentityOutcome{}, f.identityErr
 	}
@@ -323,6 +350,10 @@ func TestAccountDeletion_OwnerWithSharesRunsEveryStepInOrder(t *testing.T) {
 	}
 
 	want := []string{
+		// MYR-452. FIRST, and load-bearing: the caller's JWT subject is not
+		// reliably the id their account is filed under, so every step below
+		// keys off the resolved closure rather than the raw subject.
+		"resolve_identity_scope",
 		"count_drives",
 		"teardown:cveh_a",
 		"teardown:cveh_b",
@@ -713,5 +744,99 @@ func TestAccountDeletion_SuccessResponseHasNoBody(t *testing.T) {
 	}
 	if body := w.Body.String(); body != "" {
 		t.Fatalf("body = %q, want empty", body)
+	}
+}
+
+// --- MYR-452: the sequence must cover the whole identity closure ------------
+
+// TestAccountDeletion_ConvergedScopeRunsEveryStepOverEveryID is the handler-side
+// half of MYR-452.
+//
+// When a Tesla link converges two identities, the caller's token keeps naming
+// the pre-convergence id while the account's rows sit under another. Every step
+// therefore has to run over the resolved closure, not the raw subject — a step
+// that quietly keeps keying off the JWT subject deletes nothing and still
+// reports success, which is exactly how a "deleted" account came back.
+func TestAccountDeletion_ConvergedScopeRunsEveryStepOverEveryID(t *testing.T) {
+	const canonical = "ccanonical_452"
+
+	data := &fakeAccountData{scopeExtraIDs: []string{canonical}}
+	sessions := &fakeSessionInvalidator{}
+	vehicles := &fakeOwnedVehicleLister{ids: []string{"cveh_a"}}
+
+	h := newDeletionHandler(t, AccountDeletionDeps{
+		Vehicles: vehicles,
+		Teardown: newFakeAccountTeardown(),
+		Rides:    &fakeRideCanceller{},
+		Data:     data,
+		Sessions: sessions,
+	})
+
+	if got := callDelete(h).Code; got != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", got)
+	}
+
+	// Every SQL step saw both ids. Counting per step rather than checking the
+	// set as a whole is what catches one straggler still keyed on the subject.
+	const sqlSteps = 6 // drives, shares, labels, devices, places, tokens
+	if len(data.seenIDs) != sqlSteps*2 {
+		t.Fatalf("steps ran on %d ids, want %d (every step over both)", len(data.seenIDs), sqlSteps*2)
+	}
+	for _, want := range []string{deletionUserID, canonical} {
+		if !slices.Contains(data.seenIDs, want) {
+			t.Errorf("no step ran against %q; seen=%v", want, data.seenIDs)
+		}
+	}
+
+	// The identity transaction receives the whole closure, not one id.
+	if !slices.Contains(data.identityScope.IDs, canonical) ||
+		!slices.Contains(data.identityScope.IDs, deletionUserID) {
+		t.Errorf("DeleteIdentity scope = %v, want both ids", data.identityScope.IDs)
+	}
+
+	// The vehicle teardown is per-id too: a converged owner's cars are filed
+	// under the canonical id, which the token never names, so listing by the
+	// subject alone finds an empty garage.
+	if vehicles.calls != 2 {
+		t.Errorf("owned-vehicle lister called %d times, want once per id", vehicles.calls)
+	}
+
+	// Both auth caches are dropped for BOTH ids — the caller's own subject is
+	// the one their still-unexpired access token actually presents.
+	if len(sessions.users) != 2 || len(sessions.vehicles) != 2 {
+		t.Errorf("auth caches invalidated for users=%v vehicles=%v, want both ids in each",
+			sessions.users, sessions.vehicles)
+	}
+}
+
+// A scope that cannot be resolved must FAIL the deletion. Guessing at the
+// closure is how a teardown silently misses its target and reports 204 over a
+// live account, so this step is deliberately fatal where the drive count is not.
+func TestAccountDeletion_ScopeResolutionFailureIs500AndDeletesNothing(t *testing.T) {
+	data := &fakeAccountData{scopeErr: errors.New("convergence graph unreadable")}
+	sessions := &fakeSessionInvalidator{}
+
+	h := newDeletionHandler(t, AccountDeletionDeps{
+		Vehicles: &fakeOwnedVehicleLister{},
+		Teardown: newFakeAccountTeardown(),
+		Rides:    &fakeRideCanceller{},
+		Data:     data,
+		Sessions: sessions,
+	})
+
+	if got := callDelete(h).Code; got != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", got)
+	}
+	if data.identityCalls != 0 {
+		t.Error("identity transaction ran on an unresolved scope")
+	}
+	if len(data.seenIDs) != 0 {
+		t.Errorf("destructive steps ran on an unresolved scope: %v", data.seenIDs)
+	}
+	if len(sessions.users) != 0 {
+		t.Error("sessions were invalidated for a deletion that never ran")
+	}
+	if got := data.calls; len(got) != 1 || got[0] != "resolve_identity_scope" {
+		t.Errorf("calls = %v, want the sequence to stop at scope resolution", got)
 	}
 }

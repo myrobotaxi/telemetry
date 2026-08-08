@@ -261,8 +261,11 @@ When a user requests deletion of their account (FR-10.1), the system MUST delete
 
 The deletion is a SEQUENCE of independently-atomic steps, executed in this order by `telemetry.AccountDeletionHandler` (`internal/telemetry/account_deletion_sequence.go`) over `store.OwnerTeardown` and `store.AccountDeleter`:
 
+**Every step below is keyed on the DELETION SCOPE, not on the caller's JWT subject** ([MYR-452](https://linear.app/myrobotaxi/issue/MYR-452)). Step 0 resolves that scope; steps 1–9 each run once per id in it, and step 10 takes the whole set at once. See §3.1.1 for why the subject alone is not a safe key.
+
 | # | Step | Writer | Idempotent because |
 |---|------|--------|--------------------|
+| 0 | **Resolve the caller's subject to its identity closure** (MYR-452) | `AccountDeleter.ResolveDeletionScope` | Read-only. **Fatal on error** — unlike step 1, a half-resolved scope is how a deletion silently misses its target and reports success |
 | 1 | Count the user's drives (audit metadata only) | `AccountDeleter.CountUserDrives` | Read-only; a failure is logged and ignored — a missing statistic must never block erasure |
 | 2 | **Revoke the Tesla OAuth grant AT TESLA** (MYR-366) | `telemetry.TeslaLinkRevoker` → `POST https://auth.tesla.com/oauth2/v3/revoke` | A re-run finds no `Account` row, so there is no token to present and the step skips without calling Tesla |
 | 3 | For EACH owned vehicle: the §1.4 owner-teardown transaction | `OwnerTeardown.RemoveVehicle` | An already-removed car returns `AlreadyGone` — a clean no-op success with no duplicate audit row |
@@ -275,7 +278,26 @@ The deletion is a SEQUENCE of independently-atomic steps, executed in this order
 | 10 | Identity + audit, ONE transaction | `AccountDeleter.DeleteIdentity` | The transaction probes the three identity sources first; finding none it commits empty and writes NO audit row |
 | 11 | Invalidate the auth caches | `auth.JWTAuthenticator` | Pure cache eviction |
 
-**Step 2 must precede step 3, and this ordering is normative too** ([MYR-366](https://linear.app/myrobotaxi/issue/MYR-366)). The revoke call presents the stored `refresh_token`; step 3's last-vehicle arm DELETEs the `Account` row that holds it, and step 10's `User` cascade takes any row that survived. After either, the credential the revocation needs no longer exists and only the owner can withdraw the grant by hand from the consent page. Revoking first is the only ordering in which the server can do it at all.
+#### 3.1.1 The deletion scope (step 0) — normative
+
+`DELETE /api/users/me` authenticates a JWT and gets back a subject. **That subject is not reliably the id the account is filed under**, and keying the teardown on it was [MYR-452](https://linear.app/myrobotaxi/issue/MYR-452).
+
+`store.OwnerProvisioner.rebindApple` re-points `go_identity_apple.user_id` onto a canonical Prisma `"User"` id whenever a Tesla link proves the caller and an existing owner are the same person (§ self-serve-onboarding.md, resolution paths (a) and (b)). Nothing re-issues the caller's tokens when that happens, so a converged owner keeps presenting the **pre-convergence** id for the life of their refresh family. Keyed on it, every step targeted an id that owned nothing: the binding survived, the `"User"` row and its cascades survived, and the endpoint still wrote its audit row and answered 204. The next Sign in with Apple found the surviving binding and returned the account.
+
+The scope is therefore resolved FIRST and every subsequent step runs over it:
+
+- **`go_identity_convergence(from_user_id, to_user_id)`** records each re-point, written in the SAME transaction as the re-point itself. It is deliberately NOT a column on `go_users`: the re-pointed id is whatever the caller's token names, and `identity.linkage` mints bindings directly onto Prisma `"User"` ids (verified-email match) and onto configured cuids (bootstrap override) without creating a `go_users` row at all. A `go_users` column would record nothing for exactly those callers.
+- **The walk is transitive, undirected and cycle-safe.** Chains form when a person converges twice; 2-cycles form because `Account.userId` is never rewritten, so re-linking the same Tesla under the new canonical id converges back the other way.
+- **`CanonicalID` is the closure member holding the Apple binding**, not the target of the edges — the edge direction is not well defined inside a cycle. The `account_deleted` audit row is filed against it.
+- **The closure is capped at 8 ids and exceeding it FAILS the deletion.** An edge is an unconditional grant of DELETE authority over another id, so the closure size is the blast radius of one Delete tap. A 500 is recoverable; deleting a stranger's account is not.
+- **An edge is only written when a binding actually moved.** `rebindApple` checks the re-point's affected-row count first. The evidence that two ids are the same human IS the binding moving; without it the caller held no binding — which happens whenever a caller presenting an already-converged subject links a SECOND Tesla owned by somebody else — and writing an edge would aim their next deletion at that stranger's account.
+- **A recorded edge is never silently re-targeted.** The upsert refreshes the timestamp only when the target is identical.
+- **The closure is re-walked inside step 10's transaction.** If it GREW, the transaction aborts with a retryable error and the whole sequence re-runs from step 0 — merging the newcomer in at step 10 would delete its identity rows while its push devices, saved places, grants and tokens were never touched, since no table carries an FK to `go_users` (CG-DL-9) and nothing cascades. A closure that SHRANK is not an error. `CanonicalID` is recomputed inside the transaction, because the binding can move within an unchanged closure.
+- **Two live binding owners in one closure, with neither being the caller, is refused** on the same reasoning as the cap: it is a stronger "whose account is this?" signal, at a smaller number.
+
+**Operability.** A refusal means a person cannot delete their own account until the graph is repaired, which is a privacy-commitment failure, not a routine 500. It emits the dedicated event `account_deletion_scope_unresolved` at ERROR with the caller id. Repair is manual against `go_identity_convergence` today; an `ops` subcommand and a runbook entry are outstanding.
+
+**Step 2 must precede step 3, and this ordering is normative too** ([MYR-366](https://linear.app/myrobotaxi/issue/MYR-366)). The revoke call presents the stored `refresh_token`; step 3's last-vehicle arm DELETEs the `Account` row that holds it, and step 10 deletes any row that survived. After either, the credential the revocation needs no longer exists and only the owner can withdraw the grant by hand from the consent page. Revoking first is the only ordering in which the server can do it at all.
 
 **Step 2 is BEST-EFFORT and its failure is NOT an error.** Every failure mode — no `Account` row, a database read error, a network error, a Tesla 5xx, an already-invalid token — is logged at WARN and the sequence continues. Tesla's availability MUST NOT be able to block a person's erasure of their own account, so the step has no error path a caller could propagate. It is skipped entirely when no Tesla OAuth `client_id` is configured. The step writes **no `AuditLog` row**: it records a P0 structured log line `event=tesla_tokens_revoked` carrying the `user_id` and nothing else — never the token, its prefix, its length, or a VIN.
 
@@ -294,33 +316,51 @@ BEGIN TRANSACTION;
 INSERT INTO "AuditLog" ("id", "userId", "timestamp", "action", "targetType", "targetId", "initiator", "metadata")
 VALUES (
   cuid(),
-  '<user-id>',
+  '<canonical-id>',
   NOW(),
   'account_deleted',
   'user',
-  '<user-id>',
+  '<canonical-id>',
   'user',
   '{"vehicleCount": N, "driveCount": M, "inviteCount": K}'
 );
 
--- Step 2: Delete the Go-owned identity rows. An Apple-native user has no
--- "User" row and a legacy web user has no go_users row; BOTH statements run
--- unconditionally and simply affect zero rows in the case that does not apply
--- (dual-source identity — neither case is special-cased, neither is an error).
-DELETE FROM go_identity_apple WHERE user_id = '<user-id>';
-DELETE FROM go_users         WHERE id      = '<user-id>';
+-- Step 2: Delete the identity rows. Every statement is keyed on the SCOPE
+-- (§3.1.1), re-walked inside this transaction, because the caller's subject is
+-- not reliably the id the rows are filed under.
+--
+-- An Apple-native user has no "User" row and a legacy web user has no go_users
+-- row; ALL statements run unconditionally and simply affect zero rows in the
+-- case that does not apply (dual-source identity — neither case is
+-- special-cased, neither is an error).
+DELETE FROM go_identity_apple WHERE user_id = ANY('<scope>');
 
--- Step 3: Delete the Prisma User row IF one exists — its cascades are the
--- BACKSTOP, not the mechanism: by now step 3 of §3.1 has already torn down
+-- The stored OAuth grants and Settings go EXPLICITLY, not via the Prisma
+-- cascade (MYR-452). The cascade exists and works; the point is that it is
+-- defined in the Next.js app's schema, in another repository, and a deletion
+-- guarantee about live fleet-control credentials must not rest on a constraint
+-- this server neither owns, migrates, nor tests. These statements are redundant
+-- today and deliberately so: they make the guarantee local and testable.
+DELETE FROM "Account"  WHERE "userId" = ANY('<scope>');
+DELETE FROM "Settings" WHERE "userId" = ANY('<scope>');
+
+-- The convergence edges themselves: once the ids they connect are gone, an
+-- edge is a dangling grant of delete authority over a cuid resolving to nothing.
+DELETE FROM go_identity_convergence
+  WHERE from_user_id = ANY('<scope>') OR to_user_id = ANY('<scope>');
+
+DELETE FROM go_users WHERE id = ANY('<scope>');
+
+-- Step 3: Delete the Prisma User row IF one exists — its remaining cascades are
+-- the BACKSTOP, not the mechanism: by now step 3 of §3.1 has already torn down
 -- every owned vehicle one transaction at a time, so the cascade normally has
 -- nothing left to take.
-DELETE FROM "User" WHERE "id" = '<user-id>';
+DELETE FROM "User" WHERE "id" = ANY('<scope>');
 
--- Prisma onDelete: Cascade propagation (automatic):
---   User delete  -> Account[]      (all OAuth tokens for this user)
+-- Prisma onDelete: Cascade propagation (automatic) — Account and Settings are
+-- no longer left to it, see above:
 --   User delete  -> Vehicle[]      (all vehicles owned by this user)
 --   User delete  -> Invite[]       (all invites SENT by this user)
---   User delete  -> Settings?      (user preferences)
 --
 --   Vehicle delete -> Drive[]      (all drive history for this vehicle)
 --   Vehicle delete -> TripStop[]   (all trip stops for this vehicle)

@@ -61,6 +61,18 @@ type accountDataDeleterAdapter struct {
 	deleter *store.AccountDeleter
 }
 
+func (a *accountDataDeleterAdapter) ResolveDeletionScope(ctx context.Context, callerID string) (telemetry.AccountDeletionScope, error) {
+	scope, err := a.deleter.ResolveDeletionScope(ctx, callerID)
+	if err != nil {
+		return telemetry.AccountDeletionScope{}, err
+	}
+	return telemetry.AccountDeletionScope{
+		CallerID:    scope.CallerID,
+		CanonicalID: scope.CanonicalID,
+		IDs:         scope.IDs,
+	}, nil
+}
+
 func (a *accountDataDeleterAdapter) CountUserDrives(ctx context.Context, userID string) (int, error) {
 	return a.deleter.CountUserDrives(ctx, userID)
 }
@@ -85,8 +97,12 @@ func (a *accountDataDeleterAdapter) RevokeRefreshTokens(ctx context.Context, use
 	return a.deleter.RevokeRefreshTokens(ctx, userID)
 }
 
-func (a *accountDataDeleterAdapter) DeleteIdentity(ctx context.Context, userID string, counts telemetry.AccountDeletionCounts) (telemetry.AccountIdentityOutcome, error) {
-	res, err := a.deleter.DeleteIdentity(ctx, userID, store.AccountDeletionCounts{
+func (a *accountDataDeleterAdapter) DeleteIdentity(ctx context.Context, scope telemetry.AccountDeletionScope, counts telemetry.AccountDeletionCounts) (telemetry.AccountIdentityOutcome, error) {
+	res, err := a.deleter.DeleteIdentity(ctx, store.DeletionScope{
+		CallerID:    scope.CallerID,
+		CanonicalID: scope.CanonicalID,
+		IDs:         scope.IDs,
+	}, store.AccountDeletionCounts{
 		VehicleCount:         counts.VehicleCount,
 		DriveCount:           counts.DriveCount,
 		RidesCancelled:       counts.RidesCancelled,

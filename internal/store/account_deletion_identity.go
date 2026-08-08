@@ -43,16 +43,29 @@ type AccountIdentityResult struct {
 //     audit row.
 //  2. INSERT the user-initiated `account_deleted` AuditLog row, metadata =
 //     the P0 counts the handler accumulated (CG-DL-5).
-//  3. DELETE go_identity_apple (every Apple sub bound to the user), then
-//     go_users, then the Prisma "User" row — whose cascades take Account /
-//     Settings / Invite / any residual Vehicle (data-lifecycle.md §3.2).
+//  3. DELETE go_identity_apple (every Apple sub bound to the user), then the
+//     stored OAuth grants and Settings, then go_users, then the Prisma "User"
+//     row — whose cascades take Invite / any residual Vehicle
+//     (data-lifecycle.md §3.2).
 //
 // It is deliberately LAST in the sequence: the caller authenticates with a
 // token that resolves through these rows, so deleting them first would leave a
 // half-deleted account no one could finish deleting.
-func (a *AccountDeleter) DeleteIdentity(ctx context.Context, userID string, counts AccountDeletionCounts) (AccountIdentityResult, error) {
-	if strings.TrimSpace(userID) == "" {
-		return AccountIdentityResult{}, fmt.Errorf("store.DeleteIdentity: empty user id")
+//
+// It takes the whole DeletionScope rather than a single id (MYR-452). The
+// subject a converged owner authenticates with is not the id their rows are
+// filed under, and every statement here — the probes included — would otherwise
+// miss the account entirely while still reporting success.
+func (a *AccountDeleter) DeleteIdentity(ctx context.Context, scope DeletionScope, counts AccountDeletionCounts) (AccountIdentityResult, error) {
+	userID := strings.TrimSpace(scope.CanonicalID)
+	if userID == "" || strings.TrimSpace(scope.CallerID) == "" || len(scope.IDs) == 0 {
+		return AccountIdentityResult{}, fmt.Errorf("store.DeleteIdentity: incomplete deletion scope")
+	}
+	// A canonical id outside its own closure would delete an id the sequence
+	// never ran a single data step against.
+	if !containsID(scope.IDs, userID) {
+		return AccountIdentityResult{}, fmt.Errorf(
+			"store.DeleteIdentity(user=%s): canonical id is not a member of its own scope %v", userID, scope.IDs)
 	}
 
 	tx, err := a.pool.Begin(ctx)
@@ -61,7 +74,17 @@ func (a *AccountDeleter) DeleteIdentity(ctx context.Context, userID string, coun
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op after Commit
 
-	prismaUser, goUser, appleIdentity, err := probeAccountIdentity(ctx, tx, userID)
+	// Re-walk the convergence closure under this transaction. The scope handed
+	// in was resolved at step 0, before ten other steps ran and on another
+	// snapshot; a link that converged in that window would otherwise leave this
+	// transaction deleting the wrong id and reporting success.
+	scope, err = revalidateScopeWithin(ctx, tx, scope)
+	if err != nil {
+		return AccountIdentityResult{}, err
+	}
+	userID = scope.CanonicalID
+
+	prismaUser, goUser, appleIdentity, err := probeAccountIdentity(ctx, tx, scope)
 	if err != nil {
 		return AccountIdentityResult{}, err
 	}
@@ -83,7 +106,7 @@ func (a *AccountDeleter) DeleteIdentity(ctx context.Context, userID string, coun
 		return AccountIdentityResult{}, err
 	}
 
-	if err := deleteIdentityRows(ctx, tx, userID); err != nil {
+	if err := deleteIdentityRows(ctx, tx, scope); err != nil {
 		return AccountIdentityResult{}, err
 	}
 
@@ -96,6 +119,8 @@ func (a *AccountDeleter) DeleteIdentity(ctx context.Context, userID string, coun
 	a.logger.Info("account_deleted",
 		slog.String("event", "account_deleted"),
 		slog.String("user_id", userID),
+		slog.Bool("converged_identity", scope.Converged()),
+		slog.Int("scope_size", len(scope.IDs)),
 		slog.String("audit_log_id", auditID),
 		slog.Int("vehicle_count", counts.VehicleCount),
 		slog.Int("rides_cancelled", counts.RidesCancelled),
@@ -111,36 +136,37 @@ func (a *AccountDeleter) DeleteIdentity(ctx context.Context, userID string, coun
 }
 
 // probeAccountIdentity reports which of the three identity sources still hold a
-// row for userID and ROW-LOCKS every row it finds, inside the open transaction.
-// The locks are what serialize two concurrent deletions of the same account —
-// see the queries' doc comment; without them a double-tapped Delete could write
-// two audit rows for one account.
-func probeAccountIdentity(ctx context.Context, tx pgx.Tx, userID string) (prismaUser, goUser, appleIdentity bool, err error) {
-	if prismaUser, err = lockIdentityRow(ctx, tx, userID, `"User"`, queryLockPrismaUser); err != nil {
+// row anywhere in the scope and ROW-LOCKS every row it finds, inside the open
+// transaction. The locks are what serialize two concurrent deletions of the same
+// account — see the queries' doc comment; without them a double-tapped Delete
+// could write two audit rows for one account.
+func probeAccountIdentity(ctx context.Context, tx pgx.Tx, scope DeletionScope) (prismaUser, goUser, appleIdentity bool, err error) {
+	if prismaUser, err = lockIdentityRow(ctx, tx, scope, `"User"`, queryLockPrismaUser); err != nil {
 		return false, false, false, err
 	}
-	if goUser, err = lockIdentityRow(ctx, tx, userID, "go_users", queryLockGoUser); err != nil {
+	if goUser, err = lockIdentityRow(ctx, tx, scope, "go_users", queryLockGoUser); err != nil {
 		return false, false, false, err
 	}
-	if appleIdentity, err = lockIdentityRow(ctx, tx, userID, "go_identity_apple", queryLockAppleIdentities); err != nil {
+	if appleIdentity, err = lockIdentityRow(ctx, tx, scope, "go_identity_apple", queryLockAppleIdentities); err != nil {
 		return false, false, false, err
 	}
 	return prismaUser, goUser, appleIdentity, nil
 }
 
-// lockIdentityRow runs one FOR UPDATE probe and reports whether it matched.
-// pgx.ErrNoRows is the "nothing here" answer, not a failure — it is the whole
-// Apple-native / legacy-web distinction, and on a re-run it is every table.
-func lockIdentityRow(ctx context.Context, tx pgx.Tx, userID, table, query string) (bool, error) {
+// lockIdentityRow runs one FOR UPDATE probe over the scope and reports whether
+// it matched. pgx.ErrNoRows is the "nothing here" answer, not a failure — it is
+// the whole Apple-native / legacy-web distinction, and on a re-run it is every
+// table.
+func lockIdentityRow(ctx context.Context, tx pgx.Tx, scope DeletionScope, table, query string) (bool, error) {
 	var scratch string
-	err := tx.QueryRow(ctx, query, userID).Scan(&scratch)
+	err := tx.QueryRow(ctx, query, scope.IDs).Scan(&scratch)
 	switch {
 	case err == nil:
 		return true, nil
 	case errors.Is(err, pgx.ErrNoRows):
 		return false, nil
 	default:
-		return false, fmt.Errorf("store.DeleteIdentity(user=%s): lock %s: %w", userID, table, err)
+		return false, fmt.Errorf("store.DeleteIdentity(user=%s): lock %s: %w", scope.CanonicalID, table, err)
 	}
 }
 
@@ -149,18 +175,21 @@ func lockIdentityRow(ctx context.Context, tx pgx.Tx, userID, table, query string
 // unconditional: a source that holds no row simply affects zero rows, which is
 // exactly the Apple-native-only case (no "User") and the legacy-web case (no
 // go_users).
-func deleteIdentityRows(ctx context.Context, tx pgx.Tx, userID string) error {
+func deleteIdentityRows(ctx context.Context, tx pgx.Tx, scope DeletionScope) error {
 	steps := []struct {
 		name  string
 		query string
 	}{
 		{"delete apple identity", queryDeleteAppleIdentity},
+		{"delete provider accounts", queryDeleteProviderAccounts},
+		{"delete settings", queryDeleteSettings},
+		{"delete convergence edges", queryDeleteConvergenceEdges},
 		{"delete go user", queryDeleteGoUser},
 		{"delete prisma user", queryDeletePrismaUser},
 	}
 	for _, s := range steps {
-		if _, err := tx.Exec(ctx, s.query, userID); err != nil {
-			return fmt.Errorf("store.DeleteIdentity(user=%s): %s: %w", userID, s.name, err)
+		if _, err := tx.Exec(ctx, s.query, scope.IDs); err != nil {
+			return fmt.Errorf("store.DeleteIdentity(user=%s): %s: %w", scope.CanonicalID, s.name, err)
 		}
 	}
 	return nil

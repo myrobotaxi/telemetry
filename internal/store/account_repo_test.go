@@ -27,8 +27,12 @@ func encodeBase64(b []byte) string { return base64.StdEncoding.EncodeToString(b)
 //
 // Cross-repo coupling: when ../my-robo-taxi/prisma/schema.prisma adds or
 // renames any *_enc column, mirror the change here in the same PR.
+// IF NOT EXISTS because ownerSchemaSQL creates the same table and either
+// fixture may run first depending on file order — the sync.Once below only
+// guards against THIS statement running twice, not against another file having
+// already created the table.
 const accountSchemaSQL = `
-CREATE TABLE "Account" (
+CREATE TABLE IF NOT EXISTS "Account" (
     "id"                TEXT PRIMARY KEY,
     "userId"            TEXT NOT NULL,
     "type"              TEXT NOT NULL DEFAULT 'oauth',

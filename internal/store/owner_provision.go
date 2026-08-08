@@ -137,6 +137,34 @@ SELECT "id" FROM "User" WHERE lower("email") = lower($1) LIMIT 1`
 const queryRebindAppleIdentity = `
 UPDATE go_identity_apple SET user_id = $1 WHERE user_id = $2`
 
+// queryRecordConvergence leaves the trail the re-point above would otherwise
+// sever (MYR-452). After rebindApple, nothing references the caller's id: the
+// binding now names the canonical one, so the caller's id is reachable from
+// nowhere — while the caller's JWT keeps carrying it. Account deletion is keyed
+// on that subject, so without this row the teardown would target an id that
+// owns nothing and leave the real account (binding included) standing.
+//
+// It writes to go_identity_convergence rather than to a column on go_users
+// because `from` is whatever the caller's token names, which is frequently not
+// a go_users id at all — see the table's migration comment.
+//
+// No attempt is made here to keep the graph flat. Chains and cycles are both
+// reachable (re-linking the same Tesla under the new canonical id fires a
+// convergence back the other way), so the resolver walks the graph with a
+// visited set instead of relying on an invariant this statement cannot hold.
+// The conflict arm deliberately REFUSES to re-target an existing edge: it
+// refreshes the timestamp only when the target is identical, and otherwise
+// leaves the stored edge alone. Silently repointing would move a live delete
+// grant from one account to another. With the RowsAffected guard in rebindApple
+// a divergent conflict should be unreachable, so this is the second lock on the
+// same door.
+const queryRecordConvergence = `
+INSERT INTO go_identity_convergence (from_user_id, to_user_id)
+VALUES ($2, $1)
+ON CONFLICT (from_user_id) DO UPDATE
+SET converged_at = NOW()
+WHERE go_identity_convergence.to_user_id = EXCLUDED.to_user_id`
+
 const queryProvisionSettings = `
 INSERT INTO "Settings" ("id", "userId", "teslaLinked", "updatedAt")
 VALUES ($1, $2, TRUE, NOW())
@@ -279,11 +307,44 @@ func (p *OwnerProvisioner) resolveCanonicalUser(ctx context.Context, tx pgx.Tx, 
 // rebindApple converges the caller's apple identity (currently bound to
 // fromUserID, a fresh go_users id) onto the canonical toUserID. This is the one
 // sanctioned re-point of a go_identity_apple binding: it fires only at Tesla-link
-// time when ownership/email proves the two identities are the same human. The
-// orphaned go_users row is harmless (no binding, no "User").
+// time when ownership/email proves the two identities are the same human.
+//
+// The left-behind go_users row is NOT harmless, which is what MYR-452 cost us.
+// The caller's JWT keeps naming fromUserID until its refresh family expires, and
+// DELETE /api/users/me is keyed on exactly that subject — so a deletion run
+// against a severed id would revoke nothing, delete nothing, still write its
+// audit row and still answer 204, leaving the binding to sign the person back
+// into the account they believed they had erased. Recording the convergence is
+// therefore part of the same transaction as the re-point: the two facts must
+// never be observable apart.
 func (p *OwnerProvisioner) rebindApple(ctx context.Context, tx pgx.Tx, fromUserID, toUserID string) error {
-	if _, err := tx.Exec(ctx, queryRebindAppleIdentity, toUserID, fromUserID); err != nil {
+	tag, err := tx.Exec(ctx, queryRebindAppleIdentity, toUserID, fromUserID)
+	if err != nil {
 		return fmt.Errorf("store.ProvisionTeslaOwner: converge apple identity %s->%s: %w", fromUserID, toUserID, err)
+	}
+
+	// NO BINDING MOVED, NO EDGE. This guard is load-bearing, not defensive.
+	//
+	// A convergence edge is an unconditional grant of DELETE authority over
+	// toUserID, so it may only be written on evidence that the two ids are the
+	// same human — and the evidence IS the binding moving. When it does not
+	// move, fromUserID held no binding to begin with, which happens routinely:
+	// a caller whose token still names a subject they already converged away
+	// from links a SECOND Tesla, owned by somebody else entirely. Writing the
+	// edge anyway would point their next deletion at that stranger's account
+	// while leaving their own (and its binding, and the resurrection) intact.
+	if tag.RowsAffected() == 0 {
+		p.logger.Warn("owner_identity_converge_skipped",
+			slog.String("event", "owner_identity_converge_skipped"),
+			slog.String("from_user_id", fromUserID),
+			slog.String("to_user_id", toUserID),
+			slog.String("reason", "caller holds no apple binding to move"),
+		)
+		return nil
+	}
+
+	if _, err := tx.Exec(ctx, queryRecordConvergence, toUserID, fromUserID); err != nil {
+		return fmt.Errorf("store.ProvisionTeslaOwner: record convergence %s->%s: %w", fromUserID, toUserID, err)
 	}
 	p.logger.Info("owner_identity_converged",
 		slog.String("event", "owner_identity_converged"),
