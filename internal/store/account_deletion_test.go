@@ -27,6 +27,19 @@ func newAccountDeleter(t *testing.T) *store.AccountDeleter {
 	return store.NewAccountDeleter(testPool, testLogger())
 }
 
+// soloScope is the un-converged deletion scope: the caller stands for itself.
+// It is what ResolveDeletionScope returns for every account that never went
+// through an identity convergence, which is the overwhelming majority — the
+// converged shape gets its own tests in account_deletion_resurrection_test.go.
+//
+// The parameter is what documents which id each call site builds its scope from,
+// so it stays even though every shape in this file reuses one fixture id.
+//
+//nolint:unparam // see above — the parameter is documentation, not dead weight.
+func soloScope(userID string) store.DeletionScope {
+	return store.DeletionScope{CallerID: userID, CanonicalID: userID, IDs: []string{userID}}
+}
+
 // setupAccountDeletion installs a clean slate for one test.
 //
 // The AuditLog table is created by audit_repo_test.go's `ensureAuditSchema`
@@ -149,7 +162,7 @@ func TestAccountDeleter_DeleteIdentity_DualSource(t *testing.T) {
 			userID := delUserApple
 			tc.seed(t, userID)
 
-			res, err := newAccountDeleter(t).DeleteIdentity(context.Background(), userID,
+			res, err := newAccountDeleter(t).DeleteIdentity(context.Background(), soloScope(userID),
 				store.AccountDeletionCounts{VehicleCount: 1, RidesCancelled: 2})
 			if err != nil {
 				t.Fatalf("DeleteIdentity: %v", err)
@@ -186,7 +199,7 @@ func TestAccountDeleter_DeleteIdentity_WritesTheAuditRow(t *testing.T) {
 		SharesRevoked: 3, ShareLabelsScrubbed: 3, PushDevicesDeleted: 1,
 		SavedPlacesDeleted: 2, RefreshTokensRevoked: 4,
 	}
-	res, err := newAccountDeleter(t).DeleteIdentity(context.Background(), delUserApple, counts)
+	res, err := newAccountDeleter(t).DeleteIdentity(context.Background(), soloScope(delUserApple), counts)
 	if err != nil {
 		t.Fatalf("DeleteIdentity: %v", err)
 	}
@@ -254,10 +267,10 @@ func TestAccountDeleter_DeleteIdentity_ReRunWritesNoSecondAuditRow(t *testing.T)
 	deleter := newAccountDeleter(t)
 	ctx := context.Background()
 
-	if _, err := deleter.DeleteIdentity(ctx, delUserApple, store.AccountDeletionCounts{}); err != nil {
+	if _, err := deleter.DeleteIdentity(ctx, soloScope(delUserApple), store.AccountDeletionCounts{}); err != nil {
 		t.Fatalf("first DeleteIdentity: %v", err)
 	}
-	second, err := deleter.DeleteIdentity(ctx, delUserApple, store.AccountDeletionCounts{})
+	second, err := deleter.DeleteIdentity(ctx, soloScope(delUserApple), store.AccountDeletionCounts{})
 	if err != nil {
 		t.Fatalf("second DeleteIdentity: %v", err)
 	}
@@ -407,7 +420,7 @@ func TestAccountDeletion_RideHistorySurvivesAsFormerRider(t *testing.T) {
 		t.Fatalf("before deletion RequesterName = %q, want %q", completed.RequesterName, "Priya")
 	}
 
-	if _, err := newAccountDeleter(t).DeleteIdentity(ctx, delUserApple, store.AccountDeletionCounts{}); err != nil {
+	if _, err := newAccountDeleter(t).DeleteIdentity(ctx, soloScope(delUserApple), store.AccountDeletionCounts{}); err != nil {
 		t.Fatalf("DeleteIdentity: %v", err)
 	}
 
@@ -545,7 +558,7 @@ func TestAccountDeleter_DeleteIdentity_ConcurrentCallsWriteOneAuditRow(t *testin
 		go func() {
 			defer wg.Done()
 			<-start // release them together, so the probes genuinely overlap
-			res, err := deleter.DeleteIdentity(context.Background(), delUserApple, store.AccountDeletionCounts{})
+			res, err := deleter.DeleteIdentity(context.Background(), soloScope(delUserApple), store.AccountDeletionCounts{})
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {

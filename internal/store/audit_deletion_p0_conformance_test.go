@@ -64,7 +64,7 @@ func TestAccountDeletionAuditMetadataIsStructurallyP0(t *testing.T) {
 		SharesRevoked: 1, ShareLabelsScrubbed: 1, PushDevicesDeleted: 1,
 		SavedPlacesDeleted: 2, RefreshTokensRevoked: 1,
 	}
-	res, err := newAccountDeleter(t).DeleteIdentity(context.Background(), delUserApple, counts)
+	res, err := newAccountDeleter(t).DeleteIdentity(context.Background(), soloScope(delUserApple), counts)
 	if err != nil {
 		t.Fatalf("DeleteIdentity: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestAccountDeletionAuditRowCarriesNoPII(t *testing.T) {
 	setupAccountDeletion(t)
 	seedGoUser(t, delUserApple, strPtr(deletionAuditPII[0]), strPtr(deletionAuditPII[1]))
 
-	res, err := newAccountDeleter(t).DeleteIdentity(context.Background(), delUserApple,
+	res, err := newAccountDeleter(t).DeleteIdentity(context.Background(), soloScope(delUserApple),
 		store.AccountDeletionCounts{VehicleCount: 1, ShareLabelsScrubbed: 2})
 	if err != nil {
 		t.Fatalf("DeleteIdentity: %v", err)

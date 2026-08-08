@@ -116,6 +116,16 @@ type fakeAccountData struct {
 	identityErr    error
 	identityCalls  int
 	identityCounts AccountDeletionCounts
+	identityScope  AccountDeletionScope
+
+	// scopeExtraIDs are the abandoned ids an identity convergence left behind
+	// (MYR-452). Empty — the ordinary case — resolves the caller to itself.
+	scopeExtraIDs []string
+	scopeErr      error
+	// seenIDs records every id each step was actually invoked with, which is
+	// what proves the sequence covered the whole closure rather than just the
+	// subject the caller's token happened to carry.
+	seenIDs []string
 
 	order *[]string
 	calls []string
@@ -128,13 +138,25 @@ func (f *fakeAccountData) note(step string) {
 	}
 }
 
-func (f *fakeAccountData) CountUserDrives(_ context.Context, _ string) (int, error) {
+func (f *fakeAccountData) ResolveDeletionScope(_ context.Context, callerID string) (AccountDeletionScope, error) {
+	f.note("resolve_identity_scope")
+	if f.scopeErr != nil {
+		return AccountDeletionScope{}, f.scopeErr
+	}
+	scope := AccountDeletionScope{CallerID: callerID, CanonicalID: callerID, IDs: []string{callerID}}
+	scope.IDs = append(scope.IDs, f.scopeExtraIDs...)
+	return scope, nil
+}
+
+func (f *fakeAccountData) CountUserDrives(_ context.Context, id string) (int, error) {
 	f.note("count_drives")
+	f.seenIDs = append(f.seenIDs, id)
 	return f.driveCount, f.driveCountErr
 }
 
-func (f *fakeAccountData) RevokeSharesReceived(_ context.Context, _ string) (int, error) {
+func (f *fakeAccountData) RevokeSharesReceived(_ context.Context, id string) (int, error) {
 	f.note("revoke_shares")
+	f.seenIDs = append(f.seenIDs, id)
 	if f.sharesErr != nil {
 		return 0, f.sharesErr
 	}
@@ -143,8 +165,9 @@ func (f *fakeAccountData) RevokeSharesReceived(_ context.Context, _ string) (int
 	return n, nil
 }
 
-func (f *fakeAccountData) ScrubSharesReceivedLabel(_ context.Context, _ string) (int, error) {
+func (f *fakeAccountData) ScrubSharesReceivedLabel(_ context.Context, id string) (int, error) {
 	f.note("scrub_share_labels")
+	f.seenIDs = append(f.seenIDs, id)
 	if f.shareLabelsErr != nil {
 		return 0, f.shareLabelsErr
 	}
@@ -153,8 +176,9 @@ func (f *fakeAccountData) ScrubSharesReceivedLabel(_ context.Context, _ string) 
 	return n, nil
 }
 
-func (f *fakeAccountData) DeletePushDevices(_ context.Context, _ string) (int, error) {
+func (f *fakeAccountData) DeletePushDevices(_ context.Context, id string) (int, error) {
 	f.note("delete_devices")
+	f.seenIDs = append(f.seenIDs, id)
 	if f.devicesErr != nil {
 		return 0, f.devicesErr
 	}
@@ -163,8 +187,9 @@ func (f *fakeAccountData) DeletePushDevices(_ context.Context, _ string) (int, e
 	return n, nil
 }
 
-func (f *fakeAccountData) DeleteSavedPlaces(_ context.Context, _ string) (int, error) {
+func (f *fakeAccountData) DeleteSavedPlaces(_ context.Context, id string) (int, error) {
 	f.note("delete_saved_places")
+	f.seenIDs = append(f.seenIDs, id)
 	if f.placesErr != nil {
 		return 0, f.placesErr
 	}
@@ -173,8 +198,9 @@ func (f *fakeAccountData) DeleteSavedPlaces(_ context.Context, _ string) (int, e
 	return n, nil
 }
 
-func (f *fakeAccountData) RevokeRefreshTokens(_ context.Context, _ string) (int, error) {
+func (f *fakeAccountData) RevokeRefreshTokens(_ context.Context, id string) (int, error) {
 	f.note("revoke_tokens")
+	f.seenIDs = append(f.seenIDs, id)
 	if f.tokensErr != nil {
 		return 0, f.tokensErr
 	}
@@ -183,10 +209,11 @@ func (f *fakeAccountData) RevokeRefreshTokens(_ context.Context, _ string) (int,
 	return n, nil
 }
 
-func (f *fakeAccountData) DeleteIdentity(_ context.Context, _ string, counts AccountDeletionCounts) (AccountIdentityOutcome, error) {
+func (f *fakeAccountData) DeleteIdentity(_ context.Context, scope AccountDeletionScope, counts AccountDeletionCounts) (AccountIdentityOutcome, error) {
 	f.note("delete_identity")
 	f.identityCalls++
 	f.identityCounts = counts
+	f.identityScope = scope
 	if f.identityErr != nil {
 		return AccountIdentityOutcome{}, f.identityErr
 	}
@@ -323,6 +350,10 @@ func TestAccountDeletion_OwnerWithSharesRunsEveryStepInOrder(t *testing.T) {
 	}
 
 	want := []string{
+		// MYR-452. FIRST, and load-bearing: the caller's JWT subject is not
+		// reliably the id their account is filed under, so every step below
+		// keys off the resolved closure rather than the raw subject.
+		"resolve_identity_scope",
 		"count_drives",
 		"teardown:cveh_a",
 		"teardown:cveh_b",
