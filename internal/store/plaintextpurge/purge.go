@@ -1,12 +1,15 @@
 // Package plaintextpurge scrubs the retired plaintext copies of every
-// column the telemetry server now stores as ciphertext (MYR-433).
+// column the telemetry server now stores as ciphertext (MYR-433,
+// MYR-447).
 //
-// It is the closing step of the MYR-62/63/64 encryption rollout. The
-// backfills (accountbackfill, vehiclegpsbackfill, routeblobbackfill)
-// sealed each legacy value into its `*Enc` / `*_enc` sibling; the repos
-// then stopped reading and writing the plaintext columns. What remains is
-// the residue: real Tesla tokens and real coordinates still sitting in
-// columns nothing consults. This package removes them.
+// It is the closing step of the MYR-62/63/64 encryption rollout and of
+// the MYR-447 label rollout that finished it. The backfills
+// (accountbackfill, vehiclegpsbackfill, routeblobbackfill,
+// locationlabelbackfill) sealed each legacy value into its `*Enc` /
+// `*_enc` sibling; the repos then stopped reading and writing the
+// plaintext columns. What remains is the residue: real Tesla tokens, real
+// coordinates and the street addresses those coordinates resolve to,
+// still sitting in columns nothing consults. This package removes them.
 //
 // # Why this is a command and not a migration
 //
@@ -143,8 +146,8 @@ func (t Target) hasDataPredicate() string {
 	return strings.Join(parts, " OR ")
 }
 
-// Targets is the full set of plaintext columns MYR-433 retires, in a
-// deliberate order: Tesla OAuth tokens first.
+// Targets is the full set of plaintext columns MYR-433 and MYR-447
+// retire, in a deliberate order: Tesla OAuth tokens first.
 //
 // The token columns are the sharpest item in the database. Vehicle GPS
 // and route blobs reveal where someone went; a Tesla access/refresh token
@@ -194,6 +197,73 @@ var Targets = []Target{
 		{Plaintext: "routePoints", Encrypted: "routePointsEnc", Kind: KindJSON,
 			ScrubSQL: `'[]'::jsonb`,
 			HasData:  `"routePoints" IS NOT NULL AND "routePoints"::text NOT IN ('[]', 'null')`},
+	}},
+
+	// MYR-447 — the geocoded location labels. Each is its own target,
+	// deliberately NOT grouped the way the GPS pairs are.
+	//
+	// A GPS pair is grouped because a latitude without its longitude is a
+	// broken row: scrubbing the verified half would both leave a readable
+	// coordinate and half-destroy the pair, so refusing is strictly
+	// better. Labels have neither property. Each one is an independently
+	// recoverable string, and each one on its own already gives away the
+	// location — "Alcatraz Landing" and "Pier 33, San Francisco" are two
+	// spellings of the same disclosure, not two halves of one. Grouping
+	// them would mean one undecryptable column pins the other three in
+	// plaintext, which is the wrong trade in both directions: scrubbing
+	// what verifies strictly reduces exposure and destroys nothing.
+	//
+	// ScrubSQL tracks each column's nullability in the react-frontend
+	// Prisma schema, because an all-or-nothing UPDATE that violates a NOT
+	// NULL constraint aborts the whole target:
+	//
+	//	Vehicle.locationName        String  @default("")  → NOT NULL → ''
+	//	Vehicle.locationAddress     String  @default("")  → NOT NULL → ''
+	//	Vehicle.destinationName     String?               → nullable → NULL
+	//	Vehicle.destinationAddress  String?               → nullable → NULL
+	//	Drive.startLocation         String                → NOT NULL → ''
+	//	Drive.startAddress          String                → NOT NULL → ''
+	//	Drive.endLocation           String                → NOT NULL → ''
+	//	Drive.endAddress            String                → NOT NULL → ''
+	//
+	// The empty string is the correct "no data here" value for the NOT
+	// NULL columns and reveals no location, exactly as the zero
+	// coordinate does for latitude/longitude.
+	//
+	// HasData excludes the empty string as well as NULL: an empty label
+	// discloses nothing, so churning those rows would inflate the
+	// operator's counters with work that changes nothing.
+	{Table: "Vehicle", Name: "locationName", Members: []Member{
+		{Plaintext: "locationName", Encrypted: "locationNameEnc", Kind: KindString,
+			ScrubSQL: `''`, HasData: `"locationName" IS NOT NULL AND "locationName" <> ''`},
+	}},
+	{Table: "Vehicle", Name: "locationAddress", Members: []Member{
+		{Plaintext: "locationAddress", Encrypted: "locationAddressEnc", Kind: KindString,
+			ScrubSQL: `''`, HasData: `"locationAddress" IS NOT NULL AND "locationAddress" <> ''`},
+	}},
+	{Table: "Vehicle", Name: "destinationName", Members: []Member{
+		{Plaintext: "destinationName", Encrypted: "destinationNameEnc", Kind: KindString,
+			ScrubSQL: "NULL", HasData: `"destinationName" IS NOT NULL AND "destinationName" <> ''`},
+	}},
+	{Table: "Vehicle", Name: "destinationAddress", Members: []Member{
+		{Plaintext: "destinationAddress", Encrypted: "destinationAddressEnc", Kind: KindString,
+			ScrubSQL: "NULL", HasData: `"destinationAddress" IS NOT NULL AND "destinationAddress" <> ''`},
+	}},
+	{Table: "Drive", Name: "startLocation", Members: []Member{
+		{Plaintext: "startLocation", Encrypted: "startLocationEnc", Kind: KindString,
+			ScrubSQL: `''`, HasData: `"startLocation" IS NOT NULL AND "startLocation" <> ''`},
+	}},
+	{Table: "Drive", Name: "startAddress", Members: []Member{
+		{Plaintext: "startAddress", Encrypted: "startAddressEnc", Kind: KindString,
+			ScrubSQL: `''`, HasData: `"startAddress" IS NOT NULL AND "startAddress" <> ''`},
+	}},
+	{Table: "Drive", Name: "endLocation", Members: []Member{
+		{Plaintext: "endLocation", Encrypted: "endLocationEnc", Kind: KindString,
+			ScrubSQL: `''`, HasData: `"endLocation" IS NOT NULL AND "endLocation" <> ''`},
+	}},
+	{Table: "Drive", Name: "endAddress", Members: []Member{
+		{Plaintext: "endAddress", Encrypted: "endAddressEnc", Kind: KindString,
+			ScrubSQL: `''`, HasData: `"endAddress" IS NOT NULL AND "endAddress" <> ''`},
 	}},
 }
 

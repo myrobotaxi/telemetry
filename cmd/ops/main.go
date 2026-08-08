@@ -104,8 +104,8 @@ Environment:
   AUTH_TESLA_SECRET             Tesla OAuth client secret
   DEBUG_FIELDS_TOKEN            Auth token for fields watch (when server requires it)
   MAPBOX_TOKEN                  Mapbox API token (required for geocode backfill)
-  ENCRYPTION_KEY                base64(32B) AES-256 key (optional for geocode backfill;
-                                 falls back to plaintext routePoints reads when unset)
+  ENCRYPTION_KEY                base64(32B) AES-256 key (REQUIRED for geocode backfill:
+                                 drive GPS trails and addresses are encrypted at rest)
   INVITE_LINK_SIGNING_KEY       base64(32B) Ed25519 SEED signing join links (required for
                                  invite-link public-key; generate with: openssl rand -base64 32)
 `

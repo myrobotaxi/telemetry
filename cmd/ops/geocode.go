@@ -157,6 +157,15 @@ type driveAddressUpdater interface {
 // writer's inline geocode calls already treat these cases (see
 // internal/store/writer_drives.go).
 //
+// MYR-447: row.StartAddress / row.EndAddress arrive DECRYPTED from
+// DriveRepo.ListMissingAddresses, so the empty-string side selection
+// below is unchanged. What changed is upstream — the discovery predicate
+// now asks `"startAddressEnc" IS NULL`, because a sealed address is a
+// fresh nondeterministic ciphertext and could never match an equality
+// test against the empty string again.
+// Run `backfill-location-labels` before this command or every legacy row
+// whose plaintext address was never sealed will be re-geocoded.
+//
 // The end side is skipped whenever row.EndTime is empty, i.e. the drive
 // is still open — belt-and-braces alongside queryDriveMissingAddresses'
 // own endTime guard. Every Drive row is created with both endTime and
