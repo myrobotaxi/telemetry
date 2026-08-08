@@ -29,10 +29,17 @@ type updateColumn struct {
 // here re-opens the exact hole MYR-433 closed: it would make a user's
 // live position readable to anyone with a database connection.
 //
+// MYR-447 removed four more for the same reason: "locationName",
+// "locationAddress", "destinationName" and "destinationAddress". Those
+// are the reverse-geocoded rendering of the coordinates above — a street
+// address and a place name — and leaving them here meant the sealed
+// coordinate sat next to a plaintext column saying where it was in
+// English. They are written only as ciphertext, by appendLabelShadowSets.
+//
 // The plaintext columns are left untouched rather than cleared because
 // this server no longer owns them — `cmd/purge-plaintext-columns` is what
-// scrubs their pre-MYR-433 residue, once it has verified the ciphertext
-// sibling decrypts.
+// scrubs their pre-MYR-433/447 residue, once it has verified the
+// ciphertext sibling decrypts.
 func updateColumns(u VehicleUpdate) []updateColumn {
 	return []updateColumn{
 		{"speed", derefInt(u.Speed), ""},
@@ -46,10 +53,6 @@ func updateColumns(u VehicleUpdate) []updateColumn {
 		{"exteriorTemp", derefInt(u.ExteriorTemp), ""},
 		{"odometerMiles", derefInt(u.OdometerMiles), ""},
 		{"fsdMilesSinceReset", derefFloat(u.FsdMilesSinceReset), ""},
-		{"locationName", derefString(u.LocationName), ""},
-		{"locationAddress", derefString(u.LocationAddr), ""},
-		{"destinationName", derefString(u.DestinationName), ""},
-		{"destinationAddress", derefString(u.DestinationAddress), ""},
 		{"etaMinutes", derefInt(u.EtaMinutes), ""},
 		{"tripDistanceRemaining", derefFloat(u.TripDistRemaining), ""},
 	}
@@ -98,6 +101,7 @@ func buildTelemetryUpdate(vin string, u VehicleUpdate, encShadows map[string]str
 	setClauses, args, argIdx = appendPlaintextSets(setClauses, args, argIdx, u, clearSet)
 	setClauses, args, argIdx = appendGPSShadowSets(setClauses, args, argIdx, encShadows, clearSet)
 	setClauses, args, argIdx = appendNavRouteShadowSet(setClauses, args, argIdx, encShadows, clearSet)
+	setClauses, args, argIdx = appendLabelShadowSets(setClauses, args, argIdx, encShadows, clearSet)
 	setClauses = appendClearFieldSets(setClauses, u.ClearFields)
 
 	if len(setClauses) == 0 {
@@ -194,6 +198,44 @@ func appendNavRouteShadowSet(
 	return setClauses, args, argIdx
 }
 
+// appendLabelShadowSets emits the MYR-447 location-label `*Enc` shadows.
+// This is the replacement for the four plaintext label columns that
+// updateColumns used to carry; a label reaches the database only through
+// here.
+//
+// Two behaviours worth naming:
+//
+//   - An EMPTY ciphertext means the update carried an empty label (the
+//     geocoder returned nothing). That is written as an explicit
+//     `= NULL`, not as an empty-string ciphertext, so "no label" has one
+//     representation in the column and queryDriveMissingAddresses-style
+//     `IS NULL` predicates stay meaningful. It still has to be WRITTEN
+//     rather than skipped: the field was present in the update, so a
+//     previously-known address must be cleared, not left stale.
+//   - A column being explicitly cleared (ClearFields) is skipped here and
+//     handled by appendClearFieldSets, which NULLs the same `*Enc`
+//     column. Emitting both would produce a duplicate SET.
+func appendLabelShadowSets(
+	setClauses []string, args []any, argIdx int,
+	encShadows map[string]string, clearSet map[string]bool,
+) (clauses []string, outArgs []any, nextIdx int) {
+	for _, plain := range vehicleLabelColumns {
+		encCol := plain + "Enc"
+		ct, ok := encShadows[encCol]
+		if !ok || clearSet[plain] {
+			continue
+		}
+		if ct == "" {
+			setClauses = append(setClauses, fmt.Sprintf("%q = NULL", encCol))
+			continue
+		}
+		setClauses = append(setClauses, fmt.Sprintf("%q = $%d", encCol, argIdx))
+		args = append(args, ct)
+		argIdx++
+	}
+	return setClauses, args, argIdx
+}
+
 // appendClearFieldSets emits an explicit `SET NULL` for every
 // ClearFields entry, so a "navigation cancelled" event actually empties
 // the row.
@@ -227,6 +269,13 @@ func appendClearFieldSets(setClauses, clearFields []string) []string {
 // *Enc shadow that replaced it. Membership in this map is what marks a
 // column as "ciphertext-owned" for appendClearFieldSets and
 // appendGPSShadowSets.
+//
+// MYR-447 added the four label columns. That entry is load-bearing rather
+// than cosmetic: navFieldColumns (field_mapper.go) puts
+// "destinationName" and "destinationAddress" in ClearFields when the car
+// reports navigation cancelled, and without a mapping here the cancel
+// would NULL the retired plaintext column while the ciphertext column
+// kept serving the address of the destination the user just abandoned.
 var plaintextToEncColumn = map[string]string{
 	"latitude":             "latitudeEnc",
 	"longitude":            "longitudeEnc",
@@ -235,4 +284,8 @@ var plaintextToEncColumn = map[string]string{
 	"originLatitude":       "originLatitudeEnc",
 	"originLongitude":      "originLongitudeEnc",
 	"navRouteCoordinates":  "navRouteCoordinatesEnc",
+	"locationName":         "locationNameEnc",
+	"locationAddress":      "locationAddressEnc",
+	"destinationName":      "destinationNameEnc",
+	"destinationAddress":   "destinationAddressEnc",
 }

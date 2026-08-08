@@ -54,6 +54,7 @@ func (r *VehicleRepo) scanVehicleRowExtra(row rowScanner, extra ...any) (Vehicle
 		destLatEnc, destLngEnc     *string
 		originLatEnc, originLngEnc *string
 		navRouteEnc                *string
+		labels                     labelScanResult
 	)
 	dests := append(make([]any, 0, 33+len(extra)),
 		&v.ID, &v.UserID, &v.VIN, &v.Name,
@@ -61,10 +62,10 @@ func (r *VehicleRepo) scanVehicleRowExtra(row rowScanner, extra ...any) (Vehicle
 		&v.ChargeLevel, &v.EstimatedRange, &v.ChargeState, &v.TimeToFull,
 		&v.Speed, &v.GearPosition,
 		&v.Heading,
-		&v.LocationName, &v.LocationAddress,
+		&labels.locationNameEnc, &labels.locationAddressEnc,
 		&v.InteriorTemp, &v.ExteriorTemp,
 		&v.OdometerMiles, &v.FsdMilesSinceReset,
-		&v.DestinationName, &v.DestinationAddress,
+		&labels.destinationNameEnc, &labels.destinationAddressEnc,
 		&v.EtaMinutes, &v.TripDistRemaining,
 		&v.LastUpdated,
 		&latEnc, &lngEnc,
@@ -88,7 +89,44 @@ func (r *VehicleRepo) scanVehicleRowExtra(row rowScanner, extra ...any) (Vehicle
 		gpsScanResult{originLatEnc, originLngEnc},
 	)
 	r.applyResolvedNavRoute(&v, navRouteEnc)
+	r.applyResolvedLabels(&v, labels)
 	return v, nil
+}
+
+// labelScanResult holds the four MYR-447 location-label ciphertexts read
+// by the wide vehicle SELECT. Like gpsScanResult it exists purely so the
+// values stay in LOCAL slots — they are never exposed on the returned
+// Vehicle, which carries only the decrypted strings consumers expect.
+type labelScanResult struct {
+	locationNameEnc       *string
+	locationAddressEnc    *string
+	destinationNameEnc    *string
+	destinationAddressEnc *string
+}
+
+// applyResolvedLabels decrypts the four geocoded location labels
+// (MYR-447) onto v.
+//
+// `locationName` / `locationAddress` are NOT NULL with default '' on the
+// Prisma schema and surface as plain strings, so an absent or unreadable
+// ciphertext collapses to "" — the same value the plaintext column held
+// for a car whose position was never geocoded. `destinationName` /
+// `destinationAddress` are nullable and surface as *string, so absent
+// stays nil and the JSON emits `null` exactly as before.
+//
+// A repo built without an Encryptor reads no labels at all, mirroring
+// applyResolvedGPS. That is a real capability loss for the legacy
+// constructor and it is intended: no key, no location — in either its
+// numeric or its human-readable form.
+func (r *VehicleRepo) applyResolvedLabels(v *Vehicle, l labelScanResult) {
+	if r.encryptor == nil {
+		return
+	}
+	v.LocationName = encStringToLabel(l.locationNameEnc, r.encryptor, r.logger, r.metrics, "locationNameEnc")
+	v.LocationAddress = encStringToLabel(l.locationAddressEnc, r.encryptor, r.logger, r.metrics, "locationAddressEnc")
+	v.DestinationName = encStringToLabelPtr(l.destinationNameEnc, r.encryptor, r.logger, r.metrics, "destinationNameEnc")
+	v.DestinationAddress = encStringToLabelPtr(
+		l.destinationAddressEnc, r.encryptor, r.logger, r.metrics, "destinationAddressEnc")
 }
 
 // applyResolvedNavRoute decrypts `navRouteCoordinatesEnc` into
