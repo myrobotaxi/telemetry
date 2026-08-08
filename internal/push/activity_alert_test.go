@@ -17,12 +17,33 @@ import (
 // island strobes". So most of what is asserted here is that alerts DON'T fire.
 
 // TestAlertPhaseForMapsTheDesignsSixPhases pins the ladder itself, including
+// arrivingDispatch and acceptDispatch are the two dispatch instants the MYR-409
+// relevance gate is asked about (push.navReadingIsOurs).
+//
+// A genuine Arriving needs a nav reading dated AFTER the server sent the car to
+// the rider, so arrivingDispatch sits an hour before fixedNow — comfortably
+// before every "fresh" reading in this file, including the ones in tests that
+// wind `now` forward mid-test.
+//
+// acceptDispatch is fixedNow itself: on the accept push the dispatch has only
+// just happened, so any reading already in hand necessarily predates it. That is
+// the production shape of the burnt-rung defect, and stating it as a value keeps
+// the ladder test honest about which arm is doing the refusing.
+var (
+	arrivingDispatch = fixedNow.Add(-time.Hour)
+	acceptDispatch   = fixedNow
+)
+
 // the two things a reader would otherwise have to take on trust: that Arriving
 // outranks Enroute on the same status, and that the unhappy endings are outside
 // the six.
 func TestAlertPhaseForMapsTheDesignsSixPhases(t *testing.T) {
 	fresh := fixedNow.Add(-30 * time.Second)
 	stale := fixedNow.Add(-ProgressFreshFor - time.Second)
+	// dispatched precedes `fresh`, so a reading taken at `fresh` is about THIS
+	// ride; afterFresh follows it, so the same reading is about the previous one.
+	dispatched := fixedNow.Add(-2 * time.Minute)
+	afterFresh := fixedNow.Add(-10 * time.Second)
 
 	tests := []struct {
 		name string
@@ -44,14 +65,41 @@ func TestAlertPhaseForMapsTheDesignsSixPhases(t *testing.T) {
 			"arriving at the threshold",
 			RideContext{
 				Status: statusAccepted, ETAMinutes: intPtr(ArrivingWithinMinutes),
-				NavUpdatedAt: &fresh, DispatchUnderway: true,
+				NavUpdatedAt: &fresh, PickupDispatchedAt: &dispatched, DispatchUnderway: true,
 			},
 			AlertPhaseArriving,
 		},
 		{
 			"arriving under the threshold",
-			RideContext{Status: statusAccepted, ETAMinutes: intPtr(1), NavUpdatedAt: &fresh, DispatchUnderway: true},
+			RideContext{
+				Status: statusAccepted, ETAMinutes: intPtr(1),
+				NavUpdatedAt: &fresh, PickupDispatchedAt: &dispatched, DispatchUnderway: true,
+			},
 			AlertPhaseArriving,
+		},
+		{
+			// THE DEFECT MYR-409 CLOSES, and the one a freshness gate alone
+			// cannot. This reading is thirty seconds old — genuinely fresh —
+			// but it PREDATES the dispatch, so it describes wherever the
+			// owner's car was already going. Recency is not relevance.
+			"a fresh reading that predates the dispatch never reaches Arriving",
+			RideContext{
+				Status: statusAccepted, ETAMinutes: intPtr(1),
+				NavUpdatedAt: &fresh, PickupDispatchedAt: &afterFresh, DispatchUnderway: true,
+			},
+			AlertPhaseEnroute,
+		},
+		{
+			// Dispatch failed or was skipped: the car was never sent to this
+			// rider, so nothing it is navigating can be theirs. DispatchUnderway
+			// is true (an instant ride has no scheduled_for), so this gate is
+			// the only one that can refuse.
+			"an undispatched leg never reaches Arriving",
+			RideContext{
+				Status: statusAccepted, ETAMinutes: intPtr(1),
+				NavUpdatedAt: &fresh, DispatchUnderway: true,
+			},
+			AlertPhaseEnroute,
 		},
 		{
 			"one minute above the threshold is still Enroute",
@@ -240,12 +288,13 @@ func TestArrivingAlertsExactlyOnceAcrossManyTicks(t *testing.T) {
 			AlertedPhase: AlertPhaseEnroute,
 		},
 		RideContext: RideContext{
-			Status:           statusAccepted,
-			VehicleName:      "Blue Whale",
-			Destination:      "Home",
-			ETAMinutes:       intPtr(2),
-			NavUpdatedAt:     &fresh,
-			DispatchUnderway: true,
+			Status:             statusAccepted,
+			VehicleName:        "Blue Whale",
+			Destination:        "Home",
+			ETAMinutes:         intPtr(2),
+			NavUpdatedAt:       &fresh,
+			PickupDispatchedAt: &arrivingDispatch,
+			DispatchUnderway:   true,
 		},
 	}}
 
@@ -300,12 +349,13 @@ func TestArrivingAlertRidesPriorityTen(t *testing.T) {
 			AlertedPhase: AlertPhaseEnroute,
 		},
 		RideContext: RideContext{
-			Status:           statusAccepted,
-			VehicleName:      "Blue Whale",
-			Destination:      "Home",
-			ETAMinutes:       intPtr(1),
-			NavUpdatedAt:     &fresh,
-			DispatchUnderway: true,
+			Status:             statusAccepted,
+			VehicleName:        "Blue Whale",
+			Destination:        "Home",
+			ETAMinutes:         intPtr(1),
+			NavUpdatedAt:       &fresh,
+			PickupDispatchedAt: &arrivingDispatch,
+			DispatchUnderway:   true,
 		},
 	}}
 
@@ -357,6 +407,7 @@ func TestOrdinaryTicksNeverAlert(t *testing.T) {
 			ETAMinutes:         intPtr(14),
 			TripMilesRemaining: miles(6),
 			NavUpdatedAt:       &fresh,
+			PickupDispatchedAt: &arrivingDispatch,
 		},
 	}}
 
@@ -425,10 +476,12 @@ func TestStaleFlipNeverAlerts(t *testing.T) {
 		t.Errorf("persisted alert phases = %v, want none — a stale reading may not burn a rung", got)
 	}
 
-	// THE CONTROL. The same 1 minute, now freshly stamped, is the real thing and
-	// must alert — otherwise the assertion above would pass for the wrong reason.
+	// THE CONTROL. The same 1 minute, now freshly stamped AND postdating the
+	// dispatch, is the real thing and must alert — otherwise the assertion above
+	// would pass for the wrong reason.
 	fresh := fixedNow.Add(-30 * time.Second)
 	store.legs[0].NavUpdatedAt = &fresh
+	store.legs[0].PickupDispatchedAt = &arrivingDispatch
 	ticker.RunPass(t.Context())
 
 	sent = sender.Sent()
@@ -471,12 +524,13 @@ func TestStaleETAAtAcceptDoesNotBurnTheLadder(t *testing.T) {
 	// The leftover: one minute, last streamed before the accept and never since.
 	leftover := fixedNow.Add(-ProgressFreshFor - time.Minute)
 	store.context[activityRideID] = RideContext{
-		Status:           statusAccepted,
-		VehicleName:      "Blue Whale",
-		Destination:      "Home",
-		ETAMinutes:       intPtr(1),
-		NavUpdatedAt:     &leftover,
-		DispatchUnderway: true,
+		Status:             statusAccepted,
+		VehicleName:        "Blue Whale",
+		Destination:        "Home",
+		ETAMinutes:         intPtr(1),
+		NavUpdatedAt:       &leftover,
+		PickupDispatchedAt: &acceptDispatch,
+		DispatchUnderway:   true,
 	}
 
 	n.handleStatusChanged(events.NewEvent(events.RideStatusChangedEvent{
@@ -513,12 +567,13 @@ func TestStaleETAAtAcceptDoesNotBurnTheLadder(t *testing.T) {
 			AlertedPhase: AlertPhaseEnroute,
 		},
 		RideContext: RideContext{
-			Status:           statusAccepted,
-			VehicleName:      "Blue Whale",
-			Destination:      "Home",
-			ETAMinutes:       intPtr(1),
-			NavUpdatedAt:     &dispatched,
-			DispatchUnderway: true,
+			Status:             statusAccepted,
+			VehicleName:        "Blue Whale",
+			Destination:        "Home",
+			ETAMinutes:         intPtr(1),
+			NavUpdatedAt:       &dispatched,
+			PickupDispatchedAt: &arrivingDispatch,
+			DispatchUnderway:   true,
 		},
 	}}
 
@@ -1044,12 +1099,13 @@ func TestStaleSnapshotAlertIsBoundedAndCannotLowerTheMark(t *testing.T) {
 			AlertedPhase: AlertPhaseEnroute,
 		},
 		RideContext: RideContext{
-			Status:           statusAccepted,
-			VehicleName:      "Blue Whale",
-			Destination:      "Home",
-			ETAMinutes:       intPtr(1),
-			NavUpdatedAt:     &fresh,
-			DispatchUnderway: true,
+			Status:             statusAccepted,
+			VehicleName:        "Blue Whale",
+			Destination:        "Home",
+			ETAMinutes:         intPtr(1),
+			NavUpdatedAt:       &fresh,
+			PickupDispatchedAt: &arrivingDispatch,
+			DispatchUnderway:   true,
 		},
 	}
 	store.legs = []ActivityLeg{leg}

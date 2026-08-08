@@ -203,6 +203,14 @@ type VehicleUpdate struct {
 	ClearFields          []string         // DB column names to explicitly SET NULL
 	LastUpdated          time.Time        // always set
 
+	// NavReadingAt is set ONLY when this frame carried a navigation-group member,
+	// zero otherwise (MYR-409) — the distinction LastUpdated cannot make, since
+	// that one moves on every write of any column. Decided by carriedNavReading
+	// (field_mapper.go), persisted to the Go-owned side table by
+	// VehicleRepo.SetNavReadingAt (vehicle_nav_freshness.go, migration 0034) and
+	// never to the Prisma-owned car row. Monotone on write and on merge.
+	NavReadingAt time.Time
+
 	// Streamed reports whether this update came from the LIVE vehicle stream
 	// rather than a REST backfill (MYR-260's synthetic /vehicle_data frames).
 	// Provenance has to survive the trip into the store because MYR-454's

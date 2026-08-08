@@ -90,18 +90,26 @@ func navReading(rc RideContext) (float64, ProgressSource) {
 	return 0, ProgressSourceNone
 }
 
-// navFresh is the CHEAP HALF of the freshness gate: it rejects a car whose row
-// has not been written inside the horizon at all.
+// navFresh is the FIRST HALF of the freshness gate: it rejects a car that has
+// not reported navigation inside the horizon at all.
 //
-// An unknown timestamp is not fresh — a car we have never heard from is exactly
-// the case this guard exists for. A timestamp in the FUTURE is treated as
-// fresh: it means the database clock and ours disagree, which is a fact about
-// our infrastructure and not a reason to blank a rider's track.
+// An unknown timestamp is not fresh — a car whose navigation we have never
+// heard is exactly the case this guard exists for. A timestamp in the FUTURE is
+// treated as fresh: it means the database clock and ours disagree, which is a
+// fact about our infrastructure and not a reason to blank a rider's track.
 //
-// It is only half the gate because `NavUpdatedAt` is `Vehicle."lastUpdated"`, a
-// ROW stamp: every telemetry write of any column moves it, including writes
-// that touch no nav field at all. readingStalled is the half that dates the
-// readings themselves.
+// SINCE MYR-409 THIS IS A STATEMENT ABOUT THE READINGS, NOT ABOUT THE ROW.
+// `NavUpdatedAt` was `Vehicle."lastUpdated"` — a row stamp moved by every
+// telemetry write of any column, so a car streaming nothing but speed and
+// position held this gate open indefinitely over an ETA of arbitrary age. It is
+// now `go_vehicle_control_state.nav_reading_at` (migration 0034), stamped only
+// by a frame that actually carried a navigation-group member.
+//
+// readingStalled next door is still the other half, and still earns its keep:
+// this gate dates the last frame that MENTIONED navigation, while that one
+// catches a car dutifully re-sending the SAME reading — a stopped car's 30s
+// nav resend keeps this stamp current, and only the value's own staleness
+// distinguishes it from movement.
 func navFresh(rc RideContext, now time.Time) bool {
 	return rc.NavUpdatedAt != nil && now.Sub(*rc.NavUpdatedAt) <= ProgressFreshFor
 }

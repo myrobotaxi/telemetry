@@ -79,4 +79,16 @@ func mergeUpdate(dst, src *VehicleUpdate) {
 	if src.LastUpdated.After(dst.LastUpdated) {
 		dst.LastUpdated = src.LastUpdated
 	}
+
+	// MYR-409: the nav stamp merges FORWARD-ONLY, and unlike LastUpdated it is
+	// frequently zero on one side — a nav frame coalescing with the five
+	// motion-only frames around it is the ordinary shape of a flush window. A
+	// zero source must therefore not erase a stamp the window already earned
+	// (that would report a fresh reading as stale), and a zero destination must
+	// take the source's (that is the nav frame arriving second). `After` on a
+	// zero src is false and a zero dst is before everything, so both fall out of
+	// the same comparison — but only because zero is never a legitimate stamp.
+	if src.NavReadingAt.After(dst.NavReadingAt) {
+		dst.NavReadingAt = src.NavReadingAt
+	}
 }

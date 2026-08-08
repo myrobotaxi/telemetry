@@ -193,22 +193,78 @@ func alertPhaseFor(rc RideContext, now time.Time) AlertPhase {
 // Arriving expansion when it genuinely was two minutes out — the next thing they
 // saw would be Arrived.
 //
-// WHAT THIS GATE DOES NOT CLOSE, stated because the difference matters. NavFresh
-// is the cheap half — `NavUpdatedAt` is `Vehicle."lastUpdated"`, a ROW stamp, so
-// a car that is awake and streaming speed and position carries a "fresh" row
-// over a `minutesToArrival` of any age. The arm this closes is the common one (a
-// car that finished its errand, parked and went quiet: its row ages out of the
-// horizon and the accept push correctly yields Enroute). The arm still open is a
-// car actively navigating somewhere else at the instant its owner accepts an
-// instant ride. Closing that one needs the reading's own age relative to the
-// ride's dispatch, which no column carries today — `readingStalled` next door is
-// keyed on an anchor this rung does not have at accept, since the anchor is only
-// opened by a delivered push. A follow-up issue, not a silent omission.
+// BOTH ARMS ARE NOW CLOSED (MYR-409). This comment used to end by naming an
+// arm that was still open, and the note is kept because the shape of the fix is
+// the interesting part.
+//
+// The arm that was always closed is the common one: a car that finished its
+// errand, parked and went quiet. Its stamp ages out of the horizon and the
+// accept push correctly yields Enroute.
+//
+// The arm that was open is a car ACTIVELY NAVIGATING SOMEWHERE ELSE at the
+// instant its owner accepts an instant ride. `NavUpdatedAt` was
+// `Vehicle."lastUpdated"`, a ROW stamp, so a car awake and streaming speed and
+// position carried a "fresh" row over a `minutesToArrival` of any age — and the
+// obvious fix, `readingStalled` next door, is keyed on an anchor this rung does
+// not have at accept, since the anchor is only opened by a DELIVERED push.
+//
+// It is closed by dating the reading on the car rather than on the ride:
+// `NavUpdatedAt` is now `go_vehicle_control_state.nav_reading_at`, stamped only
+// by a frame that carried a navigation-group member. Note what this does and
+// does not claim. A car navigating its owner's errand at accept is genuinely
+// streaming FRESH navigation, so this gate passes — and the rung is not burnt
+// anyway, because the errand's `minutesToArrival` describes a route to the
+// owner's destination and only resolves Arriving when that route is itself
+// nearly over. What is now impossible is the durable case the issue was filed
+// for: a STALE `minutesToArrival`, frozen at 0 or 1 by a route that ended
+// without a cancel, riding a row stamp kept fresh by motion.
 func arrivingSoon(rc RideContext, now time.Time) bool {
-	if !rc.DispatchUnderway || !navFresh(rc, now) {
+	if !rc.DispatchUnderway || !navFresh(rc, now) || !navReadingIsOurs(rc) {
 		return false
 	}
 	return rc.ETAMinutes != nil && *rc.ETAMinutes >= 0 && *rc.ETAMinutes <= ArrivingWithinMinutes
+}
+
+// navReadingIsOurs reports whether the car's navigation reading can possibly be
+// about THIS RIDE'S PICKUP, by asking whether it postdates the dispatch that
+// sent the car there (MYR-409).
+//
+// WHY FRESHNESS IS NOT ENOUGH, which is the whole reason this exists. navFresh
+// now dates the reading rather than the row, and that closes the frozen-value
+// arm: a `minutesToArrival` left at 1 by a route that ended without a cancel no
+// longer rides a row stamp kept current by motion. It does NOT close the arm
+// this issue is named for. A car navigating its owner's errand at the instant an
+// instant ride is accepted is streaming perfectly fresh navigation, one second
+// old, describing a route to the shops — and if the owner happens to be two
+// minutes from the shops, `ETAMinutes` is 2 and the rung burns. Recency and
+// relevance are different questions and only one of them is a timestamp on the
+// car.
+//
+// The dispatch instant answers the other. A reading taken BEFORE the server told
+// the car where the rider is cannot be describing the rider, whatever its age.
+//
+// NIL IS NOT FRESH, and that is deliberate rather than defensive. A nil stamp
+// means leg 1 was never dispatched — a reservation still sleeping, or a dispatch
+// that failed or was skipped — so the car was never sent to this rider at all
+// and nothing it is navigating is theirs. DispatchUnderway catches the sleeping
+// reservation; the failed and skipped dispatches are this predicate's alone.
+//
+// THE RESIDUAL, stated because it is real and this gate does not close it.
+// Dispatch is recorded when the destination is PUSHED to the car, not when the
+// car acts on it, so a nav frame emitted in the seconds between those two events
+// postdates the dispatch while still describing the old route. Closing that
+// needs the car's active destination matched against the ride's pickup
+// coordinates, and `pickup_lat_enc`/`pickup_lng_enc` are app-encrypted
+// (migration 0002) — the same reason legUnderway settles for dormancy next door.
+// The window is now a few seconds wide rather than unbounded, and it errs the
+// safe way at the moment that matters: on the accept push, dispatch is
+// approximately now, so no reading yet postdates it and the rung is left unspent
+// for the real Arriving.
+func navReadingIsOurs(rc RideContext) bool {
+	if rc.PickupDispatchedAt == nil || rc.NavUpdatedAt == nil {
+		return false
+	}
+	return !rc.NavUpdatedAt.Before(*rc.PickupDispatchedAt)
 }
 
 // alertFor returns the alert to attach to a push carrying `phase`, or nil when

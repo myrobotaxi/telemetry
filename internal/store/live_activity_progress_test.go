@@ -169,6 +169,15 @@ func TestLiveActivityRepo_ActiveLegsCarriesTheNavInputs(t *testing.T) {
 
 // seedActivityVehicle inserts the Prisma-owned "Vehicle" row the ride points
 // at, carrying a nav reading. The id matches seedActivityRide's derivation.
+//
+// IT STAMPS nav_reading_at TOO, and the two writes belong together (MYR-409).
+// In production a frame carrying etaMinutes / tripDistanceRemaining is by
+// definition a navigation frame, so the writer stamps the side table in the
+// same flush; a helper that wrote the readings without the stamp would be
+// seeding a state the server cannot produce, and every test built on it would
+// be asserting against fiction. Tests that want the UNSTAMPED case — a car
+// streaming motion with navigation of unknown age, which is the defect state —
+// seed the car row directly and deliberately, as migration_0034_test.go does.
 func seedActivityVehicle(t *testing.T, rideID string, etaMinutes int, milesRemaining float64) {
 	t.Helper()
 	if _, err := testPool.Exec(context.Background(),
@@ -180,5 +189,13 @@ func seedActivityVehicle(t *testing.T, rideID string, etaMinutes int, milesRemai
 		     "lastUpdated" = EXCLUDED."lastUpdated"`,
 		rideID, etaMinutes, milesRemaining); err != nil {
 		t.Fatalf("seed vehicle for %s: %v", rideID, err)
+	}
+	if _, err := testPool.Exec(context.Background(),
+		`INSERT INTO go_vehicle_control_state (vehicle_id, nav_reading_at)
+		 VALUES ('veh_' || $1, NOW())
+		 ON CONFLICT (vehicle_id) DO UPDATE
+		 SET nav_reading_at = GREATEST(EXCLUDED.nav_reading_at, go_vehicle_control_state.nav_reading_at)`,
+		rideID); err != nil {
+		t.Fatalf("seed nav stamp for %s: %v", rideID, err)
 	}
 }

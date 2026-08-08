@@ -20,6 +20,10 @@ type vehicleUpdater interface {
 	// trunk/frunk, climate, charge-port) to the Go-owned side table, keyed by
 	// vehicle cuid. Nil fields are left untouched (per-field last-writer-wins).
 	UpsertControlState(ctx context.Context, vehicleID string, update ControlStateUpdate) error
+	// SetNavReadingAt stamps MYR-409 nav-reading freshness on the same Go-owned
+	// side table, also keyed by vehicle cuid. Called only for a frame that
+	// carried a navigation-group member; the write is monotone-forward.
+	SetNavReadingAt(ctx context.Context, vehicleID string, readingAt time.Time) error
 }
 
 // drivePersister is the consumer-site interface for persisting drive
