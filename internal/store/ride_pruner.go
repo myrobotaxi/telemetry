@@ -156,19 +156,19 @@ func (p *RidePruner) PruneBatch(ctx context.Context, batchSize int) (RidePruneBa
 
 	res := RidePruneBatchResult{}
 
-	deleted, deleteAudits, deleteClaimed, err := p.runDeleteJob(ctx, tx, batchSize)
+	del, err := p.runDeleteJob(ctx, tx, batchSize)
 	if err != nil {
 		return RidePruneBatchResult{}, err
 	}
-	res.RidesDeleted = deleted
-	res.AuditRows += deleteAudits
+	res.RidesDeleted = del.written
+	res.AuditRows += del.audits
 
-	scrubbed, scrubAudits, scrubClaimed, err := p.runScrubJob(ctx, tx, batchSize)
+	scrub, err := p.runScrubJob(ctx, tx, batchSize)
 	if err != nil {
 		return RidePruneBatchResult{}, err
 	}
-	res.PassengersScrubbed = scrubbed
-	res.AuditRows += scrubAudits
+	res.PassengersScrubbed = scrub.written
+	res.AuditRows += scrub.audits
 
 	if err := tx.Commit(ctx); err != nil {
 		return RidePruneBatchResult{}, fmt.Errorf("store.RidePruner.PruneBatch: commit: %w", err)
@@ -176,7 +176,7 @@ func (p *RidePruner) PruneBatch(ctx context.Context, batchSize int) (RidePruneBa
 
 	// Exhausted only when NEITHER job could claim anything — see the field's
 	// doc comment for why a short batch does not qualify.
-	res.Exhausted = deleteClaimed == 0 && scrubClaimed == 0
+	res.Exhausted = del.claimed == 0 && scrub.claimed == 0
 
 	if res.RidesDeleted > 0 || res.PassengersScrubbed > 0 {
 		// P0 only: counts and the two window sizes. Never a ride id, a
@@ -194,44 +194,58 @@ func (p *RidePruner) PruneBatch(ctx context.Context, batchSize int) (RidePruneBa
 	return res, nil
 }
 
-// runDeleteJob is step 1-2: claim, audit, destroy. Returns rows deleted, audit
-// rows written, and how many rows the claim found (which is what Exhausted is
-// derived from, NOT the delete count).
-func (p *RidePruner) runDeleteJob(ctx context.Context, tx pgx.Tx, batchSize int) (int, int, int, error) {
+// rideJobResult is one of the two jobs' contribution to a batch.
+//
+// `claimed` and `written` are separate on purpose. Exhausted is derived from
+// CLAIMED, never from written: a claim that found rows but whose write affected
+// none — the repeated guards rejecting a row that changed under the lock — is
+// still evidence that work may remain, and reporting exhaustion there would end
+// the pass over rows nobody handled.
+type rideJobResult struct {
+	// claimed is how many rows the claim query locked.
+	claimed int
+	// written is how many rows the destructive statement actually affected.
+	written int
+	// audits is how many audit entries were written for this job.
+	audits int
+}
+
+// runDeleteJob is step 1-2: claim, audit, destroy.
+func (p *RidePruner) runDeleteJob(ctx context.Context, tx pgx.Tx, batchSize int) (rideJobResult, error) {
 	claimed, err := claimRides(ctx, tx, queryPrunableRideBatch, batchSize, "claim expired rides")
 	if err != nil {
-		return 0, 0, 0, err
+		return rideJobResult{}, err
 	}
 	if len(claimed) == 0 {
-		return 0, 0, 0, nil
+		return rideJobResult{}, nil
 	}
 
 	// Audit FIRST (CG-DL-3).
 	audits, err := insertRideAudits(ctx, tx, claimed, AuditActionRidesPruned)
 	if err != nil {
-		return 0, 0, 0, err
+		return rideJobResult{}, err
 	}
 
 	tag, err := tx.Exec(ctx, queryPruneDeleteRides, rideIDs(claimed))
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("store.RidePruner.PruneBatch: delete rides: %w", err)
+		return rideJobResult{}, fmt.Errorf("store.RidePruner.PruneBatch: delete rides: %w", err)
 	}
-	return int(tag.RowsAffected()), audits, len(claimed), nil
+	return rideJobResult{claimed: len(claimed), written: int(tag.RowsAffected()), audits: audits}, nil
 }
 
 // runScrubJob is step 3-4: claim, audit, NULL both passenger columns.
-func (p *RidePruner) runScrubJob(ctx context.Context, tx pgx.Tx, batchSize int) (int, int, int, error) {
+func (p *RidePruner) runScrubJob(ctx context.Context, tx pgx.Tx, batchSize int) (rideJobResult, error) {
 	claimed, err := claimRides(ctx, tx, queryScrubbableRideBatch, batchSize, "claim scrubbable rides")
 	if err != nil {
-		return 0, 0, 0, err
+		return rideJobResult{}, err
 	}
 	if len(claimed) == 0 {
-		return 0, 0, 0, nil
+		return rideJobResult{}, nil
 	}
 
 	audits, err := insertRideAudits(ctx, tx, claimed, AuditActionRidePassengersScrubbed)
 	if err != nil {
-		return 0, 0, 0, err
+		return rideJobResult{}, err
 	}
 
 	// ALWAYS BOTH COLUMNS, NEVER PHONE ONLY — the statement sets them together
@@ -240,9 +254,9 @@ func (p *RidePruner) runScrubJob(ctx context.Context, tx pgx.Tx, batchSize int) 
 	// removing both makes the block disappear. See queryScrubRidePassengers.
 	tag, err := tx.Exec(ctx, queryScrubRidePassengers, rideIDs(claimed))
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("store.RidePruner.PruneBatch: scrub passengers: %w", err)
+		return rideJobResult{}, fmt.Errorf("store.RidePruner.PruneBatch: scrub passengers: %w", err)
 	}
-	return int(tag.RowsAffected()), audits, len(claimed), nil
+	return rideJobResult{claimed: len(claimed), written: int(tag.RowsAffected()), audits: audits}, nil
 }
 
 // rideIDs projects claimed rows onto the id array both write statements take.

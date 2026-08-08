@@ -93,9 +93,9 @@ type rideAuditGroup struct {
 // groupRidesByVehicle buckets claimed rows by vehicle, returning an
 // insertion-ordered key list alongside the map so the audit rows land
 // oldest-vehicle-first and the output is deterministic for tests.
-func groupRidesByVehicle(claimed []prunedRide) ([]string, map[string]*rideAuditGroup) {
-	order := make([]string, 0, len(claimed))
-	groups := make(map[string]*rideAuditGroup, len(claimed))
+func groupRidesByVehicle(claimed []prunedRide) (order []string, groups map[string]*rideAuditGroup) {
+	order = make([]string, 0, len(claimed))
+	groups = make(map[string]*rideAuditGroup, len(claimed))
 	for i := range claimed {
 		r := &claimed[i]
 		g, ok := groups[r.vehicleID]
