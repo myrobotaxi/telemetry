@@ -1,0 +1,79 @@
+-- 0034_vehicle_nav_reading_at.up.sql
+--
+-- MYR-409: give the car a NAV-READING stamp, because the only timestamp it had
+-- was a ROW stamp and the difference is the whole bug.
+--
+-- WHAT WAS WRONG. Every freshness gate in the Live Activity sender reads
+-- RideContext.NavUpdatedAt, and until this migration that value was the car
+-- row's own "last written" column -- which is stamped by every telemetry write
+-- of ANY column. A car that is awake and streaming speed, position and gear
+-- therefore carried a permanently "fresh" stamp over navigation readings of
+-- arbitrary age. Two consequences, one of them durable:
+--
+--   * push.arrivingSoon (the Arriving alert rung) gates on that stamp plus the
+--     carried minutesToArrival. minutesToArrival KEEPS ITS VALUE after the
+--     route that produced it ends, so a car that is actively navigating its
+--     owner's PREVIOUS errand at the instant a rider's instant ride is accepted
+--     reads a small number behind a fresh row stamp, resolves Arriving(3), and
+--     BURNS both the Enroute and Arriving rungs. A wrong eta self-corrects on
+--     the next reading; a burnt rung does not -- the rider is never told the
+--     car is on its way and never gets the real Arriving expansion.
+--   * push.navFresh (the progress track's cheap pre-filter) had the same hole.
+--     MYR-398 worked around it PER ACTIVITY with progress_reading /
+--     progress_reading_at (migration 0027), but that anchor is only opened by a
+--     delivered push, so it does not exist at accept -- exactly when the alert
+--     rung is decided.
+--
+-- WHAT THIS COLUMN IS. nav_reading_at is when the car last actually TOLD US
+-- something about its navigation: the flush timestamp of the most recent
+-- telemetry frame that carried a member of the navigation atomic group
+-- (destinationName, minutesToArrival, milesToArrival, destination/origin
+-- location, routeLine -- vehicle-state-schema.md section 1.1). A frame that
+-- carries only motion, charge, climate or media columns does NOT move it, and
+-- neither does the MYR-454 derived-status fold, which writes the status column
+-- from gear/speed and never touches navigation.
+--
+-- A NAV CANCEL DOES MOVE IT, deliberately. "The car has no route" is a fresh
+-- reading about navigation, not an absence of one, and the readings it clears
+-- are NULLed in the same write -- so the stamp and the values it dates stay
+-- consistent. Refusing to stamp a cancel would leave the column ageing while
+-- the truth it describes is current.
+--
+-- NULL MEANS "NO NAV READING HAS EVER BEEN SEEN", and every gate treats that as
+-- NOT FRESH. That is the fail-closed direction and it is the point: the arm
+-- this issue closes is a gate saying yes when it should say no. There is
+-- deliberately NO backfill and deliberately NO COALESCE onto the row stamp on
+-- the read side -- falling back to the row stamp would reinstate the exact lie
+-- for the exact population this column exists to describe. A car with a live
+-- route re-acquires a stamp on its next nav frame (1s interval, 30s resend per
+-- section 4 of the schema doc), so the unstamped window is small and
+-- self-healing, and it errs toward a rung unspent.
+--
+-- WHY THIS TABLE. The stamp is a fact about one car and has to survive a
+-- deploy and be shared by two replicas that both push to the same phone, so it
+-- has to be in the database. It cannot go on the Prisma-owned car row -- CG-DL-9
+-- forbids Go migration SQL from touching tables owned by the sibling app's ORM
+-- -- which is precisely the constraint rest-api.md section 7.21.3 recorded when
+-- it said "a per-field nav timestamp on the car is not available to it". A
+-- Go-owned side table keyed by the same vehicle cuid removes that constraint
+-- without a cross-repo Prisma migration, which is the MYR-253 hydration pattern
+-- this table has carried since migration 0008.
+--
+-- WRITE PATH: a dedicated statement, not the shared per-field COALESCE upsert,
+-- following the MYR-316 service-window precedent (internal/store/
+-- vehicle_nav_freshness.go). The write is MONOTONE -- GREATEST(new, stored) --
+-- so it can never move backwards. That is not decoration: the writer coalesces
+-- per VIN and flushes from a ticker, two replicas write the same row, and a
+-- stamp that could go backwards would make a genuinely fresh reading report
+-- stale and flicker a client gate off and on. Monotone-forward is also what
+-- makes the write safe to retry.
+--
+-- Naming convention (CG-DL-9): Go-owned table, "go_" prefix, snake_case column,
+-- no foreign key to any table owned by the sibling app's ORM.
+--
+-- Classification: P0. It is a clock reading about one car -- no coordinate, no
+-- place name, no distance, no duration, and it names nobody. Same tier as the
+-- sibling updated_at. See data-classification.md section 1.13.
+
+ALTER TABLE go_vehicle_control_state
+    ADD COLUMN IF NOT EXISTS nav_reading_at TIMESTAMPTZ;
