@@ -1492,6 +1492,20 @@ The owner changing what ONE accepted grant conveys, **in place**. This is what r
 
 **Applies to ONE ROW.** A multi-vehicle invite is N rows sharing one code, and patching one changes that vehicle's grant only — so an owner may now hold *different capabilities per vehicle for the same person*, which the fixed tier could not express.
 
+> **AMENDED BY [MYR-451](https://linear.app/myrobotaxi/issue/MYR-451) — the write is now DATED and the decision is now LOGGED.** Nothing about the request or response shape changes; what changes is what survives the request.
+>
+> An external-beta owner reported that a grantee whose Rides toggle was OFF had still requested and received a ride. The grant row was recovered intact and read `permission = 'rides'` beside `allow_rides = false` — which **proves the patch committed**, because redemption derives the flag from the preset, so a row that redeemed as `rides` and now reads `false` can only have been narrowed afterwards. The create gate is correct and refuses exactly that grant (verified end to end against the database by `TestMYR451_WithdrawnRideCapabilityIsRefusedEverywhere`).
+>
+> What could not be established was **when** the flag moved — and therefore whether the rides taken preceded the toggle (correct) or followed it (a live bypass). Those are opposite conclusions and the system could not distinguish them, because:
+>
+> 1. the row had **no `updated_at`** — `suspended_at` recorded WHEN for suspension, while `allow_rides` sat beside it as a bare boolean recording only the verdict;
+> 2. the patch log line carried the invite id and the resulting flags, but **not the grantee, the vehicle, or what was asked for**, so it joined to nothing; and
+> 3. the create path logged **denials only**, so a create that sailed through the gate and a create that never happened emitted identical silence.
+>
+> All three are closed. `updated_at` (migration 0032) is stamped by the same statement that moves the flags; the patch line names `user_id` / `vehicle_id` / `requested_*` beside the resulting state; and a **permitted non-owner create** is logged on the same `(user_id, vehicle_id)` key. The three lines reconstruct the ordering from logs alone. **This is observability, not enforcement** — no gate changed, and none needed to.
+>
+> **Still open, and NOT fixed here.** The grantee's client is never told that its ride capability was withdrawn: the cache bust below is server-side, and the socket teardown is deliberately limited to suspension because `allowRides` has no WebSocket effect. So a rider app that has already loaded its vehicle list keeps rendering `"Location + rides"` and keeps offering the booking flow until it independently re-reads — which is what the beta reporters saw and described as "I can still request the ride". The server refuses at the final step; the client walks the user to it. Closing that needs a client-visible signal and a client change, tracked separately.
+
 ##### Request
 
 `PatchShareInviteRequest` — `{"allowRides"?: boolean, "suspended"?: boolean}`.
