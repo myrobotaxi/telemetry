@@ -33,6 +33,32 @@ func loadEncryptor() (cryptox.Encryptor, error) {
 	return enc, nil
 }
 
+// READ THIS BEFORE ADDING A SUBCOMMAND THAT USES ANY REPO BELOW.
+//
+// Every constructor in this file returns an ENCRYPTION-WIRED repo. If your
+// subcommand then READS a P1 column through it — a Tesla token, any Vehicle
+// location field, a Drive route trail or its geocoded labels — you have
+// performed an operator decrypt, and MYR-447 requires it to be attributable:
+//
+//  1. Call requireOperator() FIRST, before openDB, so a missing OPS_OPERATOR
+//     fails before a connection is made.
+//  2. Write a store.OperatorAccess row via newOperatorAuditor(db).RecordDecrypt
+//     BEFORE the plaintext is printed, transmitted, or otherwise used, and
+//     abort the command if that write fails.
+//
+// THIS IS A CONVENTION, NOT A COMPILER GUARANTEE, and it is worth saying so
+// rather than letting the next author assume otherwise. A signature-level
+// guard was considered and rejected: these constructors are shared with
+// subcommands that only WRITE (`ops auth link` seals a fresh token and reads
+// nothing), so forcing an operator handle through the constructor would
+// demand attribution from commands that decrypt nothing and would say
+// nothing about whether RecordDecrypt was actually called. Making the
+// obligation structural means wrapping the decrypt itself — pushing the
+// audit into the repo read path — which is a larger change than MYR-447
+// took on. Until then: the four audited subcommands are `auth token`,
+// `fields snapshot`, `fleet-config push` and `geocode backfill`; copy one of
+// them.
+//
 // newAccountRepo is the canonical constructor used by every ops
 // subcommand that needs to read or write Account tokens. Centralizing it
 // here keeps the encryption foundation in one place across auth, fleet,
@@ -66,6 +92,59 @@ func newDriveRepo(db *store.DB, logger *slog.Logger) (*store.DriveRepo, error) {
 		return nil, err
 	}
 	return store.NewDriveRepoWithEncryption(db.Pool(), store.NoopMetrics{}, enc, logger), nil
+}
+
+// opsOperatorEnv names the environment variable carrying the operator's
+// handle. It is REQUIRED by every subcommand that decrypts user data.
+const opsOperatorEnv = "OPS_OPERATOR"
+
+// Field-name vocabularies for the MYR-447 operator-access audit. These are
+// NAMES ONLY — store.OperatorAuditor rejects anything value-shaped. Keep
+// them in sync with what each subcommand actually decrypts; over-reporting
+// is harmless, under-reporting defeats the audit.
+var (
+	// teslaTokenAuditFields covers store.AccountRepo.GetTeslaToken, which
+	// decrypts the Tesla fleet-control credentials.
+	teslaTokenAuditFields = []string{"accessToken", "refreshToken"}
+
+	// vehicleRowAuditFields covers store.VehicleRepo.GetByVIN, which
+	// decrypts the whole location/navigation surface of the row — every
+	// P1 field in data-classification.md §1.3 that MYR-433 moved to
+	// ciphertext-only.
+	vehicleRowAuditFields = []string{
+		"latitude", "longitude", "locationName", "locationAddress",
+		"destinationName", "destinationAddress",
+		"destinationLatitude", "destinationLongitude",
+		"originLatitude", "originLongitude",
+		"navRouteCoordinates",
+	}
+)
+
+// requireOperator resolves the operator's handle from OPS_OPERATOR.
+//
+// MYR-447: an unattributable decrypt is exactly what the operator audit
+// exists to prevent, so there is NO default and NO fallback to the OS
+// username — a fallback would silently produce rows attributed to "root"
+// or to whoever's laptop the tool happened to run on. Call this first,
+// before opening the database, so the operator learns what is missing
+// without a connection attempt in between.
+func requireOperator() (string, error) {
+	handle := strings.TrimSpace(os.Getenv(opsOperatorEnv))
+	if err := store.ValidateOperatorHandle(handle); err != nil {
+		return "", fmt.Errorf(
+			"%s must be set to your operator handle: this command decrypts user data "+
+				"and every decrypt is audited (MYR-447); there is no default. "+
+				"Example: %s=jdoe ops ... (%w)",
+			opsOperatorEnv, opsOperatorEnv, err)
+	}
+	return handle, nil
+}
+
+// newOperatorAuditor builds the audit writer used by every decrypting
+// subcommand. Shared here so the three call sites cannot drift on which
+// table or which action they write.
+func newOperatorAuditor(db *store.DB) *store.OperatorAuditor {
+	return store.NewOperatorAuditor(db.Pool())
 }
 
 // newLogger returns a text-handler slog logger writing to stderr so

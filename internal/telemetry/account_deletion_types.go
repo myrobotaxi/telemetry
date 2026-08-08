@@ -41,6 +41,7 @@ type OpenRideRef struct {
 type AccountDataDeleter interface {
 	CountUserDrives(ctx context.Context, userID string) (int, error)
 	RevokeSharesReceived(ctx context.Context, userID string) (int, error)
+	ScrubSharesReceivedLabel(ctx context.Context, userID string) (int, error)
 	DeletePushDevices(ctx context.Context, userID string) (int, error)
 	DeleteSavedPlaces(ctx context.Context, userID string) (int, error)
 	RevokeRefreshTokens(ctx context.Context, userID string) (int, error)
@@ -54,6 +55,7 @@ type AccountDeletionCounts struct {
 	DriveCount           int
 	RidesCancelled       int
 	SharesRevoked        int
+	ShareLabelsScrubbed  int
 	PushDevicesDeleted   int
 	SavedPlacesDeleted   int
 	RefreshTokensRevoked int

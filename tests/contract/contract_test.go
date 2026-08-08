@@ -32,6 +32,8 @@ package contract_test
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -53,8 +55,10 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/myrobotaxi/telemetry/internal/auth"
+	"github.com/myrobotaxi/telemetry/internal/cryptox"
 	"github.com/myrobotaxi/telemetry/internal/store"
 	"github.com/myrobotaxi/telemetry/internal/telemetry"
+	"github.com/myrobotaxi/telemetry/internal/testutil"
 )
 
 // ---------------------------------------------------------------------------
@@ -183,6 +187,15 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"heading"          INT NOT NULL DEFAULT 0,
 		"locationName"     TEXT NOT NULL DEFAULT '',
 		"locationAddress"  TEXT NOT NULL DEFAULT '',
+		-- MYR-447 — encrypted shadows for the geocoded location labels.
+		-- Mirrors docs/migrations/myr-447-prisma-label-enc.sql, which has
+		-- to be applied as a Prisma migration in react-frontend because
+		-- CG-DL-9 forbids a Go migration from naming "Vehicle"/"Drive".
+		-- The wide vehicle SELECT reads these INSTEAD OF the plaintext
+		-- pair above, so omitting them here is not a lossy fixture — it
+		-- is a 42703 on every snapshot and drives read.
+		"locationNameEnc"       TEXT,
+		"locationAddressEnc"    TEXT,
 		"latitude"         DOUBLE PRECISION NOT NULL DEFAULT 0,
 		"longitude"        DOUBLE PRECISION NOT NULL DEFAULT 0,
 		"latitudeEnc"          TEXT,
@@ -202,6 +215,9 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"originLatitudeEnc"    TEXT,
 		"originLongitudeEnc"   TEXT,
 		"destinationAddress" TEXT,
+		-- MYR-447 — encrypted shadows for the destination labels.
+		"destinationNameEnc"    TEXT,
+		"destinationAddressEnc" TEXT,
 		"etaMinutes"       INT,
 		"tripDistanceMiles" DOUBLE PRECISION,
 		"tripDistanceRemaining" DOUBLE PRECISION,
@@ -222,6 +238,13 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"startAddress"     TEXT NOT NULL DEFAULT '',
 		"endLocation"      TEXT NOT NULL DEFAULT '',
 		"endAddress"       TEXT NOT NULL DEFAULT '',
+		-- MYR-447 — encrypted shadows for the drive's endpoint labels.
+		-- Nullable: NULL is the absent sentinel that
+		-- queryDriveMissingAddresses' discovery predicate keys on.
+		"startLocationEnc" TEXT,
+		"startAddressEnc"  TEXT,
+		"endLocationEnc"   TEXT,
+		"endAddressEnc"    TEXT,
 		"distanceMiles"    DOUBLE PRECISION NOT NULL DEFAULT 0,
 		"durationMinutes"  INT NOT NULL DEFAULT 0,
 		"avgSpeedMph"      DOUBLE PRECISION NOT NULL DEFAULT 0,
@@ -335,8 +358,15 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 // seedHelpers exposes the seed primitives every test needs to plant
 // rows into the test DB. Returned by setupTestServer so a test holds a
 // pointer to both the server and the seed surface in one value.
+//
+// `enc` is the SAME Encryptor the repos under test were built with
+// (MYR-447). Every geocoded label a seed plants is sealed with it —
+// the handlers read the labels from the `*Enc` columns only, so a seed
+// holding a different key (or none) would surface as "this car has no
+// address" rather than as a failure anyone could diagnose.
 type seedHelpers struct {
 	pool *pgxpool.Pool
+	enc  cryptox.Encryptor
 }
 
 // setupTestServer wires the three REST handlers under test against a
@@ -358,8 +388,14 @@ func setupTestServer(t *testing.T) (*httptest.Server, *seedHelpers) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	vehicleRepo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
-	driveRepo := store.NewDriveRepo(testPool, store.NoopMetrics{})
+	// MYR-447: the encryption-aware constructors, not the legacy keyless
+	// ones. A keyless repo reads NO location at all — neither coordinates
+	// (MYR-433) nor labels — so the keyless harness would have asserted
+	// against a wire payload production never emits: every address blank.
+	// The seeds below share this exact Encryptor.
+	enc := newContractEncryptor(t)
+	vehicleRepo := store.NewVehicleRepoWithEncryption(testPool, store.NoopMetrics{}, enc, logger)
+	driveRepo := store.NewDriveRepoWithEncryption(testPool, store.NoopMetrics{}, enc, logger)
 
 	// Issuer / audience left empty: the test minter omits them too, so
 	// the JWT validator skips those checks. This mirrors the dev-mode
@@ -389,7 +425,34 @@ func setupTestServer(t *testing.T) (*httptest.Server, *seedHelpers) {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
-	return srv, &seedHelpers{pool: testPool}
+	return srv, &seedHelpers{pool: testPool, enc: enc}
+}
+
+// newContractEncryptor builds an AES-256-GCM Encryptor over a randomly
+// generated per-test key, going through the production loader
+// (LoadKeySetFromEnv, single-key shorthand) rather than hand-rolling a
+// KeySet. Mirrors newTestEncryptor in internal/store/account_repo_test.go
+// — the two suites are in different packages, so the helper cannot be
+// shared, but the sealing itself is (testutil.SealLabel).
+//
+// A fresh key per test is safe because the seeds and the reads happen
+// inside the same test: nothing sealed here outlives cleanTables.
+func newContractEncryptor(t *testing.T) cryptox.Encryptor {
+	t.Helper()
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	t.Setenv("ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(raw))
+	ks, err := cryptox.LoadKeySetFromEnv()
+	if err != nil {
+		t.Fatalf("LoadKeySetFromEnv: %v", err)
+	}
+	enc, err := cryptox.NewEncryptor(ks)
+	if err != nil {
+		t.Fatalf("NewEncryptor: %v", err)
+	}
+	return enc
 }
 
 // ---------------------------------------------------------------------------
@@ -597,26 +660,36 @@ func (h *seedHelpers) seedUser(ctx context.Context, t *testing.T, userID string)
 // (status=offline, charge=0, etc.) so a minimal call site can pass just
 // the identifiers and let the schema fill the rest.
 type vehicleSeed struct {
-	ID              string
-	UserID          string
-	VIN             string
-	Name            string
-	Model           string
-	Year            int
-	Color           string
-	Status          string // empty string falls through to schema default 'offline'
-	ChargeLevel     int
-	EstimatedRange  int
-	LocationName    string
-	LocationAddress string
-	FsdMilesReset   float64
-	LastUpdated     time.Time
+	ID                 string
+	UserID             string
+	VIN                string
+	Name               string
+	Model              string
+	Year               int
+	Color              string
+	Status             string // empty string falls through to schema default 'offline'
+	ChargeLevel        int
+	EstimatedRange     int
+	LocationName       string
+	LocationAddress    string
+	DestinationName    string // empty seeds NULL — the "not navigating" state
+	DestinationAddress string // empty seeds NULL
+	FsdMilesReset      float64
+	LastUpdated        time.Time
 }
 
 // seedVehicle inserts a Vehicle row. The fixture covers every field the
 // snapshot handler reads back (status, charge, name, address, etc.) —
 // the wide-read path will scan all columns whether or not the test
 // cares about them.
+//
+// MYR-447: the four geocoded labels are planted as CIPHERTEXT ONLY,
+// which is the row shape production now writes — the retired plaintext
+// columns get `”` / NULL exactly as vehicle_update_builder.go writes
+// them. That is deliberate and it is what makes the label assertions in
+// vehicle_snapshot_test.go load-bearing: a read path that regressed to
+// the plaintext column would surface empty labels and fail, where a seed
+// that wrote both halves would let the regression pass.
 func (h *seedHelpers) seedVehicle(ctx context.Context, t *testing.T, v vehicleSeed) {
 	t.Helper()
 	status := v.Status
@@ -632,23 +705,42 @@ func (h *seedHelpers) seedVehicle(ctx context.Context, t *testing.T, v vehicleSe
 			"model", "year", "color", "status",
 			"chargeLevel", "estimatedRange",
 			"locationName", "locationAddress",
+			"locationNameEnc", "locationAddressEnc",
+			"destinationNameEnc", "destinationAddressEnc",
 			"fsdMilesSinceReset", "lastUpdated"
 		) VALUES (
 			$1, $2, $3, $4,
 			$5, $6, $7, $8::"VehicleStatus",
 			$9, $10,
+			'', '',
 			$11, $12,
-			$13, $14
+			$13, $14,
+			$15, $16
 		)`,
 		v.ID, v.UserID, v.VIN, v.Name,
 		v.Model, v.Year, v.Color, status,
 		v.ChargeLevel, v.EstimatedRange,
-		v.LocationName, v.LocationAddress,
+		h.seal(t, v.LocationName), h.seal(t, v.LocationAddress),
+		h.seal(t, v.DestinationName), h.seal(t, v.DestinationAddress),
 		v.FsdMilesReset, v.LastUpdated,
 	)
 	if err != nil {
 		t.Fatalf("seedVehicle(%s): %v", v.ID, err)
 	}
+}
+
+// seal is the harness's single door to a sealed label (MYR-447). It
+// delegates to testutil.SealLabel, which internal/store/db_test.go's
+// sealCatalogLabels also uses, so a fixture planted here is
+// byte-for-byte the shape the store tests plant and the writers write:
+// ciphertext for a real label, NULL for an empty one.
+func (h *seedHelpers) seal(t *testing.T, plain string) *string {
+	t.Helper()
+	ct, err := testutil.SealLabel(h.enc, plain)
+	if err != nil {
+		t.Fatalf("seal label: %v", err)
+	}
+	return ct
 }
 
 // driveSeed bundles the columns that drive the drives-list ordering and
@@ -659,7 +751,8 @@ func (h *seedHelpers) seedVehicle(ctx context.Context, t *testing.T, v vehicleSe
 // MYR-145 added Start/End Location + Address. Leave them empty to
 // exercise the "drive in progress / not yet geocoded" branch (the wire
 // payload omits the key entirely); set them to non-empty strings to
-// assert the populated branch.
+// assert the populated branch. MYR-447 changed only WHERE seedDrive puts
+// them — sealed into the `*Enc` columns — not what the wire looks like.
 type driveSeed struct {
 	ID               string
 	VehicleID        string
@@ -679,9 +772,14 @@ type driveSeed struct {
 	CreatedAt        time.Time
 }
 
-// seedDrive inserts a Drive row. Empty Start/End Location + Address
-// values rely on the table's NOT NULL DEFAULT ” to stay consistent
-// with the Prisma-owned column semantics.
+// seedDrive inserts a Drive row.
+//
+// MYR-447: the four endpoint labels go to the `*Enc` columns only, and
+// the retired plaintext columns get the four empty strings queryDriveInsert
+// writes — the harness plants the same row a live drive detection now
+// plants. An empty label seals to NULL, which is the absent sentinel the
+// geocode backfill's discovery predicate keys on and the state the
+// "not yet geocoded" case in vehicle_drives_test.go asserts against.
 func (h *seedHelpers) seedDrive(ctx context.Context, t *testing.T, d driveSeed) {
 	t.Helper()
 	if d.CreatedAt.IsZero() {
@@ -691,12 +789,14 @@ func (h *seedHelpers) seedDrive(ctx context.Context, t *testing.T, d driveSeed) 
 		INSERT INTO "Drive" (
 			"id", "vehicleId", "date", "startTime", "endTime",
 			"startLocation", "startAddress", "endLocation", "endAddress",
+			"startLocationEnc", "startAddressEnc", "endLocationEnc", "endAddressEnc",
 			"distanceMiles", "durationMinutes",
 			"avgSpeedMph", "maxSpeedMph",
 			"startChargeLevel", "endChargeLevel",
 			"createdAt"
 		) VALUES (
 			$1, $2, $3, $4, $5,
+			'', '', '', '',
 			$6, $7, $8, $9,
 			$10, $11,
 			$12, $13,
@@ -704,7 +804,8 @@ func (h *seedHelpers) seedDrive(ctx context.Context, t *testing.T, d driveSeed) 
 			$16
 		)`,
 		d.ID, d.VehicleID, d.Date, d.StartTime, d.EndTime,
-		d.StartLocation, d.StartAddress, d.EndLocation, d.EndAddress,
+		h.seal(t, d.StartLocation), h.seal(t, d.StartAddress),
+		h.seal(t, d.EndLocation), h.seal(t, d.EndAddress),
 		d.DistanceMiles, d.DurationMinutes,
 		d.AvgSpeedMph, d.MaxSpeedMph,
 		d.StartChargeLevel, d.EndChargeLevel,

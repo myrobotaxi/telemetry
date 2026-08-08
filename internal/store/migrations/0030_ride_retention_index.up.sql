@@ -1,0 +1,66 @@
+-- 0030_ride_retention_index.up.sql
+--
+-- MYR-447: index the ride retention sweep's two claim queries
+-- (queryPrunableRideBatch and queryScrubbableRideBatch in
+-- internal/store/ride_pruner_queries.go). Both run once a night per replica at
+-- 03:00 UTC, in a loop, until their claims come back empty — so an unindexed
+-- predicate costs a sequential scan and a sort of the WHOLE ride table on every
+-- batch of every pass, not once per pass.
+--
+-- Without this index that cost grows without bound. go_ride_requests keeps
+-- terminal rows for a year by design, and the sweep is the only thing that
+-- removes them; a pass that cannot finish inside its per-batch timeout fails,
+-- retries, ends its pass, and the backlog it was meant to drain grows instead.
+-- The failure mode is therefore self-reinforcing, which is the specific reason
+-- to ship the index in the same change as the sweeper rather than after it.
+--
+-- Why the existing indexes cannot serve these queries:
+--   * 0002's three indexes lead on rider_id / owner_id / vehicle_id. The claims
+--     constrain none of them — the sweep is fleet-wide by construction.
+--   * 0004 and 0013's partial UNIQUE indexes are partial on
+--     `scheduled_for IS NULL` AND on the OPEN statuses.
+--   * 0016 is partial on `status = 'accepted' AND dispatched_at IS NULL`.
+--   * 0026 leads on vehicle_id.
+--   * 0028 is the closest — same key column, same shape — but its predicate is
+--     `status IN ('accepted', 'enroute', 'arrived')`, the EXACT COMPLEMENT of
+--     this one. Every partial index on this table today is partial on the open
+--     statuses, so not one of them contains a single row the sweep wants.
+--
+-- SHAPE. The index predicate is exactly the claims' terminal-status conjunct, so
+-- Postgres can prove it implied and match the index. The key is updated_at,
+-- which serves both remaining pieces of each claim:
+--
+--   * the age boundary (`updated_at < NOW() - make_interval(days => 365)` for
+--     the delete, `=> 30` for the passenger scrub) as an Index Cond range, and
+--   * the `ORDER BY updated_at ASC` as a forward ordered scan that stops after
+--     the LIMIT's worth of rows.
+--
+-- One index serves both claims because they differ only in that constant and in
+-- the scrub's extra `passenger_name IS NOT NULL OR passenger_phone IS NOT NULL`
+-- arm, which stays a cheap recheck on the heap fetch. Making the index wider to
+-- cover that arm would not pay: the columns it tests are NULL on essentially
+-- every row (the book-for-someone-else feature was removed in MYR-382), so the
+-- recheck discards almost the entire candidate set on its first test.
+--
+-- NOT SELF-DRAINING — and this is the honest difference from 0028. 0028's
+-- predicate is partial on the OPEN statuses, so a row LEAVES that index the
+-- moment its ride ends and the indexed set tracks concurrent live rides. This
+-- one is the mirror image: a row ENTERS it when the ride ends and stays until
+-- the row is deleted, so the indexed set tracks LIFETIME terminal ride volume
+-- and grows monotonically. What bounds it is the sweeper this index exists to
+-- serve — the index and the job that keeps it small ship together, and the index
+-- is only affordable because the job runs. If the sweep is ever disabled
+-- long-term (RIDE_RETENTION_PRUNER_ENABLED=false), this index grows with the
+-- table and should be reconsidered along with everything else that decision
+-- breaks.
+--
+-- Plain non-unique INDEX, IF NOT EXISTS, no data change: it cannot fail to
+-- install over existing rows and dropping it weakens performance, never
+-- correctness. Naming convention (CG-DL-9): Go-owned table, "go_" prefix,
+-- snake_case, no REFERENCES to a Prisma-owned table. Classification: no new
+-- columns; an index over existing P0 columns (status, updated_at), not exposed
+-- on the wire.
+
+CREATE INDEX IF NOT EXISTS idx_go_ride_requests_retention
+    ON go_ride_requests (updated_at)
+    WHERE status IN ('completed', 'declined', 'cancelled');

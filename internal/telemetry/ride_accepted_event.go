@@ -10,8 +10,12 @@ import "github.com/myrobotaxi/telemetry/internal/events"
 
 // buildRideAcceptedEvent projects the accepted record onto the dispatch-seam
 // payload. Places travel plaintext on the internal bus (the repo already
-// decrypted them); PassengerName/Phone are flattened to empty strings when
-// absent so MYR-176 can branch on emptiness without nil checks.
+// decrypted them).
+//
+// It deliberately does NOT copy rec.PassengerName / rec.PassengerPhone. The
+// event dropped those fields in MYR-447 — see events.RideAcceptedEvent for why
+// — and this is the assignment that used to put a passenger's name and phone
+// on the bus on every accept. Nothing downstream lost a reader; there was none.
 func buildRideAcceptedEvent(rec RideRequestData) events.RideAcceptedEvent {
 	ev := events.RideAcceptedEvent{
 		RideRequestID: rec.ID,
@@ -21,12 +25,6 @@ func buildRideAcceptedEvent(rec RideRequestData) events.RideAcceptedEvent {
 		Pickup:        toEventPlace(rec.Pickup),
 		Dropoff:       toEventPlace(rec.Dropoff),
 		ScheduledFor:  rec.ScheduledFor,
-	}
-	if rec.PassengerName != nil {
-		ev.PassengerName = *rec.PassengerName
-	}
-	if rec.PassengerPhone != nil {
-		ev.PassengerPhone = *rec.PassengerPhone
 	}
 	if rec.AcceptedAt != nil {
 		ev.AcceptedAt = *rec.AcceptedAt

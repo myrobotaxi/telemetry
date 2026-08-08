@@ -15,7 +15,9 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/myrobotaxi/telemetry/internal/config"
+	"github.com/myrobotaxi/telemetry/internal/cryptox"
 	"github.com/myrobotaxi/telemetry/internal/store"
+	"github.com/myrobotaxi/telemetry/internal/testutil"
 )
 
 // testPool is the shared connection pool for all store integration tests.
@@ -127,6 +129,12 @@ func createSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"heading"          INT NOT NULL DEFAULT 0,
 		"locationName"     TEXT NOT NULL DEFAULT '',
 		"locationAddress"  TEXT NOT NULL DEFAULT '',
+		-- MYR-447 — encrypted shadows for the geocoded location labels.
+		-- Mirrors docs/migrations/myr-447-prisma-label-enc.sql, which has
+		-- to be applied as a Prisma migration in react-frontend because
+		-- CG-DL-9 forbids a Go migration from naming "Vehicle"/"Drive".
+		"locationNameEnc"       TEXT,
+		"locationAddressEnc"    TEXT,
 		"latitude"         DOUBLE PRECISION NOT NULL DEFAULT 0,
 		"longitude"        DOUBLE PRECISION NOT NULL DEFAULT 0,
 		-- MYR-63 Phase 2 — encrypted shadow columns. Mirrors the Prisma
@@ -150,6 +158,9 @@ func createSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"originLatitudeEnc"    TEXT,
 		"originLongitudeEnc"   TEXT,
 		"destinationAddress" TEXT,
+		-- MYR-447 — encrypted shadows for the destination labels.
+		"destinationNameEnc"    TEXT,
+		"destinationAddressEnc" TEXT,
 		"etaMinutes"       INT,
 		"tripDistanceMiles" DOUBLE PRECISION,
 		"tripDistanceRemaining" DOUBLE PRECISION,
@@ -174,6 +185,13 @@ func createSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"startAddress"     TEXT NOT NULL DEFAULT '',
 		"endLocation"      TEXT NOT NULL DEFAULT '',
 		"endAddress"       TEXT NOT NULL DEFAULT '',
+		-- MYR-447 — encrypted shadows for the drive's endpoint labels.
+		-- Nullable: NULL is the absent sentinel that
+		-- queryDriveMissingAddresses' discovery predicate keys on.
+		"startLocationEnc" TEXT,
+		"startAddressEnc"  TEXT,
+		"endLocationEnc"   TEXT,
+		"endAddressEnc"    TEXT,
 		"distanceMiles"    DOUBLE PRECISION NOT NULL DEFAULT 0,
 		"durationMinutes"  INT NOT NULL DEFAULT 0,
 		"avgSpeedMph"      DOUBLE PRECISION NOT NULL DEFAULT 0,
@@ -240,8 +258,19 @@ func seedVehicle(t *testing.T, pool *pgxpool.Pool, id, vin string) {
 // seedVehicleWithCatalog inserts a test vehicle and also sets the seven
 // catalog columns promoted by MYR-24. Used by TestVehicleRepo_CatalogFields
 // to verify the SELECT / scan path loads every column.
+//
+// MYR-447: three of those columns (locationName, locationAddress,
+// destinationAddress) are read from `*Enc` ciphertext now, so a seed that
+// wrote only the plaintext side would be invisible to every read path.
+// Pass the SAME Encryptor the repo under test was built with and the
+// helper writes both halves — plaintext (so purge/operator tests still
+// have legacy residue to find) and ciphertext (so the reads work).
+//
+// A nil Encryptor writes the plaintext side only. That is the right
+// choice for callers seeding empty labels, where there is nothing to
+// seal and the repo's key is generated independently.
 func seedVehicleWithCatalog(
-	t *testing.T, pool *pgxpool.Pool, id, vin string, cat catalogFields,
+	t *testing.T, pool *pgxpool.Pool, id, vin string, cat catalogFields, enc cryptox.Encryptor,
 ) {
 	t.Helper()
 	ctx := context.Background()
@@ -264,6 +293,45 @@ func seedVehicleWithCatalog(
 	)
 	if err != nil {
 		t.Fatalf("seed vehicle with catalog: %v", err)
+	}
+	if enc == nil {
+		return
+	}
+	sealCatalogLabels(t, pool, id, cat, enc)
+}
+
+// sealCatalogLabels writes the MYR-447 `*Enc` half of a catalog seed.
+// Split out so seedVehicleWithCatalog stays readable.
+func sealCatalogLabels(
+	t *testing.T, pool *pgxpool.Pool, id string, cat catalogFields, enc cryptox.Encryptor,
+) {
+	t.Helper()
+	ctx := context.Background()
+
+	// testutil.SealLabel is the ONE way a test seals a label — shared with
+	// the contract harness in tests/contract so both plant the same row
+	// shape production writes (ciphertext set, NULL for an empty label).
+	seal := func(plain string) *string {
+		ct, err := testutil.SealLabel(enc, plain)
+		if err != nil {
+			t.Fatalf("seal catalog label: %v", err)
+		}
+		return ct
+	}
+	var destAddr *string
+	if cat.destinationAddress != nil {
+		destAddr = seal(*cat.destinationAddress)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE "Vehicle" SET
+			"locationNameEnc" = $2,
+			"locationAddressEnc" = $3,
+			"destinationAddressEnc" = $4
+		WHERE "id" = $1`,
+		id, seal(cat.locationName), seal(cat.locationAddress), destAddr,
+	); err != nil {
+		t.Fatalf("seal catalog labels: %v", err)
 	}
 }
 

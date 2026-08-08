@@ -92,6 +92,11 @@ Commands:
 
 Environment:
   DATABASE_URL                  Postgres connection string (required)
+  OPS_OPERATOR                  Your operator handle, e.g. jdoe (REQUIRED by every command that
+                                 decrypts user data: auth token, fields snapshot, fleet-config push,
+                                 geocode backfill).
+                                 Recorded in an AuditLog operator_decrypt row before the decrypt
+                                 happens (MYR-447). No default — an email address is rejected.
   TESLA_PROXY_URL               tesla-http-proxy base URL (for fleet-config push)
   FLEET_TELEMETRY_HOSTNAME      Hostname vehicles connect to after config push
   FLEET_TELEMETRY_PORT          Port vehicles connect to (default 443)
@@ -100,8 +105,8 @@ Environment:
   AUTH_TESLA_SECRET             Tesla OAuth client secret
   DEBUG_FIELDS_TOKEN            Auth token for fields watch (when server requires it)
   MAPBOX_TOKEN                  Mapbox API token (required for geocode backfill)
-  ENCRYPTION_KEY                base64(32B) AES-256 key (optional for geocode backfill;
-                                 falls back to plaintext routePoints reads when unset)
+  ENCRYPTION_KEY                base64(32B) AES-256 key (REQUIRED for geocode backfill:
+                                 drive GPS trails and addresses are encrypted at rest)
   INVITE_LINK_SIGNING_KEY       base64(32B) Ed25519 SEED signing join links (required for
                                  invite-link public-key; generate with: openssl rand -base64 32)
 `

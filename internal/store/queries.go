@@ -9,26 +9,35 @@ package store
 // every read path, so the six `*Enc` GPS columns and
 // `navRouteCoordinatesEnc` are the sole source of truth for coordinates.
 //
+// MYR-447 extended that rule to the human-readable rendering of the same
+// position: "locationNameEnc", "locationAddressEnc",
+// "destinationNameEnc" and "destinationAddressEnc" replaced their
+// plaintext originals here. A street address needs no map to interpret,
+// so leaving it readable while the coordinate beside it was sealed made
+// the coordinate's encryption largely decorative.
+//
 // The plaintext columns ("latitude", "longitude", "destinationLatitude",
 // "destinationLongitude", "originLatitude", "originLongitude",
-// "navRouteCoordinates") still EXIST on the Prisma-owned table — they are
-// dropped by a react-frontend Prisma migration, not from here (CG-DL-9
-// forbids Go migrations touching Prisma tables). They MUST NOT be added
-// back to this projection: selecting them is what made an operator with
-// DB access able to read a user's location (MYR-433 acceptance bar).
-// `cmd/purge-plaintext-columns` scrubs their residual values.
+// "navRouteCoordinates", "locationName", "locationAddress",
+// "destinationName", "destinationAddress") still EXIST on the
+// Prisma-owned table — they are dropped by a react-frontend Prisma
+// migration, not from here (CG-DL-9 forbids Go migrations touching Prisma
+// tables). They MUST NOT be added back to this projection: selecting them
+// is what made an operator with DB access able to read a user's location
+// (MYR-433 / MYR-447 acceptance bar). `cmd/purge-plaintext-columns`
+// scrubs their residual values.
 //
-// See vehicle_gps_encryption.go and vehicle_repo_scan.go for the
-// ciphertext-only read rules.
+// See vehicle_gps_encryption.go, label_encryption.go and
+// vehicle_repo_scan.go for the ciphertext-only read rules.
 
 const vehicleSelectColumns = `"id", "userId", "vin", "name",
 	"model", "year", "color", "licensePlate", "status",
 	"chargeLevel", "estimatedRange", "chargeState", "timeToFull",
 	"speed", "gearPosition", "heading",
-	"locationName", "locationAddress",
+	"locationNameEnc", "locationAddressEnc",
 	"interiorTemp", "exteriorTemp",
 	"odometerMiles", "fsdMilesSinceReset",
-	"destinationName", "destinationAddress",
+	"destinationNameEnc", "destinationAddressEnc",
 	"etaMinutes", "tripDistanceRemaining",
 	"lastUpdated",
 	"latitudeEnc", "longitudeEnc",
@@ -215,20 +224,29 @@ WHERE "vin" = $2`
 // plaintext `routePoints` JSONB column is never read and never written
 // with real coordinates by this server again.
 //
-// `routePoints` is NOT NULL on the Prisma schema, so the INSERT still has
-// to supply a value — it writes the empty array literal `[]`, which
-// carries no location data. Every real coordinate goes to the ciphertext
-// column only.
+// MYR-447 did the same for the drive's four geocoded endpoint labels.
+// "startLocationEnc" / "startAddressEnc" / "endLocationEnc" /
+// "endAddressEnc" are now the sole store for the place names and street
+// addresses of where a drive began and ended — the trail's endpoints
+// rendered in the form a human reads directly.
+//
+// `routePoints`, `startLocation`, `startAddress`, `endLocation` and
+// `endAddress` are all NOT NULL on the Prisma schema, so the INSERT still
+// has to supply values for them — it writes the empty array literal `[]`
+// and four empty strings, none of which carry location data. Every real
+// coordinate and every real label goes to a ciphertext column only.
 
 const queryDriveInsert = `INSERT INTO "Drive" (
 	"id", "vehicleId", "date", "startTime", "endTime",
 	"startLocation", "startAddress", "endLocation", "endAddress",
+	"startLocationEnc", "startAddressEnc", "endLocationEnc", "endAddressEnc",
 	"distanceMiles", "durationMinutes", "avgSpeedMph", "maxSpeedMph",
 	"energyUsedKwh", "startChargeLevel", "endChargeLevel",
 	"fsdMiles", "fsdPercentage", "interventions", "routePoints",
 	"routePointsEnc"
 ) VALUES (
 	$1, $2, $3, $4, $5,
+	'', '', '', '',
 	$6, $7, $8, $9,
 	$10, $11, $12, $13,
 	$14, $15, $16,
@@ -261,8 +279,14 @@ WHERE "id" = $1`
 // startChargeLevel defaulting to 0 (that event carries no charge), and the
 // true drive-start SOC is only known once the detector ends the drive
 // (MYR-241). $14 lands that value so start/end charge are both persisted.
+//
+// MYR-447: $3/$4 are the SEALED end labels and land in the `*Enc`
+// columns. They are nullable *string parameters — nil (an empty label,
+// i.e. the geocode found nothing) writes NULL, which is the absent
+// sentinel. The retired plaintext "endLocation"/"endAddress" columns are
+// deliberately left untouched; `cmd/purge-plaintext-columns` scrubs them.
 const queryDriveComplete = `UPDATE "Drive"
-SET "endTime" = $2, "endLocation" = $3, "endAddress" = $4,
+SET "endTime" = $2, "endLocationEnc" = $3, "endAddressEnc" = $4,
 	"distanceMiles" = $5, "durationMinutes" = $6,
 	"avgSpeedMph" = $7, "maxSpeedMph" = $8, "energyUsedKwh" = $9,
 	"endChargeLevel" = $10, "fsdMiles" = $11, "fsdPercentage" = $12,
@@ -279,7 +303,7 @@ const queryDriveDelete = `DELETE FROM "Drive"
 WHERE "id" = $1`
 
 const queryDriveByID = `SELECT "id", "vehicleId", "date", "startTime", "endTime",
-	"startLocation", "startAddress", "endLocation", "endAddress",
+	"startLocationEnc", "startAddressEnc", "endLocationEnc", "endAddressEnc",
 	"distanceMiles", "durationMinutes", "avgSpeedMph", "maxSpeedMph",
 	"energyUsedKwh", "startChargeLevel", "endChargeLevel",
 	"fsdMiles", "fsdPercentage", "interventions", "createdAt",
@@ -328,8 +352,18 @@ WHERE d."endTime" IS NULL OR d."endTime" = ''`
 // MYR-152 added `fsdMiles` / `fsdPercentage` — two small `double`
 // columns (P0, non-identifying) so the drive-history list can show FSD
 // usage per drive without a per-row drive-detail fetch.
+//
+// MYR-447 swapped the four location columns for their `*Enc` ciphertext
+// shadows. The wire shape is unchanged — scanDriveSummaryRow decrypts
+// them back into the same four DriveSummaryRow string fields — but this
+// list path now REQUIRES a DriveRepo built with an Encryptor. A keyless
+// repo reads the labels as empty strings, exactly as it already read no
+// coordinates.
+//
+// Cost is a wash: ciphertext is base64 and runs ~40 bytes longer than the
+// address it replaces, which keeps the page well inside the ~5 KB budget.
 const driveSummarySelectColumns = `"id", "vehicleId", "date", "startTime", "endTime",
-	"startLocation", "startAddress", "endLocation", "endAddress",
+	"startLocationEnc", "startAddressEnc", "endLocationEnc", "endAddressEnc",
 	"distanceMiles", "durationMinutes", "avgSpeedMph", "maxSpeedMph",
 	"startChargeLevel", "endChargeLevel", "fsdMiles", "fsdPercentage", "createdAt"`
 
@@ -380,10 +414,52 @@ LIMIT $4`
 // mirrors queryDriveListOpen's predicate: the cleanup-binary findings
 // showed the column can be either representation depending on how the
 // row was inserted.
-const queryDriveMissingAddresses = `SELECT "id", "startAddress", "endAddress", "endTime", "routePointsEnc"
-FROM "Drive"
-WHERE "startAddress" = '' OR ("endAddress" = '' AND NOT ("endTime" IS NULL OR "endTime" = ''))
-ORDER BY "createdAt" ASC`
+//
+// MYR-447 REWROTE the discovery predicate, and this is the one change in
+// that issue that could not be a like-for-like column swap. The old
+// predicate asked `"startAddress" = <empty string>`. AES-GCM ciphertext is
+// nondeterministic — a fresh 12-byte nonce per encrypt — so a sealed
+// address is a different base64 string every time it is written and can
+// NEVER equal the empty string again. Kept verbatim against the `*Enc`
+// columns, the predicate would match nothing, forever, and the geocode
+// backfill would silently report "0 rows found" on a database full of
+// unaddressed drives.
+//
+// The nullable-`*Enc` column shape is precisely what buys the fix: NULL
+// is the absent sentinel (an empty label seals to "" and is persisted as
+// NULL — see label_encryption.go), so "has no address" is expressible as
+// `IS NULL`, which needs to compare nothing against the ciphertext.
+//
+// The endTime guard is untouched: endTime is not encrypted and keeps its
+// original two-representation shape.
+//
+// One behavioural note for the rollout: a legacy row that HAS a plaintext
+// startAddress but no ciphertext sibling matches this predicate and will
+// be re-geocoded. Running `backfill-location-labels` first seals those
+// rows and removes them from the result set, which is both cheaper and
+// preserves the original geocode.
+//
+// MYR-447 (audit follow-up): the projection also carries the drive's
+// vehicleId and that vehicle's OWNER, joined in from "Vehicle". Neither is
+// used to select rows — the discovery predicate is byte-for-byte the one
+// described above — they exist because `ops geocode backfill` decrypts
+// every matching row fleet-wide and must write an operator_decrypt audit
+// row naming the data SUBJECT before it transmits a single coordinate to
+// Mapbox. The subject of a Drive is the owner of the car that drove it,
+// and there is no other column on "Drive" that names them.
+//
+// The join is INNER, and that is safe rather than lossy: "Drive"."vehicleId"
+// is NOT NULL with a foreign key to "Vehicle"."id", so every Drive row has
+// exactly one matching Vehicle and the join cannot drop a row the old
+// single-table SELECT would have returned. A row it DID drop would be a
+// row with no identifiable owner — which the backfill must not decrypt
+// anyway, because it could not be audited.
+const queryDriveMissingAddresses = `SELECT d."id", d."startAddressEnc", d."endAddressEnc", d."endTime", d."routePointsEnc",
+       d."vehicleId", v."userId"
+FROM "Drive" d
+JOIN "Vehicle" v ON v."id" = d."vehicleId"
+WHERE d."startAddressEnc" IS NULL OR (d."endAddressEnc" IS NULL AND NOT (d."endTime" IS NULL OR d."endTime" = ''))
+ORDER BY d."createdAt" ASC`
 
 // queryDriveUpdateAddresses writes whichever of the four location
 // columns the caller supplies; COALESCE leaves the rest untouched. Every
@@ -392,11 +468,17 @@ ORDER BY "createdAt" ASC`
 // or the end-side geocode lookup returned ErrNoResult — without
 // clobbering a value the row already had or that a concurrent write
 // landed between the backfill's SELECT and this UPDATE.
+//
+// MYR-447: the parameters are SEALED labels and the targets are the
+// `*Enc` columns. The COALESCE shape is unchanged and still means
+// "leave this column exactly as it was" — which is the only reason the
+// nondeterminism of the ciphertext is harmless here: nothing compares
+// the new value to the old one, it either replaces it or is NULL.
 const queryDriveUpdateAddresses = `UPDATE "Drive"
-SET "startLocation" = COALESCE($2, "startLocation"),
-    "startAddress"  = COALESCE($3, "startAddress"),
-    "endLocation"   = COALESCE($4, "endLocation"),
-    "endAddress"    = COALESCE($5, "endAddress")
+SET "startLocationEnc" = COALESCE($2, "startLocationEnc"),
+    "startAddressEnc"  = COALESCE($3, "startAddressEnc"),
+    "endLocationEnc"   = COALESCE($4, "endLocationEnc"),
+    "endAddressEnc"    = COALESCE($5, "endAddressEnc")
 WHERE "id" = $1`
 
 // Account queries. The Account table is Prisma-owned (NextAuth). We read

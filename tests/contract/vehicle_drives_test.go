@@ -231,6 +231,9 @@ func TestContract_GETVehicleDrives(t *testing.T) {
 		})
 
 		// Drive 1: fully geocoded — all four location fields populated.
+		// MYR-447: seedDrive seals these into the `*Enc` columns and
+		// writes '' to the retired plaintext ones, so the four
+		// assertions below only pass if the list read decrypts.
 		seeder.seedDrive(ctx, t, driveSeed{
 			ID:               "drive_loc_complete",
 			VehicleID:        vehicleID,

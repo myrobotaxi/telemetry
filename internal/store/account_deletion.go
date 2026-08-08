@@ -68,6 +68,13 @@ type AccountDeletionCounts struct {
 	// SharesRevoked is the number of accepted grants the user had REDEEMED
 	// that were tombstoned.
 	SharesRevoked int `json:"sharesRevoked"`
+	// ShareLabelsScrubbed is the number of share rows whose owner-typed label
+	// — the deleted person's NAME, written by somebody else — was erased
+	// (MYR-447). A count, never the labels: they are P1 and the audit row is
+	// P0-only (CG-DL-5). Counted separately from SharesRevoked because the two
+	// steps deliberately cover different row sets: revocation skips rows that
+	// were already revoked, the scrub does not.
+	ShareLabelsScrubbed int `json:"shareLabelsScrubbed"`
 	// PushDevicesDeleted is the number of APNs registrations removed.
 	PushDevicesDeleted int `json:"pushDevicesDeleted"`
 	// SavedPlacesDeleted is the number of saved Home/Work rows removed —
@@ -105,6 +112,19 @@ func (a *AccountDeleter) CountUserDrives(ctx context.Context, userID string) (in
 // revoked. Idempotent: a re-run matches nothing.
 func (a *AccountDeleter) RevokeSharesReceived(ctx context.Context, userID string) (int, error) {
 	return a.execCount(ctx, "RevokeSharesReceived", queryRevokeSharesReceived, userID)
+}
+
+// ScrubSharesReceivedLabel erases the owner-typed label from every share row
+// the user had redeemed (MYR-447), so a third party's list does not keep the
+// name of a person who deleted their account. Returns the number of rows
+// scrubbed. Idempotent: a re-run matches nothing.
+//
+// Ordering note: this runs immediately after the revocation it completes, and
+// its position is otherwise unconstrained — nothing later in the sequence reads
+// the label. It is deliberately NOT folded into the revoke; see
+// queryScrubSharesReceivedLabel for why the row sets differ.
+func (a *AccountDeleter) ScrubSharesReceivedLabel(ctx context.Context, userID string) (int, error) {
+	return a.execCount(ctx, "ScrubSharesReceivedLabel", queryScrubSharesReceivedLabel, userID)
 }
 
 // DeletePushDevices removes every APNs registration owned by the user, so no

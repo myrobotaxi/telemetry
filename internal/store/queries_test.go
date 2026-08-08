@@ -12,13 +12,25 @@ import (
 //
 // ClearFields is still keyed on PLAINTEXT column names — that is the
 // vocabulary the nav-field tables and the writer speak — but MYR-433
-// changed which column the clause lands on. For the seven location
-// columns the server now owns only the ciphertext, so the clear must NULL
-// the *Enc sibling and leave the plaintext column alone. That is not
-// cosmetic: "latitude"/"longitude" are NOT NULL on the Prisma schema, so
-// a `"latitude" = NULL` clause would fail the whole UPDATE and drop the
-// telemetry tick. Non-location columns (destinationName, etaMinutes, …)
-// hold no coordinates and still clear in place.
+// changed which column the clause lands on, and MYR-447 split the answer
+// three ways. The cases below pin all three:
+//
+//   - COORDINATE columns clear the *Enc sibling ONLY. `"latitude"` and
+//     `"longitude"` are NOT NULL on the Prisma schema, so a
+//     `"latitude" = NULL` clause would fail the whole UPDATE and drop the
+//     telemetry tick.
+//   - LABEL columns (MYR-447) clear the *Enc sibling AND scrub the retired
+//     plaintext. Clearing only the ciphertext leaves the row in the one
+//     state plaintextpurge cannot resolve — plaintext present, ciphertext
+//     NULL — which it reads as "never sealed" and refuses to touch, and
+//     which the label backfill would then RE-SEAL, resurrecting a
+//     destination the driver had cancelled onto the live read path.
+//   - NON-LOCATION columns (etaMinutes, …) hold no location and clear in
+//     place, as they always did.
+//
+// The scrub value tracks nullability, matching plaintextpurge's ScrubSQL:
+// NULL for the nullable destination labels, the empty string for the NOT
+// NULL ones.
 func TestBuildTelemetryUpdate_ClearFields(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -36,8 +48,16 @@ func TestBuildTelemetryUpdate_ClearFields(t *testing.T) {
 				ClearFields: []string{"destinationName", "etaMinutes"},
 				LastUpdated: time.Now(),
 			},
-			wantOK:       true,
-			wantNulls:    []string{"destinationName", "etaMinutes"},
+			wantOK: true,
+			// MYR-447: destinationName is a label column now, so the clear
+			// lands on its ciphertext sibling — AND scrubs the retired
+			// plaintext, which is the half that is easy to get wrong.
+			// Clearing only the ciphertext would park a readable place name
+			// in a state the purge reads as "never sealed" and refuses to
+			// touch, and that the backfill would then RE-SEAL, resurrecting
+			// a destination the driver cancelled. destinationName is
+			// nullable, so its scrub value is NULL.
+			wantNulls:    []string{"destinationNameEnc", "destinationName", "etaMinutes"},
 			wantNoParams: true,
 		},
 		{
@@ -78,10 +98,18 @@ func TestBuildTelemetryUpdate_ClearFields(t *testing.T) {
 			wantOK: true,
 			wantNulls: []string{
 				// Non-location columns clear in place…
-				"destinationName",
 				"etaMinutes",
 				"tripDistanceRemaining",
-				// …location columns clear their ciphertext sibling.
+				// …location columns clear their ciphertext sibling. MYR-447
+				// put destinationName in that family: the place name of a
+				// cancelled destination is location data too.
+				"destinationNameEnc",
+				// …and a LABEL column additionally scrubs its retired
+				// plaintext (MYR-447), unlike a coordinate column, whose
+				// plaintext is NOT NULL and whose scrub value is 0 rather
+				// than NULL. That asymmetry is why only the labels appear
+				// in both lists.
+				"destinationName",
 				"destinationLatitudeEnc",
 				"destinationLongitudeEnc",
 				"originLatitudeEnc",
@@ -96,6 +124,79 @@ func TestBuildTelemetryUpdate_ClearFields(t *testing.T) {
 		},
 	}
 
+	runClearFieldCases(t, tests)
+}
+
+// TestBuildTelemetryUpdate_EmptyLabelClearsBothColumns covers the OTHER way a
+// label becomes empty, which is not ClearFields and is far more common.
+//
+// A reverse geocode that resolves a street address but no place name writes
+// LocationName="" alongside a populated LocationAddr; the destination
+// geocode does the same for DestinationAddress. Those arrive as a normal
+// update with a non-nil, empty string, so they reach appendLabelShadowSets
+// rather than appendClearFieldSets — a completely separate branch, which is
+// why this needs its own test and why the bug survived the first one.
+//
+// The empty label must clear BOTH columns, exactly as ClearFields does.
+// Emitting only `"…Enc" = NULL` would leave plaintext-present +
+// ciphertext-NULL, which plaintextpurge classifies as verdictUnsealed and
+// refuses to touch — permanently, and recurring after every purge, since a
+// car parked somewhere address-only re-enters this branch on every geocode.
+func TestBuildTelemetryUpdate_EmptyLabelClearsBothColumns(t *testing.T) {
+	empty := ""
+	// Every label column, with the scrub literal its nullability demands.
+	cases := []struct {
+		col       string
+		update    VehicleUpdate
+		wantScrub string
+	}{
+		{"locationName", VehicleUpdate{LocationName: &empty}, `''`},
+		{"locationAddress", VehicleUpdate{LocationAddr: &empty}, `''`},
+		{"destinationName", VehicleUpdate{DestinationName: &empty}, "NULL"},
+		{"destinationAddress", VehicleUpdate{DestinationAddress: &empty}, "NULL"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.col, func(t *testing.T) {
+			encCol := tc.col + "Enc"
+			u := tc.update
+			u.LastUpdated = time.Now()
+
+			// labelToEncString maps "" to "" (the absent sentinel), which is
+			// exactly what addLabelShadows puts in the map for an empty
+			// label. Reproduce that rather than guessing at it.
+			query, _, ok := buildTelemetryUpdate("5YJ3E1EA1NF000001", u,
+				map[string]string{encCol: ""})
+			if !ok {
+				t.Fatal("expected an update to be built")
+			}
+
+			if want := `"` + encCol + `" = NULL`; !strings.Contains(query, want) {
+				t.Errorf("missing %q in:\n%s", want, query)
+			}
+			// The half that was missing: the retired plaintext must be
+			// scrubbed too, or the row is stranded unsealed forever.
+			if want := `"` + tc.col + `" = ` + tc.wantScrub; !strings.Contains(query, want) {
+				t.Errorf("empty label did not scrub the retired plaintext: missing %q in:\n%s\n"+
+					"plaintext-present + ciphertext-NULL is the one state the purge cannot "+
+					"resolve, and the backfill would re-seal the stale value onto the read path",
+					want, query)
+			}
+		})
+	}
+}
+
+func runClearFieldCases(t *testing.T, tests []struct {
+	name         string
+	vin          string
+	update       VehicleUpdate
+	wantOK       bool
+	wantNulls    []string
+	wantNoNulls  []string
+	wantNoParams bool
+},
+) {
+	t.Helper()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			query, args, ok := buildTelemetryUpdate(tt.vin, tt.update, nil)

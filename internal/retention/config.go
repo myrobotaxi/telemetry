@@ -2,21 +2,30 @@ package retention
 
 import "time"
 
-// Config tunes the drive retention sweep. Zero values get defaults via
+// Config tunes ONE retention sweep. The same struct serves both — the drive
+// sweep (MYR-439) and the ride sweep (MYR-447) — because they run the same
+// engine (sweeper.go) over different tables and want the same knobs. Each
+// sweep is wired with its OWN Config value rather than sharing one, so their
+// kill-switches and paces stay independent: a misbehaving ride sweep can be
+// stopped without also stopping the drive sweep. Zero values get defaults via
 // withDefaults.
 //
-// NOTE WHAT IS NOT HERE: the retention window. 365 days is a compile-time
-// constant in the store layer (store.DriveRetentionDays) and is deliberately
-// unreachable from configuration — CG-DL-4, because a window an operator can
-// shorten by mistake is a fleet's history one typo from gone. Everything in
-// this struct governs PACE, never SCOPE.
+// NOTE WHAT IS NOT HERE: the retention windows. Every one of them — 365 days
+// for drives (store.DriveRetentionDays), 365 days for terminal rides
+// (store.RideRetentionDays), 30 days for the passenger-field scrub
+// (store.RidePassengerScrubDays) — is a compile-time constant in the store
+// layer, deliberately unreachable from configuration — CG-DL-4, because a
+// window an operator can shorten by mistake is a fleet's history one typo from
+// gone. Everything in this struct governs PACE, never SCOPE.
 type Config struct {
-	// Enabled is the kill-switch (DRIVE_RETENTION_PRUNER_ENABLED). Unlike the
-	// Live Activity ticker's switch, this one stops the loop outright: pruning
-	// is the whole job, so there is no useful degraded mode between "running"
-	// and "off". Off means drives accumulate past a year until it is turned
-	// back on — recoverable, because the sweep is idempotent and the next pass
-	// simply finds more work.
+	// Enabled is the kill-switch for whichever sweep this value configures:
+	// DRIVE_RETENTION_PRUNER_ENABLED for the drive sweep,
+	// RIDE_RETENTION_PRUNER_ENABLED for the ride sweep. Unlike the Live
+	// Activity ticker's switch, this one stops the loop outright: pruning is
+	// the whole job, so there is no useful degraded mode between "running" and
+	// "off". Off means the rows that sweep is responsible for accumulate past
+	// their window until it is turned back on — recoverable, because the sweep
+	// is idempotent and the next pass simply finds more work.
 	Enabled bool
 	// RunAtUTC is the offset from UTC midnight at which each pass fires
 	// (data-lifecycle.md §5.2: daily at 03:00 UTC).

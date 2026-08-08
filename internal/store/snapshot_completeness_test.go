@@ -292,7 +292,7 @@ func newCompletenessRepo(t *testing.T) *store.VehicleRepo {
 func runSteadyStateField(t *testing.T, p schemaProperty, row fixtureRow, fix fixtureRoot) {
 	t.Helper()
 	cleanTables(t, testPool)
-	seedVehicleWithCatalog(t, testPool, completenessVehicleID, completenessVIN, completenessSeedCatalog)
+	seedVehicleWithCatalog(t, testPool, completenessVehicleID, completenessVIN, completenessSeedCatalog, nil)
 	repo := newCompletenessRepo(t)
 	ctx := context.Background()
 
@@ -455,7 +455,7 @@ func applySyntheticAndAssertNonNull(
 func runActiveGroup(t *testing.T, group string, members []string, fix fixtureRoot) {
 	t.Helper()
 	cleanTables(t, testPool)
-	seedVehicleWithCatalog(t, testPool, completenessVehicleID, completenessVIN, completenessSeedCatalog)
+	seedVehicleWithCatalog(t, testPool, completenessVehicleID, completenessVIN, completenessSeedCatalog, nil)
 	repo := newCompletenessRepo(t)
 	ctx := context.Background()
 
@@ -547,7 +547,7 @@ func runActiveGroup(t *testing.T, group string, members []string, fix fixtureRoo
 func runLastUpdatedAdvances(t *testing.T) {
 	t.Helper()
 	cleanTables(t, testPool)
-	seedVehicleWithCatalog(t, testPool, completenessVehicleID, completenessVIN, completenessSeedCatalog)
+	seedVehicleWithCatalog(t, testPool, completenessVehicleID, completenessVIN, completenessSeedCatalog, nil)
 	repo := newCompletenessRepo(t)
 	ctx := context.Background()
 

@@ -1694,14 +1694,15 @@ Normative in [`data-lifecycle.md`](data-lifecycle.md) §3.1. Summary:
 | 2 | **Revoke the Tesla OAuth grant at Tesla** | `POST https://auth.tesla.com/oauth2/v3/revoke` with the stored `refresh_token` + `client_id`. **Best-effort and non-fatal** — see "Tesla grant revocation" below. MUST run before step 3, which deletes the token it needs |
 | 3 | Tear down every owned vehicle | One existing §7.12 `owner_teardown` transaction per car: `Vehicle` + cascade, that car's `go_ride_requests`, every sharing grant ON the car revoked, the VIN tombstoned, and on the last car the Tesla `Account` tokens cleared + `Settings` reset |
 | 4 | Revoke shares RECEIVED | Every accepted grant the user redeemed → `revoked` tombstone |
-| 5 | Cancel open rides as RIDER | Through the guarded §7.8 transition, publishing `ride_status_changed` so affected owners get the standard lifecycle push |
-| 6 | Delete push devices | Whole `go_push_devices` address book for the user |
-| 7 | Delete saved places | The person's `go_saved_places` Home/Work rows (MYR-321, §7.20) — personal effects with no counterparty |
-| 8 | Revoke refresh tokens | `go_refresh_tokens` marked revoked with `reason='account_deleted'` |
-| 9 | Delete identity + write audit | ONE transaction: the `account_deleted` row, then `go_identity_apple`, `go_users`, and the Prisma `"User"` row **if one exists** |
-| 10 | Invalidate auth caches | The caller's unexpired access token stops validating immediately rather than at the cache TTL |
+| 5 | **Scrub the owner-typed label off shares RECEIVED** (MYR-447) | Step 4 tombstones the ACCESS; this erases the NAME. `label` is free text the CAR OWNER typed for their own list, so on a redeemed grant it is the departing person's name in somebody else's row. Keyed on the person, not the status, so it also reaches grants that were ALREADY revoked — which step 4, being idempotency-guarded, skips. Scrubbed to `''`. No wire effect: a revoked grant is never serialized |
+| 6 | Cancel open rides as RIDER | Through the guarded §7.8 transition, publishing `ride_status_changed` so affected owners get the standard lifecycle push |
+| 7 | Delete push devices | Whole `go_push_devices` address book for the user |
+| 8 | Delete saved places | The person's `go_saved_places` Home/Work rows (MYR-321, §7.20) — personal effects with no counterparty |
+| 9 | Revoke refresh tokens | `go_refresh_tokens` marked revoked with `reason='account_deleted'` |
+| 10 | Delete identity + write audit | ONE transaction: the `account_deleted` row, then `go_identity_apple`, `go_users`, and the Prisma `"User"` row **if one exists** |
+| 11 | Invalidate auth caches | The caller's unexpired access token stops validating immediately rather than at the cache TTL |
 
-**Dual-source identity.** Step 9 handles both account shapes with the same statements: an Apple-native user has no `"User"` row (that DELETE affects zero rows) and a legacy web user has no `go_users` row. Neither case is special-cased and neither is an error.
+**Dual-source identity.** Step 10 handles both account shapes with the same statements: an Apple-native user has no `"User"` row (that DELETE affects zero rows) and a legacy web user has no `go_users` row. Neither case is special-cased and neither is an error.
 
 **A ride physically in progress (`enroute` / `arrived`) is NOT cancelled.** Those states are not rider-cancellable under §7.8, and cancelling a car mid-trip from under its owner is a worse outcome than letting the ride reach its own terminal state. It closes on its own, and afterwards renders as former-rider history like any other completed ride.
 
@@ -1713,7 +1714,7 @@ Step 2 now actively revokes the grant: a form-encoded `POST` to Tesla's OAuth2 r
 
 Three properties are contractual:
 
-1. **It runs BEFORE anything deletes the tokens.** Step 3's last-vehicle arm deletes the `Account` row and step 9's `User` cascade takes any that survives; after either, the refresh token is gone and revocation is impossible. This ordering is normative — see [`data-lifecycle.md`](data-lifecycle.md) §3.1.
+1. **It runs BEFORE anything deletes the tokens.** Step 3's last-vehicle arm deletes the `Account` row and step 10's `User` cascade takes any that survives; after either, the refresh token is gone and revocation is impossible. This ordering is normative — see [`data-lifecycle.md`](data-lifecycle.md) §3.1.
 2. **It is best-effort and NEVER blocks the deletion.** A Tesla 5xx, a timeout, a network failure, an already-invalid token, or no Tesla account at all are each logged and stepped past. The response is unchanged: still `204`, still no body. **A client cannot observe whether revocation succeeded**, and deliberately so — the account is deleted either way, and a partial-success signal would be a state no client could act on.
 3. **A re-run skips it cleanly.** The second call finds no stored token and makes no request to Tesla.
 
@@ -1742,7 +1743,7 @@ This is pinned by `TestAccountDeletion_RideHistorySurvivesAsFormerRider`, which 
 
 #### Audit row (FR-10.2)
 
-`action='account_deleted'`, `targetType='user'`, `targetId`=the caller's own cuid, `initiator='user'`. `metadata` is **P0 counts only** per CG-DL-5: `{vehicleCount, driveCount, ridesCancelled, sharesRevoked, pushDevicesDeleted, refreshTokensRevoked, hadPrismaUser}`. No name, no email, no VIN, no coordinate, no token.
+`action='account_deleted'`, `targetType='user'`, `targetId`=the caller's own cuid, `initiator='user'`. `metadata` is **P0 counts only** per CG-DL-5: `{vehicleCount, driveCount, ridesCancelled, sharesRevoked, shareLabelsScrubbed, pushDevicesDeleted, savedPlacesDeleted, refreshTokensRevoked, hadPrismaUser}`. No name, no email, no VIN, no coordinate, no token.
 
 #### What changed and why
 
@@ -3975,7 +3976,7 @@ Authorization: Bearer <app session JWT>
 
 #### 7.20.4 Account deletion
 
-Saved places are deleted as **step 6** of the §7.6 `DELETE /api/users/me` sequence, between the push devices and the refresh tokens and BEFORE the identity transaction.
+Saved places are deleted as **step 8** of the §7.6 `DELETE /api/users/me` sequence, between the push devices and the refresh tokens and BEFORE the identity transaction.
 
 The position is load-bearing in one direction. `go_saved_places` has no foreign key (CG-DL-9), so nothing cascades: a row left behind after the identity rows go would be AES-256-GCM ciphertext of where a DELETED PERSON LIVES, keyed by a cuid that no longer resolves to anybody and reachable by nothing but a table scan. It would never be read, never be reported, and never go away.
 
