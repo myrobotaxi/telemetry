@@ -64,12 +64,17 @@ func TestVehicleAvailability(t *testing.T) {
 // arms. Do not "simplify" it away.
 //
 // `offline` is the "Vehicle" schema default (NOT NULL DEFAULT 'offline'). The
-// owned-vehicle provisioning INSERT never sets the column, and nothing in this
-// server ever writes the value back: both status writers require a live stream
-// event, the MYR-320 periodic re-poll selects `in_service` rows only, and the
-// §7.15 refresh writes everything except status. So a key-paired car that has
-// not yet streamed telemetry — every new owner, for their first days — sits at
-// `offline` with nothing scheduled to correct it.
+// owned-vehicle provisioning INSERT never sets the column, and nothing writes
+// the value back for a car that has never STREAMED: every status writer
+// requires a live stream event, the MYR-320 periodic re-poll selects
+// `in_service` rows only, and the §7.15 refresh writes everything except
+// status. So a key-paired car that has not yet streamed telemetry — every new
+// owner, for their first days — sits at `offline` with nothing scheduled to
+// correct it.
+//
+// MYR-454 added a status writer (the telemetry fold heals `offline` on the
+// first frame carrying gear/speed) but did NOT weaken this guard: it made the
+// permanently-`offline` population exactly the never-streamed cars above.
 //
 // If the sweeper held on that, it would hold every 30 seconds for 30 minutes
 // and then expire the reservation, every time, forever — while suppressing the
