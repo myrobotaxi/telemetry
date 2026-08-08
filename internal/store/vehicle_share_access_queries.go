@@ -116,6 +116,16 @@ SELECT EXISTS (
 // (1) at the top of this file. `status = 'accepted'` is likewise in the write:
 // a pending or revoked row updates zero rows, and the caller disambiguates with
 // queryShareExistsForOwner rather than pre-reading.
+// `updated_at` IS STAMPED UNCONDITIONALLY (MYR-451), in this same statement, so
+// the timestamp and the values it dates come from one write and cannot
+// disagree. It is stamped even when the patch is a no-op in effect — setting
+// allow_rides false on a grant already false still records that the owner
+// decided it — because the column answers "when was this grant's CAPABILITY SET
+// last decided", and an owner's re-assertion is a decision. Redemption stamps
+// it too (queryAcceptSharesByID), for the same reason and no other: it is the
+// only other statement that moves a capability. `suspended_at` keeps recording
+// the suspension transition specifically; the two are not redundant, and only
+// one of them survives a restore.
 const queryPatchShare = `
 UPDATE go_vehicle_shares
 SET allow_rides  = CASE WHEN $3::boolean THEN $4::boolean ELSE allow_rides END,
@@ -123,6 +133,7 @@ SET allow_rides  = CASE WHEN $3::boolean THEN $4::boolean ELSE allow_rides END,
                      WHEN NOT $5::boolean THEN suspended_at
                      WHEN $6::boolean      THEN NOW()
                      ELSE NULL
-                   END
+                   END,
+    updated_at   = NOW()
 WHERE id = $1 AND owner_user_id = $2 AND status = 'accepted'
 RETURNING` + shareColumns

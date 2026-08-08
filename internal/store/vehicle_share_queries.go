@@ -183,10 +183,21 @@ FOR UPDATE`
 // this is belt and braces against a row that somehow carried the column — a
 // freshly accepted grant must never be born paused, because nobody would know
 // to un-pause it.
+// `updated_at` IS STAMPED HERE TOO (MYR-451), and it has to be: this statement
+// MOVES A CAPABILITY. `allow_rides` goes false → true for a `rides` preset, and
+// redemption is the only mutation other than the owner's patch that changes it.
+// Leaving it unstamped would let a grant that acquired the ride capability at
+// redemption still report the invite's creation instant — so the one question
+// the column exists to answer ("when did this grant gain or lose rides, before
+// or after the ride they took?") would be answered with a date that can be days
+// early. The lifecycle transitions that DON'T touch a capability — revoke,
+// resend — keep their own dedicated timestamps and deliberately do not stamp
+// this one.
 const queryAcceptSharesByID = `
 UPDATE go_vehicle_shares
 SET status = 'accepted', accepted_at = NOW(), accepted_by_user_id = $2,
-    allow_rides = (permission = 'rides'), suspended_at = NULL
+    allow_rides = (permission = 'rides'), suspended_at = NULL,
+    updated_at = NOW()
 WHERE id = ANY($1) AND status = 'pending' AND expires_at > NOW()
 RETURNING vehicle_id, owner_user_id, allow_rides`
 
