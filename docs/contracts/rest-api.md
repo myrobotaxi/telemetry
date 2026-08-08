@@ -3605,7 +3605,7 @@ not use it as an access control.
 
 | Wire key | Column | Covers |
 |----------|--------|--------|
-| `rideLifecycle` | `ride_lifecycle` | The **whole** ride status class — a new request reaching an OWNER, and `accepted` / `declined` / `arrived` / `enroute` / `completed` / `expired` reaching a RIDER. |
+| `rideLifecycle` | `ride_lifecycle` | The **whole** ride status class — a new request and the rider's `enroute` start reaching an OWNER, and `accepted` / `declined` / `arrived` / `completed` / `expired` reaching a RIDER. |
 | `driveStarted` | `drive_started` | The owner's car began a drive. |
 | `driveCompleted` | `drive_completed` | The owner's car finished a drive. |
 | `chargingComplete` | `charging_complete` | The owner's car finished charging. |
@@ -3629,8 +3629,20 @@ class of lie this issue exists to remove. The two rows therefore move together
 on the client. If they must become independent, the send sites have to split
 first, not the column.
 
+**One event can now wake BOTH parties, and `rideLifecycle` gates each of them
+against its own row.** MYR-462 added the first owner-facing status transition:
+`arrived → enroute` — the rider pressing Start ride — is the owner's only signal
+that their car has left the kerb with somebody aboard, and before it existed the
+owner learned the trip had started only by opening the app and waiting for a
+refresh. `ride.status.changed` therefore fans out to the RIDER for
+`accepted` / `declined` / `arrived` and to the OWNER for `enroute`, and the gate
+reads the recipient's row in each case, never the other party's. The two never
+both fire on one transition, and the owner-side send is **suppressed entirely
+when the owner IS the rider** — a self-ride must not report the rider's own tap
+back to them.
+
 **Four of the five categories have no sender yet.** `internal/push` has exactly
-three fan-out sites and **all three are `rideLifecycle`** — there is no
+four fan-out sites and **all four are `rideLifecycle`** — there is no
 drive-started, drive-completed, charging-complete or viewer-joined notifier in
 this service at all (see the audit in the MYR-349 PR). Those four columns are
 created now anyway, because their switches are already on the owner's screen:
@@ -4051,7 +4063,7 @@ Content-Type: application/json
 4. Strict-decode the body — **unknown keys are a `400`**, matching §7.14 / §7.17 / §7.19 / §7.20.
 5. Reject an empty, over-long or non-hexadecimal token → `400 invalid_request`, describing the RULE and **never echoing the value**.
 6. Reject a ride already in a terminal state (`completed`, `declined`, `cancelled`) → `409 conflict`.
-7. Reject a ride whose **reservation expired** → `409 conflict` with `subCode: reservation_expired`. See "Two endings are final" below.
+7. Reject a ride whose **reservation expired and which is still `accepted`** → `409 conflict` with `subCode: reservation_expired`. A ride that has since advanced to `arrived` or `enroute` is **not** refused. See "Two endings are final" below.
 8. **Upsert** on `(ride_request_id, user_id)`, replacing `activity_push_token` and `sandbox`, stamping `updated_at`, and **clearing `ended_at`** — with steps 6 and 7 re-applied **as a predicate inside the write itself**, not merely re-checked.
 
 **This is an UPSERT, and rotation is the reason — not deduplication.** ActivityKit **rotates the push token during the life of a single Activity**: the system hands the app a replacement and expects the server to start using it. So a rotation is an ordinary re-registration, and the conflict target is the `(ride, rider)` pair rather than the token — the §7.17 posture, where the token IS the identity, would accumulate a row per rotation and leave the sender guessing which one is live. A first registration and a rotation are indistinguishable on the wire and both answer `registered: true`.
@@ -4065,6 +4077,10 @@ A **terminal status** is the obvious one and is visible in the ride. A **reserva
 That case gets a **`subCode`** precisely because the ride's own status does not explain it. A client seeing a bare `conflict` on an `accepted` ride cannot tell a lapsed reservation from a server bug, and would keep retrying; `reservation_expired` tells it to end the Activity and say why.
 
 **Note what this does NOT refuse.** `dispatch_status='failed'` on its own means any nav push that did not land — the car was asleep, the proxy was down. That ride is still genuinely happening (the owner can drive it manually) and its Activity must keep working, rotations included. The refusal is scoped to the expiry outcome, never to dispatch failure in general and never to re-registration in general.
+
+**Nor does it refuse a RESCUED reservation (MYR-461).** The expiry refusal holds only while the ride is still `accepted` — that is, while it is nothing but a reservation nobody came for. `reservation_expired` is a verdict on the **dispatch**, not on the ride, and this section says so twice already: the row stays `accepted` and its parties "may still cancel or **proceed manually**". When they do proceed manually the ride advances to `arrived` (the owner confirms the kerb) and then `enroute` (the rider starts), and at that point the expiry verdict has been **falsified by events** — the car is demonstrably there and a passenger is demonstrably aboard. Continuing to refuse registration then produced the defect this rule was scoped to fix: in external beta an expired reservation ran on for another **99 minutes** as a real, driven ride, and every registration attempt over that whole span answered `409`, so the rider's lock screen went dark at the expiry and could never come back. The ride's own status is the authority on whether a ride is over, and step 6 already enforces it; step 7 no longer second-guesses it.
+
+**The client's part.** A `409 … reservation_expired` still means "end the Activity locally now", and that is unchanged. But because a rescued ride becomes registrable again, a client that ended its Activity at the expiry SHOULD start a fresh one when it next observes the ride at `arrived` or `enroute` — the dismissed Activity cannot be revived by any push, so only the app can bring the card back. A client that does not do this simply keeps the pre-MYR-461 behaviour; nothing breaks.
 
 **The guard lives in the WRITE, not in a check before it.** Steps 6 and 7 are a read; the upsert is a write, and a `POST` arriving while the ride is transitioning passes both checks and then lands after the terminal tombstone. The `INSERT … SELECT` that performs the registration carries the same two predicates, so the refusal holds under the race rather than merely being unlikely. A registration that loses that race answers `409 conflict` with **no `subCode`** — by then the server no longer knows which ending won, and naming one would be a guess the client would act on.
 
