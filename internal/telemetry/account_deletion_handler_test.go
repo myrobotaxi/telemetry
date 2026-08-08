@@ -746,3 +746,97 @@ func TestAccountDeletion_SuccessResponseHasNoBody(t *testing.T) {
 		t.Fatalf("body = %q, want empty", body)
 	}
 }
+
+// --- MYR-452: the sequence must cover the whole identity closure ------------
+
+// TestAccountDeletion_ConvergedScopeRunsEveryStepOverEveryID is the handler-side
+// half of MYR-452.
+//
+// When a Tesla link converges two identities, the caller's token keeps naming
+// the pre-convergence id while the account's rows sit under another. Every step
+// therefore has to run over the resolved closure, not the raw subject — a step
+// that quietly keeps keying off the JWT subject deletes nothing and still
+// reports success, which is exactly how a "deleted" account came back.
+func TestAccountDeletion_ConvergedScopeRunsEveryStepOverEveryID(t *testing.T) {
+	const canonical = "ccanonical_452"
+
+	data := &fakeAccountData{scopeExtraIDs: []string{canonical}}
+	sessions := &fakeSessionInvalidator{}
+	vehicles := &fakeOwnedVehicleLister{ids: []string{"cveh_a"}}
+
+	h := newDeletionHandler(t, AccountDeletionDeps{
+		Vehicles: vehicles,
+		Teardown: newFakeAccountTeardown(),
+		Rides:    &fakeRideCanceller{},
+		Data:     data,
+		Sessions: sessions,
+	})
+
+	if got := callDelete(h).Code; got != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", got)
+	}
+
+	// Every SQL step saw both ids. Counting per step rather than checking the
+	// set as a whole is what catches one straggler still keyed on the subject.
+	const sqlSteps = 6 // drives, shares, labels, devices, places, tokens
+	if len(data.seenIDs) != sqlSteps*2 {
+		t.Fatalf("steps ran on %d ids, want %d (every step over both)", len(data.seenIDs), sqlSteps*2)
+	}
+	for _, want := range []string{deletionUserID, canonical} {
+		if !slices.Contains(data.seenIDs, want) {
+			t.Errorf("no step ran against %q; seen=%v", want, data.seenIDs)
+		}
+	}
+
+	// The identity transaction receives the whole closure, not one id.
+	if !slices.Contains(data.identityScope.IDs, canonical) ||
+		!slices.Contains(data.identityScope.IDs, deletionUserID) {
+		t.Errorf("DeleteIdentity scope = %v, want both ids", data.identityScope.IDs)
+	}
+
+	// The vehicle teardown is per-id too: a converged owner's cars are filed
+	// under the canonical id, which the token never names, so listing by the
+	// subject alone finds an empty garage.
+	if vehicles.calls != 2 {
+		t.Errorf("owned-vehicle lister called %d times, want once per id", vehicles.calls)
+	}
+
+	// Both auth caches are dropped for BOTH ids — the caller's own subject is
+	// the one their still-unexpired access token actually presents.
+	if len(sessions.users) != 2 || len(sessions.vehicles) != 2 {
+		t.Errorf("auth caches invalidated for users=%v vehicles=%v, want both ids in each",
+			sessions.users, sessions.vehicles)
+	}
+}
+
+// A scope that cannot be resolved must FAIL the deletion. Guessing at the
+// closure is how a teardown silently misses its target and reports 204 over a
+// live account, so this step is deliberately fatal where the drive count is not.
+func TestAccountDeletion_ScopeResolutionFailureIs500AndDeletesNothing(t *testing.T) {
+	data := &fakeAccountData{scopeErr: errors.New("convergence graph unreadable")}
+	sessions := &fakeSessionInvalidator{}
+
+	h := newDeletionHandler(t, AccountDeletionDeps{
+		Vehicles: &fakeOwnedVehicleLister{},
+		Teardown: newFakeAccountTeardown(),
+		Rides:    &fakeRideCanceller{},
+		Data:     data,
+		Sessions: sessions,
+	})
+
+	if got := callDelete(h).Code; got != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", got)
+	}
+	if data.identityCalls != 0 {
+		t.Error("identity transaction ran on an unresolved scope")
+	}
+	if len(data.seenIDs) != 0 {
+		t.Errorf("destructive steps ran on an unresolved scope: %v", data.seenIDs)
+	}
+	if len(sessions.users) != 0 {
+		t.Error("sessions were invalidated for a deletion that never ran")
+	}
+	if got := data.calls; len(got) != 1 || got[0] != "resolve_identity_scope" {
+		t.Errorf("calls = %v, want the sequence to stop at scope resolution", got)
+	}
+}

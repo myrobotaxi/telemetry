@@ -7,8 +7,12 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"log/slog"
+	"slices"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -250,6 +254,72 @@ func TestPostDeletionSignInYieldsAVirginAccount(t *testing.T) {
 			},
 			wantConverged: true,
 		},
+		{
+			// THE SHAPE A go_users COLUMN WOULD HAVE MISSED. Same convergence,
+			// but the caller's subject is a Prisma "User" id with NO go_users
+			// row — which is what identity.linkage mints on a verified-email
+			// match. Recording the convergence against go_users would silently
+			// write nothing here and leave the account resurrectable, so this
+			// case is the reason the trail lives in its own table.
+			name: "converged caller whose pre-convergence id is a Prisma user, not a go_users row",
+			arrange: func(t *testing.T, svc *identity.Service) string {
+				t.Helper()
+				ctx := context.Background()
+				const (
+					legacyCaller = "clegacycaller00000000001"
+					canonical    = "cconverged00000000000002"
+				)
+				// The caller: a legacy web user the email match will adopt.
+				if _, err := testPool.Exec(ctx,
+					`INSERT INTO "User" ("id", "email", "updatedAt") VALUES ($1, $2, NOW())`,
+					legacyCaller, appleMail); err != nil {
+					t.Fatalf("seed legacy caller: %v", err)
+				}
+				// The canonical owner of the Tesla account they are about to link.
+				if _, err := testPool.Exec(ctx,
+					`INSERT INTO "User" ("id", "email", "updatedAt") VALUES ($1, $2, NOW())`,
+					canonical, "other-owner@example.com"); err != nil {
+					t.Fatalf("seed canonical User: %v", err)
+				}
+				if _, err := testPool.Exec(ctx,
+					`INSERT INTO "Account" ("id", "userId", "type", "provider", "providerAccountId")
+					 VALUES ($1, $2, 'oauth', 'tesla', $3)`,
+					"cacct00000000000000000002", canonical, teslaSub); err != nil {
+					t.Fatalf("seed Account: %v", err)
+				}
+
+				res, err := svc.SignInWithApple(ctx,
+					identity.AppleSignInInput{IdentityToken: appleSub})
+				if err != nil {
+					t.Fatalf("first sign-in: %v", err)
+				}
+				if res.User.ID != legacyCaller {
+					t.Fatalf("precondition: email match should adopt the legacy user, got %q", res.User.ID)
+				}
+				if n := countQuery(t, `SELECT count(*) FROM go_users WHERE id = $1`, legacyCaller); n != 0 {
+					t.Fatalf("precondition: the legacy caller must have no go_users row, found %d", n)
+				}
+
+				prov := newTestProvisioner(t)
+				//nolint:gosec // G101: fixed test fixtures, not credentials.
+				out, err := prov.ProvisionTeslaOwner(ctx, store.ProvisionInput{
+					UserID:            legacyCaller,
+					ProviderAccountID: teslaSub,
+					Email:             appleMail,
+					AccessToken:       "tesla-access",
+					RefreshToken:      "tesla-refresh",
+					ExpiresAt:         time.Now().Add(time.Hour).Unix(),
+				})
+				if err != nil {
+					t.Fatalf("provision tesla owner: %v", err)
+				}
+				if out.CanonicalUserID != canonical {
+					t.Fatalf("precondition: convergence target = %q, want %q", out.CanonicalUserID, canonical)
+				}
+				return legacyCaller
+			},
+			wantConverged: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -291,8 +361,9 @@ func TestPostDeletionSignInYieldsAVirginAccount(t *testing.T) {
 			}
 
 			// (3) The Tesla grant goes with the account. For the converged
-			// shape this only happens if the "User" cascade fired on the
-			// CANONICAL id — the id the caller's token never named.
+			// shape this only happens if the scope reached the CANONICAL id —
+			// the id the caller's token never named — since the grant is filed
+			// there and is deleted by userId, not by providerAccountId.
 			if got := countQuery(t,
 				`SELECT count(*) FROM "Account" WHERE "providerAccountId" = $1`, teslaSub); got != 0 {
 				t.Errorf("Tesla Account row survived deletion (%d rows) — sealed OAuth tokens outlived the account", got)
@@ -354,11 +425,10 @@ func TestResolveDeletionScope_FollowsConvergenceBothWays(t *testing.T) {
 		alias     = "calias0000000000000000001"
 		canonical = "ccanon0000000000000000001"
 	)
-	if _, err := testPool.Exec(ctx,
-		`INSERT INTO go_users (id, email, converged_to) VALUES ($1, $2, $3)`,
-		alias, "converged@privaterelay.appleid.com", canonical); err != nil {
-		t.Fatalf("seed alias: %v", err)
-	}
+	seedConvergence(t, alias, canonical)
+	// The binding is what makes an id canonical, so seed it where a real
+	// convergence would have left it.
+	seedAppleIdentity(t, "sub-converged", canonical, nil, nil)
 
 	tests := []struct {
 		name          string
@@ -405,4 +475,100 @@ func TestResolveDeletionScope_FollowsConvergenceBothWays(t *testing.T) {
 			t.Errorf("IDs = %v, want exactly the caller", scope.IDs)
 		}
 	})
+}
+
+// TestResolveDeletionScope_SurvivesChainsAndCycles pins the two graph shapes the
+// writer cannot rule out.
+//
+// A CHAIN forms when one person converges twice. A 2-CYCLE forms because
+// "Account".userId is never rewritten: after A converges onto B, re-linking that
+// same Tesla while authenticated as B resolves canonical A and converges back.
+// A one-hop resolver silently drops members of both, and a resolver without a
+// visited set spins forever on the cycle.
+func TestResolveDeletionScope_SurvivesChainsAndCycles(t *testing.T) {
+	tests := []struct {
+		name    string
+		edges   [][2]string
+		binding string // id the Apple binding sits under
+		from    string // the caller's subject
+		wantIDs []string
+	}{
+		{
+			name:    "chain A->B->C resolves all three from any end",
+			edges:   [][2]string{{"cchain0000000000000000a", "cchain0000000000000000b"}, {"cchain0000000000000000b", "cchain0000000000000000c"}},
+			binding: "cchain0000000000000000c",
+			from:    "cchain0000000000000000a",
+			wantIDs: []string{"cchain0000000000000000a", "cchain0000000000000000b", "cchain0000000000000000c"},
+		},
+		{
+			name:    "chain resolves from the middle too",
+			edges:   [][2]string{{"cchain0000000000000000a", "cchain0000000000000000b"}, {"cchain0000000000000000b", "cchain0000000000000000c"}},
+			binding: "cchain0000000000000000c",
+			from:    "cchain0000000000000000b",
+			wantIDs: []string{"cchain0000000000000000a", "cchain0000000000000000b", "cchain0000000000000000c"},
+		},
+		{
+			name:    "2-cycle A<->B terminates and yields both",
+			edges:   [][2]string{{"ccycle0000000000000000a", "ccycle0000000000000000b"}, {"ccycle0000000000000000b", "ccycle0000000000000000a"}},
+			binding: "ccycle0000000000000000a",
+			from:    "ccycle0000000000000000b",
+			wantIDs: []string{"ccycle0000000000000000a", "ccycle0000000000000000b"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setupAccountDeletion(t)
+			ctx := context.Background()
+			for _, e := range tt.edges {
+				seedConvergence(t, e[0], e[1])
+			}
+			seedAppleIdentity(t, "sub-"+tt.from, tt.binding, nil, nil)
+
+			scope, err := newAccountDeleter(t).ResolveDeletionScope(ctx, tt.from)
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			if scope.CanonicalID != tt.binding {
+				t.Errorf("CanonicalID = %q, want the id holding the binding (%q)", scope.CanonicalID, tt.binding)
+			}
+			got := append([]string(nil), scope.IDs...)
+			sort.Strings(got)
+			if !slices.Equal(got, tt.wantIDs) {
+				t.Errorf("closure = %v, want %v", got, tt.wantIDs)
+			}
+		})
+	}
+}
+
+// TestResolveDeletionScope_RefusesAnImplausiblyLargeClosure is the blast-radius
+// guard. A convergence edge grants DELETE authority over another id, so a
+// corrupt graph must fail the deletion rather than fan it out across accounts:
+// a 500 is recoverable, deleting a stranger's account is not.
+func TestResolveDeletionScope_RefusesAnImplausiblyLargeClosure(t *testing.T) {
+	setupAccountDeletion(t)
+	ctx := context.Background()
+
+	// A star: many abandoned ids all pointing at one hub, well past the cap.
+	const hub = "chub000000000000000000000"
+	for i := range 12 {
+		seedConvergence(t, fmt.Sprintf("cspoke%019d", i), hub)
+	}
+
+	if _, err := newAccountDeleter(t).ResolveDeletionScope(ctx, hub); err == nil {
+		t.Fatal("resolved a 13-id closure; want a refusal")
+	} else if !strings.Contains(err.Error(), "cap") {
+		t.Errorf("error = %v, want it to name the scope cap", err)
+	}
+}
+
+// seedConvergence records one convergence edge.
+func seedConvergence(t *testing.T, from, to string) {
+	t.Helper()
+	if _, err := testPool.Exec(context.Background(),
+		`INSERT INTO go_identity_convergence (from_user_id, to_user_id) VALUES ($1, $2)
+		 ON CONFLICT (from_user_id) DO UPDATE SET to_user_id = EXCLUDED.to_user_id`,
+		from, to); err != nil {
+		t.Fatalf("seed convergence %s->%s: %v", from, to, err)
+	}
 }
