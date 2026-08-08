@@ -26,12 +26,24 @@
 -- asymmetry is the gap. A boolean records the verdict and destroys the history.
 --
 -- WHY A ROW TIMESTAMP RATHER THAN A PER-FLAG ONE. `allow_rides_changed_at`
--- would answer this incident precisely and nothing else, and the next flag
--- added to this table would reopen the same hole. `updated_at` covers every
--- mutation the row will ever accept, including ones not yet written, and the
--- flags' current values are already in the row — "these values, as of this
--- instant" is the complete statement. Correlating it with the request log is
--- what turns a disputed grant into a settled timeline.
+-- would answer this incident precisely and nothing else, and the next
+-- capability added to this table would need its own column or reopen the hole.
+-- One `updated_at` covers the whole capability set, and the flags' current
+-- values are already in the row — "these values, as of this instant" is the
+-- complete statement. Correlating it with the request log is what turns a
+-- disputed grant into a settled timeline.
+--
+-- WHAT IT DOES AND DOES NOT DATE — read this before trusting it. It records
+-- CAPABILITY CHANGES, which is a narrower claim than "every write to the row",
+-- and the difference is load-bearing. Exactly two statements move a capability
+-- and exactly two stamp: `queryPatchShare` (the owner's toggle) and
+-- `queryAcceptSharesByID` (redemption, which derives `allow_rides` from the
+-- preset and so moves it false → true). The lifecycle transitions — revoke,
+-- resend — do NOT stamp, because each already has a dedicated timestamp
+-- (`revoked_at`, `expires_at`) that says more than this column could, and
+-- folding them in here would make a revocation look like a capability edit.
+-- A future statement that writes a capability MUST stamp; one that does not,
+-- must not.
 --
 -- DEFAULT now() AND BACKFILL. Existing rows are stamped at migration time
 -- rather than left NULL. NULL would mean "never modified", which for a row that

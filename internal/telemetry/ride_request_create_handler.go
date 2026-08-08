@@ -170,12 +170,17 @@ func (h *RideRequestHandler) rejectIfRideNotGrantedToCaller(
 	// they hold every capability unconditionally, and there is no grant behind
 	// their access to reconstruct — logging them would bury the rare line that
 	// matters under the common one that never does.
+	// NO `allow_rides` FIELD HERE, deliberately. Reaching this branch already
+	// means capRides was satisfied, and the adapter only ever builds a live
+	// grant, so the value could not be anything but true — a field that cannot
+	// vary records nothing and invites a reader to believe it was checked
+	// against something. The fact worth logging is that a NON-OWNER got
+	// through, and the line's existence carries it.
 	if access.Role == auth.RoleViewer {
 		h.logger.Info("ride-request create: permitted by share grant",
 			slog.String("user_id", userID),
 			slog.String("vehicle_id", vehicleID),
 			slog.String("owner_user_id", ownerUserID),
-			slog.Bool("allow_rides", access.Grant.AllowRides),
 		)
 	}
 	return false

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/myrobotaxi/telemetry/internal/auth"
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
@@ -151,16 +152,24 @@ func (h *ShareInviteHandler) ServePatch(w http.ResponseWriter, r *http.Request) 
 // one line that was supposed to settle the incident. Rendering the distinction
 // ourselves makes the attribute identical under every handler.
 //
-// An absent field logs the STRING "unchanged" rather than being omitted or
-// logged as false. Omission would make a partial patch indistinguishable from
-// one that never mentioned the field, and false would assert a decision the
-// owner did not make — the very conflation §7.5.7 spends a paragraph forbidding
-// on the wire, which a log line has no business reintroducing.
+// An absent field logs "unchanged" rather than being omitted or logged as
+// false. Omission would make a partial patch indistinguishable from one that
+// never mentioned the field, and false would assert a decision the owner did
+// not make — the very conflation §7.5.7 spends a paragraph forbidding on the
+// wire, which a log line has no business reintroducing.
+//
+// ALWAYS A STRING, INCLUDING FOR THE PRESENT CASE, and that is the whole reason
+// this returns what it returns. Emitting `slog.Bool` when present and
+// `slog.String` when absent would put two JSON TYPES under one key across
+// consecutive lines; a strict-mapping sink (Elasticsearch dynamic mapping,
+// BigQuery, Loki structured metadata) rejects the second shape and DROPS THE
+// DOCUMENT — silently discarding exactly the line written to settle an
+// incident. One key, one type, three self-describing values.
 func requestedFlag(name string, v *bool) slog.Attr {
 	if v == nil {
 		return slog.String(name, "unchanged")
 	}
-	return slog.Bool(name, *v)
+	return slog.String(name, strconv.FormatBool(*v))
 }
 
 // decodePatch reads the body and rejects one that asks for nothing.

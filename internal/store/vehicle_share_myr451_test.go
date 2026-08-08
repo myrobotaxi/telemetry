@@ -29,7 +29,6 @@ func TestMYR451_WithdrawnRideCapabilityIsRefusedEverywhere(t *testing.T) {
 	ctx := context.Background()
 	vehA1, _, _ := seedShareFixtures(t)
 	repo := newShareRepo(t)
-	cleanVehicleShares(t)
 
 	// Redeem at the RIDES preset, so the grant genuinely starts with the
 	// capability. Starting from `live` would let a test pass that never
@@ -98,6 +97,45 @@ func TestMYR451_WithdrawnRideCapabilityIsRefusedEverywhere(t *testing.T) {
 	if !afterPatch.After(beforePatch) {
 		t.Errorf("updated_at did not advance across the patch (before=%s after=%s); a capability change is undateable again",
 			beforePatch, afterPatch)
+	}
+}
+
+// TestMYR451_RedemptionStampsTheCapabilityItGrants covers the SECOND statement
+// that moves a capability.
+//
+// Redemption derives `allow_rides` from the invite's preset, so for a `rides`
+// invite it flips the flag false → true. If it did not stamp `updated_at`, a
+// grant that acquired the ride capability at redemption would still report the
+// INVITE's creation instant — and an on-call asking MYR-451's own question
+// ("did this grant have rides before or after the ride they took?") would read
+// a date that can be days early. That is the same class of wrong answer the
+// column was added to prevent, so the fix is only half done without this.
+func TestMYR451_RedemptionStampsTheCapabilityItGrants(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable")
+	}
+	ctx := context.Background()
+	vehA1, _, _ := seedShareFixtures(t)
+	repo := newShareRepo(t)
+
+	invite := mustCreateInvite(t, repo, shareOwnerA, vehA1, []string{vehA1}, store.SharePermissionRides)
+
+	var createdAt time.Time
+	if err := testPool.QueryRow(ctx,
+		`SELECT created_at FROM go_vehicle_shares WHERE id = $1`, invite.ID).Scan(&createdAt); err != nil {
+		t.Fatalf("read created_at: %v", err)
+	}
+
+	if _, err := repo.RedeemCode(ctx, invite.Code, shareViewer1); err != nil {
+		t.Fatalf("redeem: %v", err)
+	}
+
+	// created_at and updated_at are written by separate statements, so their
+	// NOW() values come from different transactions and must differ.
+	updatedAt := grantUpdatedAt(t, invite.ID)
+	if !updatedAt.After(createdAt) {
+		t.Errorf("redemption granted the ride capability without stamping updated_at (created=%s updated=%s); the capability's acquisition is misdated to the invite instant",
+			createdAt, updatedAt)
 	}
 }
 
