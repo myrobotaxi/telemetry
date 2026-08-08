@@ -35,6 +35,14 @@ func (w *Writer) handleTelemetry(event events.Event) {
 	// MYR-454: carry provenance through to the status fold, which must not
 	// act on a REST backfill frame — see VehicleUpdate.Streamed.
 	update.Streamed = telEvt.Streamed()
+	// MYR-409: date the NAV READING, not the row. Only a frame that actually
+	// carried a navigation-group member gets a stamp; a motion-, charge- or
+	// climate-only frame leaves it zero so nav freshness ages honestly while
+	// the row stays current. Same instant as LastUpdated when it is set at
+	// all — the distinction is WHETHER, never WHICH clock.
+	if update.carriedNavReading() {
+		update.NavReadingAt = telEvt.CreatedAt
+	}
 
 	shouldFlush := w.coalesce(telEvt.VIN, update)
 	if shouldFlush {
@@ -84,7 +92,7 @@ func (w *Writer) flush(ctx context.Context) {
 		// even if the Vehicle-table write below is a no-op or fails. This is the
 		// write half of the fix — the snapshot read (GetByID LEFT JOIN) returns
 		// these with no live socket.
-		w.persistControlState(ctx, vin, update)
+		w.persistSideTable(ctx, vin, update)
 		if err := w.vehicles.UpdateTelemetry(ctx, vin, *update); err != nil {
 			w.logger.Warn("failed to write telemetry update",
 				slog.String("vin", redactVIN(vin)),
@@ -101,26 +109,49 @@ func (w *Writer) flush(ctx context.Context) {
 	}
 }
 
-// persistControlState upserts the MYR-269 owner-control read-backs for one VIN
-// into the Go-owned side table. It resolves the vehicle cuid via the VIN cache
-// (the side table is keyed by cuid, not VIN). A resolve or upsert failure is
-// logged and swallowed — control-state persistence is best-effort and must not
-// stall the flush loop or drop the Vehicle-table write. A frame with no control
-// fields is a cheap no-op.
-func (w *Writer) persistControlState(ctx context.Context, vin string, update *VehicleUpdate) {
-	if update.ControlState == nil || !update.ControlState.HasAny() {
+// persistSideTable writes everything this flush owes the Go-owned
+// go_vehicle_control_state row: the MYR-269 owner-control read-backs and the
+// MYR-409 nav-reading stamp.
+//
+// The two share this function because they share the only expensive part — the
+// side table is keyed by vehicle cuid, not VIN, so each needs a VIN-cache
+// resolve, and doing it once keeps a nav frame from paying for two. They are
+// otherwise independent: a frame can carry controls with no navigation (a lock
+// toggle), navigation with no controls (the common streaming case), or both.
+//
+// A frame owing neither returns before the resolve, which is the majority of
+// flushes.
+func (w *Writer) persistSideTable(ctx context.Context, vin string, update *VehicleUpdate) {
+	hasControls := update.ControlState != nil && update.ControlState.HasAny()
+	hasNavStamp := !update.NavReadingAt.IsZero()
+	if !hasControls && !hasNavStamp {
 		return
 	}
 	vehicleID, err := w.vinCache.ResolveID(ctx, vin)
 	if err != nil {
-		w.logger.Warn("failed to resolve vehicle id for control-state persist",
+		w.logger.Warn("failed to resolve vehicle id for side-table persist",
 			slog.String("vin", redactVIN(vin)),
 			slog.String("error", err.Error()),
 		)
 		return
 	}
-	if err := w.vehicles.UpsertControlState(ctx, vehicleID, *update.ControlState); err != nil {
-		w.logger.Warn("failed to persist owner control state",
+	if hasControls {
+		if err := w.vehicles.UpsertControlState(ctx, vehicleID, *update.ControlState); err != nil {
+			w.logger.Warn("failed to persist owner control state",
+				slog.String("vin", redactVIN(vin)),
+				slog.String("error", err.Error()),
+			)
+		}
+	}
+	if !hasNavStamp {
+		return
+	}
+	// Best-effort, like its neighbour, and the failure direction is the safe
+	// one: a stamp that does not land leaves the column at its previous value,
+	// so nav freshness reads OLDER than the truth and the gates it feeds decline
+	// rather than fire. A burnt alert rung is durable; a declined one is not.
+	if err := w.vehicles.SetNavReadingAt(ctx, vehicleID, update.NavReadingAt); err != nil {
+		w.logger.Warn("failed to persist nav reading stamp",
 			slog.String("vin", redactVIN(vin)),
 			slog.String("error", err.Error()),
 		)

@@ -49,6 +49,59 @@ var navFieldColumns = map[telemetry.FieldName][]string{
 	telemetry.FieldRouteLine:        {"navRouteCoordinates"},
 }
 
+// navClearColumns is the set of DB columns whose appearance in ClearFields
+// means the CAR reported navigation invalid — a cancel. Derived from
+// navFieldColumns rather than restated, so the two cannot drift: a nav field
+// that gains a column there gains it here.
+var navClearColumns = buildNavClearColumns()
+
+func buildNavClearColumns() map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, cols := range navFieldColumns {
+		for _, col := range cols {
+			out[col] = struct{}{}
+		}
+	}
+	return out
+}
+
+// carriedNavReading reports whether this update was built from a frame that
+// actually told us something about NAVIGATION (MYR-409).
+//
+// It is asked of the finished update rather than of the raw field map on
+// purpose: the answer is then "a nav reading we acted on", not "a key was
+// present". A nav field the applier rejected sets no pointer and schedules no
+// clear, so it stamps nothing — which is right, since nothing about the stored
+// navigation changed.
+//
+// BOTH ARMS COUNT. A frame that carries a destination, an ETA, a remaining
+// distance, an origin or a route line is the obvious case. A frame that CLEARS
+// them is equally a reading: "this car has no route" is current information
+// about navigation, and the same update NULLs the values, so the stamp can
+// never end up dating a value that is no longer in the row.
+//
+// DestinationAddress is deliberately excluded from the pointer arm. It is the
+// reverse-geocoded rendering of a destination the server itself resolves
+// (applyDestinationAddress, on the flush path), not something the car said, so
+// letting it stamp would date a nav reading by our own geocoder's clock. Its
+// COLUMN still counts in the clear arm, because a `destinationAddress` entry in
+// ClearFields can only have come from the car invalidating DestLocation.
+func (u *VehicleUpdate) carriedNavReading() bool {
+	if u.DestinationName != nil ||
+		u.DestinationLatitude != nil || u.DestinationLongitude != nil ||
+		u.OriginLatitude != nil || u.OriginLongitude != nil ||
+		u.EtaMinutes != nil || u.TripDistRemaining != nil ||
+		u.NavRouteCoordinates != nil {
+		return true
+	}
+	for _, col := range u.ClearFields {
+		if _, isNav := navClearColumns[col]; isNav {
+			return true
+		}
+	}
+	return false
+}
+
 // mapTelemetryToUpdate converts a map of telemetry field values into a
 // VehicleUpdate with only the present fields set. Fields not recognized
 // or missing from the map are left nil (no-op on the database update).
