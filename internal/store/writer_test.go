@@ -30,11 +30,20 @@ type recordedControlWrite struct {
 	Update    ControlStateUpdate
 }
 
+// recordedNavStampWrite is one MYR-409 nav-freshness stamp the writer emitted.
+// Keyed by vehicle cuid, like its control-state sibling — the stamp lives on
+// the same Go-owned side table.
+type recordedNavStampWrite struct {
+	VehicleID string
+	ReadingAt time.Time
+}
+
 type mockVehicleUpdater struct {
 	mu              sync.Mutex
 	telemetryWrites []recordedTelemetryWrite
 	statusWrites    []recordedStatusWrite
 	controlWrites   []recordedControlWrite
+	navStampWrites  []recordedNavStampWrite
 	err             error
 }
 
@@ -57,6 +66,21 @@ func (m *mockVehicleUpdater) UpsertControlState(_ context.Context, vehicleID str
 	defer m.mu.Unlock()
 	m.controlWrites = append(m.controlWrites, recordedControlWrite{VehicleID: vehicleID, Update: update})
 	return m.err
+}
+
+func (m *mockVehicleUpdater) SetNavReadingAt(_ context.Context, vehicleID string, readingAt time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.navStampWrites = append(m.navStampWrites, recordedNavStampWrite{VehicleID: vehicleID, ReadingAt: readingAt})
+	return m.err
+}
+
+func (m *mockVehicleUpdater) getNavStampWrites() []recordedNavStampWrite {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := make([]recordedNavStampWrite, len(m.navStampWrites))
+	copy(cp, m.navStampWrites)
+	return cp
 }
 
 func (m *mockVehicleUpdater) getControlWrites() []recordedControlWrite {
