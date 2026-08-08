@@ -197,8 +197,10 @@ func (p *OwnerProvisioner) migrateRefreshFamilies(ctx context.Context, tx pgx.Tx
 }
 
 // revokeSplitRefreshFamilies revokes whatever the sweep left under the abandoned
-// id. It is skipped entirely when the sweep settled — the overwhelmingly common
-// case — so the ordinary convergence pays for two statements, not three.
+// id. It is skipped entirely when the sweep settled, which is the overwhelmingly
+// common case: an ordinary convergence pays for two UPDATEs — the one that moves
+// the rows and the zero-row one that proves nothing was re-planted behind it —
+// and never reaches this third.
 func (p *OwnerProvisioner) revokeSplitRefreshFamilies(
 	ctx context.Context, tx pgx.Tx, fromUserID string, families []string, settled bool,
 ) (int64, error) {
