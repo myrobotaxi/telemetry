@@ -39,13 +39,40 @@ type OpenRideRef struct {
 // are pure SQL. Backed by store.AccountDeleter. Every method is idempotent:
 // a re-run affects zero rows and reports zero.
 type AccountDataDeleter interface {
+	ResolveDeletionScope(ctx context.Context, callerID string) (AccountDeletionScope, error)
 	CountUserDrives(ctx context.Context, userID string) (int, error)
 	RevokeSharesReceived(ctx context.Context, userID string) (int, error)
 	ScrubSharesReceivedLabel(ctx context.Context, userID string) (int, error)
 	DeletePushDevices(ctx context.Context, userID string) (int, error)
 	DeleteSavedPlaces(ctx context.Context, userID string) (int, error)
 	RevokeRefreshTokens(ctx context.Context, userID string) (int, error)
-	DeleteIdentity(ctx context.Context, userID string, counts AccountDeletionCounts) (AccountIdentityOutcome, error)
+	DeleteIdentity(ctx context.Context, scope AccountDeletionScope, counts AccountDeletionCounts) (AccountIdentityOutcome, error)
+}
+
+// AccountDeletionScope mirrors store.DeletionScope: the set of user ids that
+// constitute one human (MYR-452).
+//
+// The caller's JWT subject is not reliably the id their account is filed under.
+// A Tesla link that converges two identities re-points the Apple binding onto a
+// canonical id and abandons the caller's original one, and nothing re-issues the
+// caller's tokens — so the subject arriving here can name an id that owns
+// nothing while the real account, binding included, sits under another. Running
+// the teardown over the closure instead of the bare subject is what stops a
+// "deleted" account from being recognised and signed back into.
+type AccountDeletionScope struct {
+	// CallerID is the JWT subject as presented.
+	CallerID string
+	// CanonicalID is the id that owns the identity rows; the audit row is
+	// filed against it.
+	CanonicalID string
+	// IDs is every id in the closure, CanonicalID first. Usually just one.
+	IDs []string
+}
+
+// Converged reports whether the caller authenticated under an id other than the
+// one that owns the account, or trails abandoned aliases. P0-safe to log.
+func (s AccountDeletionScope) Converged() bool {
+	return s.CanonicalID != s.CallerID || len(s.IDs) > 1
 }
 
 // AccountDeletionCounts is the P0-only audit tally, mirroring
