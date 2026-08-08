@@ -14,6 +14,42 @@ UPDATE go_vehicle_shares
 SET status = 'revoked', revoked_at = NOW()
 WHERE accepted_by_user_id = $1 AND status <> 'revoked'`
 
+// queryScrubSharesReceivedLabel erases the owner-typed label from every share
+// row the deleted user had REDEEMED (MYR-447).
+//
+// WHAT THE LABEL IS, AND WHY IT OUTLIVING THE PERSON IS THE BUG. `label` is a
+// free-text name the CAR OWNER typed for their own list — "Mira Chen", "Mom",
+// "Roommate" (data-classification.md §1.15). It is P1, it is a third party's
+// name, and it is the deleted user's name. Revocation alone (the step above)
+// leaves it in place forever: `queryRevokeSharesReceived` moves `status` and
+// stamps `revoked_at` and touches nothing else, so before MYR-447 a person
+// could delete their account and have their name persist indefinitely in a
+// stranger's row, keyed by a cuid that resolves to nothing.
+//
+// WHY THIS IS A SEPARATE STATEMENT rather than another SET clause on the
+// revoke. The revoke is guarded by `status <> 'revoked'` for idempotency, which
+// means it deliberately skips rows that were ALREADY revoked — by the owner, or
+// by an earlier partial run of this very sequence. Those rows carry the same
+// name and are exactly as stale, so folding the scrub into the revoke would
+// leave the oldest and most-forgotten labels untouched. This statement is
+// therefore keyed only on the person, not on the status.
+//
+// SCRUB VALUE. `label` is TEXT NOT NULL (migration 0020) so the scrub writes
+// the empty string rather than NULL — chosen over widening the column because
+// `store.CreateInvite` rejects a blank label at the door, which makes the empty
+// string an unambiguous scrubbed-here sentinel that no live row can hold. The
+// `label <> ''` predicate then makes a re-run affect zero rows, so the step is
+// idempotent on the same terms as every other step in the sequence.
+//
+// NO WIRE EFFECT. A revoked grant is never serialized to any client (`status`
+// has no `revoked` wire member), and the label was owner-facing only — it is
+// never delivered to the invited party. So the owner loses a name on a row they
+// can no longer see, and nobody's UI changes.
+const queryScrubSharesReceivedLabel = `
+UPDATE go_vehicle_shares
+SET label = ''
+WHERE accepted_by_user_id = $1 AND label <> ''`
+
 // queryDeletePushDevicesForUser drops the whole APNs address book for one
 // person. Unlike the sign-out unregister (queryDeletePushDevice) this is not
 // scoped to one token: the account is going away, so every installation it

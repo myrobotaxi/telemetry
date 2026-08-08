@@ -69,6 +69,10 @@ func (a *accountDataDeleterAdapter) RevokeSharesReceived(ctx context.Context, us
 	return a.deleter.RevokeSharesReceived(ctx, userID)
 }
 
+func (a *accountDataDeleterAdapter) ScrubSharesReceivedLabel(ctx context.Context, userID string) (int, error) {
+	return a.deleter.ScrubSharesReceivedLabel(ctx, userID)
+}
+
 func (a *accountDataDeleterAdapter) DeletePushDevices(ctx context.Context, userID string) (int, error) {
 	return a.deleter.DeletePushDevices(ctx, userID)
 }
@@ -87,6 +91,7 @@ func (a *accountDataDeleterAdapter) DeleteIdentity(ctx context.Context, userID s
 		DriveCount:           counts.DriveCount,
 		RidesCancelled:       counts.RidesCancelled,
 		SharesRevoked:        counts.SharesRevoked,
+		ShareLabelsScrubbed:  counts.ShareLabelsScrubbed,
 		PushDevicesDeleted:   counts.PushDevicesDeleted,
 		SavedPlacesDeleted:   counts.SavedPlacesDeleted,
 		RefreshTokensRevoked: counts.RefreshTokensRevoked,

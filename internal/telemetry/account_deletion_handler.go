@@ -35,18 +35,24 @@ import (
 //     tombstones the VIN (MYR-261) and, on the last car, clears the Tesla
 //     Account tokens + resets Settings. Idempotent: AlreadyGone is success.
 //  3. Revoke the grants the caller RECEIVED (shares-received → tombstones).
-//  4. Cancel the caller's OPEN rides as RIDER, through the guarded status
+//  4. Scrub the owner-typed label off those same received grants (MYR-447).
+//     Step 3 tombstones the ACCESS but leaves the NAME: `label` is a third
+//     party's free-text name for this person, typed by the car owner, and
+//     before MYR-447 it survived the deletion indefinitely. Keyed on the
+//     person rather than the status, so it also reaches grants that were
+//     already revoked — which step 3, being idempotency-guarded, skips.
+//  5. Cancel the caller's OPEN rides as RIDER, through the guarded status
 //     transition, publishing ride_status_changed so the affected owners are
 //     notified by the standard lifecycle pushes.
-//  5. Delete the caller's push devices.
-//  6. Delete the caller's saved Home/Work places (MYR-321) — personal effects
+//  6. Delete the caller's push devices.
+//  7. Delete the caller's saved Home/Work places (MYR-321) — personal effects
 //     with no counterparty, and the one step whose rows are encrypted GPS of
 //     where the person lives, so they must not outlive the account.
-//  7. Revoke the caller's refresh tokens.
-//  8. Delete the identity rows (go_identity_apple, go_users) and the Prisma
+//  8. Revoke the caller's refresh tokens.
+//  9. Delete the identity rows (go_identity_apple, go_users) and the Prisma
 //     "User" row if one exists — ONE transaction, with the account_deleted
 //     audit row written first (CG-DL-3).
-//  9. Invalidate the auth caches so the caller's unexpired access token stops
+//  10. Invalidate the auth caches so the caller's unexpired access token stops
 //     validating immediately.
 //
 // The order is load-bearing in one specific way: the identity rows the caller

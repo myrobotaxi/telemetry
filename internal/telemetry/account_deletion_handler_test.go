@@ -100,6 +100,9 @@ type fakeAccountData struct {
 	sharesRevoked int
 	sharesErr     error
 
+	shareLabelsScrubbed int
+	shareLabelsErr      error
+
 	devicesDeleted int
 	devicesErr     error
 
@@ -137,6 +140,16 @@ func (f *fakeAccountData) RevokeSharesReceived(_ context.Context, _ string) (int
 	}
 	n := f.sharesRevoked
 	f.sharesRevoked = 0 // idempotent: a re-run matches nothing
+	return n, nil
+}
+
+func (f *fakeAccountData) ScrubSharesReceivedLabel(_ context.Context, _ string) (int, error) {
+	f.note("scrub_share_labels")
+	if f.shareLabelsErr != nil {
+		return 0, f.shareLabelsErr
+	}
+	n := f.shareLabelsScrubbed
+	f.shareLabelsScrubbed = 0 // idempotent: a re-run matches nothing
 	return n, nil
 }
 
@@ -287,12 +300,13 @@ func TestAccountDeletion_OwnerWithSharesRunsEveryStepInOrder(t *testing.T) {
 	teardown := newFakeAccountTeardown()
 	teardown.order = &order
 	data := &fakeAccountData{
-		driveCount:     7,
-		sharesRevoked:  2,
-		devicesDeleted: 1,
-		placesDeleted:  2,
-		tokensRevoked:  3,
-		order:          &order,
+		driveCount:          7,
+		sharesRevoked:       2,
+		shareLabelsScrubbed: 2,
+		devicesDeleted:      1,
+		placesDeleted:       2,
+		tokensRevoked:       3,
+		order:               &order,
 	}
 	sessions := &fakeSessionInvalidator{}
 
@@ -313,6 +327,10 @@ func TestAccountDeletion_OwnerWithSharesRunsEveryStepInOrder(t *testing.T) {
 		"teardown:cveh_a",
 		"teardown:cveh_b",
 		"revoke_shares",
+		// MYR-447. Immediately after the revocation it completes: step 4
+		// tombstones the ACCESS, this erases the NAME the owner typed for a
+		// person who has just deleted their account.
+		"scrub_share_labels",
 		"delete_devices",
 		// MYR-321. Position is load-bearing in one direction only: it MUST
 		// precede delete_identity, because a saved place that outlived its
@@ -329,6 +347,7 @@ func TestAccountDeletion_OwnerWithSharesRunsEveryStepInOrder(t *testing.T) {
 	// The audit metadata carries the P0 tally accumulated along the way.
 	got := data.identityCounts
 	if got.VehicleCount != 2 || got.DriveCount != 7 || got.SharesRevoked != 2 ||
+		got.ShareLabelsScrubbed != 2 ||
 		got.PushDevicesDeleted != 1 || got.SavedPlacesDeleted != 2 ||
 		got.RefreshTokensRevoked != 3 {
 		t.Fatalf("audit counts = %+v", got)
