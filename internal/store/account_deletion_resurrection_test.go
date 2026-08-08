@@ -572,3 +572,128 @@ func seedConvergence(t *testing.T, from, to string) {
 		t.Fatalf("seed convergence %s->%s: %v", from, to, err)
 	}
 }
+
+// TestRebindApple_WritesNoEdgeWhenNoBindingMoved is the cross-account
+// over-deletion regression (MYR-452, second review pass).
+//
+// The sequence that broke it: a caller signs in (id X), links Tesla T1 owned by
+// web user Y1 — the binding moves to Y1 and the edge X→Y1 is recorded. Their
+// token still says X, because nothing re-issues it. They then link a SECOND
+// Tesla, T2, owned by an unrelated web user Y2. Path (a) fires with UserID=X,
+// but X no longer holds a binding, so the re-point matches zero rows — and an
+// unconditional edge write would nonetheless record X→Y2, REPLACING X→Y1.
+//
+// Deleting X would then have destroyed Y2 (a stranger's account) while leaving
+// Y1 and the Apple binding standing, so the original resurrection survived too.
+// Both halves are prevented by refusing to record an edge that no binding move
+// supports.
+func TestRebindApple_WritesNoEdgeWhenNoBindingMoved(t *testing.T) {
+	setupAccountDeletion(t)
+	if _, err := testPool.Exec(context.Background(), ownerSchemaSQL); err != nil {
+		t.Fatalf("owner schema: %v", err)
+	}
+	ctx := context.Background()
+	prov := newTestProvisioner(t)
+
+	const (
+		caller = "cxcaller00000000000000001" // the stale JWT subject
+		owner1 = "cy1owner00000000000000001" // owns Tesla T1
+		owner2 = "cy2owner00000000000000001" // owns Tesla T2 — a different human
+		tesla1 = "tesla-sub-one"
+		tesla2 = "tesla-sub-two"
+	)
+	for _, u := range []string{owner1, owner2} {
+		if _, err := testPool.Exec(ctx,
+			`INSERT INTO "User" ("id", "email", "updatedAt") VALUES ($1, $2, NOW())`,
+			u, u+"@example.com"); err != nil {
+			t.Fatalf("seed user %s: %v", u, err)
+		}
+	}
+	for i, pair := range [][2]string{{tesla1, owner1}, {tesla2, owner2}} {
+		if _, err := testPool.Exec(ctx,
+			`INSERT INTO "Account" ("id", "userId", "type", "provider", "providerAccountId")
+			 VALUES ($1, $2, 'oauth', 'tesla', $3)`,
+			fmt.Sprintf("cacctx%018d", i), pair[1], pair[0]); err != nil {
+			t.Fatalf("seed account %s: %v", pair[0], err)
+		}
+	}
+	// The caller starts out holding the binding, as a real signed-in user does.
+	seedGoUser(t, caller, nil, nil)
+	seedAppleIdentity(t, "sub-xcaller", caller, nil, nil)
+
+	link := func(teslaSub string) {
+		t.Helper()
+		//nolint:gosec // G101: fixed test fixtures, not credentials.
+		if _, err := prov.ProvisionTeslaOwner(ctx, store.ProvisionInput{
+			UserID:            caller,
+			ProviderAccountID: teslaSub,
+			AccessToken:       "access",
+			RefreshToken:      "refresh",
+			ExpiresAt:         time.Now().Add(time.Hour).Unix(),
+		}); err != nil {
+			t.Fatalf("provision %s: %v", teslaSub, err)
+		}
+	}
+
+	link(tesla1) // legitimate convergence: caller -> owner1
+	if got := countQuery(t,
+		`SELECT count(*) FROM go_identity_convergence WHERE from_user_id = $1 AND to_user_id = $2`,
+		caller, owner1); got != 1 {
+		t.Fatalf("precondition: the first link must record caller->owner1, got %d", got)
+	}
+
+	link(tesla2) // the caller now holds no binding; nothing may be recorded
+
+	if got := countQuery(t,
+		`SELECT count(*) FROM go_identity_convergence WHERE from_user_id = $1 AND to_user_id = $2`,
+		caller, owner2); got != 0 {
+		t.Error("an edge to an unrelated owner was recorded on a re-point that moved no binding")
+	}
+	if got := countQuery(t,
+		`SELECT count(*) FROM go_identity_convergence WHERE from_user_id = $1 AND to_user_id = $2`,
+		caller, owner1); got != 1 {
+		t.Error("the real convergence edge was overwritten by the second link")
+	}
+
+	// The decisive assertion: deleting the caller must not reach owner2.
+	scope, err := newAccountDeleter(t).ResolveDeletionScope(ctx, caller)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if slices.Contains(scope.IDs, owner2) {
+		t.Fatalf("deletion scope %v contains an unrelated account (%s)", scope.IDs, owner2)
+	}
+	if !slices.Contains(scope.IDs, owner1) {
+		t.Errorf("deletion scope %v lost the caller's real account (%s)", scope.IDs, owner1)
+	}
+	if scope.CanonicalID != owner1 {
+		t.Errorf("CanonicalID = %q, want the id holding the binding (%q)", scope.CanonicalID, owner1)
+	}
+}
+
+// A closure holding live bindings under two different ids, neither of them the
+// caller, is refused rather than resolved by guesswork — the same reasoning as
+// the size cap, at a smaller number.
+func TestResolveDeletionScope_RefusesTwoBindingOwners(t *testing.T) {
+	setupAccountDeletion(t)
+	ctx := context.Background()
+
+	const (
+		a = "cambig0000000000000000a"
+		b = "cambig0000000000000000b"
+		c = "cambig0000000000000000c"
+	)
+	// from_user_id is the primary key, so a single id cannot point two ways.
+	// A closure still reaches two binding owners through the reverse edge:
+	// a→b pulls in b, and c→a pulls in c.
+	seedConvergence(t, a, b)
+	seedConvergence(t, c, a)
+	seedAppleIdentity(t, "sub-ambig-b", b, nil, nil)
+	seedAppleIdentity(t, "sub-ambig-c", c, nil, nil)
+
+	if _, err := newAccountDeleter(t).ResolveDeletionScope(ctx, a); err == nil {
+		t.Fatal("resolved a closure with two binding owners; want a refusal")
+	} else if !strings.Contains(err.Error(), "refusing to guess") {
+		t.Errorf("error = %v, want it to name the ambiguity", err)
+	}
+}

@@ -261,7 +261,7 @@ When a user requests deletion of their account (FR-10.1), the system MUST delete
 
 The deletion is a SEQUENCE of independently-atomic steps, executed in this order by `telemetry.AccountDeletionHandler` (`internal/telemetry/account_deletion_sequence.go`) over `store.OwnerTeardown` and `store.AccountDeleter`:
 
-**Every step below is keyed on the DELETION SCOPE, not on the caller's JWT subject** ([MYR-452](https://linear.app/myrobotaxi/issue/MYR-452)). Step 0 resolves that scope; steps 1 and 4–9 run once per id in it, and step 10 takes the whole set. See §3.1.1 for why the subject alone is not a safe key.
+**Every step below is keyed on the DELETION SCOPE, not on the caller's JWT subject** ([MYR-452](https://linear.app/myrobotaxi/issue/MYR-452)). Step 0 resolves that scope; steps 1–9 each run once per id in it, and step 10 takes the whole set at once. See §3.1.1 for why the subject alone is not a safe key.
 
 | # | Step | Writer | Idempotent because |
 |---|------|--------|--------------------|
@@ -290,7 +290,12 @@ The scope is therefore resolved FIRST and every subsequent step runs over it:
 - **The walk is transitive, undirected and cycle-safe.** Chains form when a person converges twice; 2-cycles form because `Account.userId` is never rewritten, so re-linking the same Tesla under the new canonical id converges back the other way.
 - **`CanonicalID` is the closure member holding the Apple binding**, not the target of the edges — the edge direction is not well defined inside a cycle. The `account_deleted` audit row is filed against it.
 - **The closure is capped at 8 ids and exceeding it FAILS the deletion.** An edge is an unconditional grant of DELETE authority over another id, so the closure size is the blast radius of one Delete tap. A 500 is recoverable; deleting a stranger's account is not.
-- **The closure is re-walked inside step 10's transaction** and merged (additively) with the step-0 result, so a convergence committing mid-sequence cannot leave the identity transaction keyed on a stale set.
+- **An edge is only written when a binding actually moved.** `rebindApple` checks the re-point's affected-row count first. The evidence that two ids are the same human IS the binding moving; without it the caller held no binding — which happens whenever a caller presenting an already-converged subject links a SECOND Tesla owned by somebody else — and writing an edge would aim their next deletion at that stranger's account.
+- **A recorded edge is never silently re-targeted.** The upsert refreshes the timestamp only when the target is identical.
+- **The closure is re-walked inside step 10's transaction.** If it GREW, the transaction aborts with a retryable error and the whole sequence re-runs from step 0 — merging the newcomer in at step 10 would delete its identity rows while its push devices, saved places, grants and tokens were never touched, since no table carries an FK to `go_users` (CG-DL-9) and nothing cascades. A closure that SHRANK is not an error. `CanonicalID` is recomputed inside the transaction, because the binding can move within an unchanged closure.
+- **Two live binding owners in one closure, with neither being the caller, is refused** on the same reasoning as the cap: it is a stronger "whose account is this?" signal, at a smaller number.
+
+**Operability.** A refusal means a person cannot delete their own account until the graph is repaired, which is a privacy-commitment failure, not a routine 500. It emits the dedicated event `account_deletion_scope_unresolved` at ERROR with the caller id. Repair is manual against `go_identity_convergence` today; an `ops` subcommand and a runbook entry are outstanding.
 
 **Step 2 must precede step 3, and this ordering is normative too** ([MYR-366](https://linear.app/myrobotaxi/issue/MYR-366)). The revoke call presents the stored `refresh_token`; step 3's last-vehicle arm DELETEs the `Account` row that holds it, and step 10 deletes any row that survived. After either, the credential the revocation needs no longer exists and only the owner can withdraw the grant by hand from the consent page. Revoking first is the only ordering in which the server can do it at all.
 
@@ -331,13 +336,11 @@ VALUES (
 DELETE FROM go_identity_apple WHERE user_id = ANY('<scope>');
 
 -- The stored OAuth grants and Settings go EXPLICITLY, not via the Prisma
--- cascade (MYR-452). The cascade is defined in the Next.js app's schema, in
--- another repository, and a deletion guarantee about live fleet-control
--- credentials must not rest on a constraint this server neither owns nor
--- tests. It also cannot fire at all for a row whose "User" is already gone:
--- before this, an owner who was linked but held zero Vehicle rows had nothing
--- delete their Tesla tokens, because the only other DELETE is the last-vehicle
--- arm of the §1.4 owner teardown.
+-- cascade (MYR-452). The cascade exists and works; the point is that it is
+-- defined in the Next.js app's schema, in another repository, and a deletion
+-- guarantee about live fleet-control credentials must not rest on a constraint
+-- this server neither owns, migrates, nor tests. These statements are redundant
+-- today and deliberately so: they make the guarantee local and testable.
 DELETE FROM "Account"  WHERE "userId" = ANY('<scope>');
 DELETE FROM "Settings" WHERE "userId" = ANY('<scope>');
 

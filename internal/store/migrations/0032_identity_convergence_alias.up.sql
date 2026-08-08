@@ -53,14 +53,26 @@ CREATE INDEX IF NOT EXISTS idx_go_identity_convergence_to
 -- of rebindApple firing. Both EXISTS guards make the statement inert in every
 -- other environment (and in prod too, once that account is deleted), and the
 -- ids are 32-hex/cuid values that cannot collide by accident.
+-- The third guard is the important one: it re-checks, in SQL, the observation
+-- the pairing rests on — that the abandoned row and the surviving binding carry
+-- the SAME Apple-verified address. It is a guard, not a selector: it cannot
+-- choose a partner, only refuse the hard-coded one. If the two rows have
+-- drifted apart by deploy time, the statement does nothing and the account
+-- stays as it is rather than being handed a delete grant over a stranger.
 INSERT INTO go_identity_convergence (from_user_id, to_user_id)
 SELECT 'cd38cb3eba91a3b9b69ff6eee5aedcc29', 'cmnccy4tf0000ky04coe4is96'
 WHERE EXISTS (
-    SELECT 1 FROM go_users
-    WHERE id = 'cd38cb3eba91a3b9b69ff6eee5aedcc29'
+    SELECT 1
+    FROM go_users g
+    JOIN go_identity_apple i ON lower(i.email) = lower(g.email)
+    WHERE g.id = 'cd38cb3eba91a3b9b69ff6eee5aedcc29'
+      AND i.user_id = 'cmnccy4tf0000ky04coe4is96'
+      AND g.email IS NOT NULL
 )
-AND EXISTS (
+-- And the abandoned id must still hold no binding of its own; if it does, it
+-- was never converged away and needs no edge.
+AND NOT EXISTS (
     SELECT 1 FROM go_identity_apple
-    WHERE user_id = 'cmnccy4tf0000ky04coe4is96'
+    WHERE user_id = 'cd38cb3eba91a3b9b69ff6eee5aedcc29'
 )
 ON CONFLICT (from_user_id) DO NOTHING;
