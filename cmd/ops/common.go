@@ -68,6 +68,59 @@ func newDriveRepo(db *store.DB, logger *slog.Logger) (*store.DriveRepo, error) {
 	return store.NewDriveRepoWithEncryption(db.Pool(), store.NoopMetrics{}, enc, logger), nil
 }
 
+// opsOperatorEnv names the environment variable carrying the operator's
+// handle. It is REQUIRED by every subcommand that decrypts user data.
+const opsOperatorEnv = "OPS_OPERATOR"
+
+// Field-name vocabularies for the MYR-447 operator-access audit. These are
+// NAMES ONLY — store.OperatorAuditor rejects anything value-shaped. Keep
+// them in sync with what each subcommand actually decrypts; over-reporting
+// is harmless, under-reporting defeats the audit.
+var (
+	// teslaTokenAuditFields covers store.AccountRepo.GetTeslaToken, which
+	// decrypts the Tesla fleet-control credentials.
+	teslaTokenAuditFields = []string{"accessToken", "refreshToken"}
+
+	// vehicleRowAuditFields covers store.VehicleRepo.GetByVIN, which
+	// decrypts the whole location/navigation surface of the row — every
+	// P1 field in data-classification.md §1.3 that MYR-433 moved to
+	// ciphertext-only.
+	vehicleRowAuditFields = []string{
+		"latitude", "longitude", "locationName", "locationAddress",
+		"destinationName", "destinationAddress",
+		"destinationLatitude", "destinationLongitude",
+		"originLatitude", "originLongitude",
+		"navRouteCoordinates",
+	}
+)
+
+// requireOperator resolves the operator's handle from OPS_OPERATOR.
+//
+// MYR-447: an unattributable decrypt is exactly what the operator audit
+// exists to prevent, so there is NO default and NO fallback to the OS
+// username — a fallback would silently produce rows attributed to "root"
+// or to whoever's laptop the tool happened to run on. Call this first,
+// before opening the database, so the operator learns what is missing
+// without a connection attempt in between.
+func requireOperator() (string, error) {
+	handle := strings.TrimSpace(os.Getenv(opsOperatorEnv))
+	if err := store.ValidateOperatorHandle(handle); err != nil {
+		return "", fmt.Errorf(
+			"%s must be set to your operator handle: this command decrypts user data "+
+				"and every decrypt is audited (MYR-447); there is no default. "+
+				"Example: %s=jdoe ops ... (%w)",
+			opsOperatorEnv, opsOperatorEnv, err)
+	}
+	return handle, nil
+}
+
+// newOperatorAuditor builds the audit writer used by every decrypting
+// subcommand. Shared here so the three call sites cannot drift on which
+// table or which action they write.
+func newOperatorAuditor(db *store.DB) *store.OperatorAuditor {
+	return store.NewOperatorAuditor(db.Pool())
+}
+
 // newLogger returns a text-handler slog logger writing to stderr so
 // normal JSON output on stdout remains machine-parseable.
 func newLogger() *slog.Logger {

@@ -68,6 +68,10 @@ func runFleetConfigPush(ctx context.Context, args []string) error {
 	if len(*vin) != 17 {
 		return fmt.Errorf("invalid --vin: must be 17 characters, got %d", len(*vin))
 	}
+	operator, err := requireOperator()
+	if err != nil {
+		return err
+	}
 
 	endpoint, err := loadEndpointConfig()
 	if err != nil {
@@ -92,6 +96,26 @@ func runFleetConfigPush(ctx context.Context, args []string) error {
 	vehicleRepo, err := newVehicleRepo(db, logger)
 	if err != nil {
 		return err
+	}
+
+	// FAIL-CLOSED (MYR-447): written before EITHER decrypt below. The
+	// ownership check decrypts the vehicle row's location columns, and the
+	// token resolve decrypts the Tesla credentials and then transmits them
+	// to Tesla. Neither is printed, but "not printed" is not "not
+	// accessed" — the plaintext exists in the operator's process either
+	// way, so it is audited either way. targetType is `user` (targetId the
+	// subject's cuid) because the account, not the car, is what the
+	// decrypted credentials belong to, and the Vehicle cuid is not known
+	// until the VIN-keyed lookup this row must precede.
+	if err := newOperatorAuditor(db).RecordDecrypt(ctx, store.OperatorAccess{
+		Operator:   operator,
+		Command:    "ops fleet-config push",
+		UserID:     *userID,
+		TargetType: store.OperatorTargetUser,
+		TargetID:   *userID,
+		Fields:     append(append([]string{}, teslaTokenAuditFields...), vehicleRowAuditFields...),
+	}); err != nil {
+		return fmt.Errorf("record operator decrypt: %w", err)
 	}
 
 	if err := verifyVINOwnership(ctx, vehicleRepo, *vin, *userID); err != nil {

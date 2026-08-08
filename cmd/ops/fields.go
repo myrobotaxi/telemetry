@@ -171,6 +171,10 @@ func runFieldsSnapshot(ctx context.Context, args []string) error {
 	if err := requireFlag("vin", *vin); err != nil {
 		return err
 	}
+	operator, err := requireOperator()
+	if err != nil {
+		return err
+	}
 
 	logger := newLogger()
 	db, err := openDB(ctx, logger)
@@ -186,6 +190,27 @@ func runFieldsSnapshot(ctx context.Context, args []string) error {
 	v, err := repo.GetByVIN(ctx, *vin)
 	if err != nil {
 		return fmt.Errorf("lookup vehicle: %w", err)
+	}
+
+	// FAIL-CLOSED (MYR-447): the audit lands between the read and the
+	// print. It cannot precede the read the way `auth token`'s does — the
+	// lookup is keyed on VIN, so the row's owner and cuid are unknown
+	// until it returns, and the audit row must name the DATA SUBJECT. The
+	// plaintext is still only in process memory at this point; if the
+	// insert fails we return non-zero and print nothing.
+	//
+	// targetId is the Vehicle cuid, deliberately NOT the VIN: AuditLog
+	// columns are P0 and a full VIN is restricted outside the owner's own
+	// snapshot (data-classification.md §1.3, §2.1).
+	if err := newOperatorAuditor(db).RecordDecrypt(ctx, store.OperatorAccess{
+		Operator:   operator,
+		Command:    "ops fields snapshot",
+		UserID:     v.UserID,
+		TargetType: store.OperatorTargetVehicle,
+		TargetID:   v.ID,
+		Fields:     vehicleRowAuditFields,
+	}); err != nil {
+		return fmt.Errorf("record operator decrypt: %w", err)
 	}
 
 	return writeJSON(os.Stdout, newVehicleSnapshot(v))
