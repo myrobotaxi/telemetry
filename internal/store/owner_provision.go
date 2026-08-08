@@ -137,6 +137,21 @@ SELECT "id" FROM "User" WHERE lower("email") = lower($1) LIMIT 1`
 const queryRebindAppleIdentity = `
 UPDATE go_identity_apple SET user_id = $1 WHERE user_id = $2`
 
+// queryRecordConvergence leaves the trail the re-point above would otherwise
+// sever (MYR-452). After rebindApple, nothing references the caller's go_users
+// row: its binding now names the canonical id, so the caller's id is reachable
+// from nowhere — while the caller's JWT keeps carrying it. Account deletion is
+// keyed on that subject, so without this row the teardown would target an id
+// that owns nothing and leave the real account (binding included) standing.
+//
+// The `OR converged_to = $2` arm keeps the mapping FLAT: if this canonical id
+// had itself absorbed an earlier identity, that older alias is re-pointed to the
+// new target in the same statement rather than forming a chain the resolver
+// would have to walk.
+const queryRecordConvergence = `
+UPDATE go_users SET converged_to = $1, updated_at = NOW()
+WHERE (id = $2 OR converged_to = $2) AND id <> $1`
+
 const queryProvisionSettings = `
 INSERT INTO "Settings" ("id", "userId", "teslaLinked", "updatedAt")
 VALUES ($1, $2, TRUE, NOW())
@@ -279,11 +294,22 @@ func (p *OwnerProvisioner) resolveCanonicalUser(ctx context.Context, tx pgx.Tx, 
 // rebindApple converges the caller's apple identity (currently bound to
 // fromUserID, a fresh go_users id) onto the canonical toUserID. This is the one
 // sanctioned re-point of a go_identity_apple binding: it fires only at Tesla-link
-// time when ownership/email proves the two identities are the same human. The
-// orphaned go_users row is harmless (no binding, no "User").
+// time when ownership/email proves the two identities are the same human.
+//
+// The left-behind go_users row is NOT harmless, which is what MYR-452 cost us.
+// The caller's JWT keeps naming fromUserID until its refresh family expires, and
+// DELETE /api/users/me is keyed on exactly that subject — so a deletion run
+// against a severed id would revoke nothing, delete nothing, still write its
+// audit row and still answer 204, leaving the binding to sign the person back
+// into the account they believed they had erased. Recording the convergence is
+// therefore part of the same transaction as the re-point: the two facts must
+// never be observable apart.
 func (p *OwnerProvisioner) rebindApple(ctx context.Context, tx pgx.Tx, fromUserID, toUserID string) error {
 	if _, err := tx.Exec(ctx, queryRebindAppleIdentity, toUserID, fromUserID); err != nil {
 		return fmt.Errorf("store.ProvisionTeslaOwner: converge apple identity %s->%s: %w", fromUserID, toUserID, err)
+	}
+	if _, err := tx.Exec(ctx, queryRecordConvergence, toUserID, fromUserID); err != nil {
+		return fmt.Errorf("store.ProvisionTeslaOwner: record convergence %s->%s: %w", fromUserID, toUserID, err)
 	}
 	p.logger.Info("owner_identity_converged",
 		slog.String("event", "owner_identity_converged"),
