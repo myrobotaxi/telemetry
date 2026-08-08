@@ -238,7 +238,12 @@ type httpRouteDeps struct {
 	// per-VIN stream-recency state (MYR-300) and the vehicle_data backfill
 	// mapping (MYR-260) that the MYR-315 refresh endpoint reuses.
 	serviceStatus *telemetry.ServiceStatusMonitor
-	logger        *slog.Logger
+	// fleetConfigReconciler is the MYR-489 observer of applied signed
+	// commands. Nil whenever the reconciler is off (no signing proxy /
+	// telemetry endpoint), and in every test that does not wire it — the
+	// command endpoint then runs exactly as it did before.
+	fleetConfigReconciler *telemetry.FleetConfigReconciler
+	logger                *slog.Logger
 }
 
 // setupHTTPHandlers wires every HTTP handler the server exposes:
@@ -541,7 +546,17 @@ func setupVehicleCommandEndpoint(deps httpRouteDeps, vehicles telemetry.VehicleS
 	proxyURL := deps.cfg.Proxy().URL
 	transport := newCommandTransport(proxyURL, deps.cfg.Proxy().FleetAPIBaseURL,
 		deps.logger.With(slog.String("component", "command-transport")))
-	executor := commands.NewExecutor(transport, deps.logger.With(slog.String("component", "command-executor")))
+	// MYR-489: an applied SIGNED command is the only in-band proof we ever get
+	// that an owner finished virtual-key pairing in the Tesla app. Reporting it
+	// to the fleet-config reconciler resets a backoff that was accumulated
+	// entirely before the key existed, and arms the synced-but-silent
+	// escalation. Nil observer when the reconciler is off.
+	var execOpts []commands.Option
+	if deps.fleetConfigReconciler != nil {
+		execOpts = append(execOpts, commands.WithSignedCommandObserver(deps.fleetConfigReconciler))
+	}
+	executor := commands.NewExecutor(transport,
+		deps.logger.With(slog.String("component", "command-executor")), execOpts...)
 
 	var opts []telemetry.VehicleCommandOption
 	if deps.cfg.TeslaOAuth().ClientID != "" {

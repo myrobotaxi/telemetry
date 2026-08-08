@@ -47,6 +47,9 @@ type Executor struct {
 	transport Transport
 	cfg       Config
 	logger    *slog.Logger
+	// applied receives every successfully applied SIGNED command (MYR-489).
+	// Nil unless WithSignedCommandObserver was passed.
+	applied SignedCommandObserver
 }
 
 // Option configures an Executor.
@@ -163,6 +166,12 @@ func (e *Executor) invoke(ctx context.Context, cmd Command, req Request, body []
 
 		switch res.Outcome {
 		case OutcomeOK:
+			// MYR-489: an applied SIGNED command proves the virtual key is
+			// paired and the car was awake. Reported before returning so the
+			// fleet-config reconciler can reset that vehicle's backoff, and
+			// non-blocking by the observer's contract so the owner's response
+			// is never delayed by it.
+			e.notifyApplied(cmd, req.VIN)
 			return Result{Command: cmd.Name, Applied: true}, nil
 
 		case OutcomeAsleep:

@@ -48,19 +48,23 @@ import (
 // telemetry endpoint are configured. Absent either, it logs and stays off —
 // the same runtime guard buildOwnerStreamHook uses to keep live pushes out of
 // dev and test processes.
+// It returns the reconciler, or nil when the safety guard keeps it off. The
+// caller passes that value to the vehicle-command endpoint, where it is
+// registered as the MYR-489 applied-signed-command observer — a nil reconciler
+// simply leaves the executor unhooked.
 func setupFleetConfigReconciler(
 	ctx context.Context,
 	cfg *config.Config,
 	vehicleRepo *store.VehicleRepo,
 	accountRepo *store.AccountRepo,
 	logger *slog.Logger,
-) {
+) *telemetry.FleetConfigReconciler {
 	log := logger.With(slog.String("component", "fleet-config-reconcile"))
 
 	if cfg.Proxy().URL == "" || cfg.Proxy().FleetTelemetryHostname == "" {
 		log.Warn("fleet-config reconciler disabled: proxy/telemetry endpoint not configured — " +
 			"a car whose config push was skipped pre-pairing will NOT self-heal")
-		return
+		return nil
 	}
 
 	reader := telemetry.NewFleetAPIClient(telemetry.FleetAPIConfig{
@@ -80,6 +84,7 @@ func setupFleetConfigReconciler(
 			Reader:     reader,
 			Writer:     writer,
 			Tokens:     newTeslaTokenResolver(cfg, accountRepo, log),
+			Pairing:    adapter,
 		},
 		telemetry.FleetConfigReconcileConfig{},
 		telemetry.EndpointConfig{
@@ -93,6 +98,7 @@ func setupFleetConfigReconciler(
 	log.Info("fleet-config reconciler enabled")
 
 	go reconciler.RunReconcileLoop(ctx)
+	return reconciler
 }
 
 // fleetConfigCandidateAdapter adapts store.VehicleRepo to
@@ -111,14 +117,38 @@ func (a *fleetConfigCandidateAdapter) ListFleetConfigCandidates(
 		return nil, fmt.Errorf("list fleet-config candidates: %w", err)
 	}
 	out := make([]telemetry.FleetConfigCandidate, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, telemetry.FleetConfigCandidate{
-			VehicleID:    r.VehicleID,
-			VIN:          r.VIN,
-			UserID:       r.UserID,
-			LastUpdated:  r.LastUpdated,
-			AttemptCount: r.AttemptCount,
-		})
+	for i := range rows {
+		out = append(out, toTelemetryFleetConfigCandidate(&rows[i]))
 	}
 	return out, nil
+}
+
+// ResetFleetConfigScheduleOnPairing adapts the MYR-489 pairing-epoch write the
+// same way — the reconciler learns that a signed command applied to a VIN and
+// needs the resulting candidate back, in its own type.
+func (a *fleetConfigCandidateAdapter) ResetFleetConfigScheduleOnPairing(
+	ctx context.Context, vin string, now, debounceBefore time.Time,
+) (telemetry.FleetConfigCandidate, bool, error) {
+	row, found, err := a.repo.ResetFleetConfigScheduleOnPairing(ctx, vin, now, debounceBefore)
+	if err != nil {
+		return telemetry.FleetConfigCandidate{}, false, fmt.Errorf("reset fleet-config schedule on pairing: %w", err)
+	}
+	if !found {
+		return telemetry.FleetConfigCandidate{}, false, nil
+	}
+	return toTelemetryFleetConfigCandidate(&row), true, nil
+}
+
+func toTelemetryFleetConfigCandidate(r *store.FleetConfigCandidate) telemetry.FleetConfigCandidate {
+	return telemetry.FleetConfigCandidate{
+		VehicleID:       r.VehicleID,
+		VIN:             r.VIN,
+		UserID:          r.UserID,
+		LastUpdated:     r.LastUpdated,
+		AttemptCount:    r.AttemptCount,
+		LastOutcome:     r.LastOutcome,
+		LastAttemptAt:   r.LastAttemptAt,
+		SignedCommandAt: r.SignedCommandAt,
+		ForcedRepushAt:  r.ForcedRepushAt,
+	}
 }

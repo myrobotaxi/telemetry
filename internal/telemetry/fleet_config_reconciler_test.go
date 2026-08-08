@@ -38,6 +38,18 @@ type fakeAttemptRecorder struct {
 	recorded []recordedAttempt
 	cleared  []string
 	recErr   error
+	// forced records the MYR-489 escalation writes, kept separate from
+	// `recorded` so a test can assert that a forced re-push stamped the epoch
+	// budget rather than taking the ordinary path.
+	forced    []recordedAttempt
+	forcedErr error
+}
+
+func (f *fakeAttemptRecorder) RecordForcedFleetConfigRepush(
+	_ context.Context, vehicleID string, _, nextAttemptAt time.Time, outcome string,
+) error {
+	f.forced = append(f.forced, recordedAttempt{vehicleID: vehicleID, next: nextAttemptAt, outcome: outcome})
+	return f.forcedErr
 }
 
 func (f *fakeAttemptRecorder) RecordFleetConfigAttempt(
@@ -56,6 +68,18 @@ type fakeConfigReader struct {
 	synced bool
 	err    error
 	calls  int
+	// MYR-489 awake probe.
+	vehicleState string
+	vehicleErr   error
+	vehicleCalls int
+}
+
+func (f *fakeConfigReader) GetVehicle(_ context.Context, _, vin string) (*FleetVehicleState, error) {
+	f.vehicleCalls++
+	if f.vehicleErr != nil {
+		return nil, f.vehicleErr
+	}
+	return &FleetVehicleState{VIN: vin, State: f.vehicleState}, nil
 }
 
 func (f *fakeConfigReader) GetTelemetryConfig(_ context.Context, _, _ string) (*FleetConfigStatusResponse, error) {
@@ -71,6 +95,18 @@ type fakeConfigWriter struct {
 	err    error
 	calls  int
 	gotReq FleetConfigRequest
+	// MYR-489 delete-then-create.
+	deleteCalls int
+	deleteErr   error
+	// order records the sequence of write verbs so a test can prove the DELETE
+	// preceded the POST rather than merely that both happened.
+	order []string
+}
+
+func (f *fakeConfigWriter) DeleteTelemetryConfig(_ context.Context, _, _ string) error {
+	f.deleteCalls++
+	f.order = append(f.order, "delete")
+	return f.deleteErr
 }
 
 func (f *fakeConfigWriter) PushTelemetryConfig(
@@ -78,6 +114,7 @@ func (f *fakeConfigWriter) PushTelemetryConfig(
 ) (*FleetConfigResponse, error) {
 	f.calls++
 	f.gotReq = req
+	f.order = append(f.order, "push")
 	return f.result, f.err
 }
 
@@ -113,6 +150,7 @@ func newTestReconcilerWithAttempts(
 			Reader:     reader,
 			Writer:     writer,
 			Tokens:     tokens,
+			Pairing:    &fakePairingResetter{},
 		},
 		FleetConfigReconcileConfig{},
 		EndpointConfig{Hostname: "telemetry.myrobotaxi.app", Port: 443, CA: "-----BEGIN CERTIFICATE-----"},
