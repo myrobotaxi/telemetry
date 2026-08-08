@@ -2,11 +2,8 @@ package store
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // The ETA ticker's read path (MYR-172).
@@ -53,12 +50,30 @@ type LiveActivityLeg struct {
 	// drives rather than being re-estimated in both directions the way minutes
 	// are.
 	TripMilesRemaining *float64
-	// NavUpdatedAt is when the car's ROW was last written — an upper bound on
-	// how old the two readings above are, not a stamp on the readings
-	// themselves. Nil for a car we have never heard from. It gates the progress
-	// fraction only, as a cheap pre-filter; see RideContext.NavUpdatedAt in
-	// internal/push for why the sender does not trust it on its own.
+	// NavUpdatedAt is when the car last reported NAVIGATION — the age of the two
+	// readings above, not of the row that holds them (MYR-409, migration 0034,
+	// go_vehicle_control_state.nav_reading_at).
+	//
+	// It used to be the car's `lastUpdated`, a ROW stamp bumped by every
+	// telemetry write of any column, which meant a car streaming speed and
+	// position carried a permanently fresh stamp over an ETA of any age. That is
+	// the defect MYR-409 names: it let an instant-ride accept resolve the
+	// Arriving alert rung off a `minutesToArrival` left over from the owner's
+	// previous errand, and a burnt rung is durable.
+	//
+	// NIL MEANS NO NAVIGATION FRAME HAS EVER BEEN SEEN for this car, and every
+	// gate downstream reads that as not fresh. There is no fallback to the row
+	// stamp by design — see navFreshnessJoin.
 	NavUpdatedAt *time.Time
+	// PickupDispatchedAt is go_ride_requests.dispatched_at: when the rider's
+	// PICKUP was pushed to the car as a navigation destination. Nil when leg 1
+	// has not been dispatched — a sleeping reservation, or a dispatch that
+	// failed or was skipped.
+	//
+	// It is what makes NavUpdatedAt actionable for the Arriving alert rung
+	// (MYR-409). Freshness says a reading is recent; only this says it can be
+	// about THIS RIDE. See push.navReadingIsOurs.
+	PickupDispatchedAt *time.Time
 	// DispatchUnderway is MYR-376's reservation-dormancy predicate, evaluated
 	// in SQL: false while a reservation is still sleeping between accept and
 	// the earlier of dispatch and its due instant.
@@ -129,16 +144,33 @@ SELECT a.ride_request_id,
        r.dropoff_label,
        v."etaMinutes",
        v."tripDistanceRemaining",
-       v."lastUpdated",
+       nf.nav_reading_at,
+       r.dispatched_at,
        ` + dispatchUnderwaySelect + `,
        ` + progressColumns + `
 FROM go_live_activities a
 JOIN go_ride_requests r ON r.id = a.ride_request_id
 LEFT JOIN "Vehicle" v ON v."id" = r.vehicle_id
+` + navFreshnessJoin + `
 WHERE a.ended_at IS NULL
   AND r.status = ANY($1)
 ORDER BY a.updated_at ASC
 LIMIT $2`
+
+// navFreshnessJoin attaches the MYR-409 nav-reading stamp to a query that has
+// already joined the ride as `r`, exposing it as `nf.nav_reading_at`.
+//
+// Keyed on r.vehicle_id rather than on the car's alias so it does not depend on
+// the car row being present — the vehicle join above is LEFT for a reason and
+// this one must degrade the same way.
+//
+// LEFT, and NOT COALESCEd onto the row stamp. A missing row means no navigation
+// frame has ever been seen for this car, and NULL is the honest way to say so:
+// every gate downstream reads a nil stamp as not-fresh and declines. Falling
+// back to the car's own `lastUpdated` would restore precisely the row-stamp lie
+// this column exists to end, and would do it for exactly the population the
+// column describes — a car streaming motion with no navigation to report.
+const navFreshnessJoin = `LEFT JOIN go_vehicle_control_state nf ON nf.vehicle_id = r.vehicle_id`
 
 // dispatchUnderwaySelect renders the shared dormancy predicate as a selectable
 // boolean over the ride aliased `r`.
@@ -189,6 +221,7 @@ func (r *LiveActivityRepo) ListActiveLegActivities(ctx context.Context, limit in
 			&leg.ETAMinutes,
 			&leg.TripMilesRemaining,
 			&leg.NavUpdatedAt,
+			&leg.PickupDispatchedAt,
 			&leg.DispatchUnderway,
 			&pLeg, &pSource, &pBaseline, &pValue, &pReading, &pReadingAt,
 			&leg.AlertedPhase,
@@ -200,65 +233,6 @@ func (r *LiveActivityRepo) ListActiveLegActivities(ctx context.Context, limit in
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store.ListActiveLegActivities: iterate: %w", err)
-	}
-	return out, nil
-}
-
-// activityContextColumns is the same projection for a SINGLE ride, used by the
-// lifecycle fan-out: a status transition already knows the ride id, but still
-// needs the car's nickname, the destination label and the carried ETA to build
-// the content-state it is about to send.
-var queryRideActivityContext = `
-SELECT r.status,
-       r.vehicle_id,
-       COALESCE(v."name", ''),
-       r.dropoff_label,
-       v."etaMinutes",
-       v."tripDistanceRemaining",
-       v."lastUpdated",
-       ` + dispatchUnderwaySelect + `
-FROM go_ride_requests r
-LEFT JOIN "Vehicle" v ON v."id" = r.vehicle_id
-WHERE r.id = $1`
-
-// RideActivityContext is the per-ride half of a content-state: everything that
-// is not the Activity's own token.
-type RideActivityContext struct {
-	Status       RideRequestStatus
-	VehicleID    string
-	VehicleName  string
-	DropoffLabel string
-	ETAMinutes   *int
-	// TripMilesRemaining, NavUpdatedAt and DispatchUnderway feed the progress
-	// track and its two gates (MYR-398); see the LiveActivityLeg fields of the
-	// same name.
-	TripMilesRemaining *float64
-	NavUpdatedAt       *time.Time
-	DispatchUnderway   bool
-}
-
-// ActivityContextForRide reads the content-state inputs for one ride.
-//
-// Returns ErrRideRequestNotFound (wrapping sdk.ErrNotFound) when the ride is
-// gone — which a terminal-state send can legitimately race with, since owner
-// teardown hard-deletes rides.
-func (r *LiveActivityRepo) ActivityContextForRide(ctx context.Context, rideRequestID string) (RideActivityContext, error) {
-	var out RideActivityContext
-	err := r.pool.QueryRow(ctx, queryRideActivityContext, rideRequestID).Scan(
-		&out.Status,
-		&out.VehicleID,
-		&out.VehicleName,
-		&out.DropoffLabel,
-		&out.ETAMinutes,
-		&out.TripMilesRemaining,
-		&out.NavUpdatedAt,
-		&out.DispatchUnderway,
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return RideActivityContext{}, fmt.Errorf("store.ActivityContextForRide(%s): %w", rideRequestID, ErrRideRequestNotFound)
-	}
-	if err != nil {
-		return RideActivityContext{}, fmt.Errorf("store.ActivityContextForRide(%s): %w", rideRequestID, err)
 	}
 	return out, nil
 }
