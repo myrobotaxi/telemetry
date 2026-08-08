@@ -258,11 +258,54 @@ func appendClearFieldSets(setClauses, clearFields []string) []string {
 	for _, col := range clearFields {
 		if encCol, isLocation := plaintextToEncColumn[col]; isLocation {
 			setClauses = append(setClauses, fmt.Sprintf("%q = NULL", encCol))
+			// MYR-447: for the LABEL columns, also scrub the retired
+			// plaintext. Clearing the ciphertext alone would leave the row
+			// in the one state the purge cannot resolve — plaintext
+			// present, ciphertext NULL — which plaintextpurge reads as
+			// "never sealed" (verdictUnsealed) and deliberately refuses to
+			// touch, because for a legacy row the plaintext really is the
+			// only copy. A nav-cancel would therefore park a readable
+			// place name in the table permanently and hold
+			// `remaining` above zero forever, blocking the column drop.
+			//
+			// Worse than the counter: the tool's own advice on an unsealed
+			// row is "run the backfill first", and the backfill's
+			// predicate (plaintext <> '' AND enc IS NULL) matches exactly
+			// this row — it would re-seal a destination the driver
+			// CANCELLED, resurrecting it onto the snapshot and the WS
+			// replay beside a NULL destination coordinate, i.e. a broken
+			// navigation atomic group built out of a stale P1 place name.
+			//
+			// Scrubbing both is what "cleared" has to mean once the
+			// plaintext is retired rather than dropped. The value matches
+			// the column's nullability, same as the purge's ScrubSQL.
+			if scrub, isLabel := labelPlaintextScrubValue[col]; isLabel {
+				setClauses = append(setClauses, fmt.Sprintf("%q = %s", col, scrub))
+			}
 			continue
 		}
 		setClauses = append(setClauses, fmt.Sprintf("%q = NULL", col))
 	}
 	return setClauses
+}
+
+// labelPlaintextScrubValue gives the "no data here" literal for each
+// retired plaintext LABEL column, tracking its nullability in the
+// react-frontend Prisma schema. It deliberately mirrors the ScrubSQL
+// column of plaintextpurge's target table — the two must agree, or a
+// cleared row and a purged row would end up in different states and only
+// one of them would satisfy the purge's HasData predicate.
+//
+// The GPS columns are absent on purpose. They have the same latent shape
+// (a cancelled destination leaves destinationLatitude non-zero with a NULL
+// *Enc sibling) but that predates MYR-447, their scrub value is `0` rather
+// than a string, and changing MYR-433's cancel behaviour is not this
+// issue's to make. Tracked as a follow-up.
+var labelPlaintextScrubValue = map[string]string{
+	"locationName":       `''`,
+	"locationAddress":    `''`,
+	"destinationName":    "NULL",
+	"destinationAddress": "NULL",
 }
 
 // plaintextToEncColumn maps each retired plaintext location column to the

@@ -126,15 +126,32 @@ WHERE id = ANY($1)
 // It selects the row's identity and nothing else — never the passenger values
 // themselves. Reading a P1 string in order to overwrite it would put it in a Go
 // heap and one careless log line away from disk.
+//
+// THE UPPER AGE BOUND IS WHAT KEEPS THE DELETE-BEFORE-SCRUB ORDERING HONEST
+// ACROSS BATCHES. Running the delete first is only sufficient WITHIN one batch:
+// with more than batchSize expired rides carrying passenger data, the delete
+// takes the oldest 100 and this claim — ordered the same way — would take the
+// NEXT 100, which are also past 365 days and are simply waiting for the next
+// batch to destroy them. The sweep would then rewrite rows it is about to
+// delete and, worse, emit a `ride_passengers_scrubbed` audit row asserting that
+// a surviving record had two fields removed, minutes before that record ceased
+// to exist. The two actions make different promises (see data-lifecycle.md
+// §4.2) and an audit trail that confuses them is worse than one that omits the
+// scrub entirely.
+//
+// So the scrub's window is a HALF-OPEN BAND, not a tail: older than the 30-day
+// scrub boundary, and younger than the 365-day deletion boundary. Rides past
+// 365 days are the delete job's alone.
 var queryScrubbableRideBatch = fmt.Sprintf(`
 SELECT id, vehicle_id, owner_id, updated_at
 FROM go_ride_requests
 WHERE %s
+  AND updated_at >= NOW() - make_interval(days => %d)
   AND %s
   AND (passenger_name IS NOT NULL OR passenger_phone IS NOT NULL)
 ORDER BY updated_at ASC
 LIMIT $1
-FOR UPDATE SKIP LOCKED`, rideAgePredicate(RidePassengerScrubDays), rideTerminalStatusPredicate)
+FOR UPDATE SKIP LOCKED`, rideAgePredicate(RidePassengerScrubDays), RideRetentionDays, rideTerminalStatusPredicate)
 
 // queryScrubRidePassengers NULLs both passenger columns on one claimed batch.
 //
@@ -156,11 +173,14 @@ FOR UPDATE SKIP LOCKED`, rideAgePredicate(RidePassengerScrubDays), rideTerminalS
 // there is no BEFORE UPDATE trigger on go_ride_requests, only the column
 // default, which fires on INSERT.
 //
-// Both guards are repeated here for the same reason the DELETE repeats them.
+// Both guards are repeated here for the same reason the DELETE repeats them,
+// and so is the upper age bound that keeps this statement off rows the delete
+// job owns.
 var queryScrubRidePassengers = fmt.Sprintf(`
 UPDATE go_ride_requests
 SET passenger_name = NULL,
     passenger_phone = NULL
 WHERE id = ANY($1)
   AND %s
-  AND %s`, rideAgePredicate(RidePassengerScrubDays), rideTerminalStatusPredicate)
+  AND updated_at >= NOW() - make_interval(days => %d)
+  AND %s`, rideAgePredicate(RidePassengerScrubDays), RideRetentionDays, rideTerminalStatusPredicate)

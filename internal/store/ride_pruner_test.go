@@ -541,3 +541,62 @@ func TestRidePruneBatchDeleteBeatsScrub(t *testing.T) {
 		t.Error("the ride survived the delete")
 	}
 }
+
+// TestRidePruneBatchScrubNeverTouchesDeletableRides is the CROSS-BATCH half
+// of the ordering above, and the case that made the upper age bound
+// necessary.
+//
+// Running the delete first is only sufficient WITHIN one batch. With more
+// expired rides than fit in a batch, the delete takes the oldest N and a
+// tail-only scrub claim — ordered identically — would take the NEXT N,
+// which are also past the retention window and are simply waiting for the
+// following batch to destroy them. The sweep would rewrite rows it is about
+// to delete, and emit a `ride_passengers_scrubbed` audit row asserting that
+// a SURVIVING record had two fields removed, minutes before that record
+// stopped existing. The two actions make different promises, so an audit
+// trail that confuses them is worse than one that omits the scrub.
+//
+// A batch size of 1 reproduces it deterministically without seeding
+// hundreds of rows.
+func TestRidePruneBatchScrubNeverTouchesDeletableRides(t *testing.T) {
+	pruner := setupRidePruner(t)
+	ctx := context.Background()
+
+	const owner = "user-ride-band"
+	// Both are past the 365-day deletion boundary and both carry passenger
+	// data. With batchSize 1 the delete can only claim the older one.
+	seedRide(t, "ride-band-older", owner, "veh-ride-band", "completed",
+		store.RideRetentionWindow+48*time.Hour, true)
+	seedRide(t, "ride-band-newer", owner, "veh-ride-band", "completed",
+		store.RideRetentionWindow+time.Hour, true)
+
+	res, err := pruner.PruneBatch(ctx, 1)
+	if err != nil {
+		t.Fatalf("PruneBatch: %v", err)
+	}
+	if res.RidesDeleted != 1 {
+		t.Fatalf("RidesDeleted = %d, want 1", res.RidesDeleted)
+	}
+	if res.PassengersScrubbed != 0 {
+		t.Errorf("PassengersScrubbed = %d, want 0 — the row the scrub could reach "+
+			"is past the retention window and belongs to the DELETE job; scrubbing it "+
+			"would audit a survival that is about to stop being true", res.PassengersScrubbed)
+	}
+	if !rideExists(t, "ride-band-newer") {
+		t.Fatal("the second ride should still be waiting for the next batch")
+	}
+	// It must still carry its passenger data: untouched, not scrubbed.
+	if name, _ := ridePassenger(t, "ride-band-newer"); name == nil {
+		t.Error("the surviving ride was scrubbed by the tail claim the upper bound exists to prevent")
+	}
+
+	// The next pass deletes it — never having scrubbed it first.
+	res2, err := pruner.PruneBatch(ctx, 1)
+	if err != nil {
+		t.Fatalf("second PruneBatch: %v", err)
+	}
+	if res2.RidesDeleted != 1 || res2.PassengersScrubbed != 0 {
+		t.Errorf("second batch = %d deleted / %d scrubbed, want 1 / 0",
+			res2.RidesDeleted, res2.PassengersScrubbed)
+	}
+}

@@ -105,7 +105,13 @@ type RidePruneBatchResult struct {
 	// replica declare the backlog drained over rows that a dying peer is about
 	// to roll back — the sweep would report completion and then the gauge would
 	// advance on work nobody did. Requiring empty claims costs one extra round
-	// trip per pass and removes the ambiguity entirely.
+	// trip per pass and NARROWS that ambiguity without removing it: if a peer
+	// holds the ENTIRE remainder, both claims come back empty here too, and
+	// this replica still reports a complete pass over rows it never saw. The
+	// residual is bounded and worth accepting — the pass is idempotent, so the
+	// next night re-claims anything a peer rolled back, and closing it properly
+	// would need cross-replica coordination that costs more than a one-day
+	// delay on a 365-day window.
 	Exhausted bool
 }
 

@@ -26,6 +26,16 @@ import (
 // must never reach an audit row. The strings are marker-prefixed on purpose:
 // the assertions work by scanning the raw metadata JSON for them, and a
 // realistic-but-bland value like "Alice" would hide in the noise of a cuid.
+// The first two are PLANTED — they are the name and email seeded onto the
+// user below, so those assertions are live: if the deletion tally ever grew
+// a field carrying them, this fails.
+//
+// The rest are FORWARD GUARDS, and it is worth being explicit that they are
+// not planted anywhere, because a reader could otherwise mistake them for
+// live coverage. They cannot catch a leak from elsewhere in the system;
+// what they catch is a future writer adding a label, an address or a
+// coordinate to THIS row's metadata, which is the realistic way a P0 tally
+// stops being one.
 var deletionAuditPII = []string{
 	"MYR447-NAME-Priya-Patel",
 	"MYR447-EMAIL-priya@icloud.com",

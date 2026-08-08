@@ -76,6 +76,15 @@ func (r *DriveRepo) sealEndLabels(endLoc, endAddr string) (loc, addr *string, er
 // endLocation, endAddress.
 func (r *DriveRepo) sealOptionalLabels(vals ...*string) ([4]*string, error) {
 	var out [4]*string
+	// Guard the fixed-size destination rather than trusting every caller to
+	// pass exactly four: indexing driveLabelColumns[i] past the end would
+	// panic inside an error path, which is the worst place to discover it.
+	if len(vals) > len(out) {
+		return out, fmt.Errorf("seal drive labels: got %d values, want at most %d", len(vals), len(out))
+	}
+	if r.encryptor == nil {
+		return out, ErrEncryptionRequired
+	}
 	for i, v := range vals {
 		if v == nil || *v == "" {
 			continue
