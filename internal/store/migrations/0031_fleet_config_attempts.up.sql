@@ -1,4 +1,4 @@
--- 0030_fleet_config_attempts.up.sql
+-- 0031_fleet_config_attempts.up.sql
 --
 -- MYR-448: go_fleet_config_attempts — per-vehicle scheduling state for the
 -- fleet-config reconciler.

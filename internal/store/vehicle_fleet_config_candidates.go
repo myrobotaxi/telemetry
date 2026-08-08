@@ -54,7 +54,7 @@ type FleetConfigCandidate struct {
 //   - the attempt-schedule arm — a car is due when it has never been attempted
 //     or its backoff has elapsed. Ordering by OUR schedule rather than by
 //     "lastUpdated" is what stops unfixable cars permanently occupying the
-//     LIMIT (see migration 0030).
+//     LIMIT (see migration 0031).
 //
 // A READ of the Prisma-owned "Vehicle" and "Account" tables; the
 // data-lifecycle.md §1.4 carve-outs constrain WRITES only.

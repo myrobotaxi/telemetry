@@ -1,4 +1,4 @@
--- 0030_fleet_config_attempts.down.sql
+-- 0031_fleet_config_attempts.down.sql
 --
 -- Drop the fleet-config reconciler's scheduling state (MYR-448).
 --

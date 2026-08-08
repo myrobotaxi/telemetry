@@ -21,7 +21,7 @@
 // healthy fleet costs one cheap read per quiet car and zero writes.
 //
 // SCHEDULING LIVES IN OUR OWN TABLE, not in "Vehicle"."lastUpdated" — see
-// migration 0030. Ordering candidates by a column the reconciler cannot change
+// migration 0031. Ordering candidates by a column the reconciler cannot change
 // means every car it fails to fix sorts first forever and permanently occupies
 // the per-pass limit. go_fleet_config_attempts both guarantees coverage and
 // carries the exponential backoff that keeps an unpairable car from costing a
