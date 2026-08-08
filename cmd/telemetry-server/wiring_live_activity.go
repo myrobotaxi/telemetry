@@ -135,6 +135,7 @@ func (a *liveActivityStoreAdapter) RideContextFor(ctx context.Context, rideReque
 		ETAMinutes:         row.ETAMinutes,
 		TripMilesRemaining: row.TripMilesRemaining,
 		NavUpdatedAt:       row.NavUpdatedAt,
+		PickupDispatchedAt: row.PickupDispatchedAt,
 		DispatchUnderway:   row.DispatchUnderway,
 	}, nil
 }
@@ -193,6 +194,7 @@ func (a *liveActivityStoreAdapter) ActiveLegs(ctx context.Context, limit int) ([
 				ETAMinutes:         row.ETAMinutes,
 				TripMilesRemaining: row.TripMilesRemaining,
 				NavUpdatedAt:       row.NavUpdatedAt,
+				PickupDispatchedAt: row.PickupDispatchedAt,
 				DispatchUnderway:   row.DispatchUnderway,
 			},
 		})
