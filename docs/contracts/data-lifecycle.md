@@ -185,6 +185,8 @@ The following real-time telemetry fields are delivered over the WebSocket but ar
 | `Vehicle` | Lifetime of vehicle record | Until vehicle or user deletion | Cascade (FK to User, `onDelete: Cascade`). Snapshot is overwritten, not versioned. | NFR-3.28, FR-10.1 |
 | `Drive` | **1 year rolling window** | 365 days from `createdAt` | Background pruning job (Section 5) + cascade on vehicle/user deletion | **NFR-3.27** |
 | `Drive.routePoints` | Bounded by Drive lifetime | Pruned with parent Drive row | Deleted when Drive row is deleted | NFR-3.28 |
+| `go_ride_requests` | **1 year rolling window on TERMINAL rides** | 365 days from `updated_at`, for rows in `status IN ('completed','declined','cancelled')` only | Background pruning job (Section 5A) + explicit party-scoped delete on account/vehicle deletion (§3.2). **Open rides are never swept, at any age.** | **MYR-447** |
+| `go_ride_requests.passenger_name` / `passenger_phone` | **30 days from terminal**, shorter than the parent row | 30 days from `updated_at`, for rows in `status IN ('completed','declined','cancelled')` only | Columns NULLed in place by the same job (Section 5A); the row survives. Deprecated — the book-for-someone-else feature was removed in [MYR-382](https://linear.app/myrobotaxi/issue/MYR-382) | **MYR-447** |
 | `TripStop` | Lifetime of vehicle record | Until vehicle or user deletion | Cascade (FK to Vehicle, `onDelete: Cascade`) | FR-10.1 |
 | `Invite` | Lifetime of vehicle record | Until vehicle or user deletion | Cascade (FK to Vehicle, `onDelete: Cascade`; FK to User sender, `onDelete: Cascade`) | FR-10.1 |
 | `Settings` | Lifetime of user account | Until account deletion | Cascade (FK to User, `onDelete: Cascade`) | FR-10.1 |
@@ -205,6 +207,25 @@ The Vehicle table does **not** maintain historical versions. Each telemetry even
 - The pruning job (Section 5) runs daily and deletes eligible drives in batches.
 - `Drive.routePoints` (JSONB) is deleted with the parent row — there is no separate retention policy for route data.
 - On user-initiated deletion (FR-10.1), ALL drives are deleted immediately regardless of age.
+
+### 2.2.1 go_ride_requests — 1 year rolling window on terminal rides (MYR-447)
+
+- A ride is eligible for pruning when its `status` is one of `completed`, `declined`, `cancelled` **and** its `updated_at` is older than 365 days.
+- **Open rides are never pruned, at any age.** `requested`, `accepted`, `enroute` and `arrived` are excluded by the claim predicate, which enumerates the three terminal statuses POSITIVELY rather than as `NOT IN (open)` — so adding a lifecycle state is a deliberate edit rather than a silent widening of what gets destroyed.
+- **There is no `expired` status.** A reservation whose dispatch failed carries `dispatch_error = 'reservation_expired'` and remains `accepted` ([`rest-api.md`](rest-api.md) §7.8: the owner and rider may still cancel or proceed manually). Such a ride is OPEN and is never swept.
+- **The clock is `updated_at`, not a per-row terminal timestamp, because there isn't one.** `completed_at` is stamped only on entry to `completed`; `declined` and `cancelled` stamp nothing of their own. What every transition does stamp is `updated_at = NOW()` (one shared clause, `rideRequestStatusStamp`). That makes `updated_at` a **lower bound** on age-since-terminal: `updated_at < NOW() - 365d` implies the ride went terminal at least 365 days ago. The error is one-directional — a row edited after going terminal is retained LONGER, never deleted sooner. A `terminated_at` column was rejected (nothing honest to backfill from, and a second authority on "when did this end"), as was `COALESCE(completed_at, updated_at)` (strictly worse — on the completed arm it deletes SOONER, mixes two column semantics in one boundary, and no single index serves it).
+- **The passenger columns go earlier than the row: 30 days.** See §2.2.2.
+- `go_live_activities` rows for a pruned ride are destroyed with it, via the `ON DELETE CASCADE` on `go_live_activities.ride_request_id` (migration 0025) — the only FK pointing at this table.
+- On user-initiated deletion (FR-10.1), the caller's rides are deleted immediately regardless of age or status, by an explicit party-scoped `DELETE` in the deletion transaction (§3.2) — **not** by a database cascade, because CG-DL-9 forbids a `go_*` FK to the Prisma-owned `User`.
+
+### 2.2.2 go_ride_requests passenger columns — 30 days from terminal (MYR-447)
+
+`passenger_name` and `passenger_phone` are the only columns on this table whose retention is shorter than their row's, and the reason is that they have no reader. The book-for-someone-else feature was removed from the app in [MYR-382](https://linear.app/myrobotaxi/issue/MYR-382); no live surface renders a terminal ride's passenger; nothing but the REST projection reads the columns, and both JSON keys are `omitempty` so a NULL simply removes the key. Data with no reader should not wait out the full record window — 30 days is a support window's grace on a feature that is already gone.
+
+- Both columns are NULLed in place at terminal + 30 days. The row survives whole.
+- **They are always scrubbed TOGETHER, never phone alone.** The iOS client renders the passenger block as `"\(passenger.phone) · …"` behind a single `if let passenger` whose presence test is the NAME (an absent-or-empty name maps to "no passenger at all"). Clearing the phone but leaving the name does not remove the passenger — it renders the block with a leading blank. Only clearing both makes the branch disappear.
+- The scrub does **not** touch `updated_at`. That column is the 365-day boundary above, so bumping it would defer the row's own deletion by another full year.
+- **Legacy backlog:** `cmd/scrub-passenger-fields` clears both columns across the whole table, once, with no age window and no status filter — including open rides, which the sweeper would never reach. Run it at deploy.
 
 ### 2.3 AuditLog — indefinite retention (NFR-3.29)
 
@@ -436,6 +457,8 @@ CREATE INDEX "AuditLog_timestamp_idx" ON "AuditLog" ("timestamp");
 | `vehicle_deleted` | Single vehicle and its drives/stops/invites deleted. Since MYR-261 the same-tx write also creates a `go_removed_vehicles` tombstone (§1.4.1); `metadata.tombstoned` records whether one was written | User |
 | `vehicle_readd_allowed` | Owner deliberately re-added a previously removed car — the `go_removed_vehicles` tombstone for `(userId, teslaVehicleId)` was cleared so the next Tesla sync may provision the VIN again (MYR-261, §1.4.1). `targetType='vehicle'`, `targetId` is the Tesla vehicle id, `initiator='user'`, `metadata={existed}` (P0 only). Emitted by `store.RemovedVehicleRegistry.ClearTombstone` in the same transaction as the tombstone DELETE (CG-DL-3) | User |
 | `drives_pruned` | Batch of drives older than 365 days deleted | System pruning job (NFR-3.27) |
+| `rides_pruned` | Batch of TERMINAL ride requests (`completed` / `declined` / `cancelled`) older than 365 days deleted ([MYR-447](https://linear.app/myrobotaxi/issue/MYR-447), §5A). Written by `store.RidePruner.PruneBatch` **inside the same transaction as the DELETE and before it** (CG-DL-3). `targetType='ride_request'`, `targetId`=the **vehicle** cuid the rides were booked against — not a ride id, which no longer exists by the time anyone reads the row — `initiator='system_pruner'`, `metadata={rideCount, oldestRideDate, newestRideDate}`, P0 counts and an opaque window only (CG-DL-5). One row per (owner, vehicle) group per batch. **`userId` is the vehicle OWNER; the rider gets no rider-keyed row** — see §5A.4 for why that is a decision rather than an inheritance | System pruning job (MYR-447) |
+| `ride_passengers_scrubbed` | Batch of SURVIVING terminal rides whose deprecated `passenger_name` and `passenger_phone` columns were NULLed at terminal + 30 days ([MYR-447](https://linear.app/myrobotaxi/issue/MYR-447), §2.2.2). A separate action from `rides_pruned` because it is a separate promise: one says a record was destroyed, the other says a record survives with two fields removed, and collapsing them would make the log unable to answer which happened. Same emitter, same transaction-before-write ordering, same grouping and same `metadata` shape as `rides_pruned` | System pruning job (MYR-447) |
 | `drive_deleted` | Single drive record deleted | User |
 | `invite_revoked` | Sharing invite revoked | User |
 | `tokens_refreshed` | OAuth tokens rotated | System (token refresh) |
@@ -450,6 +473,7 @@ CREATE INDEX "AuditLog_timestamp_idx" ON "AuditLog" ("timestamp");
 | `user` | A User record |
 | `vehicle` | A Vehicle record |
 | `drive` | A Drive record (or batch of drives) |
+| `ride_request` | A `go_ride_requests` record (or batch of them) — paired with `action: rides_pruned` or `ride_passengers_scrubbed` (MYR-447). Like `drive`, the `targetId` beside it is the **vehicle** cuid rather than a ride id: the row records a batch grouped by the car, and for `rides_pruned` the ride ids it covers no longer exist. First `go_*`-owned target type in this enum |
 | `invite` | An Invite record |
 | `account` | An Account (OAuth) record |
 | `rest_response` | A REST API response that was mask-projected (paired with `action: mask_applied`) |
@@ -658,6 +682,202 @@ A drive id that a client still holds — a cached `drive_ended` WebSocket payloa
 | `AuditLog.targetId` | Never a drive id — every emitter passes the vehicle id, including the `drives_pruned` row itself. No audit row can dangle. |
 
 **One caveat on §7.2's "disappearing from the tail".** The prune orders by `createdAt` (a `timestamptz`) while the list orders by `startTime` (a Prisma `String`, compared lexicographically). For rows with clock skew or a malformed `startTime` the two orders can diverge, so a pruned row may vanish from the **middle** of a cursor scan rather than its tail. The effect is still only a gap in a page — no error, no cursor corruption — but the guarantee is "items may disappear from a scan", not specifically from its tail.
+
+---
+
+## 5A. Ride pruning job spec (MYR-447)
+
+> **IMPLEMENTED by [MYR-447](https://linear.app/myrobotaxi/issue/MYR-447).** Unlike §5,
+> this section was never a specification first — `go_ride_requests` had no retention
+> policy at all, and terminal rides accumulated indefinitely. It describes shipped
+> behaviour from the start.
+>
+> Code: `store.RidePruner` (`internal/store/ride_pruner.go`,
+> `ride_pruner_queries.go`, `ride_pruner_audit.go`) is the batch;
+> `retention.RidePruner` (`internal/retention/ride_pruner.go`) is the cadence, budget
+> and retries — **the same engine as §5's drive sweep**, generalized over its batch
+> outcome in `internal/retention/sweeper.go`; `startRidePruner`
+> (`cmd/telemetry-server/wiring_retention_rides.go`) is the composition root.
+>
+> **The 365-day window is `store.RideRetentionDays` and the 30-day passenger window is
+> `store.RidePassengerScrubDays`, and those are the only places they are written.**
+> Compile-time constants, unreachable from configuration per CG-DL-4. The
+> `RIDE_RETENTION_PRUNER_ENABLED` kill-switch stops the sweep; it cannot change either
+> window.
+
+### 5A.1 Purpose
+
+Enforce two windows on `go_ride_requests` (§2.2.1, §2.2.2): delete terminal rides past
+365 days, and NULL the deprecated booked-for-passenger columns on terminal rides past
+30 days.
+
+**Scope of one deletion.** `DELETE FROM go_ride_requests` takes the row whole — both
+encrypted coordinate pairs, both place labels, both street addresses, and the two
+passenger columns. `go_live_activities.ride_request_id` is the only FK pointing at this
+table (`ON DELETE CASCADE`, migration 0025), so the delete also destroys any Live
+Activity sidecar rows for the pruned rides and takes row locks in that table. That is
+correct — an Activity for a ride deleted a year after it ended is dead weight — but it
+is why the batch stays small.
+
+**Scope of one scrub.** Exactly two columns, always both, and never `updated_at` (see
+§2.2.2).
+
+### 5A.2 Schedule
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| Schedule | Daily at **03:00 UTC**, ±5 min jitter | Same slot and same jitter as §5.2 — the two sweeps share the engine, and a second slot would be a second thing to know |
+| Frequency | Once per day | Terminal-ride accrual does not justify more |
+| Timezone | UTC | Server operates in UTC |
+
+### 5A.3 Index
+
+**Shipped with the job** — unlike §5.3, which cannot be, because `"Drive"` is
+Prisma-owned. `go_ride_requests` is Go-owned, so migration
+`0030_ride_retention_index.up.sql` lands with the sweeper:
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_go_ride_requests_retention
+    ON go_ride_requests (updated_at)
+    WHERE status IN ('completed', 'declined', 'cancelled');
+```
+
+One index serves both claims: the predicate is exactly their terminal-status conjunct,
+and the `updated_at` key serves both the age range (as an Index Cond) and the
+`ORDER BY updated_at ASC` (as a forward ordered scan the LIMIT short-circuits). The
+scrub's extra `passenger_name IS NOT NULL OR passenger_phone IS NOT NULL` arm stays a
+cheap recheck — those columns are NULL on essentially every row.
+
+**Every existing partial index on this table is partial on the OPEN statuses** — 0004,
+0013, 0016 and 0028 — i.e. the exact complement of this predicate, so not one of them
+contains a single row the sweep wants.
+
+> **NOT SELF-DRAINING, unlike migration 0028.** 0028's index is partial on the open
+> statuses, so a row LEAVES it when its ride ends and the indexed set tracks concurrent
+> live rides. This one is the mirror image: a row ENTERS when the ride ends and stays
+> until deletion, so the indexed set tracks **lifetime** terminal ride volume and grows
+> monotonically. **What bounds it is the sweeper it exists to serve.** The index is only
+> affordable because the job runs; if the sweep is disabled long-term, this index grows
+> with the table and should be reconsidered along with everything else that decision
+> breaks.
+
+### 5A.4 Execution
+
+```
+FOR each batch, in ONE transaction:
+  1. Claim: SELECT id, vehicle_id, owner_id, updated_at
+            FROM go_ride_requests
+            WHERE updated_at < NOW() - make_interval(days => 365)
+              AND status IN ('completed','declined','cancelled')
+            ORDER BY updated_at ASC LIMIT 100
+            FOR UPDATE SKIP LOCKED
+
+  2. IF the claim is non-empty:
+       INSERT one 'rides_pruned' AuditLog row per (owner, vehicle) group  -- BEFORE the delete
+       DELETE FROM go_ride_requests
+        WHERE id = ANY($1)
+          AND updated_at < NOW() - make_interval(days => 365)
+          AND status IN ('completed','declined','cancelled')
+
+  3. Claim: the same shape at 30 days, plus
+              AND (passenger_name IS NOT NULL OR passenger_phone IS NOT NULL)
+
+  4. IF that claim is non-empty:
+       INSERT one 'ride_passengers_scrubbed' AuditLog row per (owner, vehicle) group
+       UPDATE go_ride_requests
+          SET passenger_name = NULL, passenger_phone = NULL
+        WHERE id = ANY($1)
+          AND updated_at < NOW() - make_interval(days => 30)
+          AND status IN ('completed','declined','cancelled')
+
+  5. COMMIT. Exhausted = (both claims were empty).
+```
+
+> **BOTH GUARDS ARE REPEATED in the DELETE and the UPDATE**, not merely trusted from the
+> claim. §5.4's drive equivalent repeats its age predicate for the same reason — the
+> boundary is asserted at the point of destruction — but the stakes are higher here,
+> because `go_ride_requests` also holds LIVE rides. A mis-scoped delete would destroy a
+> ride someone is currently taking, not merely over-delete history.
+
+> **THE DELETE RUNS FIRST, and the ordering is not incidental.** The scrub's target set
+> is a superset of the delete's by age, so scrubbing first would rewrite rows about to
+> be destroyed and emit a `ride_passengers_scrubbed` audit row about data that no
+> longer exists.
+
+> **`Exhausted` requires BOTH claims to be EMPTY, not short.** Same reasoning as §5.4's
+> AS-BUILT note: under `SKIP LOCKED` a short claim means "no more rows *I* can take",
+> which a peer holding the remainder also satisfies. The loop pays one extra empty pair
+> of claims to confirm.
+
+> **AUDIT GROUPING IS BY VEHICLE, `userId` = the vehicle OWNER — a choice with a named
+> cost.** A ride has two parties. The row deleted is as much the RIDER's record as the
+> owner's, and the rider gets **no rider-keyed audit row** for its destruction: an
+> owner's subject-access request over `AuditLog` surfaces the deletion, a rider's does
+> not. Two rows per group was rejected because doubling audit volume to record the same
+> batch twice makes the log harder to read for the case it is actually used for
+> (reconstructing what the sweep did), and because rider-side accountability is already
+> served by the deletion being unconditional and contract-documented rather than
+> discretionary — there is no per-rider decision here for an audit row to hold to
+> account. If a rider-keyed view is ever required, the honest fix is a second row keyed
+> by `rider_id`, not a re-reading of this one.
+
+### 5A.5 Batch configuration
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| Batch size | 100 rides, per job | Small enough that the locks one transaction holds — on `go_ride_requests` AND, via the 0025 cascade, on `go_live_activities` — are never interesting to a concurrent reader |
+| Audit granularity | One entry per batch per (owner, vehicle), per action | Same as §5.5; up to two audit rows per group per batch, one per job |
+| Iteration limit | 500 batches per pass | Shared default with §5.5 |
+| Concurrency | `FOR UPDATE SKIP LOCKED` on both claims | No leader election, same as §5.8's AS-BUILT note |
+| Transaction boundary | Both claims, both audits and both writes are ONE transaction | A scrub failure rolls back the delete; both are retried together |
+
+### 5A.6 Failure handling
+
+Identical to §5.6 — same engine, same three attempts at 1s/2s, same
+end-the-pass-on-exhausted-retries, same 30s per-batch timeout, same
+stop-at-the-next-boundary on shutdown.
+
+### 5A.7 Observability
+
+**Distinct metric names from §5.7.** Both collector sets register into the same
+registry in the same process, and a duplicate metric name is a panic at
+`MustRegister` — a crash loop on boot, not a bad dashboard.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `telemetry_ride_pruner_rides_deleted_total` | Counter | Terminal rides deleted, cumulative. Expect zero for the first year of the table's life; a flat line before then is correct, not a stalled sweep |
+| `telemetry_ride_pruner_passengers_scrubbed_total` | Counter | Rows whose two passenger columns were NULLed, cumulative. **In steady state this should sit at zero** — the feature was removed in MYR-382, so a sustained non-zero rate means something is still WRITING those columns and wants finding |
+| `telemetry_ride_pruner_batches_processed_total` | Counter | Batches committed |
+| `telemetry_ride_pruner_batch_errors_total` | Counter | Batches that failed every attempt. **Alert on any increase.** |
+| `telemetry_ride_pruner_run_duration_seconds` | Histogram | Wall-clock time for one pass |
+| `telemetry_ride_pruner_last_success_timestamp_seconds` | Gauge | Unix timestamp of the last pass without a batch error. **Alert when `now() - this > ~48h`.** Seeded to `0` at startup rather than left absent, for the same reason as §5.7's gauge, and damped the same way (an alert `for:` longer than a day, never by special-casing zero) |
+
+### 5A.8 Deployment
+
+A goroutine in the telemetry server process, no separate service and **no leader** —
+`SKIP LOCKED` makes concurrent replicas safe by construction.
+
+> **Kill-switch:** `RIDE_RETENTION_PRUNER_ENABLED` (defaults ON, fail-fast on a
+> non-boolean value). **Deliberately separate from `DRIVE_RETENTION_PRUNER_ENABLED`:**
+> the two sweeps share an engine but touch different tables, and stopping one because
+> it is misbehaving must not suspend the other's promise. Turning this one off suspends
+> two commitments at once — the 365-day record window and the removal of a deleted
+> feature's PII.
+
+### 5A.9 Read-path behaviour after a prune
+
+| Path | Behaviour on a pruned ride id |
+|------|-------------------------------|
+| `GET /api/ride-requests/{id}` (§7.8) | `404 not_found` via the ordinary `store.ErrRideRequestNotFound` chain |
+| Rider / owner list endpoints | The row is simply absent from the page; `items` is an empty slice, never `null` |
+| Cursor pagination | Safe — the keyset predicate is a pure value comparison and never looks the anchor row up |
+| `go_live_activities` | Cascaded away with the ride (migration 0025). No dangling Activity row can survive its ride |
+| `AuditLog.targetId` | Never a ride id — every emitter passes the vehicle id, including the `rides_pruned` row itself |
+
+**On a SCRUBBED (not pruned) ride:** `passengerName` and `passengerPhone` are both
+`omitempty` on the wire, so a NULL simply removes the keys and the client sees a ride
+with no booked-for passenger — which is the same shape every ride created since
+MYR-382 already has.
 
 ---
 
