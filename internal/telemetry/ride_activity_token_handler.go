@@ -182,9 +182,10 @@ func (h *RideRequestHandler) ServeRegisterActivityToken(w http.ResponseWriter, r
 // predicate inside the upsert (store.queryUpsertLiveActivity), which is what
 // actually holds under a race.
 //
-// TWO ENDINGS ARE FINAL, and they look nothing alike from here.
+// ONE ENDING IS FINAL AND ONE IS PROVISIONAL, and they look nothing alike from
+// here.
 //
-// A TERMINAL STATUS is the obvious one and is visible in rec.Status.
+// A TERMINAL STATUS is the obvious one, is visible in rec.Status, and is final.
 //
 // A RESERVATION EXPIRY is invisible in the status. The sweeper gives up on a
 // late scheduled ride by recording dispatch_status='failed' with
@@ -200,6 +201,22 @@ func (h *RideRequestHandler) ServeRegisterActivityToken(w http.ResponseWriter, r
 // That second case gets a sub-code precisely because the status does not
 // explain it: a client seeing `conflict` on an `accepted` ride would have no
 // way to tell a bug from a reservation that lapsed.
+//
+// BUT THE EXPIRY REFUSAL IS PROVISIONAL, AND SCOPED TO `accepted` (MYR-461).
+// `reservation_expired` is a verdict on the DISPATCH — the car did not drive
+// itself to the pickup inside the lateness ceiling — and this service promises
+// twice over (rest-api.md §7.8 transition notes) that such a ride's parties
+// "may still cancel or PROCEED MANUALLY". When they do, the ride advances to
+// `arrived` and then `enroute`, and the verdict has been falsified by events:
+// the car is demonstrably at the kerb with a passenger aboard. Refusing then
+// was the defect — in external beta a rescued reservation ran on as a real,
+// driven ride for 99 minutes while every registration answered 409, so the
+// rider's lock screen went dark at the expiry and could never come back.
+//
+// The paragraph above still describes the ride this refusal is FOR: one that
+// is still nothing but a reservation nobody came for. The ride's own status is
+// the authority on whether a ride is over, and the terminal arm already
+// enforces it.
 func (h *RideRequestHandler) guardActivityRegistrable(w http.ResponseWriter, rec RideRequestData) bool {
 	// A ride that has reached a terminal status will never be pushed to on
 	// this registration's account, so accepting one here would store a row
@@ -225,7 +242,14 @@ func (h *RideRequestHandler) guardActivityRegistrable(w http.ResponseWriter, rec
 		return false
 	}
 
-	if isReservationExpired(rec) {
+	// SCOPED TO `accepted` (MYR-461). The expiry refusal holds only while the
+	// ride is still nothing but a reservation nobody came for. See the block
+	// above guardActivityRegistrable for why a rescued ride must be let back
+	// in, and note the predicate must match the one inside the write
+	// (queryUpsertLiveActivity) — this check is the friendly sub-coded message,
+	// the statement's is the one that holds under a race. If they disagree, the
+	// stricter one silently wins and the other becomes dead code.
+	if rec.Status == rideStatusAccepted && isReservationExpired(rec) {
 		h.writeErrorSub(w, http.StatusConflict, wserrors.ErrCodeConflict,
 			wserrors.SubCodeReservationExpired,
 			"the reservation for this ride expired and its Live Activity has ended")

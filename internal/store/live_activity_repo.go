@@ -327,7 +327,8 @@ func NewLiveActivityRepo(pool *pgxpool.Pool, logger *slog.Logger) *LiveActivityR
 // end-tombstone.
 //
 // Returns ErrLiveActivityRideClosed when the ride is past registration — a
-// terminal status, or a reservation that expired. That decision is made by the
+// terminal status, or an expired reservation nobody rescued (one still at
+// `accepted`; see the query's MYR-461 note). That decision is made by the
 // statement itself rather than by a read before it: the handler's own check is
 // a read-then-write and a POST can arrive in the middle of the terminal
 // transition, so the guard that actually holds is the one inside the write.

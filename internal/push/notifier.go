@@ -257,11 +257,15 @@ func (n *Notifier) handleCreated(evt events.Event) {
 // each of them cares about. Transitions that are the recipient's own doing send
 // them nothing.
 //
-// The two audiences are disjoint in practice but are resolved independently,
-// because they answer to different copy functions and different gates: the
-// rider hears about `accepted`, `declined` and `arrived` (statusAlert), the
-// owner hears about `enroute` (ownerStatusAlert, MYR-462). One event can
-// therefore produce zero, one or two fan-outs.
+// The two audiences are resolved independently, because they answer to
+// different copy functions: the rider hears about `accepted`, `declined` and
+// `arrived` (statusAlert), the owner hears about `enroute` (ownerStatusAlert,
+// MYR-462). Those sets are DISJOINT, so at most one branch below runs on any
+// given event and no transition wakes both phones — which is also why the two
+// fan-outs can sit sequentially in one worker without sharing a timeout budget
+// in practice. They are still written as two independent branches rather than
+// an if/else, so that a future transition either party cares about is a copy
+// change here and not a restructuring.
 func (n *Notifier) handleStatusChanged(evt events.Event) {
 	ev, ok := evt.Payload.(events.RideStatusChangedEvent)
 	if !ok {

@@ -157,6 +157,18 @@ func TestLiveActivityRepo_RegisterAllowsARescuedExpiredReservation(t *testing.T)
 				t.Fatalf("live rows = %+v, want one row holding the rescued token", live)
 			}
 
+			// The re-seed path is exactly what this fix makes newly reachable,
+			// so pin it. Registering on a TOMBSTONED row re-seeds the phase mark
+			// from the ride's status, and it must land on the rung the status
+			// names — `arrived` is 4, `enroute` is 5. Too low and the next push
+			// would re-announce a phase the app has just drawn locally,
+			// expanding an island over a card the rider is already looking at.
+			wantPhase := map[string]int16{"arrived": 4, "enroute": 5}[status]
+			if live[0].AlertedPhase != wantPhase {
+				t.Errorf("alerted_phase = %d after rescuing at %s, want %d",
+					live[0].AlertedPhase, status, wantPhase)
+			}
+
 			// And the ticker has to pick it back up, or the card is registered
 			// and still never updated — the starvation this issue was filed for.
 			legs, err := repo.ListActiveLegActivities(ctx, 50)
