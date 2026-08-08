@@ -326,8 +326,8 @@ DELETE FROM "User" WHERE "id" = '<user-id>';
 
 COMMIT;
 
--- Sessions are already gone before this transaction opens: step 8 of §3.1
--- revoked every go_refresh_tokens row, and step 10 evicts the user-existence
+-- Sessions are already gone before this transaction opens: step 9 of §3.1
+-- revoked every go_refresh_tokens row, and step 11 evicts the user-existence
 -- cache immediately after the commit so the caller's still-unexpired ES256
 -- access token stops validating at once rather than at the cache TTL. Active
 -- WebSocket connections for this user's vehicles were closed during step 3 by
@@ -383,7 +383,7 @@ An omitted `requesterName` on the live path therefore means precisely *"this acc
 **The guarantee is RE-RUNNABILITY, not whole-sequence atomicity.** The two cannot both be had here, and the reason is structural rather than a matter of effort:
 
 - Step 3 of §3.1 is `store.OwnerTeardown`, which is **already** a transaction — one that takes `SELECT … FOR UPDATE` locks over the owner's whole vehicle set (so the last-vehicle decision is race-safe) and fires the `vehicle_deleted` NOTIFY whose consumers must not observe uncommitted work.
-- Step 5 publishes `ride_status_changed`, which sends **push notifications**. A notification cannot be rolled back.
+- Step 6 publishes `ride_status_changed`, which sends **push notifications**. A notification cannot be rolled back.
 
 Wrapping N teardowns plus a notifying step in one outer transaction would therefore either deadlock against those locks or tell people about work a later rollback undid. What the contract guarantees instead:
 
@@ -807,7 +807,16 @@ FOR each batch, in ONE transaction:
 > **`Exhausted` requires BOTH claims to be EMPTY, not short.** Same reasoning as §5.4's
 > AS-BUILT note: under `SKIP LOCKED` a short claim means "no more rows *I* can take",
 > which a peer holding the remainder also satisfies. The loop pays one extra empty pair
-> of claims to confirm.
+> of claims, and that **narrows the ambiguity without removing it**. An empty claim is
+> the same statement in a stronger form — "there are no rows *I* can take" — which a
+> peer holding the ENTIRE remainder also satisfies. This replica can therefore still end
+> a pass reporting completion over rows it never saw, and if that peer's transaction
+> then rolls back, the rows come back unpruned after the freshness signal already moved.
+> Closing that last gap needs cross-replica coordination the sweep deliberately does not
+> have: the cost of the residual case is bounded — the pass is idempotent and runs again
+> the next night, so a premature "exhausted" delays rows by a day rather than losing
+> them — and a lock or a leader election to buy that day back would be a far larger
+> standing liability than the thing it fixes.
 
 > **AUDIT GROUPING IS BY VEHICLE, `userId` = the vehicle OWNER — a choice with a named
 > cost.** A ride has two parties. The row deleted is as much the RIDER's record as the

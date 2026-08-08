@@ -1714,7 +1714,7 @@ Step 2 now actively revokes the grant: a form-encoded `POST` to Tesla's OAuth2 r
 
 Three properties are contractual:
 
-1. **It runs BEFORE anything deletes the tokens.** Step 3's last-vehicle arm deletes the `Account` row and step 9's `User` cascade takes any that survives; after either, the refresh token is gone and revocation is impossible. This ordering is normative — see [`data-lifecycle.md`](data-lifecycle.md) §3.1.
+1. **It runs BEFORE anything deletes the tokens.** Step 3's last-vehicle arm deletes the `Account` row and step 10's `User` cascade takes any that survives; after either, the refresh token is gone and revocation is impossible. This ordering is normative — see [`data-lifecycle.md`](data-lifecycle.md) §3.1.
 2. **It is best-effort and NEVER blocks the deletion.** A Tesla 5xx, a timeout, a network failure, an already-invalid token, or no Tesla account at all are each logged and stepped past. The response is unchanged: still `204`, still no body. **A client cannot observe whether revocation succeeded**, and deliberately so — the account is deleted either way, and a partial-success signal would be a state no client could act on.
 3. **A re-run skips it cleanly.** The second call finds no stored token and makes no request to Tesla.
 
@@ -3976,7 +3976,7 @@ Authorization: Bearer <app session JWT>
 
 #### 7.20.4 Account deletion
 
-Saved places are deleted as **step 6** of the §7.6 `DELETE /api/users/me` sequence, between the push devices and the refresh tokens and BEFORE the identity transaction.
+Saved places are deleted as **step 8** of the §7.6 `DELETE /api/users/me` sequence, between the push devices and the refresh tokens and BEFORE the identity transaction.
 
 The position is load-bearing in one direction. `go_saved_places` has no foreign key (CG-DL-9), so nothing cascades: a row left behind after the identity rows go would be AES-256-GCM ciphertext of where a DELETED PERSON LIVES, keyed by a cuid that no longer resolves to anybody and reachable by nothing but a table scan. It would never be read, never be reported, and never go away.
 
