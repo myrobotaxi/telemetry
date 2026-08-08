@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/myrobotaxi/telemetry/internal/auth"
 	"github.com/myrobotaxi/telemetry/internal/events"
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
 	"github.com/myrobotaxi/telemetry/pkg/sdk"
@@ -53,24 +54,9 @@ func (h *RideRequestHandler) ServeCreate(w http.ResponseWriter, r *http.Request)
 		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
 		return
 	}
-	// MYR-369: the gate reads the grant's `allow_rides` FLAG, not a tier. A
-	// viewer whose grant does not carry it is refused here even though they
-	// can see the car — and the owner can now take the capability away in
-	// place (PATCH /api/invites/{inviteId}) instead of revoking the whole
-	// grant, so this check is live state rather than something fixed at
-	// invite time. capRides carries the suspension term itself, so a
-	// suspended grant is refused here as well as being absent from the
-	// access set.
-	if _, accessErr := vehicleAccessFor(ctx, h.shares, userID, in.VehicleID, row.UserID, capRides); accessErr != nil {
-		if errors.Is(accessErr, errNoVehicleAccess) {
-			denyVehicleAccess(w, h.logger, "ride-request create", in.VehicleID, userID)
-			return
-		}
-		h.logger.Error("ride-request create: access resolution failed",
-			slog.String("vehicle_id", in.VehicleID),
-			slog.String("error", accessErr.Error()),
-		)
-		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
+	// The per-grant ride gate (MYR-369), and the record of what it decided
+	// (MYR-451). Both live in the helper — see its doc.
+	if h.rejectIfRideNotGrantedToCaller(ctx, w, userID, in.VehicleID, row.UserID) {
 		return
 	}
 	// MYR-342: the vehicle's owner may have PAUSED ride requests for this car.
@@ -128,6 +114,76 @@ func (h *RideRequestHandler) ServeCreate(w http.ResponseWriter, r *http.Request)
 	})
 
 	h.writeJSON(w, http.StatusCreated, toRideRequestWire(created))
+}
+
+// rejectIfRideNotGrantedToCaller is the per-grant ride gate for CREATE, split
+// out of ServeCreate (MYR-451) so the decision and its record sit together.
+// Returns true when it has already answered and ServeCreate must stop.
+//
+// MYR-369: the gate reads the grant's `allow_rides` FLAG, not a tier. A viewer
+// whose grant does not carry it is refused here even though they can see the
+// car — and the owner can take the capability away in place (PATCH
+// /api/invites/{inviteId}) instead of revoking the whole grant, so this check is
+// LIVE STATE rather than something fixed at invite time. capRides carries the
+// suspension term itself, so a suspended grant is refused here as well as being
+// absent from the access set.
+//
+// A transient lookup failure is a 500, NOT a denial: "we could not tell" and
+// "you may not" are different answers, and collapsing them would turn a
+// database blip into a silent, invisible permission change.
+func (h *RideRequestHandler) rejectIfRideNotGrantedToCaller(
+	ctx context.Context,
+	w http.ResponseWriter,
+	userID, vehicleID, ownerUserID string,
+) bool {
+	access, err := vehicleAccessFor(ctx, h.shares, userID, vehicleID, ownerUserID, capRides)
+	if err != nil {
+		if errors.Is(err, errNoVehicleAccess) {
+			denyVehicleAccess(w, h.logger, "ride-request create", vehicleID, userID)
+			return true
+		}
+		h.logger.Error("ride-request create: access resolution failed",
+			slog.String("vehicle_id", vehicleID),
+			slog.String("error", err.Error()),
+		)
+		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
+		return true
+	}
+
+	// MYR-451: RECORD THE GRANT THAT ALLOWED THIS, not just the ones refused.
+	//
+	// Only denials were logged (denyVehicleAccess), which reads as prudent and
+	// is the exact reason MYR-451 could not be triaged. When an owner reports
+	// "this person rode and should not have been able to", a denial-only log
+	// answers by saying nothing at all — silence is emitted both by a create
+	// that never happened and by a create that sailed through the gate, so the
+	// absence of a denial proves nothing, and the ride cannot be tied back to
+	// the grant state that permitted it.
+	//
+	// So the PERMITTED non-owner create is logged too, keyed on the same
+	// (user_id, vehicle_id) pair as the denial line and the "share invite
+	// patched" line. Together those three make the ordering recoverable from
+	// logs alone: "was the capability still there when they booked" becomes a
+	// timestamp comparison instead of an argument between two screenshots.
+	//
+	// OWNERS ARE NOT LOGGED. They are the overwhelming majority of creates,
+	// they hold every capability unconditionally, and there is no grant behind
+	// their access to reconstruct — logging them would bury the rare line that
+	// matters under the common one that never does.
+	// NO `allow_rides` FIELD HERE, deliberately. Reaching this branch already
+	// means capRides was satisfied, and the adapter only ever builds a live
+	// grant, so the value could not be anything but true — a field that cannot
+	// vary records nothing and invites a reader to believe it was checked
+	// against something. The fact worth logging is that a NON-OWNER got
+	// through, and the line's existence carries it.
+	if access.Role == auth.RoleViewer {
+		h.logger.Info("ride-request create: permitted by share grant",
+			slog.String("user_id", userID),
+			slog.String("vehicle_id", vehicleID),
+			slog.String("owner_user_id", ownerUserID),
+		)
+	}
+	return false
 }
 
 // rejectIfRideActive is the one-active-instant-ride fast path (MYR-230). For

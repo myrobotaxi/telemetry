@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/myrobotaxi/telemetry/internal/auth"
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
@@ -98,8 +99,29 @@ func (h *ShareInviteHandler) ServePatch(w http.ResponseWriter, r *http.Request) 
 
 	// The invite id and what changed — never the label (P1), and there is no
 	// code on an accepted row to leak.
+	//
+	// MYR-451 WIDENED THIS DELIBERATELY, and the reason is worth keeping. The
+	// line used to carry the invite id and the two resulting flags, which is
+	// enough to know a patch happened and useless for the question an incident
+	// actually asks: WHICH PERSON lost WHICH capability on WHICH CAR, and did
+	// that precede or follow the ride they took. An invite id joins to none of
+	// that without a database the on-call may not have, and by then the row has
+	// moved on — a revoked grant answers 404 and a re-invite reuses nothing.
+	//
+	// So the line now names the grantee and the vehicle, which are exactly the
+	// two keys denyVehicleAccess and the create-path decision log key on. The
+	// three lines join on (user_id, vehicle_id) and reconstruct the timeline
+	// from logs alone. `requested_*` records what the owner ASKED FOR (nil for
+	// an absent field, which is not the same as false) beside what the row now
+	// HOLDS, so a partial patch reads unambiguously and a request that changed
+	// nothing is visible as such rather than looking like a fresh decision.
 	h.logger.Info("share invite patched",
 		slog.String("invite_id", inviteID),
+		slog.String("owner_user_id", userID),
+		slog.String("user_id", granteeID),
+		slog.String("vehicle_id", row.VehicleID),
+		requestedFlag("requested_allow_rides", patch.AllowRides),
+		requestedFlag("requested_suspended", patch.Suspended),
 		slog.Bool("allow_rides", row.Grant.AllowRides),
 		slog.Bool("suspended", row.Grant.Suspended),
 	)
@@ -120,6 +142,34 @@ func (h *ShareInviteHandler) ServePatch(w http.ResponseWriter, r *http.Request) 
 	// sends somebody looking for a broken share link is not.
 	h.writeJSON(w, http.StatusOK,
 		toShareInviteMasked(&row, auth.RoleOwner, inviteLinkCtx{}))
+}
+
+// requestedFlag renders one OPTIONAL patch field for the log (MYR-451).
+//
+// It exists because `slog.Any` over a *bool is a trap: the JSON handler
+// dereferences it and prints `true`, the text handler prints the POINTER
+// (`0xc000…`), and the two disagreeing is discovered during an incident, on the
+// one line that was supposed to settle the incident. Rendering the distinction
+// ourselves makes the attribute identical under every handler.
+//
+// An absent field logs "unchanged" rather than being omitted or logged as
+// false. Omission would make a partial patch indistinguishable from one that
+// never mentioned the field, and false would assert a decision the owner did
+// not make — the very conflation §7.5.7 spends a paragraph forbidding on the
+// wire, which a log line has no business reintroducing.
+//
+// ALWAYS A STRING, INCLUDING FOR THE PRESENT CASE, and that is the whole reason
+// this returns what it returns. Emitting `slog.Bool` when present and
+// `slog.String` when absent would put two JSON TYPES under one key across
+// consecutive lines; a strict-mapping sink (Elasticsearch dynamic mapping,
+// BigQuery, Loki structured metadata) rejects the second shape and DROPS THE
+// DOCUMENT — silently discarding exactly the line written to settle an
+// incident. One key, one type, three self-describing values.
+func requestedFlag(name string, v *bool) slog.Attr {
+	if v == nil {
+		return slog.String(name, "unchanged")
+	}
+	return slog.String(name, strconv.FormatBool(*v))
 }
 
 // decodePatch reads the body and rejects one that asks for nothing.

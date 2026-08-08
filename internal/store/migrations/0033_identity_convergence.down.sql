@@ -1,4 +1,4 @@
--- Reverses 0032.
+-- Reverses 0033.
 --
 -- NOTE: this discards every convergence recorded at runtime since the table was
 -- created, and those cannot be reconstructed — the re-point they describe left

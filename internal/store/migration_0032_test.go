@@ -2,105 +2,146 @@ package store_test
 
 import (
 	"context"
-	"strings"
 	"testing"
+	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/store"
 )
 
-// Migration 0032 (MYR-452) adds go_identity_convergence: the record of every
-// re-point of an Apple binding from one user id to another.
+// MYR-451 migration 0032: `updated_at` on go_vehicle_shares — the mutation
+// timestamp whose absence made a live permissions incident untriageable.
+
+// migration0032Columns is the shape 0032 ADDS, with its information_schema
+// data_type. It joins the union counted by the undocumented-column guard in
+// migration_0020_test.go.
 //
-// The table is load-bearing for a privacy guarantee, and a row in it is an
-// unconditional grant of DELETE authority over another user id — the deletion
-// scope runs every destructive step over the whole closure. So these tests pin
-// the two structural properties that keep that authority from being handed out
-// by accident, and the one-off repair's guards.
+// TIMESTAMPTZ, NOT NULL. The type matters for the same reason `suspended_at`'s
+// does one migration over: this column exists to answer WHEN, and the whole
+// point of adding it was that a boolean-only record of a capability change
+// destroys the history the incident needed.
+var migration0032Columns = map[string]string{
+	"updated_at": "timestamp with time zone",
+}
 
-// TestMigration0032_UpCreatesTheConvergenceTable pins the shape.
-func TestMigration0032_UpCreatesTheConvergenceTable(t *testing.T) {
+func TestMigration0032_AddsGrantUpdatedAt(t *testing.T) {
 	if !dockerAvailable {
 		t.Skip("docker unavailable; skipping migration integration test")
 	}
-	ctx := context.Background()
-	if err := store.RunMigrations(ctx, testConnStr, testLogger()); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
+	mustApplyGoMigrations(t)
+
+	got := vehicleShareColumnTypes(t)
+	for col, wantType := range migration0032Columns {
+		actual, ok := got[col]
+		if !ok {
+			t.Fatalf("column %s missing after migrate up", col)
+		}
+		if actual != wantType {
+			t.Errorf("column %s: data_type = %q, want %q", col, actual, wantType)
+		}
 	}
 
-	// from_user_id is the PRIMARY KEY, not merely indexed: one abandoned id
-	// may point at exactly one canonical id. Without the uniqueness, a second
-	// convergence would fan the closure out rather than replace the edge.
-	var pkCols int
-	if err := testPool.QueryRow(ctx, `
-		SELECT count(*) FROM information_schema.table_constraints tc
-		JOIN information_schema.key_column_usage k ON k.constraint_name = tc.constraint_name
-		WHERE tc.table_name = 'go_identity_convergence'
-		  AND tc.constraint_type = 'PRIMARY KEY' AND k.column_name = 'from_user_id'`).Scan(&pkCols); err != nil {
-		t.Fatalf("read primary key: %v", err)
-	}
-	if pkCols != 1 {
-		t.Errorf("from_user_id is not the primary key (matched %d)", pkCols)
-	}
-
-	// The reverse-direction index the closure walk depends on. Queried
-	// directly rather than through indexDef, which is pinned to
-	// go_ride_requests.
-	var def string
-	if err := testPool.QueryRow(ctx, `
-		SELECT indexdef FROM pg_indexes
-		WHERE tablename = 'go_identity_convergence' AND indexname = $1`,
-		"idx_go_identity_convergence_to").Scan(&def); err != nil {
-		t.Fatalf("idx_go_identity_convergence_to missing after migrate up: %v", err)
-	}
-	if !strings.Contains(def, "to_user_id") {
-		t.Errorf("reverse index does not cover to_user_id: %s", def)
+	// NOT NULL is asserted because every reader is written without a nil
+	// branch. A nullable column would compile identically and fail only where
+	// it is read.
+	nullability := shareColumnNullability(t)
+	if nullability["updated_at"] != "NO" {
+		t.Errorf("updated_at is_nullable = %q, want \"NO\"", nullability["updated_at"])
 	}
 }
 
-// A self-edge is always a bug — it makes the closure walk pointless — and the
-// CHECK is what stops one being written rather than being reasoned about.
-func TestMigration0032_RejectsASelfEdge(t *testing.T) {
+// TestMigration0032_ExistingRowsAreStamped pins the BACKFILL decision: a row
+// that genuinely predates the column comes out of the migration stamped, NOT
+// NULL.
+//
+// The migration argues NULL would assert "never modified" about rows that may
+// well have been patched before the column existed — a claim the data cannot
+// support — while the migration instant is honest as a lower bound. This test
+// is what stops a later edit from "cleaning up" the default and reintroducing
+// the ambiguity.
+//
+// It rolls the schema back to 31 and seeds THERE, rather than inserting a fresh
+// row at head. Seeding at head would only ever exercise `DEFAULT now()` on a
+// new INSERT and would pass even if the ALTER left every pre-existing row NULL
+// — which is the entire failure this test is named for.
+func TestMigration0032_ExistingRowsAreStamped(t *testing.T) {
 	if !dockerAvailable {
 		t.Skip("docker unavailable; skipping migration integration test")
 	}
+	mustApplyGoMigrations(t)
 	ctx := context.Background()
+
+	m := newTestMigrator(t)
+	defer func() { _, _ = m.Close() }()
+
+	if err := m.Migrate(31); err != nil {
+		t.Fatalf("migrate down to 31: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.RunMigrations(ctx, testConnStr, testLogger()); err != nil {
+			t.Fatalf("restore migrations to head: %v", err)
+		}
+	})
+
+	const legacyShare = "clmigration0032legacyrow"
+	before := time.Now().UTC().Add(-time.Minute)
+	if err := insertShare(t, legacyShare, "veh-0032", "owner-0032", "code-0032",
+		"pending", time.Now().UTC().Add(24*time.Hour), nil); err != nil {
+		t.Fatalf("seed pre-0032 share row: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(ctx, `DELETE FROM go_vehicle_shares WHERE id = $1`, legacyShare)
+	})
+
 	if err := store.RunMigrations(ctx, testConnStr, testLogger()); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
+		t.Fatalf("migrate back up: %v", err)
 	}
 
-	_, err := testPool.Exec(ctx,
-		`INSERT INTO go_identity_convergence (from_user_id, to_user_id) VALUES ($1, $1)`,
-		"cselfedge000000000000001")
-	if err == nil {
-		_, _ = testPool.Exec(ctx, `DELETE FROM go_identity_convergence WHERE from_user_id = 'cselfedge000000000000001'`)
-		t.Fatal("a self-edge was accepted; the CHECK constraint is missing")
+	var updatedAt time.Time
+	if err := testPool.QueryRow(ctx,
+		`SELECT updated_at FROM go_vehicle_shares WHERE id = $1`, legacyShare,
+	).Scan(&updatedAt); err != nil {
+		t.Fatalf("read back the backfilled row: %v", err)
 	}
-	if !strings.Contains(err.Error(), "go_identity_convergence_no_self") {
-		t.Errorf("rejected for the wrong reason: %v", err)
+	if updatedAt.Before(before) {
+		t.Errorf("updated_at = %s, want a stamp at or after %s — a row that predates the column came out unstamped",
+			updatedAt, before)
 	}
 }
 
-// The one-off repair must be INERT wherever its two subjects do not both exist.
-// It names production ids directly (there is deliberately no email heuristic —
-// see the migration comment), so the guards are the only thing standing between
-// it and an environment it was never meant to touch.
-func TestMigration0032_OneOffRepairIsInertWithoutItsSubjects(t *testing.T) {
+// TestMigration0032_DownDropsOnlyTheStamp exercises the rollback and proves it
+// is SURGICAL — it takes the MYR-451 column and nothing else, in particular not
+// the 0024 capability flags sitting beside it, whose loss would silently
+// restore every withdrawn ride capability.
+func TestMigration0032_DownDropsOnlyTheStamp(t *testing.T) {
 	if !dockerAvailable {
 		t.Skip("docker unavailable; skipping migration integration test")
 	}
-	ctx := context.Background()
-	if err := store.RunMigrations(ctx, testConnStr, testLogger()); err != nil {
-		t.Fatalf("RunMigrations: %v", err)
-	}
+	mustApplyGoMigrations(t)
 
-	var n int
-	if err := testPool.QueryRow(ctx, `
-		SELECT count(*) FROM go_identity_convergence
-		WHERE from_user_id = 'cd38cb3eba91a3b9b69ff6eee5aedcc29'`).Scan(&n); err != nil {
-		t.Fatalf("count repair row: %v", err)
+	m := newTestMigrator(t)
+	defer func() { _, _ = m.Close() }()
+
+	if err := m.Migrate(31); err != nil {
+		t.Fatalf("migrate down to 31: %v", err)
 	}
-	if n != 0 {
-		t.Errorf("the production one-off repair inserted %d rows into a test database; "+
-			"its EXISTS guards are not holding", n)
+	t.Cleanup(func() {
+		if err := store.RunMigrations(context.Background(), testConnStr, testLogger()); err != nil {
+			t.Fatalf("restore migrations to head: %v", err)
+		}
+	})
+
+	got := vehicleShareColumnTypes(t)
+	for col := range migration0032Columns {
+		if _, present := got[col]; present {
+			t.Errorf("column %s survived the down-migration", col)
+		}
+	}
+	for _, survivor := range []string{
+		"id", "vehicle_id", "owner_user_id", "label", "permission", "code",
+		"status", "accepted_by_user_id", "revoked_at", "allow_rides", "suspended_at",
+	} {
+		if _, present := got[survivor]; !present {
+			t.Errorf("column %s was dropped by the 0032 down-migration — it must be surgical", survivor)
+		}
 	}
 }
