@@ -33,9 +33,21 @@
 --      the geocode backfill (`ops geocode backfill`) will regard every
 --      unsealed Drive row as missing an address.
 --   3. Deploy the telemetry server.
---   4. Run `purge-plaintext-columns` to scrub the retired plaintext.
---   5. Drop the plaintext columns in a later react-frontend migration,
---      once step 4 reports zero remaining.
+--   4. RE-RUN `backfill-location-labels`. This is not redundant with
+--      step 2 and it is easy to skip. Between step 2 finishing and step 3
+--      completing, the OLD server is still serving and still writing
+--      plaintext-only labels — every geocode in that window lands in a
+--      column the first backfill has already passed over. Those rows would
+--      otherwise sit unsealed indefinitely: the purge refuses them
+--      (verdictUnsealed — it will not remove the only copy of anything),
+--      so `remaining` never reaches zero and step 6 stays blocked forever.
+--      The backfill's selection predicate makes the re-run free when the
+--      window happened to be empty: `<plaintext> <> '' AND <enc> IS NULL`
+--      matches nothing, and it exits reporting zero.
+--   5. Run `purge-plaintext-columns` to scrub the retired plaintext.
+--      `-dry-run` first; the acceptance bar is `totalRemaining: 0`.
+--   6. Drop the plaintext columns in a later react-frontend migration,
+--      once step 5 reports zero remaining.
 --
 -- Column contract (fixed by MYR-433): `<plaintextColumnName>Enc`, TEXT,
 -- NULLABLE. NULL is the absent sentinel — it is what makes

@@ -93,7 +93,8 @@ Commands:
 Environment:
   DATABASE_URL                  Postgres connection string (required)
   OPS_OPERATOR                  Your operator handle, e.g. jdoe (REQUIRED by every command that
-                                 decrypts user data: auth token, fields snapshot, fleet-config push).
+                                 decrypts user data: auth token, fields snapshot, fleet-config push,
+                                 geocode backfill).
                                  Recorded in an AuditLog operator_decrypt row before the decrypt
                                  happens (MYR-447). No default — an email address is rejected.
   TESLA_PROXY_URL               tesla-http-proxy base URL (for fleet-config push)

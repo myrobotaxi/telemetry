@@ -33,6 +33,32 @@ func loadEncryptor() (cryptox.Encryptor, error) {
 	return enc, nil
 }
 
+// READ THIS BEFORE ADDING A SUBCOMMAND THAT USES ANY REPO BELOW.
+//
+// Every constructor in this file returns an ENCRYPTION-WIRED repo. If your
+// subcommand then READS a P1 column through it — a Tesla token, any Vehicle
+// location field, a Drive route trail or its geocoded labels — you have
+// performed an operator decrypt, and MYR-447 requires it to be attributable:
+//
+//  1. Call requireOperator() FIRST, before openDB, so a missing OPS_OPERATOR
+//     fails before a connection is made.
+//  2. Write a store.OperatorAccess row via newOperatorAuditor(db).RecordDecrypt
+//     BEFORE the plaintext is printed, transmitted, or otherwise used, and
+//     abort the command if that write fails.
+//
+// THIS IS A CONVENTION, NOT A COMPILER GUARANTEE, and it is worth saying so
+// rather than letting the next author assume otherwise. A signature-level
+// guard was considered and rejected: these constructors are shared with
+// subcommands that only WRITE (`ops auth link` seals a fresh token and reads
+// nothing), so forcing an operator handle through the constructor would
+// demand attribution from commands that decrypt nothing and would say
+// nothing about whether RecordDecrypt was actually called. Making the
+// obligation structural means wrapping the decrypt itself — pushing the
+// audit into the repo read path — which is a larger change than MYR-447
+// took on. Until then: the four audited subcommands are `auth token`,
+// `fields snapshot`, `fleet-config push` and `geocode backfill`; copy one of
+// them.
+//
 // newAccountRepo is the canonical constructor used by every ops
 // subcommand that needs to read or write Account tokens. Centralizing it
 // here keeps the encryption foundation in one place across auth, fleet,

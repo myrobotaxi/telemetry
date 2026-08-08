@@ -226,7 +226,23 @@ func appendLabelShadowSets(
 			continue
 		}
 		if ct == "" {
-			setClauses = append(setClauses, fmt.Sprintf("%q = NULL", encCol))
+			// An EMPTY label is a clear, and must be written like one.
+			//
+			// This is not a rare path. A reverse geocode that resolves a
+			// street address but no place name writes LocationName="" with
+			// LocationAddr set (writer_location_address.go), and the
+			// destination geocode does the same for DestinationAddress —
+			// so a car habitually parked somewhere address-only re-enters
+			// this branch on every geocode.
+			//
+			// NULLing the ciphertext alone would leave plaintext-present +
+			// ciphertext-NULL, which plaintextpurge reads as
+			// verdictUnsealed and refuses to touch — permanently, and it
+			// would recur after every purge. Its printed advice ("run the
+			// backfill first") then re-seals the STALE plaintext, putting a
+			// label the server had just cleared back onto the live read
+			// path. Same failure as the nav-cancel case; same fix.
+			setClauses = appendLabelClear(setClauses, plain, encCol)
 			continue
 		}
 		setClauses = append(setClauses, fmt.Sprintf("%q = $%d", encCol, argIdx))
@@ -279,8 +295,8 @@ func appendClearFieldSets(setClauses, clearFields []string) []string {
 			// Scrubbing both is what "cleared" has to mean once the
 			// plaintext is retired rather than dropped. The value matches
 			// the column's nullability, same as the purge's ScrubSQL.
-			if scrub, isLabel := labelPlaintextScrubValue[col]; isLabel {
-				setClauses = append(setClauses, fmt.Sprintf("%q = %s", col, scrub))
+			if _, isLabel := labelPlaintextScrubValue[col]; isLabel {
+				setClauses = appendLabelPlaintextScrub(setClauses, col)
 			}
 			continue
 		}
@@ -301,6 +317,31 @@ func appendClearFieldSets(setClauses, clearFields []string) []string {
 // *Enc sibling) but that predates MYR-447, their scrub value is `0` rather
 // than a string, and changing MYR-433's cancel behaviour is not this
 // issue's to make. Tracked as a follow-up.
+// appendLabelClear writes the two SET clauses that "this label is now
+// empty" has to mean while the plaintext column is retired-but-not-dropped:
+// NULL the ciphertext this server owns, and scrub the plaintext it no
+// longer writes.
+//
+// Both callers — an explicit ClearFields entry and an empty-string label
+// arriving through the normal write path — MUST produce the identical pair.
+// They are the same event as far as the database is concerned, and the one
+// state neither may leave behind is plaintext-present + ciphertext-NULL,
+// which the purge cannot resolve and the backfill would undo.
+func appendLabelClear(setClauses []string, plaintextCol, encCol string) []string {
+	setClauses = append(setClauses, fmt.Sprintf("%q = NULL", encCol))
+	return appendLabelPlaintextScrub(setClauses, plaintextCol)
+}
+
+// appendLabelPlaintextScrub emits the "no data here" write for a retired
+// plaintext LABEL column, using the literal that matches its nullability.
+func appendLabelPlaintextScrub(setClauses []string, plaintextCol string) []string {
+	scrub, ok := labelPlaintextScrubValue[plaintextCol]
+	if !ok {
+		return setClauses
+	}
+	return append(setClauses, fmt.Sprintf("%q = %s", plaintextCol, scrub))
+}
+
 var labelPlaintextScrubValue = map[string]string{
 	"locationName":       `''`,
 	"locationAddress":    `''`,

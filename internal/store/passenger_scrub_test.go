@@ -26,9 +26,19 @@ func setupPassengerScrub(t *testing.T) {
 	if err := store.RunMigrations(ctx, testConnStr, testLogger()); err != nil {
 		t.Fatalf("RunMigrations: %v", err)
 	}
+	// The scrub now writes AuditLog rows before it touches a column
+	// (CG-DL-3), so the table has to exist.
+	ensureAuditSchema(t)
 	if _, err := testPool.Exec(ctx, `DELETE FROM go_ride_requests`); err != nil {
 		t.Fatalf("clean go_ride_requests: %v", err)
 	}
+}
+
+// newScrubber builds a Scrubber wired to the real audit writer. A real run
+// refuses to start without one.
+func newScrubber(dryRun bool) *passengerscrub.Scrubber {
+	return passengerscrub.New(testPool, scrubLogger(), dryRun).
+		WithAuditor(store.NewPassengerScrubAuditor(testPool))
 }
 
 func scrubLogger() *slog.Logger {
@@ -54,7 +64,7 @@ func TestPassengerScrubClearsBothColumnsEverywhere(t *testing.T) {
 	// A row that never had a passenger: it must not be counted as work.
 	seedRide(t, "legacy-none", owner, vehicle, "completed", time.Hour, false)
 
-	res, err := passengerscrub.New(testPool, scrubLogger(), false).Run(ctx)
+	res, err := newScrubber(false).Run(ctx)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -101,7 +111,7 @@ func TestPassengerScrubIsIdempotent(t *testing.T) {
 	seedRide(t, "idem-a", "user-scrub-idem", "veh-scrub-idem", "completed", time.Hour, true)
 	seedRide(t, "idem-b", "user-scrub-idem", "veh-scrub-idem", "arrived", time.Hour, true)
 
-	first, err := passengerscrub.New(testPool, scrubLogger(), false).Run(ctx)
+	first, err := newScrubber(false).Run(ctx)
 	if err != nil {
 		t.Fatalf("Run (first): %v", err)
 	}
@@ -109,7 +119,7 @@ func TestPassengerScrubIsIdempotent(t *testing.T) {
 		t.Fatalf("first run scrubbed %d rows, want 2", first.RowsScrubbed)
 	}
 
-	second, err := passengerscrub.New(testPool, scrubLogger(), false).Run(ctx)
+	second, err := newScrubber(false).Run(ctx)
 	if err != nil {
 		t.Fatalf("Run (second): %v", err)
 	}
@@ -134,7 +144,7 @@ func TestPassengerScrubDryRunWritesNothing(t *testing.T) {
 	seedRide(t, "dry-a", "user-scrub-dry", "veh-scrub-dry", "completed", time.Hour, true)
 	seedRide(t, "dry-b", "user-scrub-dry", "veh-scrub-dry", "cancelled", time.Hour, true)
 
-	res, err := passengerscrub.New(testPool, scrubLogger(), true).Run(ctx)
+	res, err := newScrubber(true).Run(ctx)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -170,7 +180,7 @@ func TestPassengerScrubDoesNotBumpUpdatedAt(t *testing.T) {
 	seedRide(t, "age-keep", "user-scrub-age", "veh-scrub-age", "completed", 300*24*time.Hour, true)
 	before := rideUpdatedAt(t, "age-keep")
 
-	if _, err := passengerscrub.New(testPool, scrubLogger(), false).Run(ctx); err != nil {
+	if _, err := newScrubber(false).Run(ctx); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 

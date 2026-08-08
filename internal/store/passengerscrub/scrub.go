@@ -37,6 +37,7 @@ package passengerscrub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -53,8 +54,11 @@ import (
 // IT SELECTS ONLY THE ID. Never the values. Reading a P1 string in order to
 // destroy it would put it in a Go heap and one careless log line from disk, and
 // the scrub needs to know nothing about what it is erasing.
+// It also projects the two party columns, which the scrub itself does not
+// need: they exist so the run can be AUDITED per (owner, vehicle) before it
+// writes. Both are P0 opaque cuids.
 const querySelectRows = `
-SELECT id
+SELECT id, owner_id, vehicle_id
 FROM go_ride_requests
 WHERE passenger_name IS NOT NULL OR passenger_phone IS NOT NULL
 ORDER BY id`
@@ -117,12 +121,78 @@ type pool interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
+// Auditor writes the AuditLog rows that make this run provable after the
+// fact. Declared at the consumer site (satisfied by *store.AuditRepo, wired
+// by the cmd adapter) so this package does not import the store back.
+type Auditor interface {
+	RecordPassengerScrub(ctx context.Context, ownerID, vehicleID string, rideCount int) error
+}
+
+// ErrAuditorRequired is returned when a REAL run is attempted with no
+// Auditor. A one-time mass scrub of P1 columns is exactly the operation
+// whose having-happened must be demonstrable later — CG-DL-3's principle,
+// applied to an operator-run binary rather than a request handler. A dry run
+// changes nothing and needs no row.
+var ErrAuditorRequired = errors.New(
+	"passengerscrub: an Auditor is required for a real run (CG-DL-3): " +
+		"a mass scrub that leaves no audit trail cannot be proven to have happened")
+
 // Scrubber runs the one-time legacy passenger-column scrub. Construct via New;
 // the zero value is unusable.
 type Scrubber struct {
-	pool   pool
-	logger *slog.Logger
-	dryRun bool
+	pool    pool
+	logger  *slog.Logger
+	dryRun  bool
+	auditor Auditor
+}
+
+// scrubTarget is one claimed row plus the two party ids the audit grouping
+// needs. The passenger VALUES are deliberately absent — the scrub never reads
+// what it erases.
+type scrubTarget struct {
+	id        string
+	ownerID   string
+	vehicleID string
+}
+
+// WithAuditor attaches the audit writer. Required for a real run.
+func (s *Scrubber) WithAuditor(a Auditor) *Scrubber {
+	s.auditor = a
+	return s
+}
+
+// auditScrub writes one row per (owner, vehicle) BEFORE any column is
+// cleared, so a failure to record the scrub prevents the scrub rather than
+// hiding it — the same ordering CG-DL-3 requires of a deletion.
+//
+// Grouped rather than per-row for the same reason the retention sweeper
+// groups: a fleet-wide legacy scrub would otherwise write one row per ride
+// into an append-only table that can never be compacted.
+func (s *Scrubber) auditScrub(ctx context.Context, targets []scrubTarget) error {
+	type group struct {
+		ownerID   string
+		vehicleID string
+		count     int
+	}
+	order := make([]string, 0, len(targets))
+	groups := make(map[string]*group, len(targets))
+	for _, t := range targets {
+		key := t.ownerID + "\x00" + t.vehicleID
+		g, ok := groups[key]
+		if !ok {
+			g = &group{ownerID: t.ownerID, vehicleID: t.vehicleID}
+			groups[key] = g
+			order = append(order, key)
+		}
+		g.count++
+	}
+	for _, key := range order {
+		g := groups[key]
+		if err := s.auditor.RecordPassengerScrub(ctx, g.ownerID, g.vehicleID, g.count); err != nil {
+			return fmt.Errorf("passengerscrub: record audit: %w", err)
+		}
+	}
+	return nil
 }
 
 // New returns a Scrubber bound to the given pool.
@@ -148,18 +218,26 @@ func New(p pool, logger *slog.Logger, dryRun bool) *Scrubber {
 func (s *Scrubber) Run(ctx context.Context) (Result, error) {
 	res := Result{DryRun: s.dryRun}
 
-	ids, err := s.selectRows(ctx)
+	if !s.dryRun && s.auditor == nil {
+		return res, ErrAuditorRequired
+	}
+
+	targets, err := s.selectRows(ctx)
 	if err != nil {
 		return res, err
 	}
-	res.RowsScanned = len(ids)
+	res.RowsScanned = len(targets)
 
-	if !s.dryRun {
-		for _, id := range ids {
+	if !s.dryRun && len(targets) > 0 {
+		// Audit FIRST, and abort the whole run if it fails.
+		if auditErr := s.auditScrub(ctx, targets); auditErr != nil {
+			return res, auditErr
+		}
+		for _, t := range targets {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return res, fmt.Errorf("passengerscrub: cancelled: %w", ctxErr)
 			}
-			s.scrubOne(ctx, id, &res)
+			s.scrubOne(ctx, t.id, &res)
 		}
 	}
 
@@ -182,25 +260,25 @@ func (s *Scrubber) Run(ctx context.Context) (Result, error) {
 }
 
 // selectRows collects the ids of every row still carrying either column.
-func (s *Scrubber) selectRows(ctx context.Context) ([]string, error) {
+func (s *Scrubber) selectRows(ctx context.Context) ([]scrubTarget, error) {
 	rows, err := s.pool.Query(ctx, querySelectRows)
 	if err != nil {
 		return nil, fmt.Errorf("passengerscrub: select rows: %w", err)
 	}
 	defer rows.Close()
 
-	var ids []string
+	var targets []scrubTarget
 	for rows.Next() {
-		var id string
-		if scanErr := rows.Scan(&id); scanErr != nil {
+		var t scrubTarget
+		if scanErr := rows.Scan(&t.id, &t.ownerID, &t.vehicleID); scanErr != nil {
 			return nil, fmt.Errorf("passengerscrub: scan row: %w", scanErr)
 		}
-		ids = append(ids, id)
+		targets = append(targets, t)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("passengerscrub: iterate rows: %w", err)
 	}
-	return ids, nil
+	return targets, nil
 }
 
 // scrubOne issues the two-column UPDATE for one row. A failure is tallied and

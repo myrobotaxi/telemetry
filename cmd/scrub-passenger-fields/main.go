@@ -55,6 +55,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/myrobotaxi/telemetry/internal/config"
+	"github.com/myrobotaxi/telemetry/internal/store"
 	"github.com/myrobotaxi/telemetry/internal/store/passengerscrub"
 )
 
@@ -88,7 +89,14 @@ func run() int {
 	}
 	defer pool.Close()
 
-	res, runErr := passengerscrub.New(pool, logger, *dryRun).Run(ctx)
+	// The auditor is not optional for a real run: the package refuses one
+	// without it (CG-DL-3 — a mass scrub of P1 columns that leaves no trail
+	// cannot be shown to have happened). A dry run writes no audit row
+	// because it changes nothing.
+	res, runErr := passengerscrub.
+		New(pool, logger, *dryRun).
+		WithAuditor(store.NewPassengerScrubAuditor(pool)).
+		Run(ctx)
 
 	report := struct {
 		DryRun       bool   `json:"dryRun"`
