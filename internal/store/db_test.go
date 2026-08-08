@@ -17,6 +17,7 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/config"
 	"github.com/myrobotaxi/telemetry/internal/cryptox"
 	"github.com/myrobotaxi/telemetry/internal/store"
+	"github.com/myrobotaxi/telemetry/internal/testutil"
 )
 
 // testPool is the shared connection pool for all store integration tests.
@@ -307,15 +308,15 @@ func sealCatalogLabels(
 	t.Helper()
 	ctx := context.Background()
 
+	// testutil.SealLabel is the ONE way a test seals a label — shared with
+	// the contract harness in tests/contract so both plant the same row
+	// shape production writes (ciphertext set, NULL for an empty label).
 	seal := func(plain string) *string {
-		if plain == "" {
-			return nil
-		}
-		ct, err := enc.EncryptString(plain)
+		ct, err := testutil.SealLabel(enc, plain)
 		if err != nil {
 			t.Fatalf("seal catalog label: %v", err)
 		}
-		return &ct
+		return ct
 	}
 	var destAddr *string
 	if cat.destinationAddress != nil {

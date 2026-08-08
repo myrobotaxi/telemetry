@@ -11,6 +11,10 @@
 //     `locationAddress`). These were the spec-only fields the snapshot
 //     read path started writing in MYR-24 (2026-04-23); if a future
 //     refactor stops loading them, this test fails loudly.
+//   - 200 owner happy path: the four geocoded labels (MYR-447) are
+//     seeded as ciphertext only and MUST come back on the wire
+//     unchanged — plus the absent case, where the two NOT NULL labels
+//     stay `""` and the two nullable ones stay `null`.
 //   - 404 not_found for an unknown vehicleId.
 //   - 403 vehicle_not_owned for a vehicle owned by someone else.
 //   - 401 on missing Authorization header.
@@ -35,6 +39,8 @@ func TestContract_GETVehicleSnapshot(t *testing.T) {
 		unknownVehicle = "veh_does_not_exist"
 		locName        = "Home"
 		locAddr        = "123 Market St, San Francisco, CA"
+		destName       = "Ferry Building"
+		destAddr       = "1 Ferry Building, San Francisco, CA 94111"
 		modelStr       = "Model 3"
 		colorStr       = "Midnight Silver Metallic"
 		modelYear      = 2024
@@ -57,20 +63,26 @@ func TestContract_GETVehicleSnapshot(t *testing.T) {
 			path: "/api/vehicles/" + vehicleID + "/snapshot",
 			seed: func(t *testing.T, h *seedHelpers) {
 				h.seedUser(ctx, t, ownerID)
+				// MYR-447: seedVehicle plants all four labels as
+				// ciphertext ONLY (the plaintext columns get '' / NULL,
+				// as production writes them). Every label assertion
+				// below therefore fails unless the read path decrypts.
 				h.seedVehicle(ctx, t, vehicleSeed{
-					ID:              vehicleID,
-					UserID:          ownerID,
-					VIN:             ownerVIN,
-					Name:            "Stumpy",
-					Model:           modelStr,
-					Year:            modelYear,
-					Color:           colorStr,
-					Status:          "parked",
-					ChargeLevel:     chargeLvl,
-					EstimatedRange:  rangeMiles,
-					LocationName:    locName,
-					LocationAddress: locAddr,
-					FsdMilesReset:   fsdMilesSince,
+					ID:                 vehicleID,
+					UserID:             ownerID,
+					VIN:                ownerVIN,
+					Name:               "Stumpy",
+					Model:              modelStr,
+					Year:               modelYear,
+					Color:              colorStr,
+					Status:             "parked",
+					ChargeLevel:        chargeLvl,
+					EstimatedRange:     rangeMiles,
+					LocationName:       locName,
+					LocationAddress:    locAddr,
+					DestinationName:    destName,
+					DestinationAddress: destAddr,
+					FsdMilesReset:      fsdMilesSince,
 				})
 			},
 			token:      func(t *testing.T) string { return mintToken(t, ownerID, nil) },
@@ -125,6 +137,15 @@ func TestContract_GETVehicleSnapshot(t *testing.T) {
 				if got, _ := resp["locationAddress"].(string); got != locAddr {
 					t.Errorf("locationAddress = %q, want %q", got, locAddr)
 				}
+				// MYR-447: the nullable half of the label set. These come
+				// back as JSON strings when sealed values exist — same
+				// keys, same values, same types as before sealing.
+				if got, _ := resp["destinationName"].(string); got != destName {
+					t.Errorf("destinationName = %v, want %q", resp["destinationName"], destName)
+				}
+				if got, _ := resp["destinationAddress"].(string); got != destAddr {
+					t.Errorf("destinationAddress = %v, want %q", resp["destinationAddress"], destAddr)
+				}
 				// year and fsdMilesSinceReset come back as float64
 				// after json.Unmarshal — both are JSON numbers per the
 				// schema.
@@ -139,6 +160,61 @@ func TestContract_GETVehicleSnapshot(t *testing.T) {
 				// catches the MYR-139 class of identity drift.
 				if got, _ := resp["vehicleId"].(string); got != vehicleID {
 					t.Errorf("vehicleId = %q, want %q", got, vehicleID)
+				}
+			},
+		},
+		{
+			// MYR-447 nullability guard. Sealing changed the storage of
+			// the four labels, and the absent case is where a change of
+			// storage most easily changes the WIRE: `NULL` ciphertext has
+			// to keep producing `""` for the two NOT NULL labels and
+			// `null` for the two nullable ones — never an empty string
+			// where a null belonged, and never a missing key.
+			name: "vehicle with no geocoded labels keeps the pre-sealing null shape",
+			path: "/api/vehicles/" + vehicleID + "/snapshot",
+			seed: func(t *testing.T, h *seedHelpers) {
+				h.seedUser(ctx, t, ownerID)
+				h.seedVehicle(ctx, t, vehicleSeed{
+					ID:             vehicleID,
+					UserID:         ownerID,
+					VIN:            ownerVIN,
+					Name:           "Ungeocoded",
+					Model:          modelStr,
+					Year:           modelYear,
+					Color:          colorStr,
+					Status:         "parked",
+					ChargeLevel:    chargeLvl,
+					EstimatedRange: rangeMiles,
+				})
+			},
+			token:      func(t *testing.T) string { return mintToken(t, ownerID, nil) },
+			wantStatus: http.StatusOK,
+			assertBody: func(t *testing.T, body []byte) {
+				validateAgainstSchema(t,
+					"docs/contracts/schemas/vehicle-state.schema.json", body)
+
+				var resp map[string]any
+				decodeJSON(t, body, &resp)
+
+				for _, k := range []string{"locationName", "locationAddress"} {
+					got, ok := resp[k]
+					if !ok {
+						t.Errorf("%s: key missing; want present and empty", k)
+						continue
+					}
+					if got != "" {
+						t.Errorf("%s = %v, want \"\" (no ciphertext = no label)", k, got)
+					}
+				}
+				for _, k := range []string{"destinationName", "destinationAddress"} {
+					got, ok := resp[k]
+					if !ok {
+						t.Errorf("%s: key missing; want present and null", k)
+						continue
+					}
+					if got != nil {
+						t.Errorf("%s = %v, want null (nullable label, no ciphertext)", k, got)
+					}
 				}
 			},
 		},
