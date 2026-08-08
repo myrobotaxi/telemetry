@@ -167,7 +167,7 @@ func (p *OwnerProvisioner) migrateRefreshFamilies(ctx context.Context, tx pgx.Tx
 
 	var moved int64
 	settled := false
-	for pass := 0; pass < maxRefreshMigrationPasses; pass++ {
+	for range maxRefreshMigrationPasses {
 		tag, execErr := tx.Exec(ctx, queryMigrateRefreshFamilies, toUserID, fromUserID, families)
 		if execErr != nil {
 			return fmt.Errorf("store.ProvisionTeslaOwner: migrate sessions %s->%s: %w", fromUserID, toUserID, execErr)
@@ -185,12 +185,17 @@ func (p *OwnerProvisioner) migrateRefreshFamilies(ctx context.Context, tx pgx.Tx
 	}
 
 	// Audit (P0 only: opaque cuids and counts; no hashes, no tokens).
+	//
+	// `settled` is the one an operator should alert on. It says the sweep proved
+	// itself with a zero-row pass, which is the ordinary outcome; false means the
+	// cap was reached and somebody's session was cut rather than carried.
 	p.logger.Info("owner_sessions_migrated",
 		slog.String("event", "owner_sessions_migrated"),
 		slog.String("from_user_id", fromUserID),
 		slog.String("to_user_id", toUserID),
 		slog.Int("families", len(families)),
 		slog.Int64("rows_moved", moved),
+		slog.Bool("settled", settled),
 		slog.Int64("rows_revoked_split", stranded),
 	)
 	return nil

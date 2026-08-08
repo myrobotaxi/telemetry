@@ -312,7 +312,7 @@ func seedFamilyRow(t *testing.T, userID, familyID, hash string, shape rowShape) 
 		expires = "-1 days"
 	}
 	if _, err := testPool.Exec(context.Background(), q,
-		hash, familyID, userID, timeFromNow(expires), rotated, revoked, revokedT, reason); err != nil {
+		hash, familyID, userID, timeFromNow(t, expires), rotated, revoked, revokedT, reason); err != nil {
 		t.Fatalf("seed refresh row %s: %v", hash, err)
 	}
 }
@@ -320,11 +320,12 @@ func seedFamilyRow(t *testing.T, userID, familyID, hash string, shape rowShape) 
 // timeFromNow resolves a Postgres interval literal against the DATABASE clock,
 // so a fixture's notion of "expired" is the same one the migration's predicate
 // uses. Comparing against the test process's time.Now() would be a second clock.
-func timeFromNow(interval string) time.Time {
+func timeFromNow(t *testing.T, interval string) time.Time {
+	t.Helper()
 	var ts time.Time
 	if err := testPool.QueryRow(context.Background(),
 		`SELECT NOW() + $1::interval`, interval).Scan(&ts); err != nil {
-		panic("resolve interval " + interval + ": " + err.Error())
+		t.Fatalf("resolve interval %s: %v", interval, err)
 	}
 	return ts
 }
@@ -501,7 +502,7 @@ func TestConvergenceBlocksOnAnInFlightRotationAndStillMigrates(t *testing.T) {
 	if _, err := rot.Exec(ctx, `
 		INSERT INTO go_refresh_tokens (token_hash, family_id, user_id, expires_at, rotated_from)
 		VALUES ($1, $2, $3, $4, $5)`,
-		nextHash, familyID, lockedUser, timeFromNow("90 days"), rootHash); err != nil {
+		nextHash, familyID, lockedUser, timeFromNow(t, "90 days"), rootHash); err != nil {
 		t.Fatalf("insert successor: %v", err)
 	}
 
