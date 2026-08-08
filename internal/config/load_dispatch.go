@@ -54,6 +54,19 @@ func applyDispatchEnvOverrides(fc *fileConfig) error {
 	}
 	fc.drivePrunerEnabled = pruner
 
+	// RIDE_RETENTION_PRUNER_ENABLED is the MYR-447 ride-retention sweep
+	// kill-switch. Separate from the drive switch above even though the two
+	// sweeps now share an engine: they delete from different tables, and an
+	// operator stopping one because it is misbehaving must not thereby suspend
+	// the other's privacy commitment. Same fail-fast parse, for the same reason
+	// — an unparseable value here would silently decide whether a year-old ride
+	// record and a removed feature's passenger data keep living.
+	ridePruner, err := parseKillSwitchEnv("RIDE_RETENTION_PRUNER_ENABLED")
+	if err != nil {
+		return err
+	}
+	fc.ridePrunerEnabled = ridePruner
+
 	return nil
 }
 

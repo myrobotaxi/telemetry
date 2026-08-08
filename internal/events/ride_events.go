@@ -83,21 +83,28 @@ func (RideStatusChangedEvent) EventTopic() Topic { return TopicRideStatusChanged
 
 // RideAcceptedEvent is the dispatch seam: published once when an owner
 // accepts a request, carrying everything MYR-176 needs to push a Tesla
-// navigation_request (pickup/dropoff places + booked-for passenger). No
-// subscriber exists until MYR-176; the bus tolerates zero subscribers.
-// Internal-only — never broadcast to WS clients.
+// navigation_request (pickup/dropoff places). Internal-only — never broadcast
+// to WS clients.
+//
+// IT NO LONGER CARRIES THE BOOKED-FOR PASSENGER (MYR-447). PassengerName and
+// PassengerPhone were added here in MYR-173 for a nav-dispatch consumer that
+// was never written: the fields were populated on every accept and read by
+// NOTHING — not internal/dispatch, not internal/push, not internal/ws. That
+// made this struct the one place the internal event bus carried P1 PII with no
+// purpose, so every publish put a passenger's name and phone number into an
+// in-process fan-out for no reader to use. The feature that produced the data
+// was itself removed from the app in MYR-382. Removing the fields is the whole
+// fix; there is no replacement seam, because there was never a consumer.
 type RideAcceptedEvent struct {
 	BasePayload
-	RideRequestID  string
-	VehicleID      string
-	RiderID        string
-	OwnerID        string
-	Pickup         RidePlace
-	Dropoff        RidePlace
-	PassengerName  string // empty when the rider is riding themselves
-	PassengerPhone string
-	ScheduledFor   *time.Time
-	AcceptedAt     time.Time
+	RideRequestID string
+	VehicleID     string
+	RiderID       string
+	OwnerID       string
+	Pickup        RidePlace
+	Dropoff       RidePlace
+	ScheduledFor  *time.Time
+	AcceptedAt    time.Time
 }
 
 // EventTopic returns TopicRideAccepted.

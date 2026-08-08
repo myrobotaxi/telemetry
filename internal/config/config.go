@@ -36,6 +36,8 @@ type Config struct {
 	ridePollInterval time.Duration
 	// drivePrunerEnabled is the MYR-439 drive-retention sweep kill-switch.
 	drivePrunerEnabled bool
+	// ridePrunerEnabled is the MYR-447 ride-retention sweep kill-switch.
+	ridePrunerEnabled bool
 }
 
 // MonitoringConfig holds observability probe settings.
@@ -317,6 +319,25 @@ func (c *Config) ReservationDispatchEnabled() bool { return c.reservationDispatc
 // Note what this does NOT do: it cannot change the retention window. That is a
 // compile-time constant (store.DriveRetentionDays) per CG-DL-4.
 func (c *Config) DrivePrunerEnabled() bool { return c.drivePrunerEnabled }
+
+// RidePrunerEnabled is the MYR-447 ride-retention sweep kill-switch. When false
+// the daily sweep does not run: terminal ride requests accumulate past the
+// documented 365-day window AND the deprecated booked-for-passenger columns stop
+// being scrubbed at terminal + 30 days. Recoverable — the sweep is idempotent
+// and the next enabled pass simply finds more work — but two privacy
+// commitments go unmet for as long as it is off, so this is a switch for
+// stopping a MISBEHAVING sweep, not for deferring one. Watch
+// telemetry_ride_pruner_last_success_timestamp_seconds while it is off.
+// Defaults to true; set RIDE_RETENTION_PRUNER_ENABLED=false to disable without
+// a deploy.
+//
+// Deliberately SEPARATE from DrivePrunerEnabled: the two sweeps share an engine
+// but touch different tables, and one misbehaving must not force the other off.
+//
+// Note what this does NOT do: it cannot change either window. Both are
+// compile-time constants (store.RideRetentionDays, store.RidePassengerScrubDays)
+// per CG-DL-4.
+func (c *Config) RidePrunerEnabled() bool { return c.ridePrunerEnabled }
 
 // ServiceRepollEnabled is the MYR-320 in-service re-poll kill-switch. False
 // leaves the ServiceStatusMonitor reading on connectivity / ServiceMode EDGES
