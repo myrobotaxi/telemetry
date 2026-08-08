@@ -681,7 +681,11 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	// config, and re-pushes the ones that do not, healing every already-linked
 	// owner with no ops action. Off unless the signing proxy and telemetry
 	// endpoint are configured.
-	setupFleetConfigReconciler(ctx, cfg, vehicleRepo, accountRepo, logger)
+	// MYR-489: the reconciler is also the observer of applied signed commands
+	// — the in-band proof that an owner's virtual key is now paired. nil when
+	// the safety guard above keeps the reconciler off, which simply leaves the
+	// command executor unhooked.
+	fleetConfigReconciler := setupFleetConfigReconciler(ctx, cfg, vehicleRepo, accountRepo, logger)
 
 	// --- HTTP server + route registration ---
 	srv := server.New(cfg.Server(), logger, db, reg, cfg.TeslaPublicKey())
@@ -722,7 +726,10 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 		debugGate:          gates.debugFields,
 		originPatterns:     originPatterns,
 		serviceStatus:      serviceStatusMonitor,
-		logger:             logger,
+		// MYR-489: lets the vehicle-command endpoint tell the fleet-config
+		// reconciler that a signed command applied.
+		fleetConfigReconciler: fleetConfigReconciler,
+		logger:                logger,
 	})
 
 	// --- Identity module endpoints (MYR-193, ADR-001) ---
