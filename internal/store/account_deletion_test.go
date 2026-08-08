@@ -183,8 +183,8 @@ func TestAccountDeleter_DeleteIdentity_WritesTheAuditRow(t *testing.T) {
 
 	counts := store.AccountDeletionCounts{
 		VehicleCount: 2, DriveCount: 9, RidesCancelled: 1,
-		SharesRevoked: 3, PushDevicesDeleted: 1, SavedPlacesDeleted: 2,
-		RefreshTokensRevoked: 4,
+		SharesRevoked: 3, ShareLabelsScrubbed: 3, PushDevicesDeleted: 1,
+		SavedPlacesDeleted: 2, RefreshTokensRevoked: 4,
 	}
 	res, err := newAccountDeleter(t).DeleteIdentity(context.Background(), delUserApple, counts)
 	if err != nil {
@@ -219,7 +219,11 @@ func TestAccountDeleter_DeleteIdentity_WritesTheAuditRow(t *testing.T) {
 		// places themselves. The coordinates are P1 and this row is P0-only,
 		// so what the audit trail records is that two rows went, never where
 		// they pointed.
-		"savedPlacesDeleted":   true,
+		"savedPlacesDeleted": true,
+		// MYR-447. A COUNT of the share rows whose owner-typed label — the
+		// departing person's NAME, written by somebody else — was erased.
+		// Never the labels: they are P1 and this row is P0-only.
+		"shareLabelsScrubbed":  true,
 		"refreshTokensRevoked": true, "hadPrismaUser": true,
 	}
 	for k, v := range got {
