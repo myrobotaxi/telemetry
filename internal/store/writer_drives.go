@@ -167,6 +167,21 @@ func (w *Writer) handleDriveEnded() events.Handler {
 		// Flush any remaining buffered route points for this drive.
 		w.routeBuf.flushDrive(opCtx, evt.DriveID)
 
+		// MYR-454: this is now a BACKSTOP, not the authority. Since the
+		// telemetry flush folds `status` from the row's own gear/speed
+		// (appendDerivedStatusSet), the frame that ends a drive — gear P,
+		// speed 0 — already resolves the column to 'parked' on its own,
+		// atomically with the gear write. Keeping the write here is
+		// harmless (it agrees with the fold by construction, because
+		// drive-end is defined by leaving D/R) and it still covers a drive
+		// completed by the detector's watchdog rather than by a gear frame.
+		//
+		// Note the deliberate asymmetry that remains: `drive.started` still
+		// does NOT write 'driving'. It does not need to — the gear-D frame
+		// that starts the drive folds the column in the same flush — and
+		// adding it back would put a second writer in a race with the fold
+		// that the fold cannot win, resurrecting the inverse bug (a stale
+		// 'driving' latched over a car that has since parked).
 		if err := w.vehicles.UpdateStatus(opCtx, evt.VIN, VehicleStatusParked); err != nil {
 			w.logger.Warn("failed to set vehicle status to parked",
 				slog.String("vin", redactVIN(evt.VIN)),

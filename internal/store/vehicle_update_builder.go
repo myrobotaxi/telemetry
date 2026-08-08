@@ -99,6 +99,7 @@ func buildTelemetryUpdate(vin string, u VehicleUpdate, encShadows map[string]str
 	argIdx := 1
 
 	setClauses, args, argIdx = appendPlaintextSets(setClauses, args, argIdx, u, clearSet)
+	setClauses, args, argIdx = appendDerivedStatusSet(setClauses, args, argIdx, u, clearSet)
 	setClauses, args, argIdx = appendGPSShadowSets(setClauses, args, argIdx, encShadows, clearSet)
 	setClauses, args, argIdx = appendNavRouteShadowSet(setClauses, args, argIdx, encShadows, clearSet)
 	setClauses, args, argIdx = appendLabelShadowSets(setClauses, args, argIdx, encShadows, clearSet)
@@ -150,6 +151,93 @@ func appendPlaintextSets(
 		argIdx++
 	}
 	return setClauses, args, argIdx
+}
+
+// appendDerivedStatusSet folds "status" into the SAME statement that writes
+// the motion columns it is derived from (MYR-454, MYR-61).
+//
+// Why this exists. Before MYR-454 the column had exactly two writers —
+// `drive.ended` → 'parked' and the ServiceStatusMonitor → 'in_service' /
+// 'parked' — and NEITHER of them, nor this telemetry flush, ever wrote
+// 'driving'. `drive.started` wrote no status at all, the asymmetric half of
+// a pair. So the persisted column could only ever hold 'offline' (the schema
+// default), 'parked' or 'in_service', while `driving` existed solely as a
+// live re-derivation in the WebSocket broadcaster (ws.deriveVehicleStatus).
+// Every surface that reads the column — the REST snapshot, the WS
+// on-connect snapshot, the vehicles list that backs the map sheet — served
+// 'parked' for the entire duration of a real drive. That is the external-beta
+// report: a car mid-drive, drive row open, `speed`/`gearPosition` freshly
+// written to its own row, and `status` still saying 'parked' beside them.
+//
+// The fix is to stop treating status as a thing someone remembers to write
+// and make it a function of the row's own motion columns, evaluated in SQL so
+// it is ATOMIC with the gear/speed write it follows. There is no window in
+// which the row can disagree with itself, and no second writer to race: the
+// derivation IS the column.
+//
+// Bare column references on the right-hand side of a SET read the OLD row, so
+// COALESCE($new, "col") means "this frame's value if it carried one, else the
+// last one we stored". That is what lets a speed-only frame — the common case,
+// since Tesla emits Gear on CHANGE only and a car in D sends no further gear
+// frames for the rest of the drive — still resolve against the gear the car
+// was last known to be in.
+//
+// Precedence mirrors ws.deriveVehicleStatus (vehicle-state-schema.md §2.4)
+// so the snapshot and the live wire cannot disagree: driving (gear D/R, or
+// speed > 0) always wins, then in_service, else parked.
+//
+// Two deliberate choices in the CASE:
+//
+//   - 'in_service' and 'charging' are PRESERVED rather than overwritten when
+//     the car is stationary. This server owns neither: 'in_service' belongs to
+//     the ServiceStatusMonitor and 'charging' is written by no Go path at all
+//     (the Vehicle table is Prisma-owned and shared with the Next.js app).
+//     Folding them down to 'parked' on every 5s flush would stomp another
+//     writer's value at a cadence it could never win against.
+//   - Everything else stationary becomes 'parked' — INCLUDING 'offline'. A row
+//     whose status is 'offline' while its own gear/speed columns are being
+//     updated by a live stream is self-contradictory: 'offline' is the schema
+//     default that owner-vehicle provisioning never overwrites, and it is what
+//     leaves a happily-streaming car permanently ineligible for dispatch. A
+//     frame arriving is proof the car is not offline, so ingest heals it.
+//
+// Known limitation, deliberately not papered over: a car that is in_service
+// and then drives becomes 'driving', and on parking resolves to 'parked'
+// rather than back to 'in_service'. The live wire does return to in_service,
+// because the broadcaster caches the ServiceMode bool separately — but there
+// is no persisted serviceMode column for this CASE to consult, and inventing
+// one is out of scope here. The MYR-320 periodic in-service pass re-asserts
+// the value on its next sweep.
+func appendDerivedStatusSet(
+	setClauses []string, args []any, argIdx int,
+	u VehicleUpdate, clearSet map[string]bool,
+) (clauses []string, outArgs []any, nextIdx int) {
+	gear := derefString(u.GearPosition)
+	if clearSet["gearPosition"] {
+		gear = nil
+	}
+	speed := derefInt(u.Speed)
+	if clearSet["speed"] {
+		speed = nil
+	}
+
+	// No motion signal in this frame means nothing to re-derive from. A
+	// climate-only or media-only frame must leave status exactly as it was.
+	if gear == nil && speed == nil {
+		return setClauses, args, argIdx
+	}
+
+	setClauses = append(setClauses, fmt.Sprintf(
+		`"status" = CASE`+
+			` WHEN COALESCE($%d::text, "gearPosition") IN ('D', 'R') THEN 'driving'`+
+			` WHEN COALESCE($%d::int, "speed") > 0 THEN 'driving'`+
+			` WHEN "status" = 'in_service' THEN 'in_service'`+
+			` WHEN "status" = 'charging' THEN 'charging'`+
+			` ELSE 'parked'`+
+			` END::"VehicleStatus"`,
+		argIdx, argIdx+1))
+	args = append(args, gear, speed)
+	return setClauses, args, argIdx + 2
 }
 
 // appendGPSShadowSets emits the MYR-63 GPS *Enc shadows in canonical
