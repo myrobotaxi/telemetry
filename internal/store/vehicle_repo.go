@@ -33,7 +33,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/myrobotaxi/telemetry/internal/cryptox"
-	"github.com/myrobotaxi/telemetry/internal/store/routeblob"
 )
 
 // VehicleRepo reads and writes vehicle records in the Prisma-owned

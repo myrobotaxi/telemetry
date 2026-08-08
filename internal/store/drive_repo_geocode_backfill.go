@@ -73,11 +73,18 @@ func (r *DriveRepo) ListMissingAddresses(ctx context.Context) ([]DriveBackfillRo
 	for rows.Next() {
 		var d DriveBackfillRow
 		var routePointsEnc *string
-		if scanErr := rows.Scan(&d.ID, &d.StartAddress, &d.EndAddress, &d.EndTime, &routePointsEnc); scanErr != nil {
+		var startAddrEnc, endAddrEnc *string
+		if scanErr := rows.Scan(&d.ID, &startAddrEnc, &endAddrEnc, &d.EndTime, &routePointsEnc); scanErr != nil {
 			r.metrics.IncQueryError("drive.list_missing_addresses")
 			r.metrics.ObserveQueryDuration("drive.list_missing_addresses", time.Since(start).Seconds())
 			return nil, fmt.Errorf("DriveRepo.ListMissingAddresses: scan: %w", scanErr)
 		}
+		// MYR-447: the addresses come back sealed. Decrypting them here
+		// keeps DriveBackfillRow's two plain-string fields — and therefore
+		// cmd/ops' `row.StartAddress == ""` side selection — working
+		// exactly as before.
+		d.StartAddress = r.openDriveLabel(startAddrEnc, "startAddressEnc")
+		d.EndAddress = r.openDriveLabel(endAddrEnc, "endAddressEnc")
 		rec := DriveRecord{ID: d.ID}
 		r.applyResolvedRoutePoints(&rec, routePointsEnc)
 		d.RoutePoints = rec.RoutePoints
@@ -100,9 +107,28 @@ func (r *DriveRepo) ListMissingAddresses(ctx context.Context) ([]DriveBackfillRo
 // server between this backfill's SELECT and UPDATE) is preserved rather
 // than overwritten with an empty string. Returns ErrDriveNotFound if the
 // row no longer exists.
+//
+// MYR-447: each supplied value is sealed before it reaches the UPDATE and
+// lands in the matching `*Enc` column. A supplied-but-EMPTY label seals to
+// the absent sentinel and is therefore passed as nil, i.e. treated the
+// same as "not geocoded this run" — writing an empty ciphertext would
+// make the column non-NULL and permanently hide the row from the
+// `IS NULL` discovery predicate without recording anything.
+//
+// Requires an Encryptor: a keyless repo returns ErrEncryptionRequired
+// rather than silently writing NULLs over a row it was asked to fill in.
 func (r *DriveRepo) UpdateAddresses(ctx context.Context, id string, startLocation, startAddress, endLocation, endAddress *string) error {
+	if r.encryptor == nil {
+		return fmt.Errorf("DriveRepo.UpdateAddresses(%s): %w", id, ErrEncryptionRequired)
+	}
+	sealed, err := r.sealOptionalLabels(startLocation, startAddress, endLocation, endAddress)
+	if err != nil {
+		return fmt.Errorf("DriveRepo.UpdateAddresses(%s): %w", id, err)
+	}
+
 	start := time.Now()
-	tag, err := r.pool.Exec(ctx, queryDriveUpdateAddresses, id, startLocation, startAddress, endLocation, endAddress)
+	tag, err := r.pool.Exec(ctx, queryDriveUpdateAddresses, id,
+		sealed[0], sealed[1], sealed[2], sealed[3])
 	r.metrics.ObserveQueryDuration("drive.update_addresses", time.Since(start).Seconds())
 	if err != nil {
 		r.metrics.IncQueryError("drive.update_addresses")

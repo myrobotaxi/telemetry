@@ -127,6 +127,12 @@ func createSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"heading"          INT NOT NULL DEFAULT 0,
 		"locationName"     TEXT NOT NULL DEFAULT '',
 		"locationAddress"  TEXT NOT NULL DEFAULT '',
+		-- MYR-447 — encrypted shadows for the geocoded location labels.
+		-- Mirrors docs/migrations/myr-447-prisma-label-enc.sql, which has
+		-- to be applied as a Prisma migration in react-frontend because
+		-- CG-DL-9 forbids a Go migration from naming "Vehicle"/"Drive".
+		"locationNameEnc"       TEXT,
+		"locationAddressEnc"    TEXT,
 		"latitude"         DOUBLE PRECISION NOT NULL DEFAULT 0,
 		"longitude"        DOUBLE PRECISION NOT NULL DEFAULT 0,
 		-- MYR-63 Phase 2 — encrypted shadow columns. Mirrors the Prisma
@@ -150,6 +156,9 @@ func createSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"originLatitudeEnc"    TEXT,
 		"originLongitudeEnc"   TEXT,
 		"destinationAddress" TEXT,
+		-- MYR-447 — encrypted shadows for the destination labels.
+		"destinationNameEnc"    TEXT,
+		"destinationAddressEnc" TEXT,
 		"etaMinutes"       INT,
 		"tripDistanceMiles" DOUBLE PRECISION,
 		"tripDistanceRemaining" DOUBLE PRECISION,
@@ -174,6 +183,13 @@ func createSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"startAddress"     TEXT NOT NULL DEFAULT '',
 		"endLocation"      TEXT NOT NULL DEFAULT '',
 		"endAddress"       TEXT NOT NULL DEFAULT '',
+		-- MYR-447 — encrypted shadows for the drive's endpoint labels.
+		-- Nullable: NULL is the absent sentinel that
+		-- queryDriveMissingAddresses' discovery predicate keys on.
+		"startLocationEnc" TEXT,
+		"startAddressEnc"  TEXT,
+		"endLocationEnc"   TEXT,
+		"endAddressEnc"    TEXT,
 		"distanceMiles"    DOUBLE PRECISION NOT NULL DEFAULT 0,
 		"durationMinutes"  INT NOT NULL DEFAULT 0,
 		"avgSpeedMph"      DOUBLE PRECISION NOT NULL DEFAULT 0,

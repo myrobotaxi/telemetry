@@ -417,7 +417,7 @@ LIMIT $4`
 //
 // MYR-447 REWROTE the discovery predicate, and this is the one change in
 // that issue that could not be a like-for-like column swap. The old
-// predicate asked `"startAddress" = ''`. AES-GCM ciphertext is
+// predicate asked `"startAddress" = <empty string>`. AES-GCM ciphertext is
 // nondeterministic — a fresh 12-byte nonce per encrypt — so a sealed
 // address is a different base64 string every time it is written and can
 // NEVER equal the empty string again. Kept verbatim against the `*Enc`

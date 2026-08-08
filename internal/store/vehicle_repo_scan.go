@@ -107,7 +107,8 @@ type labelScanResult struct {
 // applyResolvedLabels decrypts the four geocoded location labels
 // (MYR-447) onto v.
 //
-// `locationName` / `locationAddress` are NOT NULL with default '' on the
+// `locationName` / `locationAddress` are NOT NULL with an empty-string
+// default on the
 // Prisma schema and surface as plain strings, so an absent or unreadable
 // ciphertext collapses to "" — the same value the plaintext column held
 // for a car whose position was never geocoded. `destinationName` /
