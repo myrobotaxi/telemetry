@@ -1,4 +1,9 @@
--- Reverses 0032. The backfilled values go with the column; the convergences
--- they describe are not undone (they live in go_identity_apple.user_id).
-DROP INDEX IF EXISTS idx_go_users_converged_to;
-ALTER TABLE go_users DROP COLUMN IF EXISTS converged_to;
+-- Reverses 0032.
+--
+-- NOTE: this discards every convergence recorded at runtime since the table was
+-- created, and those cannot be reconstructed — the re-point they describe left
+-- no other trace, which is the whole reason the table exists. A down/up cycle
+-- therefore returns the affected accounts to the MYR-452 failure mode. Dump the
+-- table before running this if any rows are present.
+DROP INDEX IF EXISTS idx_go_identity_convergence_to;
+DROP TABLE IF EXISTS go_identity_convergence;

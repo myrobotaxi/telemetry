@@ -138,19 +138,25 @@ const queryRebindAppleIdentity = `
 UPDATE go_identity_apple SET user_id = $1 WHERE user_id = $2`
 
 // queryRecordConvergence leaves the trail the re-point above would otherwise
-// sever (MYR-452). After rebindApple, nothing references the caller's go_users
-// row: its binding now names the canonical id, so the caller's id is reachable
-// from nowhere — while the caller's JWT keeps carrying it. Account deletion is
-// keyed on that subject, so without this row the teardown would target an id
-// that owns nothing and leave the real account (binding included) standing.
+// sever (MYR-452). After rebindApple, nothing references the caller's id: the
+// binding now names the canonical one, so the caller's id is reachable from
+// nowhere — while the caller's JWT keeps carrying it. Account deletion is keyed
+// on that subject, so without this row the teardown would target an id that
+// owns nothing and leave the real account (binding included) standing.
 //
-// The `OR converged_to = $2` arm keeps the mapping FLAT: if this canonical id
-// had itself absorbed an earlier identity, that older alias is re-pointed to the
-// new target in the same statement rather than forming a chain the resolver
-// would have to walk.
+// It writes to go_identity_convergence rather than to a column on go_users
+// because `from` is whatever the caller's token names, which is frequently not
+// a go_users id at all — see the table's migration comment.
+//
+// No attempt is made here to keep the graph flat. Chains and cycles are both
+// reachable (re-linking the same Tesla under the new canonical id fires a
+// convergence back the other way), so the resolver walks the graph with a
+// visited set instead of relying on an invariant this statement cannot hold.
 const queryRecordConvergence = `
-UPDATE go_users SET converged_to = $1, updated_at = NOW()
-WHERE (id = $2 OR converged_to = $2) AND id <> $1`
+INSERT INTO go_identity_convergence (from_user_id, to_user_id)
+VALUES ($2, $1)
+ON CONFLICT (from_user_id) DO UPDATE
+SET to_user_id = EXCLUDED.to_user_id, converged_at = NOW()`
 
 const queryProvisionSettings = `
 INSERT INTO "Settings" ("id", "userId", "teslaLinked", "updatedAt")

@@ -1,11 +1,10 @@
 -- MYR-452: identity convergence must leave a trail.
 --
 -- store.OwnerProvisioner.rebindApple re-points go_identity_apple.user_id from
--- the caller's go_users id onto the canonical Prisma "User" id when a Tesla
--- link converges two identities onto one human. Before this migration that
--- re-point SEVERED the only link back: the caller's go_users row was left with
--- no binding and nothing referencing it, while the caller's JWT went on
--- carrying the OLD subject for the life of its refresh family (90 days).
+-- the caller's id onto the canonical Prisma "User" id when a Tesla link proves
+-- two identities are the same human. Before this table that re-point SEVERED
+-- the only link back: nothing referenced the caller's original id, while the
+-- caller's JWT went on carrying it for the life of its refresh family.
 --
 -- Account deletion is keyed on that JWT subject, so for a converged owner every
 -- step of the teardown targeted an id that owned nothing: the Apple binding
@@ -14,31 +13,54 @@
 -- found the surviving binding and signed the person straight back into the
 -- account they had just deleted.
 --
--- converged_to is that missing link. It makes the pre-convergence id resolvable
--- to the canonical one, which is what lets the deletion scope cover both.
-ALTER TABLE go_users ADD COLUMN IF NOT EXISTS converged_to TEXT;
+-- WHY A TABLE AND NOT A COLUMN ON go_users. The re-pointed id is whatever the
+-- caller's JWT names, and that is NOT always a go_users id: identity.linkage
+-- mints an Apple binding directly onto a Prisma "User" id on a verified-email
+-- match, and onto a configured cuid on a bootstrap override, creating no
+-- go_users row in either case. A go_users column would silently record nothing
+-- for exactly those callers and leave them resurrectable — the same bug in a
+-- different shape. This table is keyed on neither identity source.
+CREATE TABLE IF NOT EXISTS go_identity_convergence (
+    -- The abandoned id: what the caller's token still says.
+    from_user_id TEXT PRIMARY KEY,
+    -- The id the Apple binding was moved to.
+    to_user_id   TEXT NOT NULL,
+    converged_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- A self-edge would make the closure walk pointless and is always a bug.
+    CONSTRAINT go_identity_convergence_no_self CHECK (from_user_id <> to_user_id)
+);
 
--- Partial: only converged rows carry a value, and the reverse lookup
--- (which aliases point at this canonical id?) is the only read.
-CREATE INDEX IF NOT EXISTS idx_go_users_converged_to
-    ON go_users (converged_to) WHERE converged_to IS NOT NULL;
+-- The reverse lookup: which abandoned ids point at this canonical one. Used by
+-- the deletion-scope walk, which traverses the graph in both directions.
+CREATE INDEX IF NOT EXISTS idx_go_identity_convergence_to
+    ON go_identity_convergence (to_user_id);
 
--- Backfill the residue of every convergence that happened BEFORE this column
--- existed. Best-effort and deliberately narrow: it only claims a go_users row
--- that (a) holds no binding of its own — the signature of having been re-pointed
--- away — and (b) shares an email with a binding filed under a different id.
+-- ONE-OFF REPAIR of the single convergence that predates this table, by exact
+-- id (MYR-452).
 --
--- The email equality is safe as an identity join here because the address is one
--- WE verified through Apple (identity.SignInWithApple stores only the verified
--- claim, and a hidden-relay address is per-app stable), and because the
--- no-binding-of-its-own predicate already restricts the candidate set to
--- orphans. A row that matches nothing is simply left alone: it stays exactly as
--- broken as it is today, and no live row can be captured by this statement.
-UPDATE go_users g
-SET converged_to = i.user_id
-FROM go_identity_apple i
-WHERE g.converged_to IS NULL
-  AND g.email IS NOT NULL
-  AND i.email = g.email
-  AND i.user_id <> g.id
-  AND NOT EXISTS (SELECT 1 FROM go_identity_apple b WHERE b.user_id = g.id);
+-- There is deliberately NO heuristic backfill here. An earlier draft matched
+-- orphaned rows to bindings on email equality; that was withdrawn because a row
+-- in this table is not a hint — it is an unconditional grant of DELETE
+-- authority over another user id, since the deletion scope now runs every
+-- destructive step over the whole closure. An `UPDATE … FROM` with a
+-- non-unique email join picks its partner arbitrarily and reports success, so
+-- any duplicate or stale address could have pointed one person's Delete at
+-- another person's account. Guessing is not an acceptable input to that.
+--
+-- This pair instead comes from direct observation of production: go_users
+-- cd38cb3e… was created 134 ms before the binding for the same Apple-verified
+-- address appeared under Prisma user cmnccy4tf…, which is the exact signature
+-- of rebindApple firing. Both EXISTS guards make the statement inert in every
+-- other environment (and in prod too, once that account is deleted), and the
+-- ids are 32-hex/cuid values that cannot collide by accident.
+INSERT INTO go_identity_convergence (from_user_id, to_user_id)
+SELECT 'cd38cb3eba91a3b9b69ff6eee5aedcc29', 'cmnccy4tf0000ky04coe4is96'
+WHERE EXISTS (
+    SELECT 1 FROM go_users
+    WHERE id = 'cd38cb3eba91a3b9b69ff6eee5aedcc29'
+)
+AND EXISTS (
+    SELECT 1 FROM go_identity_apple
+    WHERE user_id = 'cmnccy4tf0000ky04coe4is96'
+)
+ON CONFLICT (from_user_id) DO NOTHING;
