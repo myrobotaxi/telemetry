@@ -46,6 +46,15 @@ type FleetVehicleReader interface {
 // import internal/store.
 type VehicleStatusUpdater interface {
 	UpdateVehicleStatus(ctx context.Context, vin, status string) error
+
+	// UpdateVehicleStatusBaseline writes a NON-MOTION baseline status without
+	// overwriting a status the telemetry stream owns (MYR-454). The monitor
+	// uses it for the `parked` connected-baseline write, which exists to move
+	// a car out of `in_service` or to give a never-streamed row its first
+	// value — neither of which should be able to stomp a car the stream is
+	// currently describing as `driving`. Affecting zero rows is a normal
+	// outcome, not an error.
+	UpdateVehicleStatusBaseline(ctx context.Context, vin, status string) error
 }
 
 // ServiceStatusMonitor surfaces a vehicle's "In Service" status EVENT-DRIVEN

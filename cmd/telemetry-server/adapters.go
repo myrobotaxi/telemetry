@@ -174,6 +174,13 @@ func (a *vehicleStatusUpdaterAdapter) UpdateVehicleStatus(ctx context.Context, v
 	return a.repo.UpdateStatus(ctx, vin, store.VehicleStatus(status))
 }
 
+// UpdateVehicleStatusBaseline is the MYR-454 guarded write: it applies only
+// over `in_service` / `offline`, so the monitor's connected baseline cannot
+// overwrite a `driving` the telemetry fold derived from the live stream.
+func (a *vehicleStatusUpdaterAdapter) UpdateVehicleStatusBaseline(ctx context.Context, vin, status string) error {
+	return a.repo.UpdateStatusBaseline(ctx, vin, store.VehicleStatus(status))
+}
+
 // vehicleListerAdapter adapts store.VehicleRepo.ListSummariesByUser
 // to the narrow telemetry.VehicleLister interface used by the
 // GET /api/vehicles handler (MYR-91). The adapter exists so the

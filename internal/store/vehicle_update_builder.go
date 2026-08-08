@@ -8,6 +8,7 @@ package store
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // updateColumn pairs a PostgreSQL column name with the value to set. A nil
@@ -99,6 +100,7 @@ func buildTelemetryUpdate(vin string, u VehicleUpdate, encShadows map[string]str
 	argIdx := 1
 
 	setClauses, args, argIdx = appendPlaintextSets(setClauses, args, argIdx, u, clearSet)
+	setClauses, args, argIdx = appendDerivedStatusSet(setClauses, args, argIdx, u, clearSet)
 	setClauses, args, argIdx = appendGPSShadowSets(setClauses, args, argIdx, encShadows, clearSet)
 	setClauses, args, argIdx = appendNavRouteShadowSet(setClauses, args, argIdx, encShadows, clearSet)
 	setClauses, args, argIdx = appendLabelShadowSets(setClauses, args, argIdx, encShadows, clearSet)
@@ -151,6 +153,140 @@ func appendPlaintextSets(
 	}
 	return setClauses, args, argIdx
 }
+
+// appendDerivedStatusSet folds "status" into the SAME statement that writes
+// the motion columns it is derived from (MYR-454, MYR-61).
+//
+// Why this exists. Before MYR-454 the column had exactly two writers —
+// `drive.ended` → 'parked' and the ServiceStatusMonitor → 'in_service' /
+// 'parked' — and NEITHER of them, nor this telemetry flush, ever wrote
+// 'driving'. `drive.started` wrote no status at all, the asymmetric half of
+// a pair. So the persisted column could only ever hold 'offline' (the schema
+// default), 'parked' or 'in_service', while `driving` existed solely as a
+// live re-derivation in the WebSocket broadcaster (ws.deriveVehicleStatus).
+// Every surface that reads the column — the REST snapshot, the WS
+// on-connect snapshot, the vehicles list that backs the map sheet — served
+// 'parked' for the entire duration of a real drive. That is the external-beta
+// report: a car mid-drive, drive row open, `speed`/`gearPosition` freshly
+// written to its own row, and `status` still saying 'parked' beside them.
+//
+// The fix is to stop treating status as a thing someone remembers to write
+// and make it a function of the row's own motion columns, evaluated in SQL so
+// it is ATOMIC with the gear/speed write it follows. There is no window in
+// which the ROW can disagree with itself.
+//
+// It is NOT, however, the only writer of this column, and the first draft of
+// this comment wrongly claimed it was. `drive.ended` still writes 'parked' as
+// a backstop, `ServiceStatusMonitor.persist` writes 'in_service' (and, via
+// UpdateStatusBaseline, a connected baseline that deliberately refuses to
+// overwrite a motion status), and the partner Next.js app writes the same
+// Prisma-owned column from Tesla's REST vehicle object with a precedence of
+// its own. The fold is the authority for the driving/parked distinction only.
+//
+// Bare column references on the right-hand side of a SET read the OLD row, so
+// COALESCE($new, "col") means "this frame's value if it carried one, else the
+// last one we stored". That is what lets a speed-only frame — the common case,
+// since Tesla emits Gear on CHANGE only and a car in D sends no further gear
+// frames for the rest of the drive — still resolve against the gear the car
+// was last known to be in.
+//
+// THE OLD ROW IS ONLY TRUSTED WHILE IT IS FRESH. Gear and speed carry no
+// ResendIntervalSeconds (fleet_api_fields.go), so a gear change that happens
+// while the socket is down is lost forever: a car that drops connection at
+// 45 mph in D keeps gearPosition='D', speed=45 in its row indefinitely, and a
+// lone speed=0 frame on reconnect would otherwise resolve against that stale
+// 'D' and latch 'driving' onto a parked car — MYR-393, the inverse of the bug
+// this fixes. The broadcaster already wipes its own gear cache on disconnect
+// for exactly this reason (broadcaster.go); the column has no such wipe, so
+// the fallback is bounded here instead, against the row's previous
+// lastUpdated. Past the horizon the frame must stand on its own values. A car
+// genuinely still moving says so with speed > 0 on its very next frame; only a
+// car stopped dead at 0 mph immediately after a multi-minute stream gap reads
+// 'parked' for one frame, which the next movement corrects.
+//
+// Order of the CASE arms is load-bearing:
+//
+//  1. 'in_service' is preserved ABOVE the driving arms — the opposite of
+//     ws.deriveVehicleStatus, and deliberately so. The live wire can let
+//     driving outrank in_service because the broadcaster keeps an independent
+//     cached ServiceMode bool to fall back to, so the value returns by itself.
+//     The COLUMN has no such fallback, and losing it here is a ONE-WAY DOOR:
+//     the MYR-320 periodic re-poll selects `WHERE "status" = 'in_service'`
+//     (queryInServiceVINs), so a car folded out of in_service drops off the
+//     worklist that was supposed to restore it. A tech moving a car across the
+//     service lot would silently disarm the MYR-372 dispatch gate and the
+//     accept-path 409 — a rider sent to meet a car that is on a lift. Showing
+//     'in_service' for a car being test-driven is the safe way to be wrong.
+//  2. Then the motion arms: gear D/R, or speed > 0 → 'driving'.
+//  3. 'charging' is preserved when stationary. No Go path writes it; the
+//     Prisma-owned table is shared with the Next.js app, which does.
+//  4. Everything else stationary becomes 'parked' — INCLUDING 'offline'. A row
+//     whose status is 'offline' while a LIVE frame is updating its own
+//     gear/speed columns is self-contradictory: 'offline' is the schema
+//     default that owner-vehicle provisioning never overwrites, and it is what
+//     leaves a happily-streaming car permanently ineligible for dispatch.
+//
+// That last arm is why u.Streamed gates this whole function. "A frame arriving
+// proves the car is live" holds only for a STREAMED frame. MYR-260's synthetic
+// /vehicle_data frames are published precisely when the monitor has determined
+// the car is NOT streaming, and they carry Tesla's cached speed and
+// shift_state — so folding on one would heal 'offline' to 'parked' using
+// evidence that the car is asleep, and could write 'driving' from a cached
+// gear. Provenance rides in on VehicleUpdate.Streamed.
+func appendDerivedStatusSet(
+	setClauses []string, args []any, argIdx int,
+	u VehicleUpdate, clearSet map[string]bool,
+) (clauses []string, outArgs []any, nextIdx int) {
+	// A REST backfill frame is evidence the car is NOT streaming. It must not
+	// drive a derivation whose whole premise is that the stream is talking.
+	if !u.Streamed {
+		return setClauses, args, argIdx
+	}
+
+	gear := derefString(u.GearPosition)
+	if clearSet["gearPosition"] {
+		gear = nil
+	}
+	speed := derefInt(u.Speed)
+	if clearSet["speed"] {
+		speed = nil
+	}
+
+	// No motion signal in this frame means nothing to re-derive from. A
+	// climate-only or media-only frame must leave status exactly as it was.
+	if gear == nil && speed == nil {
+		return setClauses, args, argIdx
+	}
+
+	// The staleness horizon is computed in Go against this frame's own
+	// timestamp rather than with NOW(), so the comparison never depends on the
+	// session TimeZone — "lastUpdated" is `timestamp` in the Prisma schema and
+	// `timestamptz` in the test fixture, and NOW() would mean subtly different
+	// things across the two.
+	staleBefore := u.LastUpdated.Add(-motionStaleAfter)
+
+	setClauses = append(setClauses, fmt.Sprintf(
+		`"status" = CASE`+
+			` WHEN "status" = 'in_service' THEN 'in_service'`+
+			` WHEN COALESCE($%d::text, CASE WHEN "lastUpdated" > $%d THEN "gearPosition" END)`+
+			` IN ('D', 'R') THEN 'driving'`+
+			` WHEN COALESCE($%d::int, CASE WHEN "lastUpdated" > $%d THEN "speed" END)`+
+			` > 0 THEN 'driving'`+
+			` WHEN "status" = 'charging' THEN 'charging'`+
+			` ELSE 'parked'`+
+			` END::"VehicleStatus"`,
+		argIdx, argIdx+2, argIdx+1, argIdx+2))
+	args = append(args, gear, speed, staleBefore)
+	return setClauses, args, argIdx + 3
+}
+
+// motionStaleAfter bounds how long a stored gear/speed may still be used to
+// resolve a partial frame. Gear and speed are emitted on change with no
+// resend, so a transition made while the socket was down is unrecoverable;
+// past this horizon the row's motion columns are treated as unknown rather
+// than as fact. Generous relative to the 1-2s cadence of a live drive, tight
+// enough that a reconnect after a real gap cannot latch a stale 'driving'.
+const motionStaleAfter = 5 * time.Minute
 
 // appendGPSShadowSets emits the MYR-63 GPS *Enc shadows in canonical
 // pair order. Half-pair entries are skipped defensively — the caller's

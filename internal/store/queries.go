@@ -219,6 +219,27 @@ const queryUpdateVehicleStatus = `UPDATE "Vehicle"
 SET "status" = $1::"VehicleStatus", "lastUpdated" = NOW()
 WHERE "vin" = $2`
 
+// queryUpdateVehicleStatusBaseline writes a NON-MOTION baseline status only
+// where it cannot contradict the stream (MYR-454).
+//
+// The ServiceStatusMonitor persists a "connected baseline" of 'parked' on
+// every connectivity edge whose REST read says the car is not in service. That
+// was harmless while 'driving' was unreachable in this column — 'parked' was
+// the most specific value the column could hold. Now that the telemetry fold
+// writes 'driving', an unconditional baseline write would stomp it on every
+// reconnect and reproduce the exact bug MYR-454 fixes, until the next flush
+// caught up.
+//
+// The monitor's actual job on this path is to move a car OUT of 'in_service'
+// and to give a never-streamed row its first real value, so the write is
+// restricted to those two states. A car the stream is actively describing is
+// none of the monitor's business.
+//
+// Zero rows affected is a NORMAL outcome here, not ErrVehicleNotFound.
+const queryUpdateVehicleStatusBaseline = `UPDATE "Vehicle"
+SET "status" = $1::"VehicleStatus", "lastUpdated" = NOW()
+WHERE "vin" = $2 AND "status" IN ('in_service', 'offline')`
+
 // Drive queries. The Drive table is Prisma-owned. MYR-433 made
 // `routePointsEnc` (Text?) the sole store for a drive's GPS trail: the
 // plaintext `routePoints` JSONB column is never read and never written

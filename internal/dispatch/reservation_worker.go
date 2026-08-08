@@ -146,14 +146,23 @@ func (s *ReservationSweeper) handleDue(ctx context.Context, r *DueReservation) s
 //     because a car at a service centre raises no mTLS connection. Waiting on
 //     it is therefore a bounded wait on a fact somebody else is maintaining,
 //     and it will clear on its own when the visit ends. Holding is honest.
+//
 //   - `offline` is the SCHEMA DEFAULT on "Vehicle" (NOT NULL DEFAULT
 //     'offline'), and the owned-vehicle provisioning INSERT never sets the
-//     column. Nothing in this server ever writes the value back either: both
-//     status writers need a live stream event (a connectivity edge or a
-//     completed drive), the MYR-320 re-poll selects `in_service` rows only,
-//     and the §7.15 refresh writes everything except status. So a key-paired
-//     car that has not yet streamed — every new owner, for their first days —
-//     sits at `offline` with NOTHING scheduled to correct it.
+//     column. Nothing writes the value back for a car that has never
+//     STREAMED either: every status writer needs a live stream event (a
+//     connectivity edge, a completed drive, or — since MYR-454 — any
+//     telemetry frame carrying gear/speed), the MYR-320 re-poll selects
+//     `in_service` rows only, and the §7.15 refresh writes everything except
+//     status. So a key-paired car that has not yet streamed — every new
+//     owner, for their first days — sits at `offline` with NOTHING scheduled
+//     to correct it.
+//
+//     MYR-454 narrowed this bullet; it did NOT overturn it. The telemetry
+//     fold now heals `offline` the instant a frame arrives, which means the
+//     permanently-`offline` population is now EXACTLY the never-streamed
+//     cars described here — the ones this hold decision is about. The
+//     argument is sharper than when it was written, not weaker.
 //
 // Holding on `offline` would therefore be self-perpetuating: the sweeper would
 // hold every 30 seconds for 30 minutes and then expire the reservation, every

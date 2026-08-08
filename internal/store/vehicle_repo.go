@@ -228,6 +228,23 @@ func (r *VehicleRepo) UpdateStatus(ctx context.Context, vin string, status Vehic
 	return nil
 }
 
+// UpdateStatusBaseline writes a non-motion baseline status, but ONLY over a
+// row that is currently 'in_service' or 'offline' — never over a status the
+// telemetry stream owns. See queryUpdateVehicleStatusBaseline for why.
+//
+// Unlike UpdateStatus, affecting zero rows is a normal, successful outcome: it
+// means the row held a motion status and was deliberately left alone.
+func (r *VehicleRepo) UpdateStatusBaseline(ctx context.Context, vin string, status VehicleStatus) error {
+	start := time.Now()
+	_, err := r.pool.Exec(ctx, queryUpdateVehicleStatusBaseline, string(status), vin)
+	r.metrics.ObserveQueryDuration("vehicle.update_status_baseline", time.Since(start).Seconds())
+	if err != nil {
+		r.metrics.IncQueryError("vehicle.update_status_baseline")
+		return fmt.Errorf("VehicleRepo.UpdateStatusBaseline(%s): %w", redactVIN(vin), err)
+	}
+	return nil
+}
+
 // scanVehicle executes a query expected to return one vehicle row and
 // scans it into a Vehicle struct, applying the dual-read GPS resolution.
 // scanVehicleRow + applyResolvedGPS live in vehicle_repo_scan.go.
