@@ -269,6 +269,13 @@ func (p *OwnerProvisioner) rebindApple(ctx context.Context, tx pgx.Tx, fromUserI
 	if _, err := tx.Exec(ctx, queryRecordConvergence, toUserID, fromUserID); err != nil {
 		return fmt.Errorf("store.ProvisionTeslaOwner: record convergence %s->%s: %w", fromUserID, toUserID, err)
 	}
+	// The person's LIVE SESSION follows the binding, in this same transaction
+	// (MYR-488). It runs here, after the RowsAffected guard above, so it is
+	// gated on the identical evidence the convergence edge is: a binding that
+	// actually moved. See owner_session_migration.go.
+	if err := p.migrateRefreshFamilies(ctx, tx, fromUserID, toUserID); err != nil {
+		return err
+	}
 	p.logger.Info("owner_identity_converged",
 		slog.String("event", "owner_identity_converged"),
 		slog.String("from_user_id", fromUserID),
