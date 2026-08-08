@@ -62,8 +62,14 @@ func TestVehicleStatus_FollowsStream(t *testing.T) {
 		// has never reported a gear.
 		startGear  string
 		startSpeed int
-		update     store.VehicleUpdate
-		want       string
+		// startAge backdates the seeded row's lastUpdated, so a case can
+		// exercise the MYR-454 staleness horizon on the old-row fallback.
+		startAge time.Duration
+		update   store.VehicleUpdate
+		// restBackfill marks the frame as a MYR-260 synthetic /vehicle_data
+		// frame rather than a live one. Frames default to streamed.
+		restBackfill bool
+		want         string
 	}{
 		{
 			name:        "gear D starts driving",
@@ -133,12 +139,22 @@ func TestVehicleStatus_FollowsStream(t *testing.T) {
 			want:        "parked",
 		},
 		{
-			// Precedence from vehicle-state-schema.md §2.4: a tech
-			// test-driving a car in service mode surfaces as driving.
-			name:        "driving outranks in_service",
+			// MYR-454 review catch, and the one case where the PERSISTED
+			// derivation deliberately DIVERGES from ws.deriveVehicleStatus.
+			//
+			// On the live wire driving outranks in_service, which is safe
+			// there because the broadcaster keeps an independent cached
+			// ServiceMode bool and the value returns by itself. The column has
+			// no such fallback, and losing in_service here is a ONE-WAY DOOR:
+			// the MYR-320 re-poll selects `WHERE "status" = 'in_service'`, so
+			// a car folded out of it drops off the worklist meant to restore
+			// it. A tech moving a car across the service lot would silently
+			// disarm the MYR-372 dispatch gate and the accept-path 409, and a
+			// rider would be sent to a car on a lift.
+			name:        "in_service survives a car being driven",
 			startStatus: "in_service",
-			update:      store.VehicleUpdate{GearPosition: strPtr("D")},
-			want:        "driving",
+			update:      store.VehicleUpdate{GearPosition: strPtr("D"), Speed: intPtr(18)},
+			want:        "in_service",
 		},
 		{
 			// The service monitor owns in_service and this server never
@@ -169,6 +185,71 @@ func TestVehicleStatus_FollowsStream(t *testing.T) {
 			update:      store.VehicleUpdate{InteriorTemp: intPtr(67)},
 			want:        "driving",
 		},
+
+		// --- MYR-454 review catches: the old row is only trusted while fresh.
+		//
+		// Gear and speed carry no ResendIntervalSeconds, so a transition made
+		// while the socket was down is lost forever. Without a horizon these
+		// two cases latch `driving` onto a stationary car — MYR-393, the exact
+		// inverse of the bug this change fixes.
+		{
+			name:        "stale stored gear does not latch driving",
+			startStatus: "parked",
+			startGear:   "D", // car dropped connection mid-drive, never sent P
+			startAge:    30 * time.Minute,
+			update:      store.VehicleUpdate{Speed: intPtr(0)},
+			want:        "parked",
+		},
+		{
+			name:        "stale stored speed does not latch driving",
+			startStatus: "parked",
+			startGear:   "D",
+			startSpeed:  45, // frozen at the moment the socket dropped
+			startAge:    30 * time.Minute,
+			update:      store.VehicleUpdate{GearPosition: strPtr("P")},
+			want:        "parked",
+		},
+		{
+			// The horizon must not break the normal case: during a real drive
+			// frames arrive every 1-2s, so the stored gear is always fresh.
+			name:        "fresh stored gear still resolves a speed-only frame",
+			startStatus: "driving",
+			startGear:   "D",
+			startAge:    2 * time.Second,
+			update:      store.VehicleUpdate{Speed: intPtr(0)},
+			want:        "driving",
+		},
+		{
+			// A car that IS still moving says so with its own speed value,
+			// so the horizon costs nothing once anything is actually happening.
+			name:        "moving car recovers immediately after a long gap",
+			startStatus: "parked",
+			startGear:   "D",
+			startAge:    30 * time.Minute,
+			update:      store.VehicleUpdate{Speed: intPtr(41)},
+			want:        "driving",
+		},
+
+		// --- MYR-454 review catch: provenance.
+		//
+		// MYR-260 publishes synthetic /vehicle_data frames ONLY for cars the
+		// monitor has just determined are NOT streaming, carrying Tesla's
+		// cached speed and shift_state. Folding on one would heal `offline`
+		// using evidence that the car is asleep.
+		{
+			name:         "REST backfill must not heal offline",
+			startStatus:  "offline",
+			update:       store.VehicleUpdate{GearPosition: strPtr("P"), Speed: intPtr(0)},
+			restBackfill: true,
+			want:         "offline",
+		},
+		{
+			name:         "REST backfill must not write driving from a cached gear",
+			startStatus:  "parked",
+			update:       store.VehicleUpdate{GearPosition: strPtr("D"), Speed: intPtr(30)},
+			restBackfill: true,
+			want:         "parked",
+		},
 	}
 
 	for _, tt := range tests {
@@ -178,22 +259,35 @@ func TestVehicleStatus_FollowsStream(t *testing.T) {
 			seedVehicle(t, testPool, "veh_myr454", vin)
 
 			ctx := context.Background()
-			if tt.startGear != "" || tt.startSpeed != 0 {
-				var gear *string
-				if tt.startGear != "" {
-					gear = &tt.startGear
-				}
-				if _, err := testPool.Exec(ctx,
-					`UPDATE "Vehicle" SET "gearPosition" = $2, "speed" = $3 WHERE "vin" = $1`,
-					vin, gear, tt.startSpeed); err != nil {
-					t.Fatalf("seed motion columns: %v", err)
-				}
+			now := time.Now().UTC()
+			// Seed the motion columns AND the row's lastUpdated together —
+			// the fold reads the latter to decide whether the former may be
+			// used to resolve a partial frame.
+			var gear *string
+			if tt.startGear != "" {
+				gear = &tt.startGear
+			}
+			if _, err := testPool.Exec(ctx,
+				`UPDATE "Vehicle"
+				 SET "gearPosition" = $2, "speed" = $3, "lastUpdated" = $4
+				 WHERE "vin" = $1`,
+				vin, gear, tt.startSpeed, now.Add(-tt.startAge)); err != nil {
+				t.Fatalf("seed motion columns: %v", err)
 			}
 			setStatus(t, testPool, vin, tt.startStatus)
+			if tt.startAge > 0 {
+				// setStatus bumps lastUpdated to NOW(); restore the backdate.
+				if _, err := testPool.Exec(ctx,
+					`UPDATE "Vehicle" SET "lastUpdated" = $2 WHERE "vin" = $1`,
+					vin, now.Add(-tt.startAge)); err != nil {
+					t.Fatalf("re-backdate lastUpdated: %v", err)
+				}
+			}
 
 			repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
 			upd := tt.update
-			upd.LastUpdated = time.Now()
+			upd.LastUpdated = now
+			upd.Streamed = !tt.restBackfill
 			if err := repo.UpdateTelemetry(ctx, vin, upd); err != nil {
 				t.Fatalf("UpdateTelemetry: %v", err)
 			}
@@ -248,6 +342,7 @@ func TestVehicleStatus_ReplaysReportedDrive(t *testing.T) {
 	for i, f := range frames {
 		upd := f.update
 		upd.LastUpdated = time.Now()
+		upd.Streamed = true
 		if err := repo.UpdateTelemetry(ctx, vin, upd); err != nil {
 			t.Fatalf("frame %d (%s): UpdateTelemetry: %v", i, f.desc, err)
 		}

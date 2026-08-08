@@ -61,8 +61,21 @@ func (m *ServiceStatusMonitor) readVehicleREST(ctx context.Context, vin string) 
 }
 
 // persist writes the resolved status, non-fatal on failure.
+//
+// MYR-454: the `parked` value on this path is a CONNECTED BASELINE, not an
+// observation that the car is stationary — the monitor has no motion data at
+// all. Writing it unconditionally would stomp a `driving` the telemetry fold
+// had just derived, on every connectivity edge, reproducing the very bug
+// MYR-454 fixes. So the baseline goes through the guarded write, which only
+// applies over `in_service` or `offline` — the two states this path exists to
+// move a car out of. `in_service` itself stays an unconditional write: that IS
+// an observation, from ServiceMode or Tesla's REST flag, and it must win.
 func (m *ServiceStatusMonitor) persist(ctx context.Context, vin, status string) {
-	if err := m.updater.UpdateVehicleStatus(ctx, vin, status); err != nil {
+	write := m.updater.UpdateVehicleStatus
+	if status == serviceStatusParked {
+		write = m.updater.UpdateVehicleStatusBaseline
+	}
+	if err := write(ctx, vin, status); err != nil {
 		m.logger.Warn("service-status: persist failed (non-fatal)",
 			slog.String("vin", redactVIN(vin)),
 			slog.String("status", status),

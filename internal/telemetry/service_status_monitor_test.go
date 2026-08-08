@@ -65,6 +65,7 @@ func (f *fakeVehicleReader) dataCallCount() int {
 type fakeStatusUpdater struct {
 	mu       sync.Mutex
 	statuses []string
+	baseline []string // MYR-454: statuses written through the GUARDED path
 	err      error
 }
 
@@ -76,6 +77,30 @@ func (f *fakeStatusUpdater) UpdateVehicleStatus(_ context.Context, _, status str
 	}
 	f.statuses = append(f.statuses, status)
 	return nil
+}
+
+// UpdateVehicleStatusBaseline records the same way as the unconditional write
+// so the existing assertions on written() keep meaning "what the monitor
+// decided", while baselineWritten() lets a test check WHICH path it took —
+// the distinction MYR-454 turns on, since the guarded path refuses to
+// overwrite a `driving` the telemetry fold derived.
+func (f *fakeStatusUpdater) UpdateVehicleStatusBaseline(_ context.Context, _, status string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	f.statuses = append(f.statuses, status)
+	f.baseline = append(f.baseline, status)
+	return nil
+}
+
+func (f *fakeStatusUpdater) baselineWritten() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.baseline))
+	copy(out, f.baseline)
+	return out
 }
 
 func (f *fakeStatusUpdater) written() []string {
@@ -279,6 +304,74 @@ func TestServiceStatusMonitor_LeaveServiceThenConnectivityEdge(t *testing.T) {
 
 	if got := updater.written(); len(got) != 1 || got[0] != "parked" {
 		t.Fatalf("persisted statuses = %v, want [parked] (not stuck in_service)", got)
+	}
+}
+
+// TestServiceStatusMonitor_ParkedBaselineUsesGuardedWrite is a MYR-454
+// REGRESSION GUARD. Do not "simplify" persist() back to a single writer.
+//
+// The monitor has NO motion data. Its `parked` is a CONNECTED BASELINE — "this
+// car is not in service" — not an observation that the car is stationary. That
+// was harmless while `driving` was unreachable in the column, because `parked`
+// was then the most specific value the column could hold. It stopped being
+// harmless the moment the MYR-454 telemetry fold started writing `driving`: an
+// unconditional baseline write lands on every connectivity edge, including
+// CONNECT, so a car reconnecting mid-drive would have `driving` stomped back
+// to `parked` — reproducing the reported bug on every reconnect until the next
+// flush caught up.
+//
+// So the baseline goes through UpdateVehicleStatusBaseline, whose SQL applies
+// only over `in_service`/`offline`. `in_service` must keep using the
+// unconditional write: that one IS an observation (ServiceMode, or Tesla's
+// REST flag) and it has to win.
+func TestServiceStatusMonitor_ParkedBaselineUsesGuardedWrite(t *testing.T) {
+	tests := []struct {
+		name        string
+		inService   bool
+		wantStatus  string
+		wantGuarded bool
+	}{
+		{
+			name:        "parked baseline takes the guarded path",
+			inService:   false,
+			wantStatus:  "parked",
+			wantGuarded: true,
+		},
+		{
+			name:        "in_service stays an unconditional write",
+			inService:   true,
+			wantStatus:  "in_service",
+			wantGuarded: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &fakeVehicleReader{
+				state: FleetVehicleState{State: "online", InService: tt.inService},
+			}
+			updater := &fakeStatusUpdater{}
+			m := newTestMonitor(reader, updater)
+
+			m.handleConnectivity(context.Background(), connectEvt())
+
+			if got := updater.written(); len(got) != 1 || got[0] != tt.wantStatus {
+				t.Fatalf("persisted statuses = %v, want [%s]", got, tt.wantStatus)
+			}
+			guarded := updater.baselineWritten()
+			if tt.wantGuarded {
+				if len(guarded) != 1 || guarded[0] != tt.wantStatus {
+					t.Fatalf("guarded writes = %v, want [%s] — an unconditional "+
+						"parked write would stomp a driving car on reconnect",
+						guarded, tt.wantStatus)
+				}
+				return
+			}
+			if len(guarded) != 0 {
+				t.Fatalf("guarded writes = %v, want none — in_service must be "+
+					"able to overwrite any status", guarded)
+			}
+		})
 	}
 }
 

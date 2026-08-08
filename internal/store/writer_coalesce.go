@@ -28,6 +28,11 @@ func mergePtr[T any](dst, src *T) *T {
 
 // mergeUpdate applies non-nil fields from src onto dst (latest wins).
 func mergeUpdate(dst, src *VehicleUpdate) {
+	// MYR-454: provenance ORs rather than last-write-wins. A single live frame
+	// anywhere in the coalesce window is proof the car is streaming, and a
+	// REST backfill arriving after it must not demote the merged update and
+	// suppress the status fold for the whole batch.
+	dst.Streamed = dst.Streamed || src.Streamed
 	dst.Speed = mergePtr(dst.Speed, src.Speed)
 	dst.ChargeLevel = mergePtr(dst.ChargeLevel, src.ChargeLevel)
 	dst.EstimatedRange = mergePtr(dst.EstimatedRange, src.EstimatedRange)

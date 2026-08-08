@@ -32,6 +32,9 @@ func (w *Writer) handleTelemetry(event events.Event) {
 		return
 	}
 	update.LastUpdated = telEvt.CreatedAt
+	// MYR-454: carry provenance through to the status fold, which must not
+	// act on a REST backfill frame — see VehicleUpdate.Streamed.
+	update.Streamed = telEvt.Streamed()
 
 	shouldFlush := w.coalesce(telEvt.VIN, update)
 	if shouldFlush {

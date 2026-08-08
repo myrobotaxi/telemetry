@@ -203,6 +203,18 @@ type VehicleUpdate struct {
 	ClearFields          []string         // DB column names to explicitly SET NULL
 	LastUpdated          time.Time        // always set
 
+	// Streamed reports whether this update came from the LIVE vehicle stream
+	// rather than a REST backfill (MYR-260's synthetic /vehicle_data frames).
+	// Provenance has to survive the trip into the store because MYR-454's
+	// status fold must not act on a REST frame: those are published ONLY for
+	// cars the monitor has just determined are NOT streaming (in service,
+	// asleep, or offline), they carry Tesla's CACHED speed and shift_state,
+	// and the whole justification for folding `offline` down to `parked` is
+	// that a frame arriving proves the car is live. For a backfill frame it
+	// proves the opposite. Coalescing ORs this across the batch — one live
+	// frame in the window is enough to make the merged update stream-backed.
+	Streamed bool
+
 	// ControlState carries the MYR-269 owner-control read-backs (lock, trunk/
 	// frunk, climate, charge-port) destined for the Go-owned
 	// go_vehicle_control_state SIDE table — NOT the Prisma-owned "Vehicle"

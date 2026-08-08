@@ -19,9 +19,12 @@ import (
 // could not win against.
 func TestAppendDerivedStatusSet_OnlyOnMotionFrames(t *testing.T) {
 	tests := []struct {
-		name       string
-		update     VehicleUpdate
-		wantStatus bool
+		name string
+		// notStreamed marks the frame as a MYR-260 synthetic /vehicle_data
+		// backfill rather than a live one. Frames default to streamed.
+		notStreamed bool
+		update      VehicleUpdate
+		wantStatus  bool
 	}{
 		{
 			name:       "gear frame re-derives",
@@ -62,11 +65,26 @@ func TestAppendDerivedStatusSet_OnlyOnMotionFrames(t *testing.T) {
 			},
 			wantStatus: false,
 		},
+		{
+			// MYR-454 review catch. MYR-260 publishes synthetic
+			// /vehicle_data frames ONLY for cars the monitor has determined
+			// are NOT streaming, and they carry Tesla's CACHED shift_state
+			// and speed. The fold's premise — "a frame arriving proves the
+			// car is live" — is exactly false for these, so it must not run.
+			name:        "REST backfill frame never re-derives",
+			notStreamed: true,
+			update: VehicleUpdate{
+				GearPosition: strPtr("D"),
+				Speed:        intPtr(31),
+			},
+			wantStatus: false,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.update.LastUpdated = time.Now()
+			tt.update.Streamed = !tt.notStreamed
 			query, _, ok := buildTelemetryUpdate("5YJ3E1EA1NF000001", tt.update, nil)
 			if !ok {
 				t.Fatal("buildTelemetryUpdate returned ok=false")
@@ -99,6 +117,7 @@ func TestAppendDerivedStatusSet_ArgsMatchPlaceholders(t *testing.T) {
 		ChargeLevel:  intPtr(78),
 		InteriorTemp: intPtr(67),
 		LastUpdated:  time.Now(),
+		Streamed:     true,
 	}
 
 	query, args, ok := buildTelemetryUpdate("5YJ3E1EA1NF000001", update, nil)
