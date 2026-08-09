@@ -32,6 +32,12 @@
 //   - Bounded concurrency: the bus delivers serially, so the handler hands
 //     each event to a worker pool (Config.MaxConcurrent) and returns at once —
 //     a slow dispatch never blocks delivery of the next accept.
+//   - Monotonic leg order (MYR-526): the car's nav destination is ONE
+//     last-write-wins resource, so pushes serialize per vehicle and a leg that
+//     has been overtaken by a later leg of the SAME ride never reaches the car
+//     (recorded `skipped` / `nav_superseded`). Without it a stalled pickup push
+//     can land after the dropoff push that overtook it, leaving the dash on the
+//     pickup while BOTH legs correctly record `sent`. See nav_sequencer.go.
 //   - Kill-switch: Config.Enabled=false records the outcome as `skipped`
 //     without any Tesla call, so the client can disable nav pushes via the
 //     DISPATCH_ENABLED env var with no code change.
