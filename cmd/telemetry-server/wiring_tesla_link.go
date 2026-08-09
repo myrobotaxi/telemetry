@@ -18,9 +18,27 @@ import (
 )
 
 // teslaLinkSessionTTL bounds how long a started in-app Tesla link may sit
-// before the user completes the browser consent. Short enough to limit the
-// window a captured state is useful, long enough for a real consent flow.
-const teslaLinkSessionTTL = 10 * time.Minute
+// before the user completes the browser consent.
+//
+// TEN MINUTES WAS NOT LONG ENOUGH FOR A REAL FIRST CONSENT (MYR-517). Spencer
+// White's onboarding, watched live on 2026-08-09, answered "link expired" after
+// he authenticated and worked through Tesla's scope screens, and forced him to
+// start over. THIS is the TTL that produced it: Tesla's authorization CODE
+// cannot be the constraint, because Tesla mints it at the END of consent and
+// our callback exchanges it within one round-trip, so no amount of time on the
+// consent screens is charged against it. Every second of that flow is charged
+// against this clock — it starts at /start, and the state has to still be here
+// when Tesla redirects back.
+//
+// A first-timer's flow is a Tesla sign-in they may not have credentials for, an
+// MFA challenge, an email round-trip, and a six-checkbox permissions screen on
+// a phone. Thirty minutes is the honest budget for that, and it costs nothing:
+// the state token is a single-use CSRF nonce bound to one authenticated user,
+// with PKCE underneath it — the TTL is a housekeeping bound on an in-memory
+// map, not the thing standing between an attacker and an account. The store
+// still reaps on write and still caps the per-user entries, so the ceiling on
+// map growth is unchanged in kind.
+const teslaLinkSessionTTL = 30 * time.Minute
 
 // setupTeslaLinkEndpoints mounts the user-facing in-app Tesla OAuth link
 // surface (MYR-246): POST /api/tesla/link/start and GET /api/tesla/link/callback.

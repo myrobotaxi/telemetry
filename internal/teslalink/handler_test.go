@@ -193,7 +193,7 @@ func TestResolveCallback(t *testing.T) {
 			// session so a denied attempt cannot be replayed within its TTL.
 			// (invalid_state has no matching session to consume.)
 			if tt.seedState != "" && tt.wantReason != reasonInvalidState {
-				if _, ok := store.Take(tt.seedState); ok {
+				if _, taken := store.Take(tt.seedState); taken == TakeOK {
 					t.Error("session should have been consumed (single-use)")
 				}
 			}
@@ -252,21 +252,75 @@ func TestServeCallback_RedirectsToApp(t *testing.T) {
 	}
 }
 
+// MYR-517. The two ways to fail state validation are not the same event, and
+// the callback must say which one happened without changing what an existing
+// client reads. `reason` is untouched; `detail` is new and additive.
+func TestResolveCallback_DistinguishesExpiryFromAnUnknownState(t *testing.T) {
+	base := time.Date(2026, 8, 9, 17, 55, 0, 0, time.UTC)
+
+	tests := []struct {
+		name       string
+		seed       bool
+		advance    time.Duration
+		wantDetail string
+	}{
+		{
+			name: "a state that timed out", seed: true, advance: 31 * time.Minute,
+			wantDetail: detailSessionExpired,
+		},
+		{
+			name: "a state we never issued", seed: false,
+			wantDetail: detailSessionUnknown,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := base
+			store := NewSessionStore(30 * time.Minute).WithClock(func() time.Time { return now })
+			h := NewHandler(fakeValidator{userID: "u1"}, &fakeLinker{}, store, testConfig(), slog.Default())
+			if tt.seed {
+				store.Put(Session{State: "s1", PKCEVerifier: "v1", UserID: "u1"})
+			}
+			now = base.Add(tt.advance)
+
+			res := h.resolveCallback(context.Background(), url.Values{"state": {"s1"}, "code": {"c"}})
+
+			if res.status != statusError || res.reason != reasonInvalidState {
+				t.Fatalf("outcome: got {%s %s}, want {%s %s} — the existing reason vocabulary must not move",
+					res.status, res.reason, statusError, reasonInvalidState)
+			}
+			if res.detail != tt.wantDetail {
+				t.Errorf("detail: got %q, want %q", res.detail, tt.wantDetail)
+			}
+		})
+	}
+}
+
 func TestAppRedirectURL(t *testing.T) {
 	tests := []struct {
 		name   string
 		base   string
 		status string
 		reason string
+		detail string
 		want   string
 	}{
 		{name: "success", base: "myrobotaxi://tesla-linked", status: "success", reason: "", want: "myrobotaxi://tesla-linked?status=success"},
 		{name: "error with reason", base: "myrobotaxi://tesla-linked", status: "error", reason: "invalid_state", want: "myrobotaxi://tesla-linked?reason=invalid_state&status=error"},
 		{name: "base already has query", base: "myrobotaxi://tesla-linked?x=1", status: "success", reason: "", want: "myrobotaxi://tesla-linked?x=1&status=success"},
+		{
+			// MYR-517: `detail` is strictly additive — `reason` keeps the exact
+			// value it had, so a client that has never heard of `detail` sees no
+			// change at all.
+			name: "expiry carries an additive detail alongside the unchanged reason",
+			base: "myrobotaxi://tesla-linked", status: "error", reason: "invalid_state", detail: "session_expired",
+			want: "myrobotaxi://tesla-linked?detail=session_expired&reason=invalid_state&status=error",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := appRedirectURL(tt.base, tt.status, tt.reason); got != tt.want {
+			if got := appRedirectURL(tt.base, tt.status, tt.reason, tt.detail); got != tt.want {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}
 		})
