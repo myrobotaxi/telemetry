@@ -49,8 +49,18 @@ type vehicleLister interface {
 }
 
 // vehicleUpserter seeds "Vehicle" identity rows (store.OwnerProvisioner).
+//
+// MYR-491 widened it with the schedule seed, which is the same actor doing the
+// same job one table over: provisioning a car that cannot stream yet, and
+// recording WHY. Keeping them on one interface is what guarantees the two
+// writes are always wired together — a deployment that provisions vehicles but
+// cannot say why they are silent is the state MYR-503 was reported from.
 type vehicleUpserter interface {
 	UpsertOwnedVehicle(ctx context.Context, in store.OwnedVehicleInput) (store.VehicleUpsertOutcome, error)
+	// SeedFleetConfigAwaitingKey records Tesla's link-time `missing_key` skip so
+	// the owner's first app open can name the one thing left to do, instead of
+	// waiting up to 45 minutes for the reconciler to discover the same fact.
+	SeedFleetConfigAwaitingKey(ctx context.Context, vin string, now time.Time) error
 }
 
 // fleetConfigPusher pushes the fleet-telemetry config for one VIN so the car
@@ -201,6 +211,7 @@ func (h *ownerStreamHook) provisionVehicle(ctx context.Context, userID, accessTo
 				slog.String("user_id", userID),
 				slog.String("vin", redactVIN(vin)),
 				slog.String("reason", skipped.Reason))
+			h.seedAwaitingKey(ctx, userID, vin)
 			return true
 		}
 		h.logger.Warn("owner stream setup: fleet-config push failed (owner still linked; reconciler will retry)",
@@ -210,6 +221,24 @@ func (h *ownerStreamHook) provisionVehicle(ctx context.Context, userID, accessTo
 			slog.String("error", err.Error()))
 	}
 	return true
+}
+
+// seedAwaitingKey persists the link-time `missing_key` skip (MYR-491) so the
+// owner's vehicle card can name the pairing step immediately, rather than
+// rendering empty until the reconciler's first pass reaches this car — up to
+// Staleness + Interval later, which for MYR-503's tester would have been long
+// after he gave up on the Lock button.
+//
+// BEST-EFFORT, LIKE EVERY OTHER STEP IN THIS HOOK. A failure to write a card's
+// input must never surface to an owner who has just successfully linked their
+// Tesla account, so this logs and returns.
+func (h *ownerStreamHook) seedAwaitingKey(ctx context.Context, userID, vin string) {
+	if err := h.upsert.SeedFleetConfigAwaitingKey(ctx, vin, time.Now()); err != nil {
+		h.logger.Warn("owner stream setup: could not record the awaiting-key setup state (card will fill in on the next reconcile pass)",
+			slog.String("user_id", userID),
+			slog.String("vin", redactVIN(vin)),
+			slog.String("error", err.Error()))
+	}
 }
 
 // vinLength is the fixed Tesla VIN length used to guard the fleet push.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/store"
 	"github.com/myrobotaxi/telemetry/internal/telemetry"
@@ -23,6 +24,10 @@ type fakeUpserter struct {
 	inputs  []store.OwnedVehicleInput
 	outcome store.VehicleUpsertOutcome
 	err     error
+	// seededVINs records the MYR-491 link-time setup-state seed, so a test can
+	// assert that Tesla's `missing_key` is persisted and not merely logged.
+	seededVINs []string
+	seedErr    error
 }
 
 func (f *fakeUpserter) UpsertOwnedVehicle(_ context.Context, in store.OwnedVehicleInput) (store.VehicleUpsertOutcome, error) {
@@ -35,6 +40,11 @@ func (f *fakeUpserter) UpsertOwnedVehicle(_ context.Context, in store.OwnedVehic
 		out = store.VehicleOwned
 	}
 	return out, nil
+}
+
+func (f *fakeUpserter) SeedFleetConfigAwaitingKey(_ context.Context, vin string, _ time.Time) error {
+	f.seededVINs = append(f.seededVINs, vin)
+	return f.seedErr
 }
 
 type fakePusher struct {
@@ -77,6 +87,75 @@ func TestOwnerStreamHook_AfterLink(t *testing.T) {
 		}
 		if len(pusher.vins) != 1 || pusher.vins[0] != validVIN {
 			t.Errorf("pushed vins = %v, want [%s]", pusher.vins, validVIN)
+		}
+	})
+
+	// MYR-491 / MYR-503. Tesla's link-time `missing_key` is the ONLY unambiguous
+	// evidence of an unpaired virtual key the server ever receives, and it
+	// arrives minutes before the owner opens the app. Logging it and dropping
+	// it is what left the setup card blank for the tester who then met a dead
+	// Lock button.
+	t.Run("records Tesla's link-time missing_key so the setup card can render", func(t *testing.T) {
+		lister := &fakeLister{vehicles: []telemetry.FleetVehicle{ownedVehicle("1", validVIN, "V")}}
+		upsert := &fakeUpserter{}
+		pusher := &fakePusher{err: &telemetry.SkippedVehicleError{
+			RedactedVIN: "***0001", Reason: telemetry.SkipReasonMissingKey,
+		}}
+		hook := &ownerStreamHook{lister: lister, upsert: upsert, pusher: pusher, logger: testLogger()}
+
+		hook.AfterLink(ctx, "cuser1", "token")
+
+		if len(upsert.seededVINs) != 1 || upsert.seededVINs[0] != validVIN {
+			t.Fatalf("seeded vins = %v, want [%s]", upsert.seededVINs, validVIN)
+		}
+	})
+
+	// A push that failed for a reason we do NOT understand must not be reported
+	// to the owner as "pair your virtual key". Naming the wrong action is worse
+	// than naming none: it sends them to the Tesla app to fix something that is
+	// not broken, and the real fault stays invisible.
+	t.Run("an unrecognised push failure seeds nothing", func(t *testing.T) {
+		lister := &fakeLister{vehicles: []telemetry.FleetVehicle{ownedVehicle("1", validVIN, "V")}}
+		upsert := &fakeUpserter{}
+		pusher := &fakePusher{err: errors.New("502 from the proxy")}
+		hook := &ownerStreamHook{lister: lister, upsert: upsert, pusher: pusher, logger: testLogger()}
+
+		hook.AfterLink(ctx, "cuser1", "token")
+
+		if len(upsert.seededVINs) != 0 {
+			t.Fatalf("seeded vins = %v, want none", upsert.seededVINs)
+		}
+	})
+
+	// A successful push means the car is configured; there is nothing to
+	// explain, and a seeded row would put a permanent "setting up" card on a
+	// healthy vehicle.
+	t.Run("a successful push seeds nothing", func(t *testing.T) {
+		lister := &fakeLister{vehicles: []telemetry.FleetVehicle{ownedVehicle("1", validVIN, "V")}}
+		upsert := &fakeUpserter{}
+		hook := &ownerStreamHook{lister: lister, upsert: upsert, pusher: &fakePusher{}, logger: testLogger()}
+
+		hook.AfterLink(ctx, "cuser1", "token")
+
+		if len(upsert.seededVINs) != 0 {
+			t.Fatalf("seeded vins = %v, want none", upsert.seededVINs)
+		}
+	})
+
+	// The seed is a card's input, not a gate. Failing an owner's Tesla link
+	// because a cosmetic row could not be written would be absurd.
+	t.Run("a seed failure never breaks the link", func(t *testing.T) {
+		lister := &fakeLister{vehicles: []telemetry.FleetVehicle{ownedVehicle("1", validVIN, "V")}}
+		upsert := &fakeUpserter{seedErr: errors.New("db down")}
+		pusher := &fakePusher{err: &telemetry.SkippedVehicleError{
+			RedactedVIN: "***0001", Reason: telemetry.SkipReasonNotPaired,
+		}}
+		hook := &ownerStreamHook{lister: lister, upsert: upsert, pusher: pusher, logger: testLogger()}
+
+		hook.AfterLink(ctx, "cuser1", "token") // must not panic, must still provision
+
+		if len(upsert.inputs) != 1 {
+			t.Fatalf("upsert inputs = %+v, want the vehicle still provisioned", upsert.inputs)
 		}
 	})
 
