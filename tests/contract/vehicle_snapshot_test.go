@@ -24,6 +24,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 )
 
 func TestContract_GETVehicleSnapshot(t *testing.T) {
@@ -122,6 +123,23 @@ func TestContract_GETVehicleSnapshot(t *testing.T) {
 					t.Errorf("rideShareEnabled = %v, want true (no control-state row = enabled)", share)
 				}
 
+				// MYR-491: the setup state is ALWAYS keyed, and for a
+				// vehicle with no fleet-config schedule row it is an
+				// explicit null — the server makes NO CLAIM. Asserting
+				// presence catches an omitempty regression; asserting
+				// null catches the opposite and worse failure, a
+				// derivation that invents a setup card for a car that
+				// does not need one. (Null here is NOT "ready" — see
+				// rest-api.md §7.1.)
+				setup, ok := resp["setupState"]
+				if !ok {
+					t.Error("MYR-491 field `setupState` missing from snapshot; " +
+						"the key is always emitted, null when there is nothing to say")
+				} else if setup != nil {
+					t.Errorf("setupState = %v, want null (no fleet-config schedule row "+
+						"means no claim)", setup)
+				}
+
 				// Spot-check that values round-trip end-to-end (DB
 				// SELECT -> scan -> handler -> JSON encode) rather
 				// than just being present-but-zero.
@@ -170,6 +188,70 @@ func TestContract_GETVehicleSnapshot(t *testing.T) {
 			// to keep producing `""` for the two NOT NULL labels and
 			// `null` for the two nullable ones — never an empty string
 			// where a null belonged, and never a missing key.
+			// MYR-491 / MYR-503, the whole point of the field. This is the
+			// tester's car verbatim: linked minutes ago, Tesla refused the
+			// telemetry config for a missing virtual key, `status` still the
+			// write-once `offline` schema default, `lastUpdated` FRESH because
+			// the provisioning INSERT just wrote it.
+			//
+			// That last detail is what this case exists to pin. A derivation
+			// that treated a fresh `lastUpdated` as "this car is streaming"
+			// would suppress the state for the first thirty minutes of a new
+			// owner's life — precisely the window in which they open the app,
+			// tap Lock, and meet a dead button.
+			name: "a linked car whose virtual key was never paired says so on the wire",
+			path: "/api/vehicles/" + vehicleID + "/snapshot",
+			seed: func(t *testing.T, h *seedHelpers) {
+				h.seedUser(ctx, t, ownerID)
+				h.seedVehicle(ctx, t, vehicleSeed{
+					ID:          vehicleID,
+					UserID:      ownerID,
+					VIN:         ownerVIN,
+					Name:        "Amruth's X Plaid",
+					Model:       "Model X",
+					Year:        2025,
+					Status:      "offline",
+					LastUpdated: time.Now().UTC(),
+				})
+				h.seedFleetConfigAttempt(ctx, t, vehicleID,
+					"awaiting_virtual_key", time.Now().UTC().Add(-4*time.Minute))
+			},
+			token:      func(t *testing.T) string { return mintToken(t, ownerID, nil) },
+			wantStatus: http.StatusOK,
+			assertBody: func(t *testing.T, body []byte) {
+				validateAgainstSchema(t,
+					"docs/contracts/schemas/vehicle-state.schema.json", body)
+
+				var resp map[string]any
+				decodeJSON(t, body, &resp)
+
+				raw, ok := resp["setupState"]
+				if !ok {
+					t.Fatal("setupState missing from the snapshot")
+				}
+				obj, ok := raw.(map[string]any)
+				if !ok {
+					t.Fatalf("setupState = %#v, want an object", raw)
+				}
+				if obj["state"] != "awaiting_virtual_key" {
+					t.Errorf("setupState.state = %v, want awaiting_virtual_key — a fresh "+
+						"lastUpdated on a never-streamed car must NOT suppress the state",
+						obj["state"])
+				}
+				since, ok := obj["since"].(string)
+				if !ok {
+					t.Fatalf("setupState.since = %#v, want an RFC 3339 string", obj["since"])
+				}
+				at, err := time.Parse(time.RFC3339, since)
+				if err != nil {
+					t.Errorf("setupState.since = %q is not RFC 3339: %v", since, err)
+				} else if at.After(time.Now().Add(time.Minute)) {
+					t.Errorf("setupState.since = %q is in the future; the server floors it "+
+						"at the read instant so clients can subtract it safely", since)
+				}
+			},
+		},
+		{
 			name: "vehicle with no geocoded labels keeps the pre-sealing null shape",
 			path: "/api/vehicles/" + vehicleID + "/snapshot",
 			seed: func(t *testing.T, h *seedHelpers) {
