@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/myrobotaxi/telemetry/internal/vin"
 )
 
 // OwnedVehicleInput seeds the identity columns of a "Vehicle" row for a
@@ -40,18 +42,39 @@ const (
 // a conflict against a row owned by a DIFFERENT user updates nothing and reports
 // RowsAffected()==0 — the teslaVehicleId is NEVER reassigned across users.
 //
-// The four NOT-NULL identity columns without Prisma defaults (`model`, `year`,
-// `color`, `licensePlate`) are seeded with empty placeholders so the INSERT
-// succeeds against the prod schema; the web sync / streaming pipeline fills real
-// values later. `xmax = 0` is Postgres's "row was inserted (not updated) by this
-// statement" test, used to distinguish an insert from a same-user reconcile.
+// MYR-507: `model` and `year` are no longer seeded with placeholders. That
+// comment used to read "the web sync / streaming pipeline fills real values
+// later" — and no such writer has ever existed on either side, so for every car
+// the GO server provisioned they stayed `”` and `0` permanently. Both are
+// `required` wire fields on §7.0 and §7.1, so a rider had no way to name a
+// shared car beyond its colour. They are now derived from the VIN
+// (`internal/vin`) and passed in as binds, which is possible precisely because
+// the VIN needs no token, no awake car and no network call: a car is correctly
+// identified from the instant it is linked, rather than waiting on a
+// connectivity edge it may never produce.
+//
+// The ON CONFLICT arm BACKFILLS both — `NULLIF`-guarded exactly like `name`
+// above, so a re-link fills an empty column but never overwrites a populated
+// one. The Prisma web-link flow writes a richer model for some rows ("Model 3
+// Performance") than position 4 of a VIN can encode, and a re-link must not
+// downgrade it. (`VehicleRepo.FillVehicleIdentity` applies the same rule on the
+// refresh path for cars already in the table.)
+//
+// `color` and `licensePlate` keep their empty placeholders: neither is
+// derivable from the VIN. `color` is filled by the MYR-320 Tesla read;
+// `licensePlate` only ever comes from the owner typing it (§7.14).
+//
+// `xmax = 0` is Postgres's "row was inserted (not updated) by this statement"
+// test, used to distinguish an insert from a same-user reconcile.
 const queryUpsertOwnedVehicle = `
 INSERT INTO "Vehicle" ("id", "userId", "teslaVehicleId", "vin", "name",
                        "model", "year", "color", "licensePlate", "updatedAt")
-VALUES ($1, $2, $3, $4, $5, '', 0, '', '', NOW())
+VALUES ($1, $2, $3, $4, $5, $6, $7, '', '', NOW())
 ON CONFLICT ("teslaVehicleId") DO UPDATE
 SET "vin"       = EXCLUDED."vin",
     "name"      = COALESCE(NULLIF("Vehicle"."name", ''), EXCLUDED."name"),
+    "model"     = COALESCE(NULLIF("Vehicle"."model", ''), EXCLUDED."model"),
+    "year"      = COALESCE(NULLIF("Vehicle"."year", 0), EXCLUDED."year"),
     "updatedAt" = NOW()
 WHERE "Vehicle"."userId" = EXCLUDED."userId"`
 
@@ -86,8 +109,13 @@ func (p *OwnerProvisioner) UpsertOwnedVehicle(ctx context.Context, in OwnedVehic
 	if strings.TrimSpace(name) == "" {
 		name = "Tesla"
 	}
+	// MYR-507: the identity a VIN can be read for without asking Tesla anything.
+	// Either may be the zero value for an unrecognised code, which the INSERT
+	// stores as the same placeholder this statement used to hard-code and which
+	// the refresh path (FillVehicleIdentity) will retry against later.
 	tag, err := p.pool.Exec(ctx, queryUpsertOwnedVehicle,
-		newProvisionID(), in.UserID, in.TeslaVehicleID, in.VIN, name)
+		newProvisionID(), in.UserID, in.TeslaVehicleID, in.VIN, name,
+		vin.Model(in.VIN), vin.ModelYear(in.VIN))
 	if err != nil {
 		return "", fmt.Errorf("store.UpsertOwnedVehicle(user=%s, vin=%s): %w", in.UserID, redactVIN(in.VIN), err)
 	}
