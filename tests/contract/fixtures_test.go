@@ -178,6 +178,13 @@ func TestFixturesValidateAgainstSchemas(t *testing.T) {
 	// violates the schema its consumer decodes — the MYR-184 viewer-`name`
 	// class of defect.
 	vehicleSummaryListSchema := compileSchema(t, c, "https://myrobotaxi.com/schemas/vehicle-summary.schema.json")
+	// MYR-505 §7.23. A SEPARATE schema from the two above on purpose: the
+	// setupState object is the same shape, but this surface's contract is
+	// strictly stronger — never null, and a superset enum carrying `streaming`.
+	// Validating the fixture against it is what would catch the drift that
+	// matters most here, a `streaming` leaking onto a read surface or a null
+	// leaking onto this one.
+	setupCompletionSchema := compileSchema(t, c, "https://myrobotaxi.com/schemas/vehicle-setup-completion.schema.json")
 
 	// Pre-compile all WS message payload schemas.
 	payloadSchemas := map[string]*jsonschema.Schema{
@@ -299,6 +306,11 @@ func TestFixturesValidateAgainstSchemas(t *testing.T) {
 					// `sharePermission` (§5.2.0).
 					validateVehiclesList(t, stripped, baseName)
 					validate(t, vehicleSummaryListSchema, stripped, "VehicleListResponse")
+
+				case baseName == "complete_setup.json":
+					// MYR-505: the §7.23 action response.
+					validate(t, setupCompletionSchema, stripped, "VehicleSetupCompletionResponse")
+					assertCompletionStateIsPositive(t, stripped)
 
 				case strings.HasPrefix(baseName, "error."):
 					validateRESTError(t, stripped)
@@ -726,6 +738,32 @@ func validateDriveRoute(t *testing.T, m map[string]any) {
 				t.Errorf("routePoints[%d] missing required RoutePoint field %q", i, field)
 			}
 		}
+	}
+}
+
+// assertCompletionStateIsPositive pins the two guarantees §7.23 makes that the
+// read surfaces deliberately do not, and that a shared schema could not express.
+//
+// The schema already rejects a null or absent `setupState`, but a fixture is
+// also documentation, and these are the properties a client author reads it
+// FOR: this surface always answers, and it can say the car is live. Asserting
+// them here means a future edit that quietly relaxed either — the exact drift
+// that would reintroduce "no claim" as the answer to a request — fails loudly
+// rather than passing on a technicality.
+func assertCompletionStateIsPositive(t *testing.T, m map[string]any) {
+	t.Helper()
+
+	state, ok := m["setupState"].(map[string]any)
+	if !ok {
+		t.Fatalf("setupState = %v, want a non-null object (§7.23 always answers)", m["setupState"])
+	}
+	// The fixture is the success-in-progress case; a `null` or an
+	// awaiting/token member would make it document the wrong thing.
+	if got := state["state"]; got != "configuring" {
+		t.Errorf("fixture state = %v, want configuring (the case the client narrates)", got)
+	}
+	if got, _ := state["since"].(string); got == "" {
+		t.Error("since is empty; the client renders the card's age from it")
 	}
 }
 
