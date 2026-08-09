@@ -568,6 +568,30 @@ The ActivityKit push-token registry behind the rider's Live Activity — one row
 
 ---
 
+### 1.19 go_fleet_config_attempts table (Go-owned, MYR-448; extended MYR-489; first wire-exposed by MYR-491)
+
+The fleet-config reconciler's per-vehicle retry schedule — one row per car that is **currently failing to stream**, and no row at all for a car that is healthy. The table is **self-draining**: a successful config push DELETEs the row (migration 0031), which is why the absence of a row is itself a meaningful, load-bearing fact rather than a gap.
+
+Classified here for the first time because **MYR-491 made it wire-visible**. Nothing in this table crosses the wire *directly* — the four columns below are read together and collapsed into the single derived `setupState` object on `VehicleState` (rest-api.md §7.1) and `VehicleSummary` (§7.0) — but Rule CG-DC-5 attaches to the field, not to the column, so the source columns are enumerated.
+
+| Column | Type | Tier | Encrypt | Log-safe | Rationale |
+|--------|------|------|---------|----------|-----------|
+| `vehicle_id` | `TEXT` (PK) | P0 | No | Yes | The car's opaque Prisma cuid. **No FK (CG-DL-9)** — a Go-owned table may not reference a Prisma-owned one. Not the VIN, so nothing here identifies a physical vehicle |
+| `attempt_count` | `INTEGER NOT NULL DEFAULT 0` | P0 | No | Yes | Consecutive unsuccessful attempts, the input to the exponential backoff. A counter about OUR scheduling, not about the car or its owner. **Deliberately NOT wire-exposed** even now: it is an implementation detail of the retry curve, and an owner shown "attempt 6 of ∞" learns nothing actionable |
+| `last_attempt_at` | `TIMESTAMPTZ NOT NULL DEFAULT NOW()` | P0 | No | Yes | When we last asked Tesla about this car. **Wire-projected** as `setupState.since` for `awaiting_virtual_key` / `token_failed` (MYR-491) — a clock reading about a server action, carrying nothing about the owner's whereabouts or behaviour |
+| `next_attempt_at` | `TIMESTAMPTZ NOT NULL DEFAULT NOW()` | P0 | No | Yes | When the car becomes eligible again. Pure scheduling; **not wire-exposed**, and deliberately so — publishing it would invite a client to render a countdown to a retry that a pairing signal can cancel at any moment |
+| `last_outcome` | `TEXT NOT NULL DEFAULT ''` | P0 | No | Yes | An INTERNAL label (`awaiting_virtual_key`, `synced_not_streaming`, `token_failed`, `forced_repush`, …), **never a raw Tesla response body** — that rule predates this issue and exists because a Tesla body can echo a full VIN (§2.1). **Wire-projected**, but NOT verbatim: it is mapped through a server-side derivation onto the three-member `setupState.state` enum, so the internal vocabulary can change without a wire break |
+| `signed_command_at` | `TIMESTAMPTZ?` | P0 | No | Yes | **MYR-489, migration 0036.** When a signed command last APPLIED — proof the virtual key is paired and the car was reachable. **Wire-projected** as `setupState.since` for `configuring`. Note what it is NOT: it records that *a* command succeeded, never WHICH command, so it cannot reveal that the owner unlocked their car at 2am |
+| `forced_repush_at` | `TIMESTAMPTZ?` | P0 | No | Yes | **MYR-489, migration 0036.** When the escalation last recreated this car's config, and the budget that rations it to one per pairing epoch. **Wire-projected** as `setupState.since` for `configuring` when it is the later stamp |
+
+> **Why the whole table is P0.** Every column is either an opaque cuid, a counter, a clock reading about a server action, or a fixed internal label. There is no VIN, no coordinate, no token, no free text and no user content — nothing whose accumulation reveals anything about a person. The table describes what OUR reconciler did and when, which is the same tier as `Vehicle.status`. It is log-safe in full, and the reconciler already logs most of it (`fleet_config_synced_not_streaming`, `fleet_config_forced_repush`) with the VIN redacted to last-4 per §2.1.
+>
+> **Wire projection (Rule CG-DC-5):** four of the seven columns feed exactly one wire field, `setupState`, on two resources — `vehicle_state` (§7.1) and `vehicle_summary` (§7.0) — in **BOTH role masks** (`vehicleStateOwnerFields`, `vehicleStateViewerFields`, `vehicleSummaryOwnerFields`, and the viewer summary list by copy). The viewer entry is a deliberate product decision on the same footing as `rideShareEnabled`: a car that has never streamed sits at `status: "offline"` permanently (MYR-437), so a viewer without `setupState` cannot distinguish a broken shared car from an unfinished one. The derivation is a **narrowing**, not a projection — three enum members out of seven-plus internal outcomes, plus one timestamp out of four — and that is intentional: the internal scheduling vocabulary stays free to change, and nothing about our retry cadence leaks to a client.
+>
+> **`attempt_count` and `next_attempt_at` are withheld ON PURPOSE, and the reason is a classification one.** Both are P0 and both would be harmless to publish, so the decision is not about tier — it is that neither is ACTIONABLE, and a card whose whole contract is "name the one thing left to do" must not carry numbers its reader cannot act on. Adding either would require a fresh CG-DC-5 entry here and a §7.0/§7.1 field row, which is exactly the friction that should stand in the way.
+
+---
+
 ## 2. Redaction rules by tier
 
 These rules apply to all structured log output (`slog`), error messages (`fmt.Errorf`), crash reports, and Prometheus metric labels.
@@ -623,7 +647,7 @@ What MYR-447 does NOT do is extend this to the SERVER's own reads of P1 columns:
 
 | | Viewer receives | Viewer does NOT receive |
 |---|---|---|
-| **Live vehicle state** (`vehicle_state`) | Location (`latitude`, `longitude`, `heading`, `speed`, `locationName`, `locationAddress`); navigation + route + live trail; identity (`name`, `model`, `year`, `color`, `trim`, `licensePlate`, …); charge (`chargeLevel`, `chargeState`, `estimatedRange`, `timeToFull`); availability (`status`, `gearPosition`, `rideShareEnabled`, `serviceEstimatedEndAt`); counters (`odometerMiles`, `fsdMilesSinceReset`); freshness (`lastUpdated`) | The full `vin` (§1.3, §2.1 — MYR-279); **all** media/now-playing fields; **all** cabin-climate fields incl. `interiorTemp` and `exteriorTemp`; **all** vehicle-controls state (`locked`, `chargePortDoorOpen`, `frunkOpen`, `trunkOpen`, `virtualKeyPaired`) |
+| **Live vehicle state** (`vehicle_state`) | Location (`latitude`, `longitude`, `heading`, `speed`, `locationName`, `locationAddress`); navigation + route + live trail; identity (`name`, `model`, `year`, `color`, `trim`, `licensePlate`, …); charge (`chargeLevel`, `chargeState`, `estimatedRange`, `timeToFull`); availability (`status`, `gearPosition`, `rideShareEnabled`, `serviceEstimatedEndAt`, `setupState`); counters (`odometerMiles`, `fsdMilesSinceReset`); freshness (`lastUpdated`) | The full `vin` (§1.3, §2.1 — MYR-279); **all** media/now-playing fields; **all** cabin-climate fields incl. `interiorTemp` and `exteriorTemp`; **all** vehicle-controls state (`locked`, `chargePortDoorOpen`, `frunkOpen`, `trunkOpen`, `virtualKeyPaired`) |
 | **Vehicles list** (`vehicle_summary`) | The full catalog row plus `sharePermission` | The full `vin` (the catalog carries `vinLast4` only). The list has never carried media, cabin or controls state, and a test now guards that it stays that way. |
 | **Drives** (`drive_summary` / `drive_detail` / `drive_route`) | — | Everything: drives are owner-only ([MYR-369](https://linear.app/myrobotaxi/issue/MYR-369)). |
 

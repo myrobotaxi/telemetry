@@ -520,6 +520,27 @@
       "x-classification": "P0",
       "examples": [false]
     },
+    "setupState": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["state", "since"],
+      "description": "What is still standing between this vehicle and live telemetry, or NULL when there is nothing to say (MYR-491, contracts v0.24.0). OPTIONAL AND TOLERANT: an ABSENT key means the server predates v0.24.0 and MUST be read exactly like null — no card, no badge, no degraded rendering. THE FIELD NAMES ONE ACTION, WHICH IS THE WHOLE POINT: MYR-503's new owner met a dead Lock button because nothing told him his virtual key was never paired, and the client's explicit direction was that pairing guidance must NOT hang off a failed control ('does this make sense to the end user to have retry associated with lock?' — no). Consumers render this as a vehicle-level card BEFORE any command is attempted. NULL IS NOT 'READY': there is deliberately no `ready` member. Null means the server makes NO CLAIM — which covers a healthy streaming car, a car nobody has examined yet, and an expired claim — so a consumer MUST NOT paint a positive 'set up ✓' state from it. SERVER-DERIVED, EXACTLY ONCE: the value comes from the Go-owned `go_fleet_config_attempts` row (migrations 0031 + 0036) read together with `status` and `lastUpdated`, in a single server-side function that BOTH this snapshot and the VehicleSummary catalog row call. Consumers MUST NOT re-derive it, and are guaranteed the list row and the snapshot for one vehicle can never disagree. HONESTY RULES the server guarantees, worth knowing because they bound what the copy may say: (1) absence of evidence yields null — a vehicle with no schedule row never carries a state; (2) `configuring` EXPIRES after 24 hours of its evidence, falling back to null rather than to `awaiting_virtual_key`, because a car whose pairing has been proven is not awaiting a key; (3) a car that is currently STREAMING never carries `configuring` or `token_failed`, so a stale schedule row cannot put a setup card on a live car; (4) a car that streamed once and later went quiet is the FRESHNESS story (`lastUpdated`), not a setup state, and is deliberately excluded. NOT derived from `key_not_paired` command rejections: that error code is overloaded — the server returns it when ITS OWN signing proxy is unconfigured — so it cannot distinguish an unpaired owner from a broken deployment. DELIVERY: REST-READ-TIME ONLY, like the siblings `rideShareEnabled` and `serviceEstimatedEndAt` — a `vehicle_update` frame NEVER carries setupState, and by construction a vehicle in any of these states is not sending frames to attach it to. It refreshes on the next GET /api/vehicles or /snapshot. RBAC: BOTH roles — P0 operational state about the car, the same tier as the sibling `status` it qualifies, carrying no VIN, no coordinate, no credential and no user content. The viewer needs it for the strongest version of the usual argument: MYR-437's rider-side picker currently calls a never-streamed shared car 'offline' forever, and 'still being set up' is the true word for it.",
+      "x-classification": "P0",
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": ["awaiting_virtual_key", "configuring", "token_failed"],
+          "description": "Which of the three setup conditions holds. `awaiting_virtual_key` — Tesla refused to apply this car's telemetry config because the owner's virtual key is not enrolled on the vehicle (Tesla's own `missing_key`/`not_paired` skip reason). THE OWNER MUST ACT: pair the key at the Tesla app deep link; nothing the server does heals this, and every signed command against the car will be rejected until it is done. `configuring` — the configuration side is in hand and the server is waiting for the car to open its telemetry session, including after the MYR-489 forced re-push. NO OWNER ACTION IS REQUIRED; copy should say so, and may suggest waking the car's screen if the state persists. Note this member does NOT by itself assert that pairing was detected — it is also reached when the server has just issued the car a brand-new config — so copy asserting 'pairing detected' would overstate it. `token_failed` — the owner's Tesla authorization can no longer be resolved or refreshed, so neither config pushes nor commands can reach the car. THE OWNER MUST ACT: reconnect the Tesla account. New members may be added in a minor version; consumers MUST treat an unrecognised value as 'setup is incomplete, reason unknown' and MUST NOT fail the decode.",
+          "examples": ["awaiting_virtual_key"]
+        },
+        "since": {
+          "type": "string",
+          "format": "date-time",
+          "description": "RFC 3339 UTC instant at which the evidence behind `state` was recorded — the failing attempt for `awaiting_virtual_key`/`token_failed`, the pairing epoch or forced re-push for `configuring`. It is DATA FOR THE COPY ('for 2 days', escalating emphasis as it ages), NOT an input a consumer is expected to re-derive `state` from. Never zero and never in the future: the server floors it at the read instant, so a client may subtract it from `now` without guarding for a negative or absurd age.",
+          "examples": ["2026-08-09T02:10:00Z"]
+        }
+      }
+    },
     "lastUpdated": {
       "type": "string",
       "format": "date-time",

@@ -36,5 +36,6 @@
   "navRouteCoordinates": null,
   "licensePlate": "ABC 1234",
   "serviceEstimatedEndAt": null,
+  "setupState": null,
   "lastUpdated": "2026-04-13T17:45:00Z"
 }

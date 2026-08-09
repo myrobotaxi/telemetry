@@ -264,6 +264,7 @@ paths:
             - locationAddress
             - serviceEstimatedEndAt
             - rideShareEnabled
+            - setupState
             - odometerMiles
             - fsdMilesSinceReset
             - destinationName
@@ -1342,6 +1343,68 @@ components:
             `vehicle_update` NEVER carries it; it refreshes on the next
             list/snapshot read or from the PUT's own echo.
           example: false
+          x-classification: P0
+        setupState:
+          type: object
+          nullable: true
+          additionalProperties: false
+          required:
+            - state
+            - since
+          description: |
+            What is still standing between this vehicle and live telemetry,
+            or NULL when there is nothing to say (MYR-491) — the SAME
+            object and the SAME semantics as VehicleState.setupState,
+            produced by the SAME server-side derivation over the same
+            inputs, so a catalog row and a snapshot for one vehicle can
+            never disagree. NULL IS NOT "READY": there is deliberately no
+            `ready` member, and null means the server makes NO CLAIM
+            (healthy car, unexamined car, or an expired claim) — a
+            consumer MUST NOT paint a positive "set up" badge from it.
+            OPTIONAL AND TOLERANT: an ABSENT key means a server predating
+            contracts v0.24.0 and MUST be read exactly like null.
+            ON THE CATALOG AS WELL AS THE SNAPSHOT, for a different
+            consumer: the rider-side picker reads list rows, and it
+            currently renders a never-streamed shared car as permanently
+            "offline" (MYR-437) because `Vehicle.status` is a write-once
+            schema default until the first stream event. This field is
+            what lets it say "still being set up", with a reason, without
+            a snapshot fetch per row. Visible to BOTH roles (P0
+            operational state about the car, same tier as `status`, which
+            it exists to qualify; no VIN, no coordinate, no credential, no
+            user content). No WebSocket delta — a `vehicle_update` NEVER
+            carries it, and by construction a vehicle in any of these
+            states is not sending frames to attach it to.
+          properties:
+            state:
+              type: string
+              enum:
+                - awaiting_virtual_key
+                - configuring
+                - token_failed
+              description: |
+                Which setup condition holds. `awaiting_virtual_key` —
+                Tesla refused the telemetry config because the owner's
+                virtual key is not enrolled; THE OWNER MUST ACT (pair the
+                key in the Tesla app), and every signed command will be
+                rejected until they do. `configuring` — the configuration
+                is in hand and the server is waiting for the car to
+                connect; NO OWNER ACTION IS REQUIRED. `token_failed` —
+                the owner's Tesla authorization can no longer be
+                refreshed; THE OWNER MUST ACT (reconnect Tesla). New
+                members may be added in a minor version: consumers MUST
+                treat an unrecognised value as "setup is incomplete,
+                reason unknown" and MUST NOT fail the decode.
+              example: awaiting_virtual_key
+            since:
+              type: string
+              format: date-time
+              description: |
+                RFC 3339 UTC instant at which the evidence behind `state`
+                was recorded. Data for the copy ("for 2 days"), not an
+                input for re-deriving `state`. Never zero and never in the
+                future — the server floors it at the read instant.
+              example: '2026-08-09T02:10:00Z'
           x-classification: P0
 
     VehiclesListResponse:

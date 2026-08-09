@@ -132,6 +132,27 @@
           "description": "Whether this vehicle's OWNER currently accepts ride requests against it (MYR-342). TRUE is the ordinary state and the state every vehicle starts in. FALSE means THE OWNER HAS PAUSED RIDE REQUESTS FOR THIS VEHICLE: the car itself may be perfectly healthy — online, parked, idle, not in service — but its owner has withdrawn it from ride-hailing, so the server refuses new ride requests against it (409 `vehicle_unavailable`, message 'Ride sharing is paused for this vehicle') and refuses to accept requests that are already outstanding. OPTIONAL AND DELIBERATELY TOLERANT: ABSENT means the server predates contracts v0.20.0 and MUST be read as ENABLED (true). Absence NEVER means paused — consumers MUST NOT render a paused state, MUST NOT hide the ride-request affordance, and MUST NOT fail closed on a missing key. OWNER INTENT, NOT VEHICLE STATE: unlike the sibling `status` ('in_service') or `hasActiveRide`, nothing the car does sets or clears this, and nothing clears it on a timer — it changes only when the owner changes it, via `PUT /api/tesla/vehicles/{vehicleId}/ride-share` (owner-only; a viewer holding any share tier gets 403 `vehicle_not_owned`). That is exactly why the server applies the pause to SCHEDULED rides as well as instant ones, a DELIBERATE DEVIATION from the in-service/offline exemption that rest-api.md §7.8 grants reservations: a service visit ends on its own, an owner's pause is open-ended, so exempting reservations would let a rider book a car its owner has withdrawn indefinitely. VISIBLE TO VIEWERS: emitted on `role` = 'viewer' rows as well as owner rows, by deliberate product decision and for the same reason as `licensePlate` and `hasActiveRide` — a rider must be able to see that the car shared with them is not taking requests, rather than discovering it from a 409 after filling in a pickup. CONSUMER GUIDANCE: owners render it as the current position of the ride-sharing toggle (this field IS that position); viewers render the vehicle as paused/unavailable and suppress the request affordance — but MUST NOT treat a hidden affordance as the enforcement, because the server independently refuses both create and accept. Delivery: REST-READ-TIME ONLY, exactly like the siblings `role` and `sharePermission` — a `vehicle_update` frame NEVER carries rideShareEnabled — so a catalog refreshes it on the next read of GET /api/vehicles or the REST /snapshot (which carries the same field, VehicleState.rideShareEnabled), or from the echo the PUT above returns. P0: an owner's availability switch on their own car — operational state, not identifying data and not user content, the same tier as the siblings `status` and `hasActiveRide`.",
           "x-classification": "P0",
           "examples": [false]
+        },
+        "setupState": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["state", "since"],
+          "description": "What is still standing between this vehicle and live telemetry, or NULL when there is nothing to say (MYR-491, contracts v0.24.0) — THE SAME OBJECT, THE SAME MEMBERS AND THE SAME SEMANTICS as VehicleState.setupState (rest-api.md §7.1), produced by the SAME server-side derivation over the same inputs, so the catalog row and the snapshot for one vehicle can never disagree. Read that field's description for the full contract, including the honesty rules the server guarantees and the reason `null` must not be rendered as 'ready'. CARRIED ON THE CATALOG AS WELL AS THE SNAPSHOT ON PURPOSE, and for a different consumer: MYR-437's rider-side picker reads list rows, and today it renders a never-streamed shared car as permanently 'offline' — a car whose status column is still the write-once schema default. This field is what lets the picker say 'still being set up' instead, and grey the row with a reason, without fetching a snapshot per vehicle. (Contrast `hasActiveRide`, which is list-only; setupState is on both surfaces because both surfaces have a consumer.) OPTIONAL AND TOLERANT: an ABSENT key means a server predating v0.24.0 and MUST be read exactly like null. RBAC: BOTH roles — P0 operational state about the car, the same tier as the sibling `status` it qualifies. Delivery: REST-READ-TIME ONLY; a `vehicle_update` frame NEVER carries it.",
+          "x-classification": "P0",
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": ["awaiting_virtual_key", "configuring", "token_failed"],
+              "description": "Which setup condition holds. Identical member set and identical meanings to VehicleState.setupState.state — see that field for the per-member owner action. Consumers MUST treat an unrecognised value as 'setup is incomplete, reason unknown' and MUST NOT fail the decode.",
+              "examples": ["awaiting_virtual_key"]
+            },
+            "since": {
+              "type": "string",
+              "format": "date-time",
+              "description": "RFC 3339 UTC instant at which the evidence behind `state` was recorded. Identical to VehicleState.setupState.since: data for the copy, never zero, never in the future.",
+              "examples": ["2026-08-09T02:10:00Z"]
+            }
+          }
         }
       }
     }
