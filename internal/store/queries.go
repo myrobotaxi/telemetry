@@ -83,9 +83,10 @@ const queryVehicleByID = `SELECT ` + vehicleSelectColumns + `,
 	gcs.seat_cooling_capable,
 	gcs.service_etc, gcs.service_expected_end_at,
 	gcs.trim_label, gcs.fsd_version,
-	` + rideShareEnabledExpr + `
+	` + rideShareEnabledExpr + `,
+	` + setupScheduleColumns + `
 FROM "Vehicle"
-LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"
+LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"` + setupScheduleJoin + `
 WHERE "Vehicle"."id" = $1`
 
 // rideShareEnabledExpr is the single definition of "does this car accept ride
@@ -200,12 +201,19 @@ const activeInstantRidePredicate = `r.scheduled_for IS NULL
 // nothing beyond one fixed-width boolean, and it IS emitted (as
 // VehicleSummary.rideShareEnabled) — the invariant this projection actually
 // enforces is "MUST NOT SELECT columns the response body doesn't emit".
+// MYR-491: the setup schedule is the SECOND side-table join on this path, and
+// it earns its place by the same invariant — all four values are emitted, as
+// the single derived VehicleSummary.setupState. A per-vehicle follow-up read
+// instead would be an N+1 on the catalog, and the rider-side picker is the
+// consumer that most needs the value (MYR-437: "setting up", not "offline"), so
+// it cannot be pushed onto the snapshot alone.
 const queryVehiclesByUserList = `SELECT ` + vehicleListSummaryColumns + `,
 	` + vehicleListHasActiveRideExpr + `,
 	gcs.service_etc, gcs.service_expected_end_at,
-	` + rideShareEnabledExpr + `
+	` + rideShareEnabledExpr + `,
+	` + setupScheduleColumns + `
 FROM "Vehicle"
-LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"
+LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"` + setupScheduleJoin + `
 WHERE "userId" = $1
 ORDER BY "name", "vin"`
 

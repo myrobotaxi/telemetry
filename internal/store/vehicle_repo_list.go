@@ -69,6 +69,15 @@ type VehicleSummary struct {
 	// no control history are the same thing here — which is what the wire
 	// contract requires (absent/unset means ENABLED).
 	RideShareEnabled bool
+
+	// SetupSchedule is the car's go_fleet_config_attempts row (MYR-491), LEFT
+	// JOINed alongside the control-state block. RAW STORAGE behind the derived
+	// VehicleSummary.setupState — the catalog carries it because the rider-side
+	// picker (MYR-437) must be able to show a shared car as "setting up" rather
+	// than omitting it or badging it "offline", and it cannot fetch a snapshot
+	// per row to find out. Zero value (Present false) means "no claim", which
+	// is the safe reading on any hand-built row.
+	SetupSchedule SetupSchedule
 }
 
 // ListSummariesByUser returns the catalog rows for every vehicle owned
@@ -150,8 +159,9 @@ func scanVehicleSummaryRow(row rowScanner) (VehicleSummary, error) {
 	var (
 		v      VehicleSummary
 		status string
+		ss     setupScheduleScan
 	)
-	if err := row.Scan(
+	dests := append([]any{
 		&v.ID,
 		&v.UserID,
 		&v.VIN,
@@ -168,9 +178,11 @@ func scanVehicleSummaryRow(row rowScanner) (VehicleSummary, error) {
 		&v.ServiceETC,
 		&v.ServiceExpectedEndAt,
 		&v.RideShareEnabled,
-	); err != nil {
+	}, ss.dests()...)
+	if err := row.Scan(dests...); err != nil {
 		return VehicleSummary{}, fmt.Errorf("scan vehicle summary: %w", err)
 	}
 	v.Status = VehicleStatus(status)
+	v.SetupSchedule = ss.value()
 	return v, nil
 }

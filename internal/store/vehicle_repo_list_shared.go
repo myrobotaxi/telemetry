@@ -68,9 +68,10 @@ const queryVehiclesSharedWithUser = `SELECT ` + sharedSummaryColumns + `,
 	` + vehicleListHasActiveRideExpr + `,
 	gcs.service_etc, gcs.service_expected_end_at,
 	` + rideShareEnabledExpr + `,
+	` + setupScheduleColumns + `,
 	s.allow_rides
 FROM "Vehicle"` + sharedSummaryJoin + `
-LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"
+LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"` + setupScheduleJoin + `
 WHERE ($2::text[] IS NULL OR "Vehicle"."id" = ANY($2))
 ORDER BY "Vehicle"."name", "Vehicle"."vin"`
 
@@ -142,8 +143,9 @@ func scanSharedVehicleSummaryRow(row rowScanner) (SharedVehicleSummary, error) {
 	var (
 		v      SharedVehicleSummary
 		status string
+		ss     setupScheduleScan
 	)
-	if err := row.Scan(
+	dests := append([]any{
 		&v.ID,
 		&v.UserID,
 		&v.VIN,
@@ -160,10 +162,14 @@ func scanSharedVehicleSummaryRow(row rowScanner) (SharedVehicleSummary, error) {
 		&v.ServiceETC,
 		&v.ServiceExpectedEndAt,
 		&v.RideShareEnabled,
-		&v.AllowRides,
-	); err != nil {
+	}, ss.dests()...)
+	// `allow_rides` is selected AFTER the setup block, so it is appended last —
+	// the scan order is the SELECT order, not the struct order.
+	dests = append(dests, &v.AllowRides)
+	if err := row.Scan(dests...); err != nil {
 		return SharedVehicleSummary{}, fmt.Errorf("scan shared vehicle summary: %w", err)
 	}
 	v.Status = VehicleStatus(status)
+	v.SetupSchedule = ss.value()
 	return v, nil
 }

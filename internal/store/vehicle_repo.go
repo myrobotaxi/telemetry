@@ -168,7 +168,12 @@ func (r *VehicleRepo) GetByID(ctx context.Context, id string) (Vehicle, error) {
 func (r *VehicleRepo) scanVehicleByID(ctx context.Context, id string) (Vehicle, error) {
 	row := r.pool.QueryRow(ctx, queryVehicleByID, id)
 	var cs controlStateScan
-	v, err := r.scanVehicleRowExtra(row, cs.dests()...)
+	// MYR-491: the fleet-config schedule is a SECOND side table on this read,
+	// appended after the control-state block, so its destinations follow that
+	// block in the same trailing `extra` list — the same ordering discipline,
+	// one bag per joined table.
+	var ss setupScheduleScan
+	v, err := r.scanVehicleRowExtra(row, append(cs.dests(), ss.dests()...)...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Vehicle{}, ErrVehicleNotFound
 	}
@@ -176,6 +181,7 @@ func (r *VehicleRepo) scanVehicleByID(ctx context.Context, id string) (Vehicle, 
 		return Vehicle{}, fmt.Errorf("scan vehicle: %w", err)
 	}
 	cs.applyTo(&v)
+	v.SetupSchedule = ss.value()
 	return v, nil
 }
 
