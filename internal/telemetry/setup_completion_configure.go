@@ -70,10 +70,21 @@ func (s *SetupCompleter) configure(
 // resetSchedule clears the backoff and opens a pairing epoch, via the SAME
 // write an applied signed command uses (MYR-489).
 //
-// A miss is normal and not an error: the vehicle may have no schedule row at
-// all (the table is self-draining), or the reset may be debounced because a
-// signed command opened this epoch minutes ago. In both cases the candidate we
-// already hold is the right one to push with — `c` keeps whatever epoch it had.
+// A miss is normal and not an error: the VIN is unknown, or the reset was
+// debounced because a signed command opened this epoch minutes ago. In both
+// cases the candidate we already hold is the right one to push with — `c` keeps
+// whatever epoch it had.
+//
+// "NO SCHEDULE ROW" USED TO BE A THIRD KIND OF MISS, AND IT LEFT THIS ENDPOINT
+// ABLE TO FIRE EXACTLY ONCE PER CAR, FOREVER (MYR-517). The write was an UPDATE,
+// so a car with no row got no epoch stamp — and then the forced re-push below
+// recorded `forced_repush_at` against a NULL `signed_command_at`. Read back,
+// that row says `epochForceSpent` = true (a force exists and does not predate a
+// pairing epoch, because there is no pairing epoch), which is a latch: every
+// later call answers `configuring` from a spend that may have accomplished
+// nothing, and the reconciler's escalation is blocked on the same predicate.
+// The store write is now an upsert, so the epoch is stamped before the force
+// and the budget re-arms the way it was designed to.
 func (s *SetupCompleter) resetSchedule(
 	ctx context.Context, row VehicleSnapshotRow, vin string, c *FleetConfigCandidate,
 ) {

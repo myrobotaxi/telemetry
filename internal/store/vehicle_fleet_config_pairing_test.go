@@ -123,25 +123,87 @@ func TestResetFleetConfigScheduleOnPairing(t *testing.T) {
 // TestResetFleetConfigScheduleOnPairing_NoRow: a healthy streaming car has no
 // schedule row, and an applied command must not manufacture one — the table is
 // bounded by "cars currently failing", not by command volume.
+// TestResetFleetConfigScheduleOnPairing_NoRow is MYR-517 at the SQL layer. This
+// used to assert the OPPOSITE — that a car with no schedule row was a silent
+// no-op — and prod showed what that cost: Spencer White's car had no row, so
+// his lock tap (the strongest evidence the system ever receives: a signed
+// command Tesla APPLIED) stamped nothing and opened no pairing epoch. The write
+// now creates the row and says it created it, so the caller can tell a car it
+// was already tracking from one it had never recorded.
 func TestResetFleetConfigScheduleOnPairing_NoRow(t *testing.T) {
 	repo := fccPairingFixture(t, "user_pair_norow", time.Now())
 	ctx := context.Background()
 
-	now := time.Now()
-	_, found, err := repo.ResetFleetConfigScheduleOnPairing(ctx, pairingVIN, now, now.Add(-10*time.Minute))
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	c, found, err := repo.ResetFleetConfigScheduleOnPairing(ctx, pairingVIN, now, now.Add(-10*time.Minute))
 	if err != nil {
 		t.Fatalf("ResetFleetConfigScheduleOnPairing: %v", err)
 	}
-	if found {
-		t.Error("found = true for a car with no schedule row")
+	if !found {
+		t.Fatal("found = false for a car with no schedule row — the epoch must be recorded, not dropped")
+	}
+	if !c.ScheduleCreated {
+		t.Error("ScheduleCreated = false; the caller cannot tell a seeded row from a reset one")
+	}
+	if c.VehicleID != "veh_pair" || c.VIN != pairingVIN {
+		t.Errorf("candidate = %+v, want the seeded vehicle", c)
 	}
 
-	var count int
+	var count, attempts int
+	var outcome string
+	var signedAt time.Time
 	if err := testPool.QueryRow(ctx, `SELECT count(*) FROM go_fleet_config_attempts`).Scan(&count); err != nil {
 		t.Fatalf("count attempts: %v", err)
 	}
-	if count != 0 {
-		t.Errorf("attempt rows = %d, want 0 — the reset must never INSERT", count)
+	if count != 1 {
+		t.Fatalf("attempt rows = %d, want exactly 1 seeded row", count)
+	}
+	err = testPool.QueryRow(ctx,
+		`SELECT attempt_count, last_outcome, signed_command_at FROM go_fleet_config_attempts WHERE vehicle_id = $1`,
+		"veh_pair").Scan(&attempts, &outcome, &signedAt)
+	if err != nil {
+		t.Fatalf("read seeded row: %v", err)
+	}
+	// The created row is a SEED: it records the epoch and claims nothing else.
+	// attempt_count 0 + last_outcome '' is scheduling- and wire-identical to no
+	// row, which is what makes creating it safe on a car that is perfectly fine.
+	if attempts != 0 {
+		t.Errorf("attempt_count = %d, want 0 — a created row must not spend a retry", attempts)
+	}
+	if outcome != store.SetupOutcomeNone {
+		t.Errorf("last_outcome = %q, want '' — a created row must claim nothing", outcome)
+	}
+	if !signedAt.UTC().Truncate(time.Millisecond).Equal(now) {
+		t.Errorf("signed_command_at = %v, want %v — the epoch is the whole point", signedAt.UTC(), now)
+	}
+}
+
+// A car that ALREADY has a schedule row must be reset in place, not reported as
+// created — the caller uses that flag to decide whether an immediate Tesla
+// round-trip is warranted, and a tracked-broken car is exactly the case where
+// it is.
+func TestResetFleetConfigScheduleOnPairing_ExistingRowIsNotReportedAsCreated(t *testing.T) {
+	repo := fccPairingFixture(t, "user_pair_existing", time.Now().Add(-3*time.Hour))
+	ctx := context.Background()
+
+	if err := repo.RecordFleetConfigAttempt(ctx, "veh_pair",
+		time.Now().Add(-time.Hour), time.Now().Add(8*time.Hour), "awaiting_virtual_key"); err != nil {
+		t.Fatalf("RecordFleetConfigAttempt: %v", err)
+	}
+
+	now := time.Now()
+	c, found, err := repo.ResetFleetConfigScheduleOnPairing(ctx, pairingVIN, now, now.Add(-10*time.Minute))
+	if err != nil {
+		t.Fatalf("ResetFleetConfigScheduleOnPairing: %v", err)
+	}
+	if !found {
+		t.Fatal("found = false for a car with a live schedule row")
+	}
+	if c.ScheduleCreated {
+		t.Error("ScheduleCreated = true for a row that already existed")
+	}
+	if c.LastOutcome != "awaiting_virtual_key" {
+		t.Errorf("LastOutcome = %q, want the existing outcome preserved", c.LastOutcome)
 	}
 }
 

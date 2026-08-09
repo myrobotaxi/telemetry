@@ -95,15 +95,31 @@ func TestPairingSignalNoOps(t *testing.T) {
 		pairing *fakePairingResetter
 	}{
 		{
-			// The overwhelmingly common case: a healthy streaming car has no
-			// schedule row, so there is nothing to reset and nothing to push.
-			name:    "no schedule row",
+			// Debounced repeats and unknown VINs look identical to the caller
+			// by design.
+			name:    "debounced repeat or unknown VIN",
 			pairing: &fakePairingResetter{found: false},
 		},
 		{
-			// Debounced repeats look identical to the caller by design.
-			name:    "debounced repeat",
-			pairing: &fakePairingResetter{found: false},
+			// MYR-517: the store now CREATES the schedule row rather than
+			// no-opping, so the pairing epoch is recorded — but a car we have
+			// never recorded a failed attempt against is not evidence of a
+			// broken car, and it is overwhelmingly likely to be streaming.
+			// Turning every first command from every healthy car into a Tesla
+			// round-trip (and an attempt_count climbing toward the escalation
+			// MYR-489 rations so carefully) would be worse than the bug this
+			// fixes. The periodic pass owns that question.
+			name: "a freshly created schedule row records the epoch and calls nobody",
+			pairing: &fakePairingResetter{
+				found: true,
+				candidate: FleetConfigCandidate{
+					VehicleID:       "veh-1",
+					VIN:             reconTestVIN,
+					UserID:          "user-1",
+					SignedCommandAt: forceNow,
+					ScheduleCreated: true,
+				},
+			},
 		},
 		{
 			name:    "store error",

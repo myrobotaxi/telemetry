@@ -150,5 +150,6 @@ func toTelemetryFleetConfigCandidate(r *store.FleetConfigCandidate) telemetry.Fl
 		LastAttemptAt:   r.LastAttemptAt,
 		SignedCommandAt: r.SignedCommandAt,
 		ForcedRepushAt:  r.ForcedRepushAt,
+		ScheduleCreated: r.ScheduleCreated,
 	}
 }

@@ -39,6 +39,13 @@ type FleetConfigCandidate struct {
 	// (delete-then-create) config re-push. Zero when never. Compared against
 	// SignedCommandAt to ration escalations to one per epoch.
 	ForcedRepushAt time.Time
+	// ScheduleCreated is set only by ResetFleetConfigScheduleOnPairing, and only
+	// when that call CREATED this vehicle's schedule row rather than resetting
+	// an existing one (MYR-517). It distinguishes "a car we were already tracking
+	// as broken" from "a car we had never recorded anything about", which is the
+	// difference between a signal worth a Tesla round-trip and one worth only a
+	// durable epoch stamp. Always false on the periodic candidate listing.
+	ScheduleCreated bool
 }
 
 // queryFleetConfigCandidates lists owned vehicles that have gone quiet and are
