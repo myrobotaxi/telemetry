@@ -49,7 +49,9 @@ type OutcomeStore interface {
 	// ClaimDispatch returns true iff THIS call won the exactly-once leg-1 claim.
 	ClaimDispatch(ctx context.Context, rideID string) (bool, error)
 	// RecordDispatchOutcome persists the resolved leg-1 status; errCode is nil
-	// for sent/skipped and the opaque failure code for failed.
+	// for sent and for a kill-switch skip, and carries the opaque code for
+	// every failure — plus for the one skip that has a reason to name,
+	// nav_superseded (MYR-526).
 	RecordDispatchOutcome(ctx context.Context, rideID string, status Outcome, errCode *string) error
 	// ClaimDropoffDispatch is the leg-2 (dropoff) exactly-once claim.
 	ClaimDropoffDispatch(ctx context.Context, rideID string) (bool, error)
@@ -115,6 +117,9 @@ type Dispatcher struct {
 	logger   *slog.Logger
 
 	sem chan struct{} // concurrency cap for in-flight dispatches
+	// nav orders this dispatcher's pushes per vehicle so the two legs of one
+	// ride can never land on the car out of order (MYR-526).
+	nav *navSequencer
 	// workers counts the in-flight dispatch goroutines. Not a sync.WaitGroup —
 	// see Wait, and internal/drain for the argument (MYR-410).
 	workers drain.Group
@@ -141,6 +146,7 @@ func New(
 		cfg:      cfg,
 		logger:   logger,
 		sem:      make(chan struct{}, cfg.MaxConcurrent),
+		nav:      newNavSequencer(),
 	}
 }
 

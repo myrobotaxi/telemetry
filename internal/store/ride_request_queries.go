@@ -214,8 +214,10 @@ RETURNING id`
 
 // queryRideRequestRecordDispatch persists the resolved dispatch outcome
 // (status + opaque error code) after the claim. dispatch_error is NULL on
-// success/skip. The row is already claimed (dispatched_at set), so this is an
-// unconditional update by id.
+// success and on a kill-switch skip; it is set for every 'failed' outcome and
+// for the one non-kill-switch skip, 'nav_superseded' (MYR-526). The row is
+// already claimed (dispatched_at set), so this is an unconditional update by
+// id.
 const queryRideRequestRecordDispatch = `UPDATE go_ride_requests SET
 	dispatch_status = $2,
 	dispatch_error = $3,
@@ -250,9 +252,11 @@ WHERE id = $1 AND dropoff_dispatched_at IS NULL
 RETURNING id`
 
 // queryRideRequestRecordDropoffDispatch persists the resolved leg-2 outcome
-// (status + opaque error code) after the claim. dropoff_dispatch_error is NULL
-// on success/skip. The row is already claimed (dropoff_dispatched_at set), so
-// this is an unconditional update by id.
+// (status + opaque error code) after the claim. dropoff_dispatch_error follows
+// the same rule as dispatch_error: NULL on success and on a kill-switch skip,
+// set for every 'failed' outcome and for the 'nav_superseded' skip (MYR-526).
+// The row is already claimed (dropoff_dispatched_at set), so this is an
+// unconditional update by id.
 const queryRideRequestRecordDropoffDispatch = `UPDATE go_ride_requests SET
 	dropoff_dispatch_status = $2,
 	dropoff_dispatch_error = $3,

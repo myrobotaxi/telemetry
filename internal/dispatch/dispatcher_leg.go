@@ -6,6 +6,7 @@ package dispatch
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
 	"github.com/myrobotaxi/telemetry/internal/events"
@@ -27,6 +28,10 @@ type dispatchLeg struct {
 	coord     events.RidePlace
 	claim     func(context.Context, string) (bool, error)
 	record    func(context.Context, string, Outcome, *string) error
+	// order is the leg's monotonic position within the ride (MYR-526). It is
+	// NOT an audit label: the nav sequencer uses it to keep the car's single
+	// last-write-wins destination moving forwards only.
+	order legOrder
 }
 
 // process runs the leg-1 (pickup) dispatch for one accepted ride. It is safe to
@@ -73,6 +78,7 @@ func (d *Dispatcher) pickupLeg(rideID, vehicleID, ownerID string, pickup events.
 		coord:     pickup,
 		claim:     d.store.ClaimDispatch,
 		record:    d.store.RecordDispatchOutcome,
+		order:     legOrderPickup,
 	}
 }
 
@@ -88,6 +94,7 @@ func (d *Dispatcher) processDropoff(ctx context.Context, ev events.RideStartedEv
 		coord:     ev.Dropoff,
 		claim:     d.store.ClaimDropoffDispatch,
 		record:    d.store.RecordDropoffDispatchOutcome,
+		order:     legOrderDropoff,
 	})
 }
 
@@ -133,26 +140,78 @@ func (d *Dispatcher) runLeg(ctx context.Context, leg dispatchLeg) {
 // means "your car is on the way", so it may only fire once the push actually
 // resolved `sent`. The instant path ignores the return value — its outcome is
 // already persisted and has no downstream seam.
+//
+// LEG ORDERING (MYR-526). Everything from here to the Tesla call runs under the
+// vehicle's nav gate, because the car's navigation destination is one
+// last-write-wins resource and the two legs of a ride arrive as independent bus
+// deliveries. Without the gate a stalled leg-1 push (an asleep car costs a wake
+// plus a retry ladder) can land AFTER the leg-2 push that overtook it and drag
+// the dash back to the pickup — with both legs recording `sent`, because both
+// commands genuinely succeeded. See navSequencer for the full argument.
 func (d *Dispatcher) runClaimedLeg(ctx context.Context, leg dispatchLeg) Outcome {
 	if !d.cfg.Enabled {
 		d.record(ctx, leg, "", OutcomeSkipped, nil, "")
 		return OutcomeSkipped
 	}
 
-	vin, code := d.resolveVIN(ctx, leg.vehicleID)
-	if code != nil {
-		d.record(ctx, leg, "", OutcomeFailed, code, "")
+	// legCtx is cancelable so a later leg of this ride can take the gate away
+	// mid-flight instead of waiting out this leg's wake/retry budget.
+	legCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	hold, err := d.nav.acquire(legCtx, leg.vehicleID, leg.rideID, leg.order, cancel)
+	if err != nil {
+		if errors.Is(err, errNavSuperseded) {
+			// A later leg of this ride already reached the car. Pushing now
+			// would walk the destination backwards, so we do not — and we say
+			// so on the row and in the log rather than dropping it silently.
+			code := codeNavSuperseded
+			d.record(ctx, leg, "", OutcomeSkipped, &code, "")
+			return OutcomeSkipped
+		}
+		code := codeCanceled
+		d.record(ctx, leg, "", OutcomeFailed, &code, "")
 		return OutcomeFailed
 	}
+	defer hold.Release()
 
-	token, code := d.resolveToken(ctx, leg.ownerID)
+	vin, code := d.resolveVIN(legCtx, leg.vehicleID)
 	if code != nil {
-		d.record(ctx, leg, vin, OutcomeFailed, code, "")
-		return OutcomeFailed
+		return d.recordSequenced(ctx, leg, hold, "", OutcomeFailed, code, "")
 	}
 
-	outcome, ecode, detail := d.executeWithRetry(ctx, vin, token, leg.coord)
-	d.record(ctx, leg, vin, outcome, ecode, detail)
+	token, code := d.resolveToken(legCtx, leg.ownerID)
+	if code != nil {
+		return d.recordSequenced(ctx, leg, hold, vin, OutcomeFailed, code, "")
+	}
+
+	outcome, ecode, detail := d.executeWithRetry(legCtx, vin, token, leg.coord)
+	return d.recordSequenced(ctx, leg, hold, vin, outcome, ecode, detail)
+}
+
+// recordSequenced persists a sequenced leg's outcome, reclassifying a failure
+// that was CAUSED by supersession. A leg the sequencer cancelled mid-flight did
+// not fail against Tesla and was not merely "canceled" — it was deliberately
+// stopped because the ride had already moved to its next target. Recording it
+// as failed/dispatch_canceled would put a phantom failure on a ride that is
+// working perfectly, and would hide the one fact worth knowing: the later leg
+// won. Records on the OUTER ctx, whose deadline `record` drops anyway, so the
+// write survives the cancellation that produced this outcome.
+//
+// A leg that resolved OutcomeSent is deliberately NOT reclassified, even when
+// the supersession flag is set: in that race the command had already reached
+// the car, so `sent` is the true statement about what happened. The ORDERING
+// guarantee is unaffected — the superseding leg cannot dial until it takes the
+// gate this one still holds, so it lands after, which is the whole point.
+func (d *Dispatcher) recordSequenced(
+	ctx context.Context, leg dispatchLeg, hold *navHold, vin string, outcome Outcome, code *string, detail string,
+) Outcome {
+	if outcome != OutcomeSent && hold.Superseded() {
+		superseded := codeNavSuperseded
+		d.record(ctx, leg, vin, OutcomeSkipped, &superseded, "")
+		return OutcomeSkipped
+	}
+	d.record(ctx, leg, vin, outcome, code, detail)
 	return outcome
 }
 

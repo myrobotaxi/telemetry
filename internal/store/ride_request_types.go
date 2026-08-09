@@ -110,8 +110,10 @@ type RideRequestRecord struct {
 	// Dispatch outcome (MYR-176). All nil until the nav-dispatch push
 	// resolves. DispatchStatus/DispatchError are set by RecordDispatchOutcome;
 	// DispatchedAt is stamped at claim time by ClaimDispatch (it doubles as
-	// the exactly-once latch). DispatchError is nil unless DispatchStatus is
-	// 'failed'.
+	// the exactly-once latch). DispatchError is nil for a plain success, and
+	// set whenever the outcome has a reason to name: every 'failed' outcome,
+	// plus the one 'skipped' outcome that is not the kill-switch —
+	// 'nav_superseded', a leg a later leg of the same ride took over (MYR-526).
 	DispatchStatus *DispatchStatus
 	DispatchedAt   *time.Time
 	DispatchError  *string
