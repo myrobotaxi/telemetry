@@ -566,6 +566,24 @@ var vehicleSummaryOwnerFields = []string{
 	// picker reads catalog rows, not snapshots. The viewer list below inherits
 	// it (that list subtracts nothing).
 	"setupState",
+	// MYR-507 — the display-safe trim label. P0, and NOT owner-private, for the
+	// simplest reason on this list: `trimLabel` is an EQUIPMENT FACT of exactly
+	// the same tier as its identity siblings `model`, `year` and `color`, which
+	// have been in both allow-lists since v1. All four are legible through a
+	// windshield from the kerb — the badge on the boot lid IS the trim — so
+	// there is nothing here for masking to protect, and this entry classifies it
+	// alongside its siblings rather than reasoning about it afresh. That is the
+	// same argument `internal/mask/tables_details_test.go` already makes for the
+	// SAME FIELD on the /snapshot resource, where it likewise goes to BOTH roles.
+	//
+	// The viewer is in fact the party this field is FOR: an owner can read the
+	// trim off their own /snapshot, but a rider never fetches one, so the
+	// catalog row is the only place a shared car can say what it is. Withholding
+	// it is what left "UltraRed" standing in for a whole vehicle descriptor.
+	//
+	// `trim` — the RAW BADGE CODE ("p74d") — is deliberately NOT here, and is not
+	// on the catalog at all: it is not display-safe for either role.
+	"trimLabel",
 }
 
 // vehicleSummaryViewerFields is the owner list PLUS `sharePermission`, with

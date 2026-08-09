@@ -69,6 +69,21 @@ type vehicleSummary struct {
 	// A pointer with NO omitempty: the key is always present, and "nothing to
 	// finish" is an explicit null.
 	SetupState *SetupState `json:"setupState"`
+	// TrimLabel is the display-ready trim of this car — "Plaid", "Performance",
+	// "Long Range" (MYR-507, contracts v0.31.0). The SAME value and the SAME
+	// column as VehicleState.trimLabel (§7.1, MYR-320): the snapshot does not
+	// derive it, it reads it, so both surfaces read one column and there is no
+	// second implementation to drift.
+	//
+	// On the CATALOG because the catalog is the ONLY vehicle-identity surface a
+	// RIDER has. Owners get model/trim from the §7.1 snapshot; viewers never
+	// fetch one, so a shared car could previously be named only by its colour
+	// and a bare make — the "UltraRed" / "Tesla" the field report opened with.
+	//
+	// A pointer with NO omitempty: the key is always present, and "Tesla has not
+	// told us the trim" is an explicit null — never `""`, which a descriptor
+	// builder would happily render as an empty fragment between two separators.
+	TrimLabel *string `json:"trimLabel"`
 }
 
 // toMaskMap returns the row as a wire-name-keyed map suitable for
@@ -114,5 +129,13 @@ func (v vehicleSummary) baseMaskMap() map[string]any {
 		// role allow-lists carry it, and the VIEWER is the party a "setting up"
 		// row is most useful to (MYR-437's picker).
 		"setupState": setupStateWire(v.SetupState),
+		// MYR-507 — the display-safe trim, emitted raw (nothing to resolve). In
+		// the BASE map, like its identity siblings `model` / `year` / `color`:
+		// both role allow-lists carry it, and the VIEWER is the party who cannot
+		// name the car any other way.
+		// derefOrNil (vehicle_status_handler.go) is the SAME helper the snapshot
+		// uses for this SAME field, so an unset trim maps to an untyped nil on
+		// both surfaces rather than a typed (*string)(nil) on one of them.
+		"trimLabel": derefOrNil(v.TrimLabel),
 	}
 }

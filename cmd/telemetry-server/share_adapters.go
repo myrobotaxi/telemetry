@@ -209,6 +209,12 @@ func toSharedVehicleRows(rows []store.SharedVehicleSummary) []telemetry.SharedVe
 				// rider learns the shared car is not taking requests from the
 				// catalog, not from a 409.
 				RideShareEnabled: row.RideShareEnabled,
+				// MYR-507: viewers see the trim too, and for the sharpest
+				// version of the argument on this struct — the viewer is the
+				// ONLY party who needs it. An owner reads the trim off their own
+				// /snapshot; a rider never fetches one, so this row is where a
+				// shared car gets to say it is a Plaid rather than an "UltraRed".
+				TrimLabel: row.TrimLabel,
 				// MYR-491: viewers see the setup state too, and for the sharper
 				// version of the same argument — MYR-437's picker must show a
 				// shared car as "setting up" rather than silently omitting it or

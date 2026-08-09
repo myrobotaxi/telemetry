@@ -224,6 +224,9 @@ func (a *vehicleListerAdapter) ListByUser(ctx context.Context, userID string) ([
 			ServiceExpectedEndAt: v.ServiceExpectedEndAt,
 			// MYR-342: emitted raw — no precedence, no status gate.
 			RideShareEnabled: v.RideShareEnabled,
+			// MYR-507: the display-safe trim, carried straight through — the
+			// same column /snapshot reads, so neither surface can rename a car.
+			TrimLabel: v.TrimLabel,
 			// MYR-491: raw schedule; the handler derives the wire state.
 			SetupSchedule: setupScheduleRow(v.SetupSchedule),
 		})

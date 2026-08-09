@@ -168,6 +168,36 @@ func TestContract_GETVehicles(t *testing.T) {
 						"means no claim)", setup)
 				}
 
+				// MYR-507: `trimLabel` is OPTIONAL in the schema (absence
+				// = a pre-v0.31.0 server, read exactly like null), but THIS
+				// server always emits the key. The seeded vehicle has no
+				// control-state row, so the honest answer is an explicit
+				// null — "no trim known", which is NOT the empty string:
+				// only null tells a descriptor builder to drop the fragment
+				// rather than render a blank one between two separators.
+				trim, ok := row["trimLabel"]
+				if !ok {
+					t.Errorf("missing `trimLabel` in items[0]; row keys: %v", keysOf(row))
+				} else if trim != nil {
+					t.Errorf("trimLabel = %v, want null (no control-state row means no "+
+						"trim has been read)", trim)
+				}
+
+				// The identity set MYR-507 exists to complete. `model` and
+				// `year` are asserted for VALUE here, not merely presence:
+				// they were `required` on this endpoint all along and still
+				// shipped as `""` / `0` for every Go-provisioned car,
+				// because the provisioning INSERT seeded placeholders no
+				// writer ever replaced. Presence was never the failing
+				// assertion — content was.
+				if got, _ := row["model"].(string); got != "Model 3" {
+					t.Errorf("model = %q, want %q — an empty model is the MYR-507 bug, "+
+						"and it passed every presence check", got, "Model 3")
+				}
+				if got, _ := row["year"].(float64); got != 2024 {
+					t.Errorf("year = %v, want 2024 — a zero year is the MYR-507 bug", got)
+				}
+
 				// Cross-check against the canonical schema so any
 				// future field rename / type change surfaces here.
 				// The file's root is the LIST ENVELOPE (VehicleListResponse);

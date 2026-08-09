@@ -70,6 +70,18 @@ type VehicleSummary struct {
 	// contract requires (absent/unset means ENABLED).
 	RideShareEnabled bool
 
+	// TrimLabel is the DISPLAY-SAFE trim label (MYR-507), LEFT JOINed from the
+	// same go_vehicle_control_state row as the service window and the switch —
+	// the SAME column the /snapshot read emits as VehicleState.trimLabel
+	// (MYR-320), not a second copy of it.
+	//
+	// A POINTER because the column is nullable and the distinction is
+	// load-bearing: NULL means "Tesla has not told us this car's trim yet",
+	// which a consumer must render as "no trim" rather than as an empty
+	// fragment in a descriptor. Contrast the sibling Color, a NOT NULL column on
+	// the Prisma-owned "Vehicle" row whose "not read yet" spelling is `''`.
+	TrimLabel *string
+
 	// SetupSchedule is the car's go_fleet_config_attempts row (MYR-491), LEFT
 	// JOINed alongside the control-state block. RAW STORAGE behind the derived
 	// VehicleSummary.setupState — the catalog carries it because the rider-side
@@ -178,6 +190,7 @@ func scanVehicleSummaryRow(row rowScanner) (VehicleSummary, error) {
 		&v.ServiceETC,
 		&v.ServiceExpectedEndAt,
 		&v.RideShareEnabled,
+		&v.TrimLabel,
 	}, ss.dests()...)
 	if err := row.Scan(dests...); err != nil {
 		return VehicleSummary{}, fmt.Errorf("scan vehicle summary: %w", err)

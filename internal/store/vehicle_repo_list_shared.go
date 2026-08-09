@@ -68,6 +68,7 @@ const queryVehiclesSharedWithUser = `SELECT ` + sharedSummaryColumns + `,
 	` + vehicleListHasActiveRideExpr + `,
 	gcs.service_etc, gcs.service_expected_end_at,
 	` + rideShareEnabledExpr + `,
+	` + catalogTrimLabelExpr + `,
 	` + setupScheduleColumns + `,
 	s.allow_rides
 FROM "Vehicle"` + sharedSummaryJoin + `
@@ -162,6 +163,7 @@ func scanSharedVehicleSummaryRow(row rowScanner) (SharedVehicleSummary, error) {
 		&v.ServiceETC,
 		&v.ServiceExpectedEndAt,
 		&v.RideShareEnabled,
+		&v.TrimLabel,
 	}, ss.dests()...)
 	// `allow_rides` is selected AFTER the setup block, so it is appended last —
 	// the scan order is the SELECT order, not the struct order.

@@ -59,6 +59,18 @@ type VehicleCatalogRow struct {
 	// construction site goes through the adapter and carries the joined value.
 	RideShareEnabled bool
 
+	// TrimLabel is the DISPLAY-SAFE trim label (MYR-507), LEFT JOINed from the
+	// same control-state row as the two above. Emitted RAW like
+	// RideShareEnabled — there is nothing to resolve and no status gate — and it
+	// is the SAME COLUMN /snapshot emits as VehicleState.trimLabel (MYR-320),
+	// read rather than re-derived, so the catalog and the detail sheet cannot
+	// name the same car two different things.
+	//
+	// Nil means Tesla has not told us the trim yet, and that is NOT the empty
+	// string: a descriptor built from it must drop the fragment entirely rather
+	// than render a stray separator.
+	TrimLabel *string
+
 	// SetupSchedule is the car's fleet-config schedule row (MYR-491), LEFT
 	// JOINed from go_fleet_config_attempts. RAW, like the service-window pair:
 	// the wire field `setupState` is DERIVED from it together with Status and
@@ -227,6 +239,10 @@ func newVehicleSummary(v *VehicleCatalogRow, role auth.Role, grant auth.ShareGra
 		// it, because a rider who cannot see that a shared car is paused finds
 		// out from a 409 instead.
 		RideShareEnabled: v.RideShareEnabled,
+		// MYR-507: emitted verbatim on BOTH roles, from the same column
+		// /snapshot reads. Identity, not telemetry and not privacy-bearing —
+		// see the mask allow-list for why a viewer sees it.
+		TrimLabel: v.TrimLabel,
 		// MYR-491: the SAME derivation the snapshot runs, over the same inputs.
 		// Calling it from both surfaces rather than copying the rules is what
 		// makes "the catalog and the detail sheet can never disagree" a
