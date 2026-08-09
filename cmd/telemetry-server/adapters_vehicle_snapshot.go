@@ -129,5 +129,10 @@ func snapshotRowFromVehicle(v store.Vehicle) telemetry.VehicleSnapshotRow {
 		// GetByID, which joins the side table and COALESCEs a missing row to
 		// true, so the value is always the store's, never a Go default.
 		RideShareEnabled: v.RideShareEnabled,
+
+		// MYR-491 fleet-config setup schedule — raw, from the second side-table
+		// join on this read. Mapped through the same helper the two catalog
+		// adapters use so all three surfaces feed the derivation identically.
+		SetupSchedule: setupScheduleRow(v.SetupSchedule),
 	}
 }

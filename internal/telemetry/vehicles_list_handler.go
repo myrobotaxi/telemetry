@@ -58,6 +58,14 @@ type VehicleCatalogRow struct {
 	// this struct can hold on a hand-built row means PAUSED; every real
 	// construction site goes through the adapter and carries the joined value.
 	RideShareEnabled bool
+
+	// SetupSchedule is the car's fleet-config schedule row (MYR-491), LEFT
+	// JOINed from go_fleet_config_attempts. RAW, like the service-window pair:
+	// the wire field `setupState` is DERIVED from it together with Status and
+	// LastUpdated. The catalog carries it so the rider-side picker can render a
+	// shared car as "setting up" instead of "offline" (MYR-437) without a
+	// snapshot fetch per row. Zero value means "no claim" — the safe reading.
+	SetupSchedule VehicleSetupSchedule
 }
 
 // VehicleLister returns the catalog rows for vehicles owned by a
@@ -165,8 +173,12 @@ func (h *VehiclesListHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 func (h *VehiclesListHandler) buildResponse(rows []VehicleCatalogRow, role auth.Role) vehiclesListResponse {
 	items := make([]map[string]any, 0, len(rows))
 	maskSpec := mask.For(mask.ResourceVehicleSummary, role)
+	// ONE reading of the clock for the whole page: the MYR-491 derivation is a
+	// set of comparisons against it, and two rows of the same response must not
+	// be judged against two different instants.
+	now := time.Now()
 	for i := range rows {
-		summary := newVehicleSummary(&rows[i], role, auth.ShareGrant{})
+		summary := newVehicleSummary(&rows[i], role, auth.ShareGrant{}, now)
 		// `fieldsMasked` is intentionally discarded in v1: §7.0 reads
 		// are not audited per `data-lifecycle.md` §4.2, and the v1
 		// path only ever projects RoleOwner (which is the identity for
@@ -188,7 +200,11 @@ func (h *VehiclesListHandler) buildResponse(rows []VehicleCatalogRow, role auth.
 //
 // Shared by the owner list, the viewer merge (vehicles_list_viewer.go), and the
 // redeem response, so all three emit byte-identical rows for the same vehicle.
-func newVehicleSummary(v *VehicleCatalogRow, role auth.Role, grant auth.ShareGrant) vehicleSummary {
+//
+// now is the instant the MYR-491 setup derivation is judged against, passed in
+// rather than read here for the same two reasons as on the snapshot: one
+// response is one instant, and the rules are testable without waiting.
+func newVehicleSummary(v *VehicleCatalogRow, role auth.Role, grant auth.ShareGrant, now time.Time) vehicleSummary {
 	summary := vehicleSummary{
 		VehicleID:      v.ID,
 		Name:           v.Name,
@@ -211,6 +227,11 @@ func newVehicleSummary(v *VehicleCatalogRow, role auth.Role, grant auth.ShareGra
 		// it, because a rider who cannot see that a shared car is paused finds
 		// out from a 409 instead.
 		RideShareEnabled: v.RideShareEnabled,
+		// MYR-491: the SAME derivation the snapshot runs, over the same inputs.
+		// Calling it from both surfaces rather than copying the rules is what
+		// makes "the catalog and the detail sheet can never disagree" a
+		// structural property instead of a convention.
+		SetupState: deriveSetupState(now, v.Status, v.LastUpdated, v.SetupSchedule),
 	}
 	if role == auth.RoleViewer {
 		// DERIVED, not stored (MYR-369): the grant's flags decide the

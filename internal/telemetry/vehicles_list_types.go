@@ -56,6 +56,19 @@ type vehicleSummary struct {
 	// on every catalog fetch. Absence therefore only ever signals a server
 	// predating MYR-342, never a paused vehicle.
 	RideShareEnabled bool `json:"rideShareEnabled"`
+	// SetupState names the ONE thing still standing between this car and live
+	// telemetry, or null when there is nothing to say (MYR-491,
+	// contracts v0.24.0) — the SAME object and the SAME semantics as
+	// VehicleState.setupState (§7.1), produced by the same derivation over the
+	// same inputs.
+	//
+	// On the CATALOG for the rider-side picker (MYR-437): a car mid-setup must
+	// read as "setting up", not be omitted and not be badged "offline", and the
+	// picker cannot fetch a snapshot per row to learn which it is.
+	//
+	// A pointer with NO omitempty: the key is always present, and "nothing to
+	// finish" is an explicit null.
+	SetupState *SetupState `json:"setupState"`
 }
 
 // toMaskMap returns the row as a wire-name-keyed map suitable for
@@ -96,5 +109,10 @@ func (v vehicleSummary) baseMaskMap() map[string]any {
 		// the BASE map, not the viewer-only branch below: both role
 		// allow-lists carry it.
 		"rideShareEnabled": v.RideShareEnabled,
+		// MYR-491 — already derived by newVehicleSummary; this is the emitted
+		// value. In the BASE map for the same reason as the sibling above: both
+		// role allow-lists carry it, and the VIEWER is the party a "setting up"
+		// row is most useful to (MYR-437's picker).
+		"setupState": setupStateWire(v.SetupState),
 	}
 }

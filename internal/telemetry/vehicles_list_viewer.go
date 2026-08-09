@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/auth"
 	"github.com/myrobotaxi/telemetry/internal/mask"
@@ -77,10 +78,15 @@ func (h *VehiclesListHandler) appendSharedRows(ctx context.Context, userID strin
 		)
 		return resp
 	}
+	// One clock reading for the whole merge, matching the owner half: both
+	// halves of a single catalog response must judge every row's MYR-491 setup
+	// state against the same instant.
+	now := time.Now()
 	for i := range rows {
 		resp.Items = append(resp.Items, viewerSummaryMap(
 			rows[i].VehicleCatalogRow,
 			auth.ShareGrant{AllowRides: rows[i].AllowRides},
+			now,
 		))
 	}
 	return resp
@@ -101,8 +107,8 @@ func (h *VehiclesListHandler) appendSharedRows(ctx context.Context, userID strin
 // vehicle-summary.schema.json marks `required` must survive this projection, or
 // the rows this function emits are invalid against the shape their own consumer
 // decodes. Asserted in vehicles_list_viewer_schema_test.go.
-func viewerSummaryMap(row VehicleCatalogRow, grant auth.ShareGrant) map[string]any {
-	summary := newVehicleSummary(&row, auth.RoleViewer, grant)
+func viewerSummaryMap(row VehicleCatalogRow, grant auth.ShareGrant, now time.Time) map[string]any {
+	summary := newVehicleSummary(&row, auth.RoleViewer, grant, now)
 	projected, _ := mask.Apply(
 		summary.toMaskMap(),
 		mask.For(mask.ResourceVehicleSummary, auth.RoleViewer),
