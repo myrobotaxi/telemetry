@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://myrobotaxi.com/schemas/vehicle-setup-completion.schema.json",
+  "title": "VehicleSetupCompletionResponse",
+  "description": "The 200 body of POST /api/tesla/vehicles/{vehicleId}/complete-setup (rest-api.md §7.23, contracts v0.25.0) — the ACTION half of the setupState surfaces MYR-491 put on §7.0 and §7.1. WHY IT IS A SEPARATE SCHEMA AND NOT A REUSE: the object is the same shape, but the CONTRACT AROUND IT is deliberately stronger in two ways that a shared schema could not express. (1) `setupState` here is NEVER null — a passive read may make no claim, but a request that asked the server to finish setting up a car always gets an answer, and null would be useless to the client rendering the progress card. (2) The `state` enum is a SUPERSET: it carries `streaming`, the positive member §7.0/§7.1 deliberately lack (MYR-491: 'null is NOT ready — there is no ready member'), because on this surface the server has just looked at the car's status and freshness and does know. THE SERVER NEVER EMITS `streaming` ON §7.0 OR §7.1, and a consumer must not expect it there. Every other member means exactly what it means on the read surfaces, produced by the same server-side helpers, so the two can never disagree about one vehicle. FAILURE IS NEVER A STATE: every way this endpoint can fail is a typed HTTP error (§7.23's table) and no error response carries a setupState at all, so a client renders a retry affordance from the code rather than a setup card.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["vehicleId", "setupState"],
+  "properties": {
+    "vehicleId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The Prisma cuid the request addressed, echoed back so a client completing several vehicles can attribute each answer. NOT a VIN — a full VIN never crosses this wire (§1.3, §2.1).",
+      "x-classification": "P0",
+      "examples": ["clx9v0000000abcd"]
+    },
+    "setupState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "since"],
+      "description": "What now stands between this vehicle and live telemetry, as of this request. NEVER null on this surface — contrast VehicleState.setupState / VehicleSummary.setupState, where null is the ordinary 'no claim' answer. Same two members and the same semantics; one shared server-side derivation, so a completion response and the next snapshot cannot contradict each other.",
+      "x-classification": "P0",
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": ["streaming", "configuring", "awaiting_virtual_key", "token_failed"],
+          "description": "`streaming` — the car is sending live telemetry; setup is COMPLETE and nothing further is required. THIS MEMBER IS EXCLUSIVE TO §7.23 and is never emitted on §7.0/§7.1. `configuring` — the virtual key is confirmed enrolled and the fleet-telemetry config has been pushed, either by this call or earlier in the same pairing epoch; NO OWNER ACTION, the client narrates progress and may suggest waking the car's screen if it persists. `awaiting_virtual_key` — Tesla reports the virtual key is NOT enrolled on the vehicle; THE OWNER MUST ACT, and because the client knows it just sent them to the Tesla app it should surface the pairing retry proactively rather than leaving them to discover a dead control (MYR-503). `token_failed` — the owner's Tesla authorization can no longer be resolved or refreshed; THE OWNER MUST ACT (reconnect the Tesla account). NOTE WHAT IS ABSENT: there is no member for 'we could not tell'. A car whose pairing Tesla would not report, a car that would not wake, and a config push that failed are all typed HTTP errors, because a confident wrong answer on a card whose job is naming the ONE thing left to do is worse than no answer. New members may be added in a minor version; consumers MUST treat an unrecognised value as 'setup is incomplete, reason unknown' and MUST NOT fail the decode.",
+          "examples": ["configuring"]
+        },
+        "since": {
+          "type": "string",
+          "format": "date-time",
+          "description": "RFC 3339 UTC instant at which the evidence behind `state` was recorded — the last live frame for `streaming`, the forced re-push or the pairing epoch it belongs to for `configuring`, and this read for `awaiting_virtual_key` / `token_failed`. It is DATA FOR THE COPY ('for 2 minutes'), NOT an input a consumer re-derives `state` from. Never zero and never in the future: the server floors it at the read instant, so a client may subtract it from `now` without guarding for a negative age.",
+          "examples": ["2026-08-09T04:00:00Z"]
+        }
+      }
+    }
+  }
+}

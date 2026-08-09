@@ -84,6 +84,7 @@ Every FR/NFR listed here is anchored in at least one section of this doc. The ta
    20. Saved places (3 operations — MYR-321)
    21. Live Activity token registration (2 operations — MYR-172; content-state progress track — MYR-398; the lifecycle banner defers to the island — MYR-413; the sixth island expansion rides an update, not the end — MYR-418; a rescued reservation may register again — MYR-461)
    22. `GET /api/vehicles/{vehicleId}/booked-windows` (schedule-picker conflict read — MYR-385)
+   23. `POST /api/tesla/vehicles/{vehicleId}/complete-setup` (zero-touch setup completion — MYR-505)
 8. Resource schemas
 9. Observability
 10. Code <-> spec divergences
@@ -649,6 +650,7 @@ No contract changes are required for the new role's wire shape (the REST respons
 | `POST` | `/api/ride-requests/{id}/activity-token` | Register (or rotate) the ActivityKit push token for the rider's Live Activity on this ride — upsert on `(ride, rider)`, clears any end tombstone (§7.21.1) | Bearer + **rider** of the ride (owner → 403; non-party → 404) | FR-9.3, NFR-3.21, MYR-172 |
 | `DELETE` | `/api/ride-requests/{id}/activity-token` | End the Live Activity registration when the Activity ends on the phone — 200 `{ended}`, idempotent (§7.21.2) | Bearer + **rider** of the ride (owner → 403; non-party → 404) | FR-9.3, NFR-3.21, MYR-172 |
 | `GET` | `/api/vehicles/{vehicleId}/booked-windows` | The vehicle's blocked time windows so a rider's schedule picker can dim conflicting slots BEFORE submitting — the read side of the §7.8 MYR-383 gate, derived from the same predicate and constant (§7.22) | Bearer + **owner of vehicleId, or a viewer whose grant carries `allowRides`** — byte-for-byte the ride-CREATE gate | FR-9.1, FR-9.3, NFR-3.21, MYR-385 |
+| `POST` | `/api/tesla/vehicles/{vehicleId}/complete-setup` | Finish onboarding without a human trigger: wake, confirm the virtual key with Tesla, force the fleet-config re-push, and answer with the resulting `setupState` (§7.23) | Bearer + owner of vehicleId | FR-1.1, NFR-3.21, MYR-505 |
 | `POST` | `/api/auth/apple` | Native Sign in with Apple → ES256 access + refresh pair | None (pre-auth; per-IP rate-limited) | FR-6.1, MYR-193 |
 | `POST` | `/api/auth/refresh` | Single-use refresh-token rotation | Refresh token in body (pre-auth; per-IP rate-limited) | FR-6.2, MYR-193 |
 | `POST` | `/api/auth/revoke` | Revoke a refresh-token family (sign-out) | Refresh token in body (pre-auth; per-IP rate-limited) | MYR-193 |
@@ -4794,6 +4796,214 @@ Handler [`internal/telemetry/vehicle_booked_windows_handler.go`](../../internal/
 
 ---
 
+### 7.23 `POST /api/tesla/vehicles/{vehicleId}/complete-setup` (zero-touch setup completion — MYR-505)
+
+Owner-authenticated "finish setting this car up now" — the action half of the
+`setupState` §7.0/§7.1 read surfaces.
+
+**Why this endpoint has to exist.** After [MYR-489](https://linear.app/myrobotaxi/issue/MYR-489)
+the server can heal a car that was linked but never streamed, and after
+[MYR-491](https://linear.app/myrobotaxi/issue/MYR-491) it can say on the wire
+what a car is waiting for. What it could not do was **start**. The heal fires on
+a background reconciler pass (up to 45 minutes) or on a *signed vehicle command
+that applied* — so in practice a new owner's onboarding finished when somebody
+told them to tap **Lock**. A lock tap is not a setup step; it was a trigger
+wearing a control's clothes, and it is exactly where a live beta onboarding
+stalled. The client, meanwhile, knows the precise moment: it handed the owner
+off to the Tesla app for the one approval Tesla requires a human for, and gets
+`scenePhase` foreground back when they return. This endpoint is how that moment
+becomes the trigger.
+
+**Enablement.** The route is **ALWAYS mounted**. Both Tesla probes — `wake_up`
+and `fleet_status` — are UNSIGNED authenticated reads against the direct Fleet
+API and need no tesla-http-proxy; only the config push does. On a deployment
+with no signing proxy the endpoint therefore still reports `awaiting_virtual_key`
+/ `streaming` / `token_failed` correctly and returns `503 service_unavailable`
+on the one path that needs the signer. A `404` would tell an SDK the server is
+too old to complete setup, which would be false.
+
+**Request.**
+
+```
+POST /api/tesla/vehicles/{vehicleId}/complete-setup
+Authorization: Bearer <app session JWT>        # owner identity = JWT sub
+```
+
+`{vehicleId}` is the Prisma cuid (the same key as §7.12 / §7.14 / §7.15 — NOT a
+VIN). There is **no request body.**
+
+**Behavior / sequence:**
+
+1. Validate the bearer → `userId`. Missing/invalid → `401 auth_failed`. Missing
+   `{vehicleId}` → `400 invalid_request`. Non-`POST` → `405 invalid_request`.
+2. Resolve `vehicleId` → owner. Unknown vehicle → `404 not_found`
+   (indistinguishable from ownership-filtered — never leaks existence); real
+   mismatch → `403 vehicle_not_owned`. **Identical semantics to §7.12 / §7.14 /
+   §7.15**, and neither touches Tesla.
+3. **Per-vehicle cooldown**, keyed by VIN: one Tesla-hitting completion per
+   **60 s**. Over the limit → `429 rate_limited` with `Retry-After: 60`.
+   Consumed BEFORE the sequence and **not refunded on failure** (§7.15's
+   argument), so a client retrying an unreachable car backs off instead of
+   re-waking it every second.
+4. **Streaming short-circuit.** If the car is already streaming — the same
+   two-condition test §7.1's derivation uses, a non-default `status` AND a
+   `lastUpdated` inside 30 minutes — respond `200` with
+   `setupState.state: "streaming"` and **make no Tesla call at all**. This is
+   what makes the common repeat (a client calling again after success) free.
+5. **Wake** (`POST /api/1/vehicles/{vin}/wake_up`, unsigned, direct Fleet API).
+   `wake_up` is exempt from Tesla's command signing, which is essential here:
+   at this instant the virtual key may not exist. A successful call means Tesla
+   **accepted** the wake, not that the car is online — for a sleeping car the
+   response carries the pre-wake state — so the returned state is never used as
+   a gate. A wake failure is carried, not fatal (see step 7).
+6. **Pairing probe** (`POST /api/1/vehicles/fleet_status`, unsigned, direct
+   Fleet API), bounded at **~30 s / at most 5 probes**, exiting the instant
+   Tesla reports the key enrolled. `key_paired_vins` membership is read
+   POSITIVELY: a VIN in neither partition reads as unpaired.
+   * **Unpaired** → `200`, `setupState.state: "awaiting_virtual_key"`. Nothing
+     is pushed. The client surfaces the retry proactively.
+   * **Tesla never answered** (every probe failed) → `502 command_failed`.
+     Pairing is UNKNOWN, and a fabricated state is worse than no answer.
+7. **Paired but the wake was refused** → `503 vehicle_asleep`. No config is
+   pushed at a car we could not reach.
+8. **Paired.** Re-read the schedule row, then: if this pairing epoch's forced
+   re-push is already spent, respond `200 configuring` and push nothing;
+   otherwise reset the vehicle's attempt schedule (the SAME write an applied
+   signed command performs, debounce included) and run
+   [MYR-489](https://linear.app/myrobotaxi/issue/MYR-489)'s **forced re-push**
+   — delete-then-create through the signing proxy — unforked. Applied →
+   `200 configuring`. Failed → `502 command_failed`; the reconciler is already
+   scheduled to repair it.
+
+**`streaming` is a fourth `setupState` member, and it exists ONLY here.** §7.0
+and §7.1 keep exactly the three members MYR-491 contracted, and their `null`
+still means *no claim*. That is right for a passive read, where `null` covers a
+healthy car, an unexamined car and an expired claim alike and the server cannot
+tell which. It is exactly wrong as the answer to a **request**: a client that
+just asked to finish setting up a car and receives "no claim" has learned
+nothing, and the moment the narration can say *"Live!"* is the entire point of
+this endpoint. Here the server does know, because it looked. So the action
+surface returns a positive member and the read surfaces do not — one vocabulary,
+one object shape, a superset on the surface that has earned the claim. This is
+the additive widening §7.1's own contract anticipates ("new members may be added
+in a minor version; consumers MUST treat an unrecognised value as *setup is
+incomplete, reason unknown* and MUST NOT fail the decode"), so a client that
+somehow met `streaming` on a read surface degrades safely. **The server never
+emits `streaming` on §7.0 or §7.1.**
+
+**"Asleep" and "not paired yet" are DIFFERENT ANSWERS and are never conflated.**
+This is the load-bearing honesty property, and it is affordable only because
+`fleet_status` is a **Tesla-side enrollment record, not a car query**: it does
+not wake, dial or otherwise depend on the vehicle being reachable. So an expired
+wake budget never degrades into `awaiting_virtual_key` — which would send an
+owner back to the Tesla app to re-pair a key that is already fine — and a car
+Tesla says is unpaired reports `awaiting_virtual_key` whether or not it woke.
+Consequently **every failure mode here is an HTTP error, never a `setupState`**:
+no error response carries one, and a client must render a retry affordance from
+the code rather than a setup card.
+
+**Idempotence means bounded effect on a REAL CAR, not identical bytes.** Three
+independent mechanisms, each closing a different door. (1) The streaming
+short-circuit makes the post-success repeat free. (2) The cooldown is **longer
+than the probe budget**, which makes it a concurrency bound as well as a rate
+limit — two requests for one car cannot overlap however they are timed, so
+twenty simultaneous calls produce exactly one wake. (3) The
+**pairing-epoch budget** — MYR-489's, shared verbatim rather than restated —
+means the delete-then-create reaches the car at most once per epoch *even across
+cooldowns*. The epoch is checked BEFORE the schedule reset, because the reset
+stamps the epoch and would otherwise re-arm the very budget being tested, and it
+is read from a row fetched AFTER the probe, so a reconciler pass that escalated
+the same car during those 30 seconds is detected instead of double-spent. Worst
+case for a client stuck in a retry loop: **one wake per minute and one forced
+push per pairing epoch, per vehicle.**
+
+**No new schedule write on the unpaired path, deliberately.** A probe that finds
+the key still unenrolled records nothing. Recording it as an attempt would
+increment `attempt_count`, so a client calling repeatedly would drive the
+reconciler's exponential backoff to its ceiling and *bury* the very car it was
+trying to help — the precise failure MYR-489 exists to undo. The reconciler owns
+the schedule; this endpoint reads it and, on success only, resets it.
+
+**Cooldown is in-memory and per-process**, resetting on restart and unshared
+across replicas (effective limit up to N completions/min/vehicle under N
+replicas). Same trade as §7.15: the backstops that actually protect the car are
+the epoch budget and the bounded probe count, and a durable counter would cost a
+DB round trip on every tap.
+
+**Response `200`** (`application/json`), contract
+[`schemas/vehicle-setup-completion.schema.json`](schemas/vehicle-setup-completion.schema.json):
+
+```json
+{
+  "vehicleId": "clx9v0000000abcd",
+  "setupState": {
+    "state": "configuring",
+    "since": "2026-08-09T04:00:00Z"
+  }
+}
+```
+
+| Field | Type | Classification | Notes |
+|-------|------|----------------|-------|
+| `vehicleId` | `string` | P0 | The Prisma cuid the request addressed, echoed so a client fanning several completions can attribute the answer. |
+| `setupState` | `object` | P0 | **NEVER `null` on this surface** — unlike §7.0/§7.1, where `null` means no claim, a `200` here always carries a state, because the request asked a question the server just answered. Same two members and same semantics as `VehicleState.setupState`. |
+| `setupState.state` | `string` enum | P0 | `streaming` — the car is sending live telemetry; setup is COMPLETE and nothing further is required. **This member is exclusive to §7.23.** `configuring` — the key is confirmed and the config has been pushed (by this call or earlier in the same pairing epoch); no owner action, the client narrates progress. `awaiting_virtual_key` — Tesla reports the virtual key is not enrolled; THE OWNER MUST ACT, and the client should offer the pairing retry proactively rather than waiting for them to find a dead button. `token_failed` — the owner's Tesla authorization can no longer be resolved or refreshed; THE OWNER MUST ACT (reconnect Tesla). |
+| `setupState.since` | `string` (RFC 3339, UTC) | P0 | When the evidence behind `state` was recorded: the last live frame for `streaming`, the push (or the epoch it belongs to) for `configuring`, this read for `awaiting_virtual_key` / `token_failed`. Never zero and never in the future — the server floors it at the read instant. Copy data, not a re-derivation input. |
+
+**Errors:**
+
+| HTTP | `error.code` | When |
+|------|--------------|------|
+| 400 | `invalid_request` | Missing `{vehicleId}`. |
+| 401 | `auth_failed` | Missing/malformed/invalid bearer. **Note the asymmetry with §7.15:** an owner whose *Tesla* token is unusable is NOT an auth failure here — it is `200` with `setupState.state: "token_failed"`, because that is a setup condition the card already has copy for. |
+| 403 | `vehicle_not_owned` | Caller does not own the vehicle (matches §7.12 / §7.14 / §7.15). |
+| 404 | `not_found` | Unknown vehicle, or ownership-filtered — intentionally indistinguishable. |
+| 405 | `invalid_request` | Non-`POST` method. |
+| 429 | `rate_limited` | A completion for this vehicle is already running, or ran within the last 60 s. Carries `Retry-After: 60`. Never returned for the streaming short-circuit's benefit — the limiter is consumed before it, so a car that is already live also spends a token. |
+| 502 | `command_failed` | Tesla never answered the pairing probe within the budget (pairing UNKNOWN — **not** reported as unpaired), or the forced config re-push did not apply. Retryable; on the push arm the reconciler is already scheduled to repair the car. |
+| 503 | `vehicle_asleep` | The virtual key IS paired but Tesla refused the wake, so no config was pushed at an unreachable car. Transient — the SDK backs off. |
+| 503 | `service_unavailable` | This deployment has no signing proxy, so no config can be pushed at all (the `self-serve-onboarding.md` §5 safety guard). Pairing was still checked. |
+| 500 | `internal_error` | Store-layer failure during the ownership lookup. Nothing was read from or written to Tesla. |
+
+**No new error code, no new sub-code, and NO MIGRATION.** Every column read or
+written already exists (`go_fleet_config_attempts`, migrations **0031** and
+**0036**), and every code above is an existing member of the shared enum.
+
+**Observability.** VINs are redacted to last-4 in every log line (§9, CG-DC-2).
+The sequence emits one greppable event per outcome —
+`setup_complete_already_streaming`, `setup_complete_token_failed`,
+`setup_complete_wake_accepted`, `setup_complete_key_paired`,
+`setup_complete_awaiting_virtual_key`, `setup_complete_wake_refused`,
+`setup_complete_schedule_reset`, `setup_complete_push_already_spent`,
+`setup_complete_configured` — alongside MYR-489's own
+`fleet_config_forced_repush*` events, which the push step still emits because
+the push step is still MYR-489's code.
+
+#### Implementation
+
+Sequence [`internal/telemetry/setup_completion.go`](../../internal/telemetry/setup_completion.go)
+and [`setup_completion_configure.go`](../../internal/telemetry/setup_completion_configure.go);
+tunables and the `streaming` member
+[`setup_completion_config.go`](../../internal/telemetry/setup_completion_config.go);
+handler [`setup_completion_handler.go`](../../internal/telemetry/setup_completion_handler.go);
+Fleet API reads [`fleet_api_vehicle_wake.go`](../../internal/telemetry/fleet_api_vehicle_wake.go)
+and [`fleet_api_fleet_status.go`](../../internal/telemetry/fleet_api_fleet_status.go);
+the on-demand entry into MYR-489 and the shared epoch predicate
+[`fleet_config_force_now.go`](../../internal/telemetry/fleet_config_force_now.go);
+route [`cmd/telemetry-server/wiring_vehicle_complete_setup.go`](../../cmd/telemetry-server/wiring_vehicle_complete_setup.go).
+The derivation helpers `isStreamingNow` and `setupStateAt` are MYR-491's, reused
+so this surface and §7.1 cannot disagree about what "streaming" means.
+
+**Not in `specs/rest.openapi.yaml`, deliberately.** That spec declares only the
+core read and sharing subset and carries **no `/api/tesla/*` path at all** —
+§7.12, §7.13, §7.14, §7.15, §7.16, §7.18 and §7.22 are likewise absent. This
+endpoint's canonical machine-readable shape is
+[`schemas/vehicle-setup-completion.schema.json`](schemas/vehicle-setup-completion.schema.json),
+which the tagged conformance suite validates the `complete_setup` fixture
+against.
+
+---
+
 ## 8. Resource schemas
 
 The canonical v1 `VehicleState` schema is [`schemas/vehicle-state.schema.json`](schemas/vehicle-state.schema.json). The REST snapshot endpoint returns that shape directly via `$ref` in the OpenAPI spec -- it is NOT re-declared.
@@ -4865,6 +5075,7 @@ Same as [`websocket-protocol.md`](websocket-protocol.md) §10 divergence managem
 
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-08-09 | **Returning from the Tesla app finishes setup by itself — new §7.23 `POST /api/tesla/vehicles/{vehicleId}/complete-setup` ([MYR-505](https://linear.app/myrobotaxi/issue/MYR-505)).** Contracts **v0.25.0**. One new owner-only endpoint, one new response schema, **NO MIGRATION** (`go_fleet_config_attempts` **0031** + **0036** already carry every column), **no new error code and no new sub-code**. **The gap it closes.** [MYR-489](https://linear.app/myrobotaxi/issue/MYR-489) taught the server to heal a linked-but-never-streaming car and [MYR-491](https://linear.app/myrobotaxi/issue/MYR-491) taught it to say what a car is waiting for, but neither could START: the heal fires on a reconciler pass (up to 45 minutes) or on a signed command that APPLIED, so a live beta onboarding finished only when somebody told the owner to tap **Lock**. A lock tap is not a setup step. The client knows the exact moment — it handed the owner off for Tesla's one required approval and gets `scenePhase` foreground back — and this makes that moment the trigger. **The sequence:** unsigned `wake_up` → bounded `fleet_status` probe (~30 s, ≤5 probes) → on paired, reset the attempt schedule and run MYR-489's forced re-push (delete-then-create through the signing proxy) **unforked, as an entry point rather than a second implementation** → answer with the resulting `setupState`. **`streaming` is a FOURTH `setupState` member and it exists ONLY on this surface** — §7.0/§7.1 keep exactly MYR-491's three, and their `null` still means *no claim*, which is right for a passive read and exactly wrong as the answer to a request: a client that asked to finish setting up a car and got "no claim" has learned nothing. One vocabulary, one object shape, a superset on the surface that has earned the claim; it is the additive widening §7.1's own contract anticipates, so a client meeting it elsewhere degrades safely. **The honesty property that shapes everything:** *asleep* and *not paired yet* are DIFFERENT ANSWERS and are never conflated, which is affordable only because `fleet_status` is a Tesla-side enrollment record rather than a car query — a vehicle that never wakes still yields a TRUE pairing answer. So an expired wake reports `503 vehicle_asleep` instead of sending an owner to re-pair a key that is already fine; a probe Tesla never answered is `502 command_failed` rather than a fabricated `awaiting_virtual_key`; and a push that failed is `502`, never `configuring`. **Every failure mode is an HTTP error and NO error response carries a `setupState`.** **Three independent bounds on what reaches a real car:** the streaming short-circuit (post-success repeats cost zero Tesla calls), a per-VIN 60 s cooldown that is deliberately LONGER than the probe budget so it doubles as a concurrency bound (twenty simultaneous calls produce exactly one wake), and MYR-489's **pairing-epoch budget shared verbatim** so the delete-then-create lands at most once per epoch even across cooldowns — checked BEFORE the schedule reset (which stamps the epoch and would re-arm it) and read from a row fetched AFTER the probe, so a reconciler pass racing us mid-request is detected rather than double-spent. Worst case for a stuck client: one wake per minute, one forced push per epoch, per vehicle. **The unpaired path writes NOTHING to the schedule, deliberately** — recording it would increment `attempt_count` and let a looping client drive the reconciler's backoff to its ceiling, burying the very car it was trying to help. **Reader/writer split preserved:** `wake_up` and `fleet_status` are unsigned reads on the DIRECT Fleet API; the config push is the only proxy call, and it happens inside MYR-489's code. The route is always mounted — with no signing proxy, pairing is still CHECKED and only the push answers `503 service_unavailable`. §1 TOC (entry 23), §6 catalog and §7.23 added; new [`schemas/vehicle-setup-completion.schema.json`](schemas/vehicle-setup-completion.schema.json), a `complete_setup` conformance fixture wired into the tagged suite, and a `data-classification.md` §1.19 wire-projection note recording the THIRD resource that projects the same four columns (no new column, no role dimension — the endpoint is owner-only and self-scoped, so `internal/mask` needs no entry). **`specs/rest.openapi.yaml` is deliberately NOT touched**: that spec covers only the core read/sharing subset and carries no `/api/tesla/*` path at all — not §7.12, §7.13, §7.14, §7.15, §7.16, §7.18 or §7.22 — so adding one here would be the inconsistency, not the omission. MYR-491 touched it only because it added a field to `VehicleState`/`VehicleSummary`, which the spec does declare. | Claude (go-engineer) |
 | 2026-08-09 | **A car that has not come up yet says why — `setupState` on `VehicleState` (§7.1) and `VehicleSummary` (§7.0) ([MYR-491](https://linear.app/myrobotaxi/issue/MYR-491)).** Contracts **v0.24.0**. Adds ONE optional, nullable P0 object to both read surfaces. **No new endpoint, no new error code, and NO MIGRATION** — every column it reads already exists ([MYR-489](https://linear.app/myrobotaxi/issue/MYR-489)'s migration **0036** on `go_fleet_config_attempts`, plus **0031**); this is the wire half that PR #385 deliberately left undone. **The gap it closes** is [MYR-503](https://linear.app/myrobotaxi/issue/MYR-503): a tester onboarded, met a card with no location and no charge, tapped Lock and got a dead button, because nothing on the wire said his virtual key was never paired. The client's direction was that pairing guidance must NOT hang off a failed control — so this is a vehicle-level state, rendered before any command is attempted, naming the ONE thing left to do: `awaiting_virtual_key` (owner pairs the key), `configuring` (nothing to do; the server is waiting on the car), `token_failed` (owner reconnects Tesla), or `null` for no claim. **Emitted on BOTH surfaces and in BOTH role masks.** The snapshot feeds the owner's card; the catalog row feeds the rider-side picker, which reads list rows and today renders a never-streamed shared car as permanently "offline" because `Vehicle.status` is a write-once schema default until the first mTLS stream event ([MYR-437](https://linear.app/myrobotaxi/issue/MYR-437)). One server-side derivation serves both, so they cannot disagree, and no client re-derives it. **Four honesty rules are part of the contract:** absence of evidence yields `null`; `configuring` expires after 24 h to `null` (never to `awaiting_virtual_key`, which would send an owner to re-pair a key that is already paired); a currently-streaming car never carries `configuring`/`token_failed`, so a stale schedule row cannot card a live vehicle; and a car that streamed once and went quiet stays the FRESHNESS story, deliberately out of scope. `null` is NOT `ready` — there is no `ready` member, and consumers must not paint a positive badge from a no-claim value. **Deliberately NOT sourced from `key_not_paired` command rejections:** that code is overloaded — the server returns it when its own signing proxy is unconfigured — so a card built on it would tell the whole fleet to re-pair whenever our deployment broke. Tesla's `missing_key` on the config push is unambiguous, and the link-time push now SEEDS it (scheduling-neutral, `ON CONFLICT DO NOTHING`) so a new owner's card is populated within seconds instead of after the reconciler's first pass up to 45 minutes later. | Claude (go-engineer) |
 | 2026-08-08 | **The Arriving alert rung stops firing on somebody else's route ([MYR-409](https://linear.app/myrobotaxi/issue/MYR-409)).** **No contracts version change, no wire-shape change, no new field, no new endpoint, no new error code** — migration **0034** and one new Go-owned column, nothing a client can see. This closes the residual §7.21.4 named and then could not fix: `navFresh` ran against `Vehicle."lastUpdated"`, a ROW stamp moved by every telemetry write of any column, so a car awake and streaming speed and position carried a permanently fresh timestamp over a `minutesToArrival` of arbitrary age. **The fix needed TWO gates and that is the interesting part.** (1) **Freshness now dates the READING** — `go_vehicle_control_state.nav_reading_at`, written only by a frame that actually carried a navigation-group member, read by both content-state projections in place of the row stamp. A nav CANCEL stamps it too, because "this car has no route" is current information and the same update NULLs the values it describes. The write is MONOTONE (`GREATEST(new, stored)`) via a dedicated statement rather than the shared COALESCE upsert, because the writer coalesces per VIN and two replicas share the row — a stamp that could regress would report a fresh reading as stale and flicker a gate off and on. NULL means no navigation has ever been seen and reads as NOT FRESH; there is deliberately **no backfill and no fallback to the row stamp**, which would reinstate the lie for exactly the population the column describes. This alone closes the FROZEN-VALUE arm. (2) **Relevance is a separate question and needed a separate gate.** A car navigating its owner's errand at the instant an instant ride is accepted is streaming perfectly fresh navigation — one second old, describing a route to the shops — so freshness passes it and, if the owner is two minutes out, the rung burns anyway. The reading must therefore also not predate `go_ride_requests.dispatched_at`, the instant the rider's pickup was pushed to the car; a nil dispatch (failed or skipped) is not relevant either, which the dormancy gate does not cover. **The remaining bound is stated, not papered over:** dispatch records when the destination was PUSHED, not when the car acted on it, so a frame in that few-second window postdates the dispatch while still describing the old route — closing it needs the car's active destination matched against the ride's pickup, and `pickup_lat_enc`/`pickup_lng_enc` are app-encrypted. It errs safely where it matters: on the accept push dispatch is approximately *now*, so nothing postdates it and the rung is left unspent. **`asOf` becomes more truthful with no shape change** — its derivation table already said a held reading keeps its old instant, and now the input can actually tell. **MYR-454's derived-status fold cannot bump the stamp:** it writes `status` from gear/speed, which carry no navigation, and the stamp lives on a different table behind a nav-presence gate — pinned by a test. The MYR-398 per-Activity `progress_reading_at` anchor is KEPT and still does the other half: this stamp dates the last frame that MENTIONED navigation, while that one catches a car dutifully re-sending the SAME value on its 30s resend. §7.21.3 (the freshness note, which previously recorded that a per-field nav timestamp on the car was unavailable) and §7.21.4 (the Arriving gate and its residual) updated; [`data-classification.md`](data-classification.md) §1.13 gains the column, **P0 156 → 157**. Implementation: `internal/store/{vehicle_nav_freshness,field_mapper,writer_flush,writer_coalesce,live_activity_leg,live_activity_context}.go`, `internal/push/{activity_alert,activity_ride_context}.go`. | Claude (go-engineer) |
 | 2026-08-08 | **A rescued reservation may register a Live Activity again, and the owner is finally told the rider started ([MYR-461](https://linear.app/myrobotaxi/issue/MYR-461), [MYR-462](https://linear.app/myrobotaxi/issue/MYR-462)).** **No contracts version change** — no new endpoint, no new field, no new status, no new error code, no migration. Two behaviour changes from external-beta triage, both server-side. **§7.21.1 — the expiry refusal is now scoped to rides still at `accepted`.** `reservation_expired` is a verdict on the DISPATCH, and this document already promises twice (§7.8 transition notes, §7.8 `?activeForVehicle`) that such a ride's parties "may still cancel or **proceed manually**". The register guard refused on the dispatch columns alone, which conflated "the car never drove itself to the pickup" with "the ride is over" — and those come apart exactly when the humans proceed manually. In beta one expired reservation then ran as a real, driven ride (`arrived` → `enroute` → `completed`) for **99 further minutes** while every registration answered `409`, so the rider's card went dark at the expiry and could never return. Once the ride advances past `accepted` the verdict has been falsified by events and registration is allowed; an unrescued reservation stays refused, preserving the MYR-172 intent. **The predicate is duplicated by necessity** — the friendly sub-coded refusal in the handler and the guard inside the write that holds under a race — and the two must be scoped in lockstep, because the stricter one silently wins and the other becomes dead code. That is precisely how the first cut of this fix failed review: the statement was scoped, the handler was not, and the endpoint was unchanged while the store's test went green. **The client's part:** a dismissed Live Activity cannot be revived by any push, so a client that ended its card at the expiry SHOULD start a fresh one on next observing the ride at `arrived`/`enroute`. Not doing so keeps the old behaviour; nothing breaks. **§7.19.0 — `rideLifecycle` gains its first owner-facing status transition.** `arrived → enroute` (the rider pressing Start ride) is the owner's only signal that their car has left the kerb with somebody aboard, and no send site in the service had the owner as a recipient except the new-request push, so an owner learned the trip had started only by opening the app and waiting for a refresh — a **66-minute** perceived lag in beta. `ride.status.changed` now fans out to the RIDER for `accepted`/`declined`/`arrived` and to the OWNER for `enroute`; the gate reads the recipient's own row in each case and the two never both fire on one transition. **The owner-side send is suppressed when the owner IS the rider** — a self-ride is the common case on this platform and must not report the rider's own tap back to them. **`islandAlerts` stays false for the owner**: the MYR-413 gate defers a banner to the recipient's own Live Activity and only the rider registers one, so marking it suppressible could only delete the notification. Category stays `rideLifecycle` — per §7.19.0 the send sites must split before the column can — taking the fan-out site count from three to four. **Copy obeys the standing payload policy**: the requester's FIRST name and nothing else about the ride. Implementation: `internal/store/live_activity_repo.go`, `internal/telemetry/ride_activity_token_handler.go`, `internal/push/{copy,notifier}.go`. **The `Drive`/`AuditLog` reconstruction behind this triage was indirect** because `go_live_activities` is swept by a 24-hour `DELETE` on `updated_at`, so the row-level push record for the reported rides was gone before triage began — worth its own issue. | Claude (go-engineer) |
