@@ -39,6 +39,27 @@
 // same first 30 minutes, and that is exactly when its owner pairs the key and
 // sends their first command. The in-band pairing signal therefore no-opped for
 // the population it was built for. With a row present from link time, it lands.
+//
+// MYR-517 WIDENED THE SEED FROM ONE OUTCOME TO EVERY DOOR, because prod showed
+// the narrow version missing the car it was written for. Spencer White's
+// "Tizzy" (linked 2026-08-09 18:07:47Z) has NO row to this day, while four
+// other cars' rows persist — and the reason is that MYR-491 hung the seed off a
+// single branch of the link-time push: the `missing_key` skip. Every OTHER
+// terminal outcome of that push — it applied, it failed with a transport or
+// proxy error, it was skipped for some other reason, the deployment has no
+// signing proxy at all — left the car with no schedule row, and therefore
+// invisible to the in-band pairing signal for as long as it kept not streaming.
+//
+// So the seed is now unconditional for every provisioned owned vehicle, and the
+// OUTCOME is the variable: `awaiting_virtual_key` when Tesla said so,
+// `push_failed` when the push genuinely failed, and '' — no claim — when no
+// push was attempted or the push applied. That keeps the WIRE behaviour
+// byte-identical to before (internal/telemetry.deriveSetupState maps '' and
+// `push_failed`-with-no-epoch alike onto "no claim") and the SCHEDULING
+// byte-identical (attempt_count 0 + next_attempt_at now is admitted by the
+// candidate query at exactly the same instant as no row at all). The only thing
+// that changes is that the row EXISTS, which is the one thing the self-heal
+// machinery needs and could not assume.
 
 package store
 
@@ -62,9 +83,24 @@ import (
 // spelling breaks one of the two.
 const SetupOutcomeAwaitingVirtualKey = "awaiting_virtual_key"
 
-// querySeedFleetConfigAwaitingKey records, against the vehicle owning vin, that
-// Tesla has just declined to apply its telemetry config for want of a virtual
-// key.
+// SetupOutcomePushFailed is the go_fleet_config_attempts.last_outcome label
+// meaning "the config push itself failed" — a transport error, a proxy error,
+// or a Tesla status we could not read as an answer. Duplicated from
+// internal/telemetry.outcomePushFailed for the same reason
+// SetupOutcomeAwaitingVirtualKey is, and guarded the same way: the
+// internal/telemetry derivation table asserts what this outcome yields on the
+// wire (no claim, absent a live pairing epoch), and the store round-trip test
+// asserts the label survives a write.
+const SetupOutcomePushFailed = "push_failed"
+
+// SetupOutcomeNone is the empty last_outcome: a row seeded because a vehicle
+// was provisioned, carrying NO claim about why it is not streaming. It exists
+// to be overwritten by the first real attempt, and until then it is
+// wire-invisible and scheduling-identical to no row at all.
+const SetupOutcomeNone = ""
+
+// querySeedFleetConfigSchedule records, against the vehicle owning vin, that a
+// link-time provisioning pass happened and what (if anything) it observed.
 //
 // Keyed by VIN through a SELECT on "Vehicle" rather than by vehicle id for the
 // same reason ResetFleetConfigScheduleOnPairing is: the caller is the link-time
@@ -75,7 +111,7 @@ const SetupOutcomeAwaitingVirtualKey = "awaiting_virtual_key"
 // A READ of the Prisma-owned "Vehicle" feeding an INSERT into a Go-owned table.
 // CG-DL-9 constrains MIGRATIONS naming Prisma tables; this is a runtime
 // statement and adds no schema.
-const querySeedFleetConfigAwaitingKey = `
+const querySeedFleetConfigSchedule = `
 INSERT INTO go_fleet_config_attempts
     (vehicle_id, attempt_count, last_attempt_at, next_attempt_at, last_outcome)
 SELECT v."id", 0, $2, $2, $3
@@ -83,18 +119,28 @@ FROM "Vehicle" v
 WHERE v."vin" = $1
 ON CONFLICT (vehicle_id) DO NOTHING`
 
-// SeedFleetConfigAwaitingKey persists the link-time observation that vin's
-// telemetry config was skipped for a missing virtual key, so the owner's very
-// first app open can explain what is left to do.
+// SeedFleetConfigSchedule persists the link-time schedule row for vin, labelled
+// with what the provisioning pass observed (SetupOutcomeAwaitingVirtualKey,
+// SetupOutcomePushFailed, or SetupOutcomeNone).
+//
+// IDEMPOTENT BY CONSTRUCTION, which is the property MYR-517 needs: it is called
+// on EVERY successful link/auth completion — a fresh provision, a re-link over
+// an already-provisioned car, a deliberate re-add — and a car that already has
+// a schedule row keeps it EXACTLY as it was. Clobbering a live schedule on a
+// re-link would disarm a pending escalation and reset a hard-won backoff, so
+// "seed on every door" and "never overwrite" have to hold together, and
+// ON CONFLICT DO NOTHING is what makes the second one free.
 //
 // Best-effort by contract: an unknown VIN inserts nothing, an existing schedule
 // row is left exactly as it was, and both are success. The caller treats a
 // returned error as loggable and never fatal — this is a card, not a gate, and
 // failing an owner's Tesla link over it would be absurd.
-func (p *OwnerProvisioner) SeedFleetConfigAwaitingKey(ctx context.Context, vin string, now time.Time) error {
-	_, err := p.pool.Exec(ctx, querySeedFleetConfigAwaitingKey, vin, now, SetupOutcomeAwaitingVirtualKey)
+func (p *OwnerProvisioner) SeedFleetConfigSchedule(
+	ctx context.Context, vin, outcome string, now time.Time,
+) error {
+	_, err := p.pool.Exec(ctx, querySeedFleetConfigSchedule, vin, now, outcome)
 	if err != nil {
-		return fmt.Errorf("OwnerProvisioner.SeedFleetConfigAwaitingKey: %w", err)
+		return fmt.Errorf("OwnerProvisioner.SeedFleetConfigSchedule: %w", err)
 	}
 	return nil
 }

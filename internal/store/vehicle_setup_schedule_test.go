@@ -119,15 +119,15 @@ func TestVehicleReadsProjectTheSetupSchedule(t *testing.T) {
 // The link-time seed is what makes the card render for a brand-new owner
 // instead of after the reconciler's first pass, and its whole design constraint
 // is that it must be invisible to MYR-489's scheduling.
-func TestSeedFleetConfigAwaitingKey(t *testing.T) {
+func TestSeedFleetConfigSchedule(t *testing.T) {
 	const owner = "user_seed"
 	repo := setupScheduleFixture(t, owner)
 	ctx := context.Background()
 	prov := newTestProvisioner(t)
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	if err := prov.SeedFleetConfigAwaitingKey(ctx, setupStateVIN, now); err != nil {
-		t.Fatalf("SeedFleetConfigAwaitingKey: %v", err)
+	if err := prov.SeedFleetConfigSchedule(ctx, setupStateVIN, store.SetupOutcomeAwaitingVirtualKey, now); err != nil {
+		t.Fatalf("SeedFleetConfigSchedule: %v", err)
 	}
 
 	t.Run("the seeded outcome round-trips to the snapshot read", func(t *testing.T) {
@@ -177,7 +177,7 @@ func TestSeedFleetConfigAwaitingKey(t *testing.T) {
 			t.Fatalf("RecordFleetConfigAttempt: %v", err)
 		}
 
-		if err := prov.SeedFleetConfigAwaitingKey(ctx, setupStateVIN, time.Now()); err != nil {
+		if err := prov.SeedFleetConfigSchedule(ctx, setupStateVIN, store.SetupOutcomeAwaitingVirtualKey, time.Now()); err != nil {
 			t.Fatalf("re-seed: %v", err)
 		}
 
@@ -199,8 +199,8 @@ func TestSeedFleetConfigAwaitingKey(t *testing.T) {
 	})
 
 	t.Run("an unknown VIN is a silent no-op", func(t *testing.T) {
-		if err := prov.SeedFleetConfigAwaitingKey(ctx, "5YJSA1E26MF999999", time.Now()); err != nil {
-			t.Fatalf("SeedFleetConfigAwaitingKey(unknown VIN) = %v, want nil", err)
+		if err := prov.SeedFleetConfigSchedule(ctx, "5YJSA1E26MF999999", store.SetupOutcomeNone, time.Now()); err != nil {
+			t.Fatalf("SeedFleetConfigSchedule(unknown VIN) = %v, want nil", err)
 		}
 	})
 }
