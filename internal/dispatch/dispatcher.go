@@ -115,6 +115,9 @@ type Dispatcher struct {
 	logger   *slog.Logger
 
 	sem chan struct{} // concurrency cap for in-flight dispatches
+	// nav orders this dispatcher's pushes per vehicle so the two legs of one
+	// ride can never land on the car out of order (MYR-526).
+	nav *navSequencer
 	// workers counts the in-flight dispatch goroutines. Not a sync.WaitGroup —
 	// see Wait, and internal/drain for the argument (MYR-410).
 	workers drain.Group
@@ -141,6 +144,7 @@ func New(
 		cfg:      cfg,
 		logger:   logger,
 		sem:      make(chan struct{}, cfg.MaxConcurrent),
+		nav:      newNavSequencer(),
 	}
 }
 
