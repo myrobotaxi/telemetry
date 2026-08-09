@@ -100,19 +100,9 @@ func (r *FleetConfigReconciler) handleSyncedQuiet(
 //     observation. Redundant with the backoff at default settings and
 //     deliberately so — it is what keeps the gate honest if Interval is ever
 //     tuned down.
-//  3. EPOCH BUDGET. One force per pairing epoch. Unspent while forced_repush_at
-//     is zero; re-armed only when a NEW epoch opens (signed_command_at moves
-//     past the last force). This is the bound that makes a permanently
-//     unreachable car cost one escalation and then nothing — it cannot loop,
-//     because the forced path records a normal incrementing attempt instead of
-//     clearing the schedule.
-//
-// MULTI-INSTANCE BOUND. The budget is read from the candidate row and stamped
-// after the fact, so two server instances passing over the same car in the same
-// window could each spend the epoch once — the same read-then-write property
-// MYR-448's ordinary attempt path already has, and the same reason its counter
-// increments server-side. The bound therefore degrades to "at most one forced
-// re-push per epoch PER INSTANCE", not to an unbounded loop.
+//  3. EPOCH BUDGET. One force per pairing epoch — `epochForceSpent`, shared
+//     verbatim with the MYR-505 on-demand path (fleet_config_force_now.go) so
+//     the two entry points cannot ration the same car differently.
 func (r *FleetConfigReconciler) escalationBlocker(c FleetConfigCandidate) (string, bool) {
 	if c.LastOutcome != outcomeSyncedQuiet {
 		return "first synced-but-quiet observation; giving the car a cycle to connect", false
@@ -120,7 +110,7 @@ func (r *FleetConfigReconciler) escalationBlocker(c FleetConfigCandidate) (strin
 	if !c.LastAttemptAt.IsZero() && r.now().Sub(c.LastAttemptAt) < r.cfg.SyncedQuietGrace {
 		return "synced-quiet grace period has not elapsed", false
 	}
-	if !c.ForcedRepushAt.IsZero() && !c.ForcedRepushAt.Before(c.SignedCommandAt) {
+	if epochForceSpent(c) {
 		return "forced re-push already spent for this key-pairing epoch", false
 	}
 	return "", true
