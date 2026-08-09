@@ -570,7 +570,9 @@ The ActivityKit push-token registry behind the rider's Live Activity — one row
 
 ### 1.19 go_fleet_config_attempts table (Go-owned, MYR-448; extended MYR-489; first wire-exposed by MYR-491)
 
-The fleet-config reconciler's per-vehicle retry schedule — one row per car that is **currently failing to stream**, and no row at all for a car that is healthy. The table is **self-draining**: a successful config push DELETEs the row (migration 0031), which is why the absence of a row is itself a meaningful, load-bearing fact rather than a gap.
+The fleet-config reconciler's per-vehicle retry schedule. The table is **self-draining**: a successful config push DELETEs the row (migration 0031), so a row's ABSENCE remains a meaningful, load-bearing fact rather than a gap.
+
+**Presence is weaker than absence, and MYR-517 is why.** A row used to mean "this car is currently failing to stream", because only a failed attempt wrote one. That made the row a handle the self-heal machinery could not assume it had: prod showed a live onboarding whose link-time push did not answer `missing_key`, so no row was written, so the in-band pairing signal had nothing to land on. A row is now ALSO written as a **seed** — `attempt_count = 0`, `last_outcome = ''` — by the link-time provisioning hook on every door (fresh link, re-link, deliberate re-add) and by the applied-signed-command pairing write. A seed row is scheduling-identical to no row (the candidate query admits both at the same instant) and wire-identical to no row (`''` derives to `null`), and cardinality is still bounded by vehicles rather than by attempts or commands, because `vehicle_id` is the primary key.
 
 Classified here for the first time because **MYR-491 made it wire-visible**. Nothing in this table crosses the wire *directly* — the four columns below are read together and collapsed into the single derived `setupState` object on `VehicleState` (rest-api.md §7.1) and `VehicleSummary` (§7.0) — but Rule CG-DC-5 attaches to the field, not to the column, so the source columns are enumerated.
 
