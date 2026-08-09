@@ -162,7 +162,16 @@ func (s *navSequencer) acquire(
 	}
 	slot.refs++
 	slot.touchedAt = s.clock()
-	// Take over from an in-flight LOWER leg of the same ride. Without this, leg
+	// Take over from an IN-FLIGHT lower leg of the same ride. A leg merely
+	// WAITING on the gate is not signalled here — it does not need to be, since
+	// the post-gate high-water check below refuses it the moment it wakes. The
+	// one gap is a 3+-legs-per-vehicle pile-up where a waiter's own
+	// OverallTimeout expires before it reaches the gate: that records
+	// dispatch_canceled rather than nav_superseded. Both are honest "did not
+	// push" outcomes and the ordering guarantee is unaffected, so tracking
+	// waiters to sharpen the label is not worth the extra state.
+	//
+	// Without the take-over, leg
 	// 2 would queue behind leg 1's wake-and-retry ladder (up to OverallTimeout)
 	// — correct in ordering but useless in practice, since the rider is already
 	// moving. Cancelling leg 1 is also the honest outcome: its destination has

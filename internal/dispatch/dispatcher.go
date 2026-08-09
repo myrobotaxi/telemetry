@@ -49,7 +49,9 @@ type OutcomeStore interface {
 	// ClaimDispatch returns true iff THIS call won the exactly-once leg-1 claim.
 	ClaimDispatch(ctx context.Context, rideID string) (bool, error)
 	// RecordDispatchOutcome persists the resolved leg-1 status; errCode is nil
-	// for sent/skipped and the opaque failure code for failed.
+	// for sent and for a kill-switch skip, and carries the opaque code for
+	// every failure — plus for the one skip that has a reason to name,
+	// nav_superseded (MYR-526).
 	RecordDispatchOutcome(ctx context.Context, rideID string, status Outcome, errCode *string) error
 	// ClaimDropoffDispatch is the leg-2 (dropoff) exactly-once claim.
 	ClaimDropoffDispatch(ctx context.Context, rideID string) (bool, error)

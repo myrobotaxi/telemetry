@@ -197,6 +197,12 @@ func (d *Dispatcher) runClaimedLeg(ctx context.Context, leg dispatchLeg) Outcome
 // working perfectly, and would hide the one fact worth knowing: the later leg
 // won. Records on the OUTER ctx, whose deadline `record` drops anyway, so the
 // write survives the cancellation that produced this outcome.
+//
+// A leg that resolved OutcomeSent is deliberately NOT reclassified, even when
+// the supersession flag is set: in that race the command had already reached
+// the car, so `sent` is the true statement about what happened. The ORDERING
+// guarantee is unaffected — the superseding leg cannot dial until it takes the
+// gate this one still holds, so it lands after, which is the whole point.
 func (d *Dispatcher) recordSequenced(
 	ctx context.Context, leg dispatchLeg, hold *navHold, vin string, outcome Outcome, code *string, detail string,
 ) Outcome {
