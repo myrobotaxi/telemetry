@@ -1,9 +1,14 @@
 {
   "_meta": {
     "description": "The 200 body of POST /api/tesla/vehicles/{vehicleId}/complete-setup (rest-api.md §7.23, MYR-505, contracts v0.25.0) — the zero-touch setup completion an owner triggers by returning from the Tesla app. This instance shows the SUCCESS-IN-PROGRESS case, which is the one the client narrates: Tesla confirmed the virtual key is enrolled, the fleet-telemetry config was force re-pushed through the signing proxy, and the server is now waiting for the car to open its telemetry session. `setupState` is NEVER null on this surface, unlike §7.0/§7.1 where null is the ordinary no-claim answer — a request that asked the server to finish setting up a car always gets an answer. The enum here is a SUPERSET of the read surfaces': it carries `streaming`, the positive member MYR-491 deliberately withheld from a passive read. Every failure mode of this endpoint is a typed HTTP error and carries no setupState at all, so there is no error variant of this fixture to hold.",
+    "anchoredFRs": [
+      "FR-1.1",
+      "NFR-3.21"
+    ],
+    "scenario": "happy-path",
+    "addedBy": "MYR-505",
     "schema": "schemas/vehicle-setup-completion.schema.json",
-    "endpoint": "POST /api/tesla/vehicles/{vehicleId}/complete-setup",
-    "issue": "MYR-505"
+    "endpoint": "POST /api/tesla/vehicles/{vehicleId}/complete-setup"
   },
   "vehicleId": "clx9v0000000abcd",
   "setupState": {
