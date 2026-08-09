@@ -1,8 +1,12 @@
 package telemetry
 
-// The per-row wire shape for GET /api/vehicles. Split out of
+// The per-row wire SHAPES for GET /api/vehicles. Split out of
 // vehicles_list_handler.go (300-line file cap) so the handler file holds the
-// request flow and this one holds the projection.
+// request flow and this one holds the shapes.
+//
+// The function that BUILDS these from a catalog row lives in
+// vehicles_list_projection.go — a third file since MYR-507/MYR-515, when two
+// more fields pushed the pair over the cap.
 
 // vehicleSummary is the per-row catalog shape returned by the list
 // endpoint. JSON tags mirror the wire schema in rest-api.md §7.0 and

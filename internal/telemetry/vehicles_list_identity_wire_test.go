@@ -241,15 +241,20 @@ func TestVehiclesListHandler_LocationOnWire(t *testing.T) {
 			Latitude: &zeroLat, Longitude: &zeroLng,
 		},
 		{
-			ID: "clloc0000000000000004", VIN: "5YJSA1E20TF000004", Name: "Half pair",
+			ID: "clloc0000000000000004", VIN: "5YJSA1E20TF000004", Name: "Half pair (lat only)",
 			Model: "Model S", Year: 2026, LastUpdated: now, Status: "parked",
 			Latitude: &halfLat, Longitude: nil,
+		},
+		{
+			ID: "clloc0000000000000005", VIN: "5YJRE11B0TA000006", Name: "Half pair (lng only)",
+			Model: "Roadster", Year: 2026, LastUpdated: now, Status: "parked",
+			Latitude: nil, Longitude: &lng,
 		},
 	}
 
 	resp := serveVehiclesList(t, rows)
-	if len(resp) != 4 {
-		t.Fatalf("want 4 items, got %d", len(resp))
+	if len(resp) != 5 {
+		t.Fatalf("want 5 items, got %d", len(resp))
 	}
 
 	// Row 0 — a real fix, emitted whole and at full precision. Full precision
@@ -293,16 +298,22 @@ func TestVehiclesListHandler_LocationOnWire(t *testing.T) {
 			"sentinel and MUST NOT reach a consumer as a Gulf-of-Guinea coordinate", loc)
 	}
 
-	// Row 3 — a half pair is corruption, not half a location. The atomic-group
-	// rule is why `location` is one nullable object rather than two nullable
-	// scalars: this state has no representation on the wire at all.
-	loc, ok = resp[3]["location"]
-	if !ok {
-		t.Fatalf("items[3] missing `location`; keys: %v", keysOfRow(resp[3]))
-	}
-	if loc != nil {
-		t.Errorf("items[3].location = %v, want null — a latitude with no longitude "+
-			"must never be plotted against a stale or zero mate", loc)
+	// Rows 3 and 4 — a half pair is corruption, not half a location. The
+	// atomic-group rule is why `location` is one nullable object rather than
+	// two nullable scalars: this state has no representation on the wire at all.
+	//
+	// BOTH permutations, deliberately. The guard is a two-clause `||` and a
+	// single-permutation test would still pass if one clause were dropped, which
+	// is precisely the edit a later refactor might make.
+	for _, i := range []int{3, 4} {
+		loc, ok = resp[i]["location"]
+		if !ok {
+			t.Fatalf("items[%d] missing `location`; keys: %v", i, keysOfRow(resp[i]))
+		}
+		if loc != nil {
+			t.Errorf("items[%d] (%v).location = %v, want null — one axis must never be "+
+				"plotted against a stale, zero, or absent mate", i, resp[i]["name"], loc)
+		}
 	}
 }
 
