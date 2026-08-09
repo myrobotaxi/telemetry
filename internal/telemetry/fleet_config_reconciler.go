@@ -78,6 +78,11 @@ type FleetConfigCandidate struct {
 	LastAttemptAt   time.Time
 	SignedCommandAt time.Time
 	ForcedRepushAt  time.Time
+	// ScheduleCreated is set when the schedule row was CREATED by the pairing
+	// reset that produced this candidate, rather than reset in place (MYR-517).
+	// A created row means we had never recorded a single thing about this car,
+	// which is not evidence that it is broken — see handlePairingSignal.
+	ScheduleCreated bool
 }
 
 // FleetConfigCandidateLister is the reconciler's view of "which cars look like

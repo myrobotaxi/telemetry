@@ -142,7 +142,8 @@ func (h *Handler) ServeCallback(w http.ResponseWriter, r *http.Request) {
 	if res.status == statusSuccess {
 		h.logger.Info("tesla link callback: success")
 	} else {
-		h.logger.Warn("tesla link callback: failed", slog.String("reason", res.reason))
+		h.logger.Warn("tesla link callback: failed",
+			slog.String("reason", res.reason), slog.String("detail", res.detail))
 	}
 	h.redirect(w, res)
 }
@@ -151,6 +152,13 @@ func (h *Handler) ServeCallback(w http.ResponseWriter, r *http.Request) {
 type callbackResult struct {
 	status string // statusSuccess | statusError
 	reason string // machine-readable error code; empty on success
+	// detail is an ADDITIVE sub-classification of reason, emitted as its own
+	// query parameter so the existing `reason` vocabulary (§7.11.2) is
+	// unchanged and a client that has never heard of it is unaffected. It
+	// exists because `invalid_state` conflated four different events, one of
+	// which — a state that simply timed out — is a clean silent re-entry into
+	// /start rather than something to make an owner read and act on.
+	detail string
 }
 
 const (
@@ -163,6 +171,14 @@ const (
 	reasonExchangeFailed = "exchange_failed"
 	reasonNotProvisioned = "account_not_provisioned"
 	reasonPersistFailed  = "persist_failed"
+
+	// detailSessionExpired — the link session existed and its TTL elapsed
+	// before Tesla redirected back. The owner did nothing wrong; the correct
+	// client behaviour is to start a new link silently.
+	detailSessionExpired = "session_expired"
+	// detailSessionUnknown — no session for this state at all: a replay, a
+	// forgery, or a process restart between /start and the callback.
+	detailSessionUnknown = "session_unknown"
 )
 
 // resolveCallback runs the full callback classification: it surfaces a
@@ -180,9 +196,20 @@ func (h *Handler) resolveCallback(ctx context.Context, q url.Values) callbackRes
 	}
 
 	state := q.Get("state")
-	sess, ok := h.sessions.Take(state)
-	if !ok {
-		return callbackResult{status: statusError, reason: reasonInvalidState}
+	sess, taken := h.sessions.Take(state)
+	switch taken {
+	case TakeExpired:
+		// The owner completed a real consent flow and we threw the answer away
+		// because our own clock ran out. Named separately so it is greppable in
+		// prod and actionable in the client, and logged at Info because it is a
+		// user-journey fact rather than a server fault.
+		h.logger.Info("tesla link callback: link session expired before the consent flow finished",
+			slog.String("event", "tesla_link_session_expired"),
+			slog.Duration("ttl", h.sessions.TTL()))
+		return callbackResult{status: statusError, reason: reasonInvalidState, detail: detailSessionExpired}
+	case TakeUnknown:
+		return callbackResult{status: statusError, reason: reasonInvalidState, detail: detailSessionUnknown}
+	case TakeOK:
 	}
 
 	code := q.Get("code")
@@ -212,11 +239,14 @@ func (h *Handler) resolveCallback(ctx context.Context, q url.Values) callbackRes
 
 // appRedirectURL builds the app deep link the callback hands off to. Query
 // params carry only the outcome — never tokens or PII.
-func appRedirectURL(base, status, reason string) string {
+func appRedirectURL(base, status, reason, detail string) string {
 	q := url.Values{}
 	q.Set("status", status)
 	if reason != "" {
 		q.Set("reason", reason)
+	}
+	if detail != "" {
+		q.Set("detail", detail)
 	}
 	sep := "?"
 	if strings.Contains(base, "?") {
@@ -229,7 +259,7 @@ func appRedirectURL(base, status, reason string) string {
 // (with a tappable link + meta refresh) in case the client does not follow the
 // custom-scheme Location header automatically.
 func (h *Handler) redirect(w http.ResponseWriter, res callbackResult) {
-	target := appRedirectURL(h.cfg.AppRedirectURL, res.status, res.reason)
+	target := appRedirectURL(h.cfg.AppRedirectURL, res.status, res.reason, res.detail)
 	w.Header().Set("Location", target)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusFound)

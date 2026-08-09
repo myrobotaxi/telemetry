@@ -223,6 +223,54 @@ func TestCompleteSetupToleratesAMissedReset(t *testing.T) {
 	}
 }
 
+// TestCompleteSetupStampsTheEpochForACarWithNoScheduleRow is MYR-517's latch at
+// this layer. A vehicle with no schedule row used to get NO epoch stamp from
+// the reset (it was an UPDATE), and then the forced re-push wrote
+// forced_repush_at against a NULL signed_command_at — which reads back as
+// `epochForceSpent` forever, so this endpoint could fire exactly once per car
+// and then answered `configuring` from a spend that may have accomplished
+// nothing. The store write now creates the row, so the candidate that reaches
+// the push carries a live epoch and the budget re-arms as designed.
+//
+// The contrast with handlePairingSignal is deliberate: a created row makes the
+// OBSERVER stand down (a car it has never recorded is not evidence of a broken
+// one), and makes this endpoint proceed (the owner asked us to finish setting
+// up this car, and Tesla just confirmed the key is enrolled).
+func TestCompleteSetupStampsTheEpochForACarWithNoScheduleRow(t *testing.T) {
+	// No schedule row at all: Present false, every stamp zero — Spencer White's
+	// car, and every car whose link-time push did not answer `missing_key`.
+	row := setupRow(func(r *VehicleSnapshotRow) {
+		r.SetupSchedule = VehicleSetupSchedule{}
+	})
+	h := newSetupHarness([]VehicleSnapshotRow{row}, func(h *setupHarness) {
+		h.pairing.found = true
+		h.pairing.candidate = FleetConfigCandidate{
+			VehicleID:       row.ID,
+			VIN:             row.VIN,
+			UserID:          row.UserID,
+			SignedCommandAt: setupNow,
+			ScheduleCreated: true,
+		}
+	})
+
+	state, err := h.completer.Complete(context.Background(), row)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if state.State != SetupStateConfiguring {
+		t.Errorf("state = %q, want %q", state.State, SetupStateConfiguring)
+	}
+	if len(h.repusher.got) != 1 {
+		t.Fatalf("forced pushes = %d, want 1", len(h.repusher.got))
+	}
+	// The pushed candidate MUST carry the epoch, or forced_repush_at lands
+	// against a NULL signed_command_at and latches the budget shut.
+	if got := h.repusher.got[0]; !got.SignedCommandAt.Equal(setupNow) {
+		t.Errorf("pushed candidate epoch = %v, want %v — an unstamped epoch latches the escalation budget",
+			got.SignedCommandAt, setupNow)
+	}
+}
+
 // TestCompleteSetupFallsBackWhenTheRereadFails: losing the re-read degrades to
 // the pre-probe row rather than refusing to finish the owner's setup. The cost
 // of a stale epoch reading is bounded at one extra push; the cost of refusing

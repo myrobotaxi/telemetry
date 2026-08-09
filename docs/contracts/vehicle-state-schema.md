@@ -310,7 +310,7 @@ A genuinely in-service car (`ServiceMode` on OR REST `in_service` true) is never
 
 **Four honesty rules, and they are part of the contract.** Each exists because the alternative is a card telling a customer something false:
 
-1. **Absence of evidence yields `null`.** A vehicle with no schedule row never carries a state. The table is self-draining — a successful config push DELETEs the row — so a healed car loses its card the same moment it stops needing one.
+1. **Absence of evidence yields `null`.** A vehicle with no schedule row never carries a state. The table is self-draining — a successful config push DELETEs the row — so a healed car loses its card the same moment it stops needing one. **Nor does mere PRESENCE license a card** (MYR-517): a row may be a SEED written at link time or by an applied signed command, carrying `last_outcome = ''`, and an empty outcome yields `null` exactly as no row does. Only a row whose outcome names something observed can produce a state.
 2. **`configuring` expires** 24 hours after the evidence behind it, falling back to `null` — **never to `awaiting_virtual_key`**. A car whose pairing has been PROVEN is not awaiting a key, and telling its owner to re-pair would send them to fix something that is not broken. Nothing here says "connecting…" forever.
 3. **A car that is currently streaming never carries `configuring` or `token_failed`.** Nothing deletes a schedule row when a car heals itself, so a stale row could otherwise put a setup card on a live vehicle.
 4. **A car that streamed once and later went quiet is the freshness story, not a setup state.** That case belongs to `lastUpdated` and its own UI. `setupState` is about cars that have never come up, not cars that have gone away.

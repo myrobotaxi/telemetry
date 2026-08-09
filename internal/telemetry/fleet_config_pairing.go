@@ -89,10 +89,30 @@ func (r *FleetConfigReconciler) handlePairingSignal(ctx context.Context, vin str
 		return
 	}
 	if !found {
-		// The overwhelmingly common case: the car is streaming fine and has no
-		// schedule row at all. Debug, not Info — every command from every
-		// healthy car lands here.
-		r.logger.Debug("fleet-config reconcile: pairing signal has no schedule to reset",
+		// Now only two ways to get here (MYR-517 made "no schedule row" a
+		// create-and-proceed): the VIN is not ours, or this car already opened a
+		// pairing epoch inside the debounce window. Debug, not Info — every
+		// command from every healthy car lands in the second case.
+		r.logger.Debug("fleet-config reconcile: pairing signal not actionable (unknown VIN or debounced)",
+			slog.String("vin", redactVIN(vin)))
+		return
+	}
+
+	if c.ScheduleCreated {
+		// THE MYR-517 ARM. There was no schedule row, so the epoch is now
+		// RECORDED — which is the durable half of what MYR-489 wanted and what
+		// Spencer White's onboarding lost — but a car we have never recorded a
+		// single failed attempt against is not evidence of a car that is broken,
+		// and it is overwhelmingly likely to be one that is simply streaming.
+		// Turning every first command from every healthy car into an immediate
+		// Tesla config read (and an attempt_count that climbs toward the
+		// escalation the reconciler rations so carefully) would be a worse bug
+		// than the one this fixes. The periodic pass owns the question of whether
+		// this car is actually quiet; it will pick the row up on the ordinary
+		// staleness rule, now with a pairing epoch already in hand.
+		r.logger.Info("fleet-config reconcile: virtual key proven paired by applied signed command — pairing epoch recorded",
+			slog.String("event", "fleet_config_pairing_epoch_seeded"),
+			slog.String("vehicle_id", c.VehicleID),
 			slog.String("vin", redactVIN(vin)))
 		return
 	}
