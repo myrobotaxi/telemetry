@@ -1192,12 +1192,30 @@ components:
           x-classification: P1
         model:
           type: string
-          description: Tesla model — Model 3, Model S, Model X, Model Y, Cybertruck, etc.
+          description: |
+            Tesla model — Model 3, Model S, Model X, Model Y, Cybertruck, etc.
+            POPULATED FOR EVERY CAR SINCE MYR-507 (contracts v0.31.0): the
+            field, type and masks are unchanged, only the provenance is new.
+            Previously filled only for vehicles linked through the Prisma web
+            flow — the Go server's provisioning INSERT seeded `''` and nothing
+            ever filled it, so a Go-linked car reported an empty model forever.
+            Now derived from VIN position 4 at link time and backfilled on the
+            non-waking refresh. FILL-IF-EMPTY, never overwrite: the Prisma flow
+            writes a richer value for some cars ("Model 3 Performance") than a
+            VIN position can encode. Key ALWAYS present; `''` means "not
+            determined" (unrecognised VIN code — this server never guesses).
           example: Model 3
           x-classification: P0
         year:
           type: integer
-          description: Model year.
+          description: |
+            Model year. POPULATED FOR EVERY CAR SINCE MYR-507 (contracts
+            v0.31.0) — same placeholder problem and same fix as `model` above.
+            Derived from VIN position 10 (ISO 3779 model-year code); Tesla's
+            Fleet API carries no model year at ANY path, so the VIN is the
+            platform's only source. FILL-IF-EMPTY, never overwrite. Key ALWAYS
+            present; `0` means "not determined" and is NEVER a real model year —
+            treat it exactly as an empty `model` and drop the fragment.
           example: 2024
           x-classification: P0
         color:
@@ -1205,6 +1223,91 @@ components:
           description: Display color.
           example: Midnight Silver Metallic
           x-classification: P0
+        trimLabel:
+          type: string
+          nullable: true
+          description: |
+            OPTIONAL (MYR-507, contracts v0.31.0). The DISPLAY-READY trim —
+            "Plaid", "Performance", "Long Range". THE SAME VALUE AND THE SAME
+            COLUMN as VehicleState.trimLabel (§7.1, MYR-320), read rather than
+            re-derived, so the catalog and the snapshot cannot name one car two
+            different things. Source: `trim_label` on go_vehicle_control_state
+            (migration 0018), written from Tesla REST
+            `vehicle_data.vehicle_config.performance_package`.
+            On the catalog for a consumer the snapshot cannot serve: a VIEWER
+            never fetches a /snapshot, so this row is the ONLY surface on which
+            a shared car can say what it is. Without it a rider's descriptor
+            degraded to the raw colour token ("UltraRed") or the bare make
+            ("Tesla"). With `year`, `model` and `color` alongside it, a row now
+            carries everything "2026 Model X Plaid · Ultra Red" needs.
+            NOT the raw badge code: VehicleState.trim ("p74d") is not
+            display-safe and is absent from the catalog under both roles.
+            NULL IS NOT THE EMPTY STRING — it means "no trim known", and a
+            descriptor MUST drop the fragment rather than emit a stray
+            separator. An ABSENT key means a server predating v0.31.0 and reads
+            exactly like null. RBAC: BOTH roles — an equipment fact of the tier
+            of its identity siblings model/year/color, all legible through a
+            windshield. Not streamed; refreshes on the next list fetch.
+          example: Plaid
+          x-classification: P0
+        location:
+          type: object
+          nullable: true
+          required: [latitude, longitude]
+          additionalProperties: false
+          description: |
+            OPTIONAL (MYR-515, contracts v0.31.0). Where this vehicle was last
+            known to be, or null when the server holds no fix. THE SAME pair, at
+            THE SAME precision, as VehicleState.latitude/longitude (§7.1) and
+            the live vehicle_update frame — same encrypted columns, same
+            resolver, so catalog and snapshot cannot disagree.
+            On the catalog because the rider picker renders a PER-ROW pickup ETA
+            and has no other input for a row it is not watching: a client holds
+            exactly ONE coordinate (the watched car's, off the single-vehicle
+            socket subscription) and a viewer's per-row /snapshot is 403 by
+            design (MYR-432/449).
+            A NULLABLE OBJECT, not two nullable scalars: latitude/longitude are
+            an ATOMIC GROUP (§5.4), so nesting makes "both or neither"
+            structural. Treat it as indivisible; never carry one axis forward.
+            NULL IS THE ONLY "no fix" SPELLING HERE — a deliberate divergence
+            from §7.1, whose NOT NULL columns use the (0,0) sentinel
+            (vehicle-state-schema.md §2.3). This surface can express absence, so
+            the server collapses an exact (0,0) to null and a consumer will
+            NEVER receive 0,0. Do not port a Gulf-of-Guinea guard here.
+            RBAC BOTH roles despite being P1: the viewer already receives this
+            exact value at full precision on the STREAMING path (the viewer mask
+            retains the whole Speed/GPS group; MYR-435 left it), so this is the
+            same value over a different transport to an entitled party. The
+            catalog does aggregate N positions into one response where the
+            socket serves one per subscription — an aggregation difference, not
+            an entitlement one. Coarsening was considered and rejected: rounding
+            here while the socket serves exact values protects nothing and
+            degrades the short-hop ETA this exists for.
+            P1 handling binds: never logged, never outside the vehicle's party,
+            encrypted at rest. REST-read-time only — no vehicle_update carries a
+            `location` object, so prefer the socket's coordinate when watching.
+          x-classification: P1
+          x-atomic-group: gps
+          properties:
+            latitude:
+              type: number
+              minimum: -90
+              maximum: 90
+              description: >
+                WGS-84 latitude. Named latitude/longitude to match VehicleState
+                and SavedPlace (the account/vehicle family) rather than
+                RidePlace's lat/lng. Full precision.
+              example: 37.7749
+              x-classification: P1
+            longitude:
+              type: number
+              minimum: -180
+              maximum: 180
+              description: >
+                WGS-84 longitude — the other half of an atomic pair. A consumer
+                receives both axes or neither.
+              example: -122.4194
+              x-classification: P1
         vinLast4:
           type: string
           description: Last 4 characters of the VIN. Full VIN never emitted (`redactVIN()`, data-classification.md §1.5).

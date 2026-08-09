@@ -160,6 +160,15 @@ func (m *ServiceStatusMonitor) refreshVehicleData(ctx context.Context, vin, toke
 		m.syncVehicleColor(ctx, vin, data.VehicleConfig)
 	}
 
+	// MYR-507: the model / model-year backfill, on the same enrich gate and for
+	// the same reason as the colour write beside it — a car's model does not
+	// change mid-ride either. It reads NOTHING from `data`, so it sits OUTSIDE
+	// the nil check above: a car that answers 200 with an empty body still gets
+	// identified, because both values come from the VIN we already hold.
+	if enrich {
+		m.syncVehicleIdentity(ctx, vin)
+	}
+
 	// MYR-320: ONE additional non-waking GET on the same trigger, for the one
 	// value no vehicle_data field carries. Non-fatal: a failure or an empty list
 	// simply adds no field, leaving any stored fsdVersion alone.

@@ -59,6 +59,12 @@ func setupServiceStatusMonitor(
 		// (data-lifecycle.md §1.4); the wire field `color` already exists and is
 		// already emitted from that column, so this needs no contract change.
 		telemetry.WithVehicleColor(vehicleRepo),
+		// MYR-507: fill the Prisma-owned "Vehicle".model / .year columns from
+		// the VIN. Same carve-out shape as the colour write above, and needed
+		// for the same reason — both are already wire fields emitted from these
+		// columns, and nothing has ever populated them for a car the GO server
+		// provisioned. Unlike the colour this costs no Tesla read at all.
+		telemetry.WithVehicleIdentity(vehicleRepo),
 		// MYR-320: the periodic in-service re-poll. STRUCTURAL — the edge-only
 		// triggers above never fire for a car that sits offline at a service
 		// centre for days, so nothing re-read it and a mid-visit service_etc was

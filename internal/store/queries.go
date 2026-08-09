@@ -108,6 +108,26 @@ WHERE "Vehicle"."id" = $1`
 // of the vehicle_id PRIMARY KEY and adds one fixed-width boolean.
 const rideShareEnabledExpr = `COALESCE(gcs.ride_share_enabled, TRUE) AS "rideShareEnabled"`
 
+// catalogTrimLabelExpr carries the DISPLAY-SAFE trim label onto the catalog
+// (MYR-507). It is the SAME COLUMN the /snapshot read already emits as
+// `VehicleState.trimLabel` (MYR-320) — read here, not re-derived, so the two
+// surfaces cannot disagree about what a car is called.
+//
+// Emitted RAW and NULLABLE: NULL means "Tesla has not told us yet", which is
+// materially different from the empty string and must survive to the wire as an
+// explicit null. Contrast the sibling `color`, which lives on the Prisma-owned
+// "Vehicle" row as NOT NULL and uses `”` for the same idea — the two spellings
+// are a consequence of which table each value lives on, not of a disagreement.
+//
+// It selects `trim_label`, NOT `trim`. `trim` is the RAW BADGE CODE ("p74d")
+// and is explicitly not display-safe (see internal/telemetry/fields.go); only
+// the label may reach a consumer.
+//
+// Costs nothing: the go_vehicle_control_state join is already there for the
+// MYR-316 service window and the MYR-342 switch, so this rides an existing
+// probe of the vehicle_id PRIMARY KEY and adds one short text column.
+const catalogTrimLabelExpr = `gcs.trim_label`
+
 const queryVehiclesByUser = `SELECT ` + vehicleSelectColumns + `
 FROM "Vehicle"
 WHERE "userId" = $1
@@ -124,9 +144,19 @@ ORDER BY "name", "vin"`
 //
 // Anchored by AGENTS.md "Performance invariants": list endpoints use
 // lean projections; wide selects belong only in detail/edit handlers.
+// MYR-515 adds the TWO `*Enc` GPS shadows for the primary position pair, and
+// they are the ONE deliberate exception to the "no GPS columns" rule above.
+// The rule's own wording is the test — "MUST NOT SELECT columns the response
+// body doesn't emit" — and these ARE emitted, as VehicleSummary.location. What
+// made the pre-MYR-122 read cost ~1.3 min was the `navRouteCoordinates` JSON
+// blob (100KB+ per row) and ~37 columns; two short base64 text columns plus two
+// AES-GCM decrypts of a ~16-byte payload are not that, and a catalog is single
+// digits of rows. The nav-route blob and the destination / origin pairs stay
+// out — nothing on this surface emits them.
 const vehicleListSummaryColumns = `"id", "userId", "vin", "name",
 	"model", "year", "color", "licensePlate", "status",
-	"chargeLevel", "estimatedRange", "lastUpdated"`
+	"chargeLevel", "estimatedRange", "lastUpdated",
+	"latitudeEnc", "longitudeEnc"`
 
 // vehicleListHasActiveRideExpr derives the `hasActiveRide` catalog flag
 // (MYR-233): TRUE iff the car holds an OPEN INSTANT ride request.
@@ -207,10 +237,17 @@ const activeInstantRidePredicate = `r.scheduled_for IS NULL
 // instead would be an N+1 on the catalog, and the rider-side picker is the
 // consumer that most needs the value (MYR-437: "setting up", not "offline"), so
 // it cannot be pushed onto the snapshot alone.
+// MYR-507: `trim_label` rides the SAME go_vehicle_control_state join as the two
+// blocks above and is emitted verbatim as VehicleSummary.trimLabel, so the same
+// invariant holds — one short text column, no new probe. It is on the catalog
+// because the catalog is the ONLY vehicle-identity surface a rider has: viewers
+// never read /snapshot, so without it a shared car can only be named by its
+// colour, which is how "UltraRed" came to be a whole vehicle descriptor.
 const queryVehiclesByUserList = `SELECT ` + vehicleListSummaryColumns + `,
 	` + vehicleListHasActiveRideExpr + `,
 	gcs.service_etc, gcs.service_expected_end_at,
 	` + rideShareEnabledExpr + `,
+	` + catalogTrimLabelExpr + `,
 	` + setupScheduleColumns + `
 FROM "Vehicle"
 LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"` + setupScheduleJoin + `

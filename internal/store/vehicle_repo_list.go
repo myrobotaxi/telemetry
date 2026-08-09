@@ -8,7 +8,15 @@
 // then decrypting all of them on every row. The handler only emits
 // ~10 of those fields. This file provides the lean read companion to
 // VehicleRepo.ListByUser: same WHERE clause, narrower SELECT, no
-// decryption, no JSON blob.
+// JSON blob.
+//
+// MYR-515 narrowed that "no decryption" clause rather than breaking it: the
+// projection now carries ONE of the three GPS pairs — `latitudeEnc` /
+// `longitudeEnc` — and decrypts it per row, because VehicleSummary.location
+// emits it. The invariant this file actually enforces is stated as "MUST NOT
+// SELECT columns the response body doesn't emit", and that still holds. The
+// other two pairs (destination, origin) and the nav-route blob remain out;
+// they were the expensive part, and nothing on the catalog emits them.
 //
 // AGENTS.md "Performance invariants": list endpoints use lean
 // projections; wide selects belong only in detail/edit handlers.
@@ -26,7 +34,9 @@ import (
 // VehicleRepo.ListSummariesByUser. Mirrors the columns selected by
 // `queryVehiclesByUserList` and the wire fields emitted by
 // `internal/telemetry/vehicles_list_handler.go` `vehicleSummary`. No
-// GPS, no nav, no climate — those belong in the wide detail read.
+// nav, no climate, and no destination / origin coordinates — those belong in
+// the wide detail read. The car's OWN position is the one exception, added by
+// MYR-515 because the rider picker has no other source for a non-watched row.
 type VehicleSummary struct {
 	ID     string
 	UserID string
@@ -70,6 +80,36 @@ type VehicleSummary struct {
 	// contract requires (absent/unset means ENABLED).
 	RideShareEnabled bool
 
+	// TrimLabel is the DISPLAY-SAFE trim label (MYR-507), LEFT JOINed from the
+	// same go_vehicle_control_state row as the service window and the switch —
+	// the SAME column the /snapshot read emits as VehicleState.trimLabel
+	// (MYR-320), not a second copy of it.
+	//
+	// A POINTER because the column is nullable and the distinction is
+	// load-bearing: NULL means "Tesla has not told us this car's trim yet",
+	// which a consumer must render as "no trim" rather than as an empty
+	// fragment in a descriptor. Contrast the sibling Color, a NOT NULL column on
+	// the Prisma-owned "Vehicle" row whose "not read yet" spelling is `''`.
+	TrimLabel *string
+
+	// Latitude / Longitude are the car's freshest known position (MYR-515),
+	// decrypted from the `latitudeEnc` / `longitudeEnc` shadows — the SAME
+	// ciphertext pair and the SAME resolveGPSPair helper the wide snapshot read
+	// uses, so the catalog and the snapshot cannot disagree about where a car is.
+	//
+	// An ATOMIC PAIR: both non-nil or both nil, never one. resolveGPSPair
+	// enforces that (a half-pair is corruption and surfaces no location), which
+	// is why these are two pointers rather than two floats — the wire shape
+	// above them is a single nullable object for the same reason.
+	//
+	// Nil means the server holds no fix. Note this is NOT the same as the
+	// (0, 0) sentinel: a car that has genuinely streamed 0,0 decrypts to a
+	// non-nil pair here and is collapsed to null at the WIRE layer, not here,
+	// because the sentinel is a wire convention (vehicle-state-schema.md §2.3)
+	// and this struct is storage.
+	Latitude  *float64
+	Longitude *float64
+
 	// SetupSchedule is the car's go_fleet_config_attempts row (MYR-491), LEFT
 	// JOINed alongside the control-state block. RAW STORAGE behind the derived
 	// VehicleSummary.setupState — the catalog carries it because the rider-side
@@ -108,7 +148,7 @@ func (r *VehicleRepo) ListSummariesByUser(ctx context.Context, userID string) ([
 
 	var out []VehicleSummary
 	for rows.Next() {
-		v, scanErr := scanVehicleSummaryRow(rows)
+		v, scanErr := r.scanVehicleSummaryRow(rows)
 		if scanErr != nil {
 			r.metrics.IncQueryError("vehicle.list_summaries_by_user")
 			r.metrics.ObserveQueryDuration("vehicle.list_summaries_by_user", time.Since(start).Seconds())
@@ -152,13 +192,18 @@ func (r *VehicleRepo) logListSummariesDuration(userID string, dur time.Duration,
 	r.logger.Info("vehicle list summary query", attrs...)
 }
 
-// scanVehicleSummaryRow scans the lean projection into a
-// VehicleSummary. Pure stdlib — no encryptor, no GPS resolution, no
-// nav-route blob handling.
-func scanVehicleSummaryRow(row rowScanner) (VehicleSummary, error) {
+// scanVehicleSummaryRow scans the lean projection into a VehicleSummary.
+//
+// A METHOD as of MYR-515 rather than the free function it used to be: the
+// projection now carries the `latitudeEnc` / `longitudeEnc` ciphertext pair, so
+// the scan needs the repo's encryptor, logger and metrics to resolve it. No
+// nav-route blob and no destination / origin pairs — those stay in the wide
+// detail read.
+func (r *VehicleRepo) scanVehicleSummaryRow(row rowScanner) (VehicleSummary, error) {
 	var (
 		v      VehicleSummary
 		status string
+		gps    summaryGPSScan
 		ss     setupScheduleScan
 	)
 	dests := append([]any{
@@ -174,15 +219,48 @@ func scanVehicleSummaryRow(row rowScanner) (VehicleSummary, error) {
 		&v.ChargeLevel,
 		&v.EstimatedRange,
 		&v.LastUpdated,
+		gps.latDest(),
+		gps.lngDest(),
 		&v.HasActiveRide,
 		&v.ServiceETC,
 		&v.ServiceExpectedEndAt,
 		&v.RideShareEnabled,
+		&v.TrimLabel,
 	}, ss.dests()...)
 	if err := row.Scan(dests...); err != nil {
 		return VehicleSummary{}, fmt.Errorf("scan vehicle summary: %w", err)
 	}
 	v.Status = VehicleStatus(status)
 	v.SetupSchedule = ss.value()
+	v.Latitude, v.Longitude = gps.resolve(r)
 	return v, nil
+}
+
+// summaryGPSScan holds the ciphertext halves of the catalog's position pair
+// between the Scan and the decrypt.
+//
+// It exists so BOTH catalog scans (owner and shared) resolve the pair the same
+// way, through the same resolveGPSPair the wide snapshot read uses. A second
+// inline copy of the decrypt is exactly where a half-pair or a swallowed
+// decrypt error would hide.
+type summaryGPSScan struct {
+	latEnc *string
+	lngEnc *string
+}
+
+func (g *summaryGPSScan) latDest() any { return &g.latEnc }
+func (g *summaryGPSScan) lngDest() any { return &g.lngEnc }
+
+// resolve decrypts the pair, or returns no location.
+//
+// A repo built WITHOUT an encryptor (NewVehicleRepo) returns no location rather
+// than attempting a decrypt: that constructor's documented contract is already
+// "reads NO coordinates", and attempting one would log a per-row ERROR for
+// every vehicle on every catalog fetch — noise that says nothing, since the
+// absence is by construction rather than a fault.
+func (g *summaryGPSScan) resolve(r *VehicleRepo) (lat, lng *float64) {
+	if r.encryptor == nil {
+		return nil, nil
+	}
+	return resolveGPSPair(g.latEnc, g.lngEnc, r.encryptor, r.logger, r.metrics, gpsPairs[0])
 }

@@ -51,19 +51,52 @@ func TestMYR320DetailFieldsAreBothRoles(t *testing.T) {
 	}
 }
 
-// TestMYR320DetailFieldsAreNotOnTheVehiclesList pins the other half of the
-// contract: both fields are deliberately DETAIL-SHEET ONLY. The vehicles-list is
-// a thin catalog whose rows nobody renders a trim label or an FSD version in,
-// and adding them there would widen every row of a response that already costs
-// the most per byte.
-func TestMYR320DetailFieldsAreNotOnTheVehiclesList(t *testing.T) {
+// TestMYR320DetailFieldsSplitOnTheVehiclesList pins the other half of the
+// contract, which MYR-507 SPLIT.
+//
+// This test used to assert that BOTH trimLabel and fsdVersion were detail-sheet
+// only, on the reasoning that "nobody renders a trim label in a catalog row" and
+// that widening the most-expensive-per-byte response was not worth it. The first
+// clause turned out to be false, and in the one place it mattered most: a VIEWER
+// never fetches a /snapshot at all, so for a rider the catalog row is the ONLY
+// surface on which a car can say what it is. With the trim withheld, a shared
+// car's descriptor degraded to the raw colour token — a lock-screen Live
+// Activity that read "UltraRed", and a review sheet whose model slot rendered
+// the bare make "Tesla".
+//
+// So `trimLabel` is now on the catalog, in BOTH role allow-lists, classified
+// with the identity siblings `model` / `year` / `color` it belongs to. The
+// byte-cost argument survives intact and is simply outweighed: one short text
+// column against a rider being unable to identify the car pulling up.
+//
+// `fsdVersion` STAYS OFF, and the split is the point of this test. It is a
+// software designation, not an identity fact; no catalog row renders it, no
+// descriptor ladder degrades without it, and nothing about MYR-507 argues for
+// it. Keeping the assertion here means a later "well, we added trimLabel"
+// cannot carry fsdVersion along by analogy.
+func TestMYR320DetailFieldsSplitOnTheVehiclesList(t *testing.T) {
 	for _, role := range []auth.Role{auth.RoleOwner, auth.RoleViewer} {
 		m := For(ResourceVehicleSummary, role)
-		for _, field := range []string{"trimLabel", "fsdVersion"} {
-			if m.allows(field) {
-				t.Errorf("%s: %s reached the vehicles-list — MYR-320 is detail-sheet-only",
-					role, field)
-			}
+
+		// MYR-507 — identity, and the viewer's only source of it.
+		if !m.allows("trimLabel") {
+			t.Errorf("%s: trimLabel denied on the vehicles-list — MYR-507 puts it on "+
+				"the catalog for BOTH roles, because a rider never reads a snapshot", role)
+		}
+
+		// Still detail-sheet only.
+		if m.allows("fsdVersion") {
+			t.Errorf("%s: fsdVersion reached the vehicles-list — it is a software "+
+				"designation with no catalog consumer, and MYR-507 deliberately did "+
+				"NOT bring it along with trimLabel", role)
+		}
+
+		// The RAW BADGE CODE never reaches the catalog under either role: it is
+		// not display-safe, and `trimLabel` exists precisely so that nothing has
+		// to render it.
+		if m.allows("trim") {
+			t.Errorf("%s: trim (the raw badge code, e.g. \"p74d\") reached the "+
+				"vehicles-list — only its display-safe sibling trimLabel may", role)
 		}
 	}
 }

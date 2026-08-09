@@ -566,6 +566,60 @@ var vehicleSummaryOwnerFields = []string{
 	// picker reads catalog rows, not snapshots. The viewer list below inherits
 	// it (that list subtracts nothing).
 	"setupState",
+	// MYR-507 — the display-safe trim label. P0, and NOT owner-private, for the
+	// simplest reason on this list: `trimLabel` is an EQUIPMENT FACT of exactly
+	// the same tier as its identity siblings `model`, `year` and `color`, which
+	// have been in both allow-lists since v1. All four are legible through a
+	// windshield from the kerb — the badge on the boot lid IS the trim — so
+	// there is nothing here for masking to protect, and this entry classifies it
+	// alongside its siblings rather than reasoning about it afresh. That is the
+	// same argument `internal/mask/tables_details_test.go` already makes for the
+	// SAME FIELD on the /snapshot resource, where it likewise goes to BOTH roles.
+	//
+	// The viewer is in fact the party this field is FOR: an owner can read the
+	// trim off their own /snapshot, but a rider never fetches one, so the
+	// catalog row is the only place a shared car can say what it is. Withholding
+	// it is what left "UltraRed" standing in for a whole vehicle descriptor.
+	//
+	// `trim` — the RAW BADGE CODE ("p74d") — is deliberately NOT here, and is not
+	// on the catalog at all: it is not display-safe for either role.
+	"trimLabel",
+	// MYR-515 — the car's last known position, and the FIRST P1 field on this
+	// resource. Every other entry above is P0 except `licensePlate`, so this one
+	// carries the heaviest justification on the list.
+	//
+	// WHY IT IS IN BOTH ROLE ALLOW-LISTS. The viewer already receives
+	// `latitude`/`longitude` at FULL PRECISION on the streaming path, for
+	// exactly these vehicles: `vehicleStateViewerFields` retains the whole
+	// Speed/GPS atomic group, annotated there as "the entire point of a shared
+	// live map", and MYR-435's narrowing deliberately left it. So a coordinate
+	// on a catalog row is not a new disclosure — it is the same value, over a
+	// different transport, to a party already entitled to it.
+	//
+	// The honest caveat, stated rather than glossed: the catalog does hand a
+	// viewer N positions at once, where the socket hands out one per
+	// subscription. That is an AGGREGATION difference, not an entitlement one —
+	// the grant is per-vehicle and a viewer could subscribe to each car in turn
+	// for the same data — so what this changes is convenience, not reach. The
+	// row still only exists because a live accepted grant produced it: the
+	// shared-catalog query's join IS the access check, and a suspended or
+	// revoked grant yields no row and therefore no coordinate.
+	//
+	// ON COARSENING. Considered and deliberately NOT applied. The repo has no
+	// precision convention to follow, and inventing one here would be theatre:
+	// the same viewer can read the exact position off the socket a moment later,
+	// so rounding the catalog protects nothing while measurably degrading the
+	// feature it exists for — a pickup ETA over a short hop is exactly where a
+	// coarsened coordinate is worst. If a future policy DOES coarsen shared
+	// positions, it must coarsen the stream and this row together; splitting
+	// them would leave the weaker surface setting the real privacy bound.
+	//
+	// P1 handling still binds in full: never logged (data-classification.md
+	// §2.2), never emitted outside the vehicle's party, encrypted at rest, and
+	// NOT on any WebSocket delta for this resource. And the wire value is
+	// null-when-absent rather than the (0,0) sentinel — a sentinel a consumer
+	// forgot to re-interpret is a coordinate leak of a different kind.
+	"location",
 }
 
 // vehicleSummaryViewerFields is the owner list PLUS `sharePermission`, with

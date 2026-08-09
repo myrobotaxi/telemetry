@@ -77,6 +77,14 @@ func setupAccountDeletion(t *testing.T) {
 }
 
 // seedShareGrant inserts one go_vehicle_shares row in the given status.
+// `status` is deliberately a parameter even though every caller currently
+// passes "accepted": the column drives the access predicate every reader of
+// go_vehicle_shares joins on, so a seed helper that could only produce accepted
+// grants would quietly stop tests from covering the revoked and pending arms.
+// Keeping it costs one argument at four call sites and makes the grant's
+// lifecycle state explicit at each of them.
+//
+//nolint:unparam // status is intentionally variable; see above.
 func seedShareGrant(t *testing.T, id, vehicleID, ownerID, acceptedBy, status string) {
 	t.Helper()
 	if _, err := testPool.Exec(context.Background(), `

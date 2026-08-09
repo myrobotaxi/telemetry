@@ -59,6 +59,29 @@ type VehicleCatalogRow struct {
 	// construction site goes through the adapter and carries the joined value.
 	RideShareEnabled bool
 
+	// TrimLabel is the DISPLAY-SAFE trim label (MYR-507), LEFT JOINed from the
+	// same control-state row as the two above. Emitted RAW like
+	// RideShareEnabled — there is nothing to resolve and no status gate — and it
+	// is the SAME COLUMN /snapshot emits as VehicleState.trimLabel (MYR-320),
+	// read rather than re-derived, so the catalog and the detail sheet cannot
+	// name the same car two different things.
+	//
+	// Nil means Tesla has not told us the trim yet, and that is NOT the empty
+	// string: a descriptor built from it must drop the fragment entirely rather
+	// than render a stray separator.
+	TrimLabel *string
+
+	// Latitude / Longitude are the car's freshest known position (MYR-515),
+	// already decrypted by the store from the SAME `latitudeEnc`/`longitudeEnc`
+	// pair the /snapshot serves. An ATOMIC PAIR: both set or both nil.
+	//
+	// RAW, in the sense that no privacy transform is applied — but NOT emitted
+	// verbatim: newVehicleSummary collapses the (0, 0) no-fix sentinel to a null
+	// `location`, because a catalog row must never hand a picker a coordinate in
+	// the Gulf of Guinea to measure an ETA against.
+	Latitude  *float64
+	Longitude *float64
+
 	// SetupSchedule is the car's fleet-config schedule row (MYR-491), LEFT
 	// JOINed from go_fleet_config_attempts. RAW, like the service-window pair:
 	// the wire field `setupState` is DERIVED from it together with Status and
@@ -192,67 +215,6 @@ func (h *VehiclesListHandler) buildResponse(rows []VehicleCatalogRow, role auth.
 		items = append(items, projected)
 	}
 	return vehiclesListResponse{Items: items}
-}
-
-// newVehicleSummary builds the per-row wire shape for a catalog row under a
-// given role. grant is the caller's share capability set and is read ONLY on
-// viewer rows — pass the zero ShareGrant for an owner, who holds no grant.
-//
-// Shared by the owner list, the viewer merge (vehicles_list_viewer.go), and the
-// redeem response, so all three emit byte-identical rows for the same vehicle.
-//
-// now is the instant the MYR-491 setup derivation is judged against, passed in
-// rather than read here for the same two reasons as on the snapshot: one
-// response is one instant, and the rules are testable without waiting.
-func newVehicleSummary(v *VehicleCatalogRow, role auth.Role, grant auth.ShareGrant, now time.Time) vehicleSummary {
-	summary := vehicleSummary{
-		VehicleID:      v.ID,
-		Name:           v.Name,
-		Model:          v.Model,
-		Year:           v.Year,
-		Color:          v.Color,
-		LicensePlate:   v.LicensePlate,
-		VinLast4:       lastFourOfVIN(v.VIN),
-		Status:         v.Status,
-		ChargeLevel:    v.ChargeLevel,
-		EstimatedRange: v.EstimatedRange,
-		LastUpdated:    v.LastUpdated.UTC().Format(time.RFC3339),
-		Role:           string(role),
-		HasActiveRide:  v.HasActiveRide,
-		// MYR-316: resolved here so the precedence and the in-service gate
-		// are applied exactly once per surface (service_window.go).
-		ServiceEstimatedEndAt: serviceEstimatedEndAtWire(v.Status, v.ServiceETC, v.ServiceExpectedEndAt),
-		// MYR-342: emitted verbatim on BOTH roles. The mask, not this
-		// assignment, is what decides who sees it — and both allow-lists carry
-		// it, because a rider who cannot see that a shared car is paused finds
-		// out from a 409 instead.
-		RideShareEnabled: v.RideShareEnabled,
-		// MYR-491: the SAME derivation the snapshot runs, over the same inputs.
-		// Calling it from both surfaces rather than copying the rules is what
-		// makes "the catalog and the detail sheet can never disagree" a
-		// structural property instead of a convention.
-		SetupState: deriveSetupState(now, v.Status, v.LastUpdated, v.SetupSchedule),
-	}
-	if role == auth.RoleViewer {
-		// DERIVED, not stored (MYR-369): the grant's flags decide the
-		// compatibility value a pre-MYR-369 client reads. A suspended grant
-		// never reaches here — the viewer's catalog query excludes it, so
-		// the vehicle is absent from the response entirely rather than
-		// present with some reduced value.
-		summary.SharePermission = grant.Permission().String()
-	}
-	return summary
-}
-
-// lastFourOfVIN returns the last 4 characters of a VIN. Empty input
-// yields an empty string; shorter-than-4 inputs are returned verbatim
-// (the contract guarantees 17-char VINs, but the helper is defensive
-// against test fixtures that pass shorter values).
-func lastFourOfVIN(vin string) string {
-	if len(vin) <= 4 {
-		return vin
-	}
-	return vin[len(vin)-4:]
 }
 
 // writeJSON marshals v as JSON with the given status code.

@@ -47,21 +47,53 @@
         },
         "model": {
           "type": "string",
-          "description": "Vehicle model (e.g., 'Model 3', 'Model Y'). Sourced from DB Vehicle.model. Matches VehicleState.model.",
+          "description": "Vehicle model (e.g., 'Model 3', 'Model Y'). Sourced from DB Vehicle.model. Matches VehicleState.model. POPULATED FOR EVERY CAR SINCE MYR-507 (contracts v0.31.0) — the field, the type and the masks are all unchanged; only the PROVENANCE is new, exactly as MYR-320 did for the sibling `color`. Until then this column was filled only for vehicles linked through the Prisma web flow: the Go server's own provisioning INSERT seeded it with the empty placeholder '' and no writer, Go or Prisma, ever filled it in, so a car linked through the Go path reported an EMPTY MODEL forever. It is now derived from position 4 of the VIN (the model line) at link time and backfilled on the non-waking refresh for cars already in the table. FILL-IF-EMPTY, NEVER OVERWRITE: a row whose model was already populated keeps it, because the Prisma flow writes a richer value for some cars ('Model 3 Performance') than a VIN position can encode ('Model 3'). EMPTY-STRING CONVENTION unchanged: the key is ALWAYS present, and '' means 'not determined' — a VIN whose model code this server does not recognise, which it will never guess at. Consumers MUST keep a fallback label for '' and MUST NOT render an empty model fragment in a descriptor.",
           "x-classification": "P0",
           "examples": ["Model 3"]
         },
         "year": {
           "type": "integer",
-          "description": "Model year. Sourced from DB Vehicle.year. Matches VehicleState.year.",
+          "description": "Model year. Sourced from DB Vehicle.year. Matches VehicleState.year. POPULATED FOR EVERY CAR SINCE MYR-507 (contracts v0.31.0) — same story, same placeholder problem and same fix as the sibling `model` above, which see. Derived from position 10 of the VIN (the ISO 3779 model-year code); Tesla's Fleet API carries no model year at ANY path, on vehicle_data or elsewhere, so the VIN is the platform's only source of one. FILL-IF-EMPTY, NEVER OVERWRITE. ZERO-VALUE CONVENTION: the key is ALWAYS present, and 0 means 'not determined' — a VIN whose year code falls outside the 2010-2030 letter window this server recognises. 0 is NEVER a real model year: consumers MUST treat it exactly as they treat an empty `model`, dropping the fragment from a descriptor rather than rendering 'Year 0'.",
           "x-classification": "P0",
           "examples": [2024]
+        },
+        "trimLabel": {
+          "type": ["string", "null"],
+          "description": "The DISPLAY-READY trim of this vehicle — 'Plaid', 'Performance', 'Long Range' (MYR-507, contracts v0.31.0). THE SAME VALUE, THE SAME COLUMN AND THE SAME SEMANTICS as VehicleState.trimLabel (rest-api.md §7.1, MYR-320): the snapshot does not derive this, it reads it, and the catalog now reads the same column, so the two surfaces cannot name one car two different things. Source: `trim_label` on the Go-owned `go_vehicle_control_state` side table (migration 0018), written from Tesla REST `vehicle_data.vehicle_config.performance_package` on the non-waking connectivity-edge / periodic in-service read. CARRIED ON THE CATALOG AS WELL AS THE SNAPSHOT ON PURPOSE, and for a consumer the snapshot cannot serve: a VIEWER never fetches a /snapshot, so the catalog row is the ONLY surface on which a shared car can say what it is. Without it a rider's vehicle descriptor degraded to the raw colour token — a Live Activity subline reading 'UltraRed', and a review-sheet row whose model slot rendered the bare make 'Tesla'. Together with the siblings `year`, `model` and `color` this row now carries everything a '2026 Model X Plaid · Ultra Red' descriptor needs. NOT THE RAW BADGE CODE: VehicleState.trim carries Tesla's `trim_badging` ('p74d'), which is explicitly NOT display-safe and is deliberately absent from the catalog under BOTH roles. Only the label may be rendered. OPTIONAL AND TOLERANT: an ABSENT key means a server predating v0.31.0 and MUST be read exactly like null. NULL IS NOT THE EMPTY STRING and is the ordinary state for a car Tesla has not yet been asked about: it means 'no trim known', and a descriptor builder MUST drop the fragment entirely rather than emit a stray separator. RBAC: BOTH roles — an equipment fact of exactly the tier of its identity siblings `model`/`year`/`color`, all of which have been in both allow-lists since v1, and all of which are legible through a windshield from the kerb (the badge on the boot lid IS the trim). There is nothing here for masking to protect. Delivery: REST-READ-TIME ONLY; a `vehicle_update` frame NEVER carries it, so it refreshes on the next list fetch or /snapshot.",
+          "x-classification": "P0",
+          "examples": ["Plaid", null]
         },
         "color": {
           "type": "string",
           "description": "Vehicle exterior color. Sourced from DB Vehicle.color. Matches VehicleState.color.",
           "x-classification": "P0",
           "examples": ["Midnight Silver Metallic"]
+        },
+        "location": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["latitude", "longitude"],
+          "description": "Where this vehicle was last known to be (MYR-515, contracts v0.31.0), or NULL when the server holds no fix. THE SAME COORDINATE PAIR, at the SAME PRECISION, as VehicleState.latitude / VehicleState.longitude (rest-api.md §7.1) and as the live `vehicle_update` frame — read from the same AES-256-GCM-encrypted columns by the same resolver, so the catalog and the snapshot cannot disagree about where a car is. WHY IT IS ON THE CATALOG: the rider's vehicle picker renders a per-row pickup ETA, and it has no other input for a row it is not actively watching — a client holds exactly ONE coordinate (the watched car's, from the single-vehicle WebSocket subscription), and a viewer's per-row /snapshot is 403 by design (MYR-432/449). Without this field the picker can only rank the one car the user already opened. A NULLABLE OBJECT, NOT TWO NULLABLE SCALARS: latitude and longitude form an ATOMIC GROUP (rest-api.md §5.4) and splitting one is itself a contract violation, so nesting makes 'both or neither' structural — there is no way to express the half-state two flat fields would permit. Consumers MUST treat the object as indivisible and MUST NOT carry one axis forward from a previous read. NULL IS THE ONLY 'NO FIX' SPELLING ON THIS SURFACE, and this is a DELIBERATE DIVERGENCE from §7.1: VehicleState's columns are NOT NULL, so that surface uses the (0, 0) sentinel described in vehicle-state-schema.md §2.3 and asks consumers to re-interpret it. This surface can express absence, so it does — the server collapses an exact (0, 0) to `null` before emitting, and a consumer will NEVER receive 0,0 here. Do not port a Gulf-of-Guinea guard to this field; do not treat `{latitude: 0, longitude: 0}` as reachable. RBAC: BOTH roles, and the reasoning matters because this is the first P1 field on this resource other than `licensePlate`. A viewer ALREADY receives latitude/longitude at full precision on the streaming path for exactly these vehicles — the viewer mask retains the whole Speed/GPS atomic group, and MYR-435's narrowing deliberately left it — so this is the same value over a different transport to a party already entitled to it, not a new disclosure. The honest caveat: the catalog hands a viewer N positions at once where the socket hands out one per subscription, which is an AGGREGATION difference rather than an entitlement one, since the grant is per-vehicle and a viewer could subscribe to each car in turn. ON COARSENING: considered and deliberately not applied. The platform has no precision convention, and rounding this row while the socket serves the exact value would protect nothing while degrading the short-hop ETA this field exists for; if a future policy coarsens shared positions it must coarsen the stream and this row together. P1 handling binds in full: never logged, never emitted outside the vehicle's party, encrypted at rest. A row exists only because a live accepted grant produced it, so a suspended or revoked grant yields no row and therefore no coordinate. OPTIONAL AND TOLERANT: an ABSENT key means a server predating v0.31.0 and MUST be read exactly like null. Delivery: REST-READ-TIME ONLY — a `vehicle_update` frame never carries a `location` object under this name; the live position arrives as the flat VehicleState fields on the socket. So this value is as fresh as the last write to the vehicle row, and a consumer watching a car should prefer the socket's coordinate over this one.",
+          "x-classification": "P1",
+          "x-atomic-group": "gps",
+          "properties": {
+            "latitude": {
+              "type": "number",
+              "description": "WGS-84 latitude. Named `latitude`/`longitude` rather than RidePlace's `lat`/`lng` to match VehicleState and SavedPlace — both spellings exist on the platform and this surface follows the account/vehicle family. Full precision, matching VehicleState.latitude exactly; see the parent description for why it is not coarsened.",
+              "minimum": -90,
+              "maximum": 90,
+              "x-classification": "P1",
+              "examples": [37.7749]
+            },
+            "longitude": {
+              "type": "number",
+              "description": "WGS-84 longitude. The other half of an ATOMIC PAIR — see `latitude` and the parent description. A consumer that receives this object receives both axes or neither.",
+              "minimum": -180,
+              "maximum": 180,
+              "x-classification": "P1",
+              "examples": [-122.4194]
+            }
+          }
         },
         "vinLast4": {
           "type": "string",

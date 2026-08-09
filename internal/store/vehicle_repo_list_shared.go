@@ -46,7 +46,8 @@ JOIN go_vehicle_shares s
 // lockstep, and the scan function asserts the order.
 const sharedSummaryColumns = `"Vehicle"."id", "Vehicle"."userId", "Vehicle"."vin", "Vehicle"."name",
 	"Vehicle"."model", "Vehicle"."year", "Vehicle"."color", "Vehicle"."licensePlate", "Vehicle"."status",
-	"Vehicle"."chargeLevel", "Vehicle"."estimatedRange", "Vehicle"."lastUpdated"`
+	"Vehicle"."chargeLevel", "Vehicle"."estimatedRange", "Vehicle"."lastUpdated",
+	"Vehicle"."latitudeEnc", "Vehicle"."longitudeEnc"`
 
 // queryVehiclesSharedWithUser is the viewer-side companion of
 // queryVehiclesByUserList: identical lean projection plus the grant's RIDE
@@ -68,6 +69,7 @@ const queryVehiclesSharedWithUser = `SELECT ` + sharedSummaryColumns + `,
 	` + vehicleListHasActiveRideExpr + `,
 	gcs.service_etc, gcs.service_expected_end_at,
 	` + rideShareEnabledExpr + `,
+	` + catalogTrimLabelExpr + `,
 	` + setupScheduleColumns + `,
 	s.allow_rides
 FROM "Vehicle"` + sharedSummaryJoin + `
@@ -119,7 +121,7 @@ func (r *VehicleRepo) listSharedSummaries(ctx context.Context, userID string, ve
 
 	var out []SharedVehicleSummary
 	for rows.Next() {
-		v, scanErr := scanSharedVehicleSummaryRow(rows)
+		v, scanErr := r.scanSharedVehicleSummaryRow(rows)
 		if scanErr != nil {
 			r.metrics.IncQueryError("vehicle.list_shared_summaries")
 			r.metrics.ObserveQueryDuration("vehicle.list_shared_summaries", time.Since(start).Seconds())
@@ -139,10 +141,15 @@ func (r *VehicleRepo) listSharedSummaries(ctx context.Context, userID string, ve
 
 // scanSharedVehicleSummaryRow reads the lean catalog columns plus the grant's
 // ride capability.
-func scanSharedVehicleSummaryRow(row rowScanner) (SharedVehicleSummary, error) {
+// A METHOD as of MYR-515, for the same reason as its owner-side twin: the
+// projection carries the position ciphertext pair and the scan needs the repo's
+// encryptor to resolve it. Both scans go through the SAME summaryGPSScan
+// helper, so the viewer's coordinate and the owner's are decrypted identically.
+func (r *VehicleRepo) scanSharedVehicleSummaryRow(row rowScanner) (SharedVehicleSummary, error) {
 	var (
 		v      SharedVehicleSummary
 		status string
+		gps    summaryGPSScan
 		ss     setupScheduleScan
 	)
 	dests := append([]any{
@@ -158,10 +165,13 @@ func scanSharedVehicleSummaryRow(row rowScanner) (SharedVehicleSummary, error) {
 		&v.ChargeLevel,
 		&v.EstimatedRange,
 		&v.LastUpdated,
+		gps.latDest(),
+		gps.lngDest(),
 		&v.HasActiveRide,
 		&v.ServiceETC,
 		&v.ServiceExpectedEndAt,
 		&v.RideShareEnabled,
+		&v.TrimLabel,
 	}, ss.dests()...)
 	// `allow_rides` is selected AFTER the setup block, so it is appended last —
 	// the scan order is the SELECT order, not the struct order.
@@ -171,5 +181,6 @@ func scanSharedVehicleSummaryRow(row rowScanner) (SharedVehicleSummary, error) {
 	}
 	v.Status = VehicleStatus(status)
 	v.SetupSchedule = ss.value()
+	v.Latitude, v.Longitude = gps.resolve(r)
 	return v, nil
 }
