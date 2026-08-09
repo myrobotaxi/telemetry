@@ -1250,6 +1250,64 @@ components:
             windshield. Not streamed; refreshes on the next list fetch.
           example: Plaid
           x-classification: P0
+        location:
+          type: object
+          nullable: true
+          required: [latitude, longitude]
+          additionalProperties: false
+          description: |
+            OPTIONAL (MYR-515, contracts v0.31.0). Where this vehicle was last
+            known to be, or null when the server holds no fix. THE SAME pair, at
+            THE SAME precision, as VehicleState.latitude/longitude (§7.1) and
+            the live vehicle_update frame — same encrypted columns, same
+            resolver, so catalog and snapshot cannot disagree.
+            On the catalog because the rider picker renders a PER-ROW pickup ETA
+            and has no other input for a row it is not watching: a client holds
+            exactly ONE coordinate (the watched car's, off the single-vehicle
+            socket subscription) and a viewer's per-row /snapshot is 403 by
+            design (MYR-432/449).
+            A NULLABLE OBJECT, not two nullable scalars: latitude/longitude are
+            an ATOMIC GROUP (§5.4), so nesting makes "both or neither"
+            structural. Treat it as indivisible; never carry one axis forward.
+            NULL IS THE ONLY "no fix" SPELLING HERE — a deliberate divergence
+            from §7.1, whose NOT NULL columns use the (0,0) sentinel
+            (vehicle-state-schema.md §2.3). This surface can express absence, so
+            the server collapses an exact (0,0) to null and a consumer will
+            NEVER receive 0,0. Do not port a Gulf-of-Guinea guard here.
+            RBAC BOTH roles despite being P1: the viewer already receives this
+            exact value at full precision on the STREAMING path (the viewer mask
+            retains the whole Speed/GPS group; MYR-435 left it), so this is the
+            same value over a different transport to an entitled party. The
+            catalog does aggregate N positions into one response where the
+            socket serves one per subscription — an aggregation difference, not
+            an entitlement one. Coarsening was considered and rejected: rounding
+            here while the socket serves exact values protects nothing and
+            degrades the short-hop ETA this exists for.
+            P1 handling binds: never logged, never outside the vehicle's party,
+            encrypted at rest. REST-read-time only — no vehicle_update carries a
+            `location` object, so prefer the socket's coordinate when watching.
+          x-classification: P1
+          x-atomic-group: gps
+          properties:
+            latitude:
+              type: number
+              minimum: -90
+              maximum: 90
+              description: >
+                WGS-84 latitude. Named latitude/longitude to match VehicleState
+                and SavedPlace (the account/vehicle family) rather than
+                RidePlace's lat/lng. Full precision.
+              example: 37.7749
+              x-classification: P1
+            longitude:
+              type: number
+              minimum: -180
+              maximum: 180
+              description: >
+                WGS-84 longitude — the other half of an atomic pair. A consumer
+                receives both axes or neither.
+              example: -122.4194
+              x-classification: P1
         vinLast4:
           type: string
           description: Last 4 characters of the VIN. Full VIN never emitted (`redactVIN()`, data-classification.md §1.5).

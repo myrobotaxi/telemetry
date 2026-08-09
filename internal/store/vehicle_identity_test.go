@@ -2,6 +2,8 @@ package store_test
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -185,6 +187,113 @@ func TestVehicleRepo_CatalogCarriesTrimLabel(t *testing.T) {
 		if rows[0].Model != "Model X" || rows[0].Year != 2026 || rows[0].Color != "UltraRed" {
 			t.Errorf("viewer identity = (%q, %d, %q), want (\"Model X\", 2026, \"UltraRed\")",
 				rows[0].Model, rows[0].Year, rows[0].Color)
+		}
+	})
+}
+
+// TestVehicleRepo_CatalogCarriesLocation covers the MYR-515 read half on BOTH
+// catalog queries.
+//
+// The lean projection now selects the `latitudeEnc`/`longitudeEnc` pair and
+// decrypts it per row — the one deliberate exception to MYR-122's "no GPS
+// columns" rule, taken because VehicleSummary.location emits it. The VIEWER arm
+// is the reason the field exists: a rider's picker ranks shared cars by pickup
+// ETA and cannot fetch a per-row /snapshot.
+func TestVehicleRepo_CatalogCarriesLocation(t *testing.T) {
+	mustApplyGoMigrations(t)
+	cleanTables(t, testPool)
+
+	ctx := context.Background()
+	enc := newTestEncryptor(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	repo := store.NewVehicleRepoWithEncryption(testPool, store.NoopMetrics{}, enc, logger)
+
+	const (
+		fixVIN     = "7SAXCDE2NTF000001"
+		neverVIN   = "5YJ3E1EA7TF000003"
+		lat, lng   = 37.7749, -122.4194
+		fixVehicle = "veh_loc_001"
+	)
+
+	seedVehicleSummaryRow(t, fixVehicle, "user_001", fixVIN, "Amruth's X Plaid",
+		"Model X", 2026, "UltraRed", store.VehicleStatusParked, 31, 96)
+	seedVehicleSummaryRow(t, "veh_loc_002", "user_001", neverVIN, "Never streamed",
+		"Model 3", 2026, "", store.VehicleStatusOffline, 0, 0)
+
+	// Write the position through the repo's own encrypted write path, so the
+	// test exercises the real round trip rather than a hand-planted ciphertext.
+	latV, lngV := lat, lng
+	if err := repo.UpdateTelemetry(ctx, fixVIN, store.VehicleUpdate{
+		Latitude:  &latV,
+		Longitude: &lngV,
+	}); err != nil {
+		t.Fatalf("seed position: %v", err)
+	}
+
+	t.Run("owner rows carry the decrypted pair", func(t *testing.T) {
+		rows, err := repo.ListSummariesByUser(ctx, "user_001")
+		if err != nil {
+			t.Fatalf("ListSummariesByUser: %v", err)
+		}
+		byName := map[string]store.VehicleSummary{}
+		for _, r := range rows {
+			byName[r.Name] = r
+		}
+
+		got := byName["Amruth's X Plaid"]
+		if got.Latitude == nil || got.Longitude == nil {
+			t.Fatalf("position = (%v, %v), want the decrypted pair", got.Latitude, got.Longitude)
+		}
+		if *got.Latitude != lat || *got.Longitude != lng {
+			t.Errorf("position = (%v, %v), want (%v, %v) — full precision, matching "+
+				"what the snapshot serves", *got.Latitude, *got.Longitude, lat, lng)
+		}
+
+		// A car that never streamed has no ciphertext at all, so the pair is
+		// absent rather than zero.
+		never := byName["Never streamed"]
+		if never.Latitude != nil || never.Longitude != nil {
+			t.Errorf("never-streamed position = (%v, %v), want (nil, nil)",
+				never.Latitude, never.Longitude)
+		}
+	})
+
+	t.Run("shared/viewer rows carry it too", func(t *testing.T) {
+		seedShareGrant(t, "share_loc_001", fixVehicle, "user_001", "user_002", "accepted")
+
+		rows, err := repo.ListSharedSummariesByUser(ctx, "user_002")
+		if err != nil {
+			t.Fatalf("ListSharedSummariesByUser: %v", err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("rows = %d, want 1", len(rows))
+		}
+		if rows[0].Latitude == nil || rows[0].Longitude == nil {
+			t.Fatalf("viewer position = (%v, %v), want the decrypted pair. The viewer is "+
+				"the role this field exists for", rows[0].Latitude, rows[0].Longitude)
+		}
+		if *rows[0].Latitude != lat || *rows[0].Longitude != lng {
+			t.Errorf("viewer position = (%v, %v), want (%v, %v) — the same value and the "+
+				"same precision the viewer already receives on the streaming path",
+				*rows[0].Latitude, *rows[0].Longitude, lat, lng)
+		}
+	})
+
+	t.Run("a repo with no encryptor surfaces no position, quietly", func(t *testing.T) {
+		// NewVehicleRepo's documented contract is already "reads NO coordinates".
+		// It must degrade to nil rather than attempt a decrypt it cannot do —
+		// otherwise every catalog fetch logs a per-row ERROR for an absence that
+		// is by construction.
+		plain := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+		rows, err := plain.ListSummariesByUser(ctx, "user_001")
+		if err != nil {
+			t.Fatalf("ListSummariesByUser: %v", err)
+		}
+		for _, r := range rows {
+			if r.Latitude != nil || r.Longitude != nil {
+				t.Errorf("%s: position = (%v, %v), want (nil, nil) from an unencrypted repo",
+					r.Name, r.Latitude, r.Longitude)
+			}
 		}
 	})
 }

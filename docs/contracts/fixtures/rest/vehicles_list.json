@@ -1,7 +1,11 @@
 {
   "_meta": {
-    "description": "Happy-path response for GET /api/vehicles — the SDK's vehicle-enumeration entry point (rest-api.md §7.0). Owner-tier projection: every VehicleSummary field is present. The list is deliberately a thin catalog — no GPS, no nav, no climate (those live in /snapshot). v1 returns owned vehicles only; viewer-merged enumeration is PLANNED. MYR-233 adds the optional P0 `hasActiveRide` flag: Stumpy is parked at a pickup with an open INSTANT ride (accepted/arrived/enroute) so it renders Busy; Lightning is free. The flag is derived read-time from the `uq_go_ride_requests_active_instant_vehicle` index predicate — scheduled rides and `requested` never set it. MYR-286 adds the P1 owner-entered `licensePlate`, shown here in BOTH of its states: Stumpy has one, Lightning's owner has not entered one and carries an EMPTY STRING rather than a missing key (the same always-emitted convention as `color`). Consumers keep the `VIN ····xxxx` fallback for the empty case and must never render an empty plate. MYR-316 adds the P0 nullable `serviceEstimatedEndAt` — the resolved end of the car's current service visit, COALESCE(Tesla `service_data.service_etc`, owner-entered expected-back), emitted ONLY while `status` is `in_service`. Neither of the first two rows is in service (`parked` / `charging`), so both carry the honest `null`; a null means NO scheduling bound at all, never 'unknown, block the picker'. MYR-491 adds the P0 nullable `setupState` object, shown here in BOTH of its states. Stumpy and Lightning are set up and streaming, so both carry `null` — which means NO CLAIM, not 'ready': a consumer must never paint a positive 'set up ✓' badge from it. The third row is the MYR-503 scenario verbatim: a car linked minutes ago whose owner has not yet paired the virtual key, so Tesla refused the telemetry config with `missing_key`, `status` is still the write-once `offline` schema default, and every signed command against it will be rejected. That row is exactly the one an owner would otherwise meet as a silent 0%/unavailable card with a dead Lock button — the card renders from `setupState` BEFORE any command is attempted, and `since` is what lets the copy age ('for 4 minutes'). MYR-507 adds the P0 nullable `trimLabel` — the display-ready trim, the SAME column /snapshot already emits as `VehicleState.trimLabel` — shown here in BOTH of its states: Stumpy has been read and carries 'Performance'; Lightning and the freshly-linked third row carry `null`, which means 'no trim known' and is NOT the empty string. A descriptor builder must drop the fragment entirely for `null` rather than emit a stray separator. Note also what `model` and `year` mean on the third row now: MYR-507 derives both from the VIN at link time, so a car provisioned by the Go server no longer reports the empty placeholders ('' / 0) it used to carry forever — which is why that row can say 'Model X' at all despite never having streamed.",
-    "anchoredFRs": ["FR-4.x", "FR-5.4", "NFR-3.21"],
+    "description": "Happy-path response for GET /api/vehicles — the SDK's vehicle-enumeration entry point (rest-api.md §7.0). Owner-tier projection: every VehicleSummary field is present. The list is deliberately a thin catalog — no nav, no climate, no destination or origin coordinates (those live in /snapshot). Since MYR-515 it does carry the car's OWN position, as the nullable `location` object; that is the single exception, and the reason is in its field description. v1 returns owned vehicles only; viewer-merged enumeration is PLANNED. MYR-233 adds the optional P0 `hasActiveRide` flag: Stumpy is parked at a pickup with an open INSTANT ride (accepted/arrived/enroute) so it renders Busy; Lightning is free. The flag is derived read-time from the `uq_go_ride_requests_active_instant_vehicle` index predicate — scheduled rides and `requested` never set it. MYR-286 adds the P1 owner-entered `licensePlate`, shown here in BOTH of its states: Stumpy has one, Lightning's owner has not entered one and carries an EMPTY STRING rather than a missing key (the same always-emitted convention as `color`). Consumers keep the `VIN ····xxxx` fallback for the empty case and must never render an empty plate. MYR-316 adds the P0 nullable `serviceEstimatedEndAt` — the resolved end of the car's current service visit, COALESCE(Tesla `service_data.service_etc`, owner-entered expected-back), emitted ONLY while `status` is `in_service`. Neither of the first two rows is in service (`parked` / `charging`), so both carry the honest `null`; a null means NO scheduling bound at all, never 'unknown, block the picker'. MYR-491 adds the P0 nullable `setupState` object, shown here in BOTH of its states. Stumpy and Lightning are set up and streaming, so both carry `null` — which means NO CLAIM, not 'ready': a consumer must never paint a positive 'set up ✓' badge from it. The third row is the MYR-503 scenario verbatim: a car linked minutes ago whose owner has not yet paired the virtual key, so Tesla refused the telemetry config with `missing_key`, `status` is still the write-once `offline` schema default, and every signed command against it will be rejected. That row is exactly the one an owner would otherwise meet as a silent 0%/unavailable card with a dead Lock button — the card renders from `setupState` BEFORE any command is attempted, and `since` is what lets the copy age ('for 4 minutes'). MYR-507 adds the P0 nullable `trimLabel` — the display-ready trim, the SAME column /snapshot already emits as `VehicleState.trimLabel` — shown here in BOTH of its states: Stumpy has been read and carries 'Performance'; Lightning and the freshly-linked third row carry `null`, which means 'no trim known' and is NOT the empty string. A descriptor builder must drop the fragment entirely for `null` rather than emit a stray separator. Note also what `model` and `year` mean on the third row now: MYR-507 derives both from the VIN at link time, so a car provisioned by the Go server no longer reports the empty placeholders ('' / 0) it used to carry forever — which is why that row can say 'Model X' at all despite never having streamed. MYR-515 adds the P1 nullable `location` object — the car's last known position, the SAME pair and the SAME full precision the /snapshot and the live `vehicle_update` frame carry. Shown in both states: the two streaming rows have a fix; the never-streamed third row carries `null`. NOTE THE DIVERGENCE FROM §7.1: that surface's columns are NOT NULL so it uses the (0,0) no-fix sentinel, whereas this one can express absence and therefore does — the server collapses an exact (0,0) to `null` before emitting, and a consumer will NEVER receive 0,0 here. Do not port a Gulf-of-Guinea guard to this field.",
+    "anchoredFRs": [
+      "FR-4.x",
+      "FR-5.4",
+      "NFR-3.21"
+    ],
     "scenario": "happy-path",
     "addedBy": "MYR-91"
   },
@@ -22,7 +26,11 @@
       "licensePlate": "ABC 1234",
       "serviceEstimatedEndAt": null,
       "setupState": null,
-      "trimLabel": "Performance"
+      "trimLabel": "Performance",
+      "location": {
+        "latitude": 37.7749,
+        "longitude": -122.4194
+      }
     },
     {
       "vehicleId": "clmno5678901234ghijkl",
@@ -40,7 +48,11 @@
       "licensePlate": "",
       "serviceEstimatedEndAt": null,
       "setupState": null,
-      "trimLabel": null
+      "trimLabel": null,
+      "location": {
+        "latitude": 37.3861,
+        "longitude": -122.0839
+      }
     },
     {
       "vehicleId": "clsetup491newownercar",
@@ -61,7 +73,8 @@
         "state": "awaiting_virtual_key",
         "since": "2026-08-09T02:10:00Z"
       },
-      "trimLabel": null
+      "trimLabel": null,
+      "location": null
     }
   ]
 }

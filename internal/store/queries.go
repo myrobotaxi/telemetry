@@ -144,9 +144,19 @@ ORDER BY "name", "vin"`
 //
 // Anchored by AGENTS.md "Performance invariants": list endpoints use
 // lean projections; wide selects belong only in detail/edit handlers.
+// MYR-515 adds the TWO `*Enc` GPS shadows for the primary position pair, and
+// they are the ONE deliberate exception to the "no GPS columns" rule above.
+// The rule's own wording is the test — "MUST NOT SELECT columns the response
+// body doesn't emit" — and these ARE emitted, as VehicleSummary.location. What
+// made the pre-MYR-122 read cost ~1.3 min was the `navRouteCoordinates` JSON
+// blob (100KB+ per row) and ~37 columns; two short base64 text columns plus two
+// AES-GCM decrypts of a ~16-byte payload are not that, and a catalog is single
+// digits of rows. The nav-route blob and the destination / origin pairs stay
+// out — nothing on this surface emits them.
 const vehicleListSummaryColumns = `"id", "userId", "vin", "name",
 	"model", "year", "color", "licensePlate", "status",
-	"chargeLevel", "estimatedRange", "lastUpdated"`
+	"chargeLevel", "estimatedRange", "lastUpdated",
+	"latitudeEnc", "longitudeEnc"`
 
 // vehicleListHasActiveRideExpr derives the `hasActiveRide` catalog flag
 // (MYR-233): TRUE iff the car holds an OPEN INSTANT ride request.

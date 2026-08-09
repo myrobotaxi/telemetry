@@ -1,7 +1,9 @@
 {
   "_meta": {
-    "description": "Forward-looking viewer-tier response for GET /api/vehicles. The viewer projection per rest-api.md §5.2.0 subtracts NOTHING from the owner field set and adds `sharePermission`. MYR-184 removed the previous `name` subtraction: the rider UI renders a shared car as '{Owner}'s {Vehicle}', and `name` is in the `required` list of vehicle-summary.schema.json, so masking it made every viewer row invalid against its own shape. Any field a future viewer mask removes MUST be optional in that schema. The viewer merge is LIVE as of MYR-184 (a rider who has redeemed an invite code sees these rows appended to their own cars), so this fixture is the canonical viewer response, not a forward-looking one. The MYR-233 `hasActiveRide` flag is in BOTH role allow-lists — it is derived operational state (P0, same tier as `status`), not owner-curated data. The MYR-286 `licensePlate` is in BOTH allow-lists too — a deliberate product decision, because the entire purpose of the plate is that a rider can identify the correct car at pickup. Contrast the full `vin`, which the catalog never carries at all (`vinLast4` only) and which the /snapshot gates to owners. The MYR-316 `serviceEstimatedEndAt` is in BOTH allow-lists too — P0 operational timing, same tier as `status`, and a rider needs it for exactly the reason the owner does: it FLOORS the scheduling picker. The first row is `parked`, so the value is `null` (no bound; scheduling stays fully open). The MYR-491 `setupState` is in BOTH allow-lists as well, and the SECOND row is why: a car whose owner has linked it but not yet paired the virtual key has never streamed, so `status` sits at the write-once `offline` schema default forever — and MYR-437 is the report that a rider's picker therefore calls a perfectly fine shared car 'offline', permanently, with no explanation and no way to book it. `setupState` is what lets the picker say 'still being set up' and grey the row with a reason instead. The viewer is the party the value is ABOUT, exactly as with `rideShareEnabled`. A `null` means NO CLAIM (the first row), never 'ready'. The MYR-507 `trimLabel` is in BOTH allow-lists as well, and the THIRD row is why — it is the field report verbatim. A rider was shown a shared car whose Live Activity subline read a bare 'UltraRed' and whose review-sheet row rendered the generic make 'Tesla', because the catalog carried a colour and nothing else identifying: the trim was withheld as detail-sheet-only, and a VIEWER NEVER FETCHES A SNAPSHOT, so there was no second surface to fall back to. `trimLabel` is an equipment fact of exactly the tier of its identity siblings `model`/`year`/`color` — all three already in both allow-lists, and all four legible through a windshield from the kerb — so there was never anything here for masking to protect. With the four together, that row renders the client's target descriptor exactly: '2026 Model X Plaid · Ultra Red'. Note `model` and `year` on that row are themselves MYR-507 values, VIN-derived: before it, a car the Go server provisioned carried '' and 0 permanently, which is the other half of why a rider had only a colour to go on.",
-    "anchoredFRs": ["FR-5.4"],
+    "description": "Forward-looking viewer-tier response for GET /api/vehicles. The viewer projection per rest-api.md §5.2.0 subtracts NOTHING from the owner field set and adds `sharePermission`. MYR-184 removed the previous `name` subtraction: the rider UI renders a shared car as '{Owner}'s {Vehicle}', and `name` is in the `required` list of vehicle-summary.schema.json, so masking it made every viewer row invalid against its own shape. Any field a future viewer mask removes MUST be optional in that schema. The viewer merge is LIVE as of MYR-184 (a rider who has redeemed an invite code sees these rows appended to their own cars), so this fixture is the canonical viewer response, not a forward-looking one. The MYR-233 `hasActiveRide` flag is in BOTH role allow-lists — it is derived operational state (P0, same tier as `status`), not owner-curated data. The MYR-286 `licensePlate` is in BOTH allow-lists too — a deliberate product decision, because the entire purpose of the plate is that a rider can identify the correct car at pickup. Contrast the full `vin`, which the catalog never carries at all (`vinLast4` only) and which the /snapshot gates to owners. The MYR-316 `serviceEstimatedEndAt` is in BOTH allow-lists too — P0 operational timing, same tier as `status`, and a rider needs it for exactly the reason the owner does: it FLOORS the scheduling picker. The first row is `parked`, so the value is `null` (no bound; scheduling stays fully open). The MYR-491 `setupState` is in BOTH allow-lists as well, and the SECOND row is why: a car whose owner has linked it but not yet paired the virtual key has never streamed, so `status` sits at the write-once `offline` schema default forever — and MYR-437 is the report that a rider's picker therefore calls a perfectly fine shared car 'offline', permanently, with no explanation and no way to book it. `setupState` is what lets the picker say 'still being set up' and grey the row with a reason instead. The viewer is the party the value is ABOUT, exactly as with `rideShareEnabled`. A `null` means NO CLAIM (the first row), never 'ready'. The MYR-507 `trimLabel` is in BOTH allow-lists as well, and the THIRD row is why — it is the field report verbatim. A rider was shown a shared car whose Live Activity subline read a bare 'UltraRed' and whose review-sheet row rendered the generic make 'Tesla', because the catalog carried a colour and nothing else identifying: the trim was withheld as detail-sheet-only, and a VIEWER NEVER FETCHES A SNAPSHOT, so there was no second surface to fall back to. `trimLabel` is an equipment fact of exactly the tier of its identity siblings `model`/`year`/`color` — all three already in both allow-lists, and all four legible through a windshield from the kerb — so there was never anything here for masking to protect. With the four together, that row renders the client's target descriptor exactly: '2026 Model X Plaid · Ultra Red'. Note `model` and `year` on that row are themselves MYR-507 values, VIN-derived: before it, a car the Go server provisioned carried '' and 0 permanently, which is the other half of why a rider had only a colour to go on. The MYR-515 `location` object is in BOTH allow-lists too, and this fixture is where that decision has to be justified: it is the FIRST P1 field on this resource other than `licensePlate`. The argument is that a viewer ALREADY receives latitude/longitude at full precision on the STREAMING path for exactly these vehicles — `vehicleStateViewerFields` retains the whole Speed/GPS atomic group, 'the entire point of a shared live map', and MYR-435's narrowing deliberately left it — so this is the same value over a different transport to a party already entitled to it. The honest caveat: the catalog hands a viewer N positions at once where the socket hands out one per subscription, which is an AGGREGATION difference rather than an entitlement one, since the grant is per-vehicle and a viewer could subscribe to each car in turn. Coarsening was considered and deliberately not applied — rounding this row while the socket serves the exact value protects nothing and degrades the short-hop pickup ETA the field exists for. Why the viewer needs it at all: the rider's picker ranks shared cars by pickup ETA, holds exactly ONE coordinate (the watched car's, off the single-vehicle socket subscription), and CANNOT fetch a per-row /snapshot — that is 403 by design (MYR-432/449). The second row shows the `null` state: a car that has never streamed has no fix.",
+    "anchoredFRs": [
+      "FR-5.4"
+    ],
     "scenario": "happy-path",
     "addedBy": "MYR-91"
   },
@@ -23,7 +25,11 @@
       "serviceEstimatedEndAt": null,
       "setupState": null,
       "trimLabel": "Performance",
-      "sharePermission": "live_history"
+      "sharePermission": "live_history",
+      "location": {
+        "latitude": 37.7749,
+        "longitude": -122.4194
+      }
     },
     {
       "vehicleId": "clsetup491sharedcar00",
@@ -45,7 +51,8 @@
         "since": "2026-08-09T02:10:00Z"
       },
       "trimLabel": null,
-      "sharePermission": "rides"
+      "sharePermission": "rides",
+      "location": null
     },
     {
       "vehicleId": "clmyr507sharedxplaid0",
@@ -64,7 +71,11 @@
       "serviceEstimatedEndAt": null,
       "setupState": null,
       "trimLabel": "Plaid",
-      "sharePermission": "rides"
+      "sharePermission": "rides",
+      "location": {
+        "latitude": 37.7935,
+        "longitude": -122.3964
+      }
     }
   ]
 }

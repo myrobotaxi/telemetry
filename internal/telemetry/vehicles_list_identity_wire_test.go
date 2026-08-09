@@ -149,6 +149,17 @@ func TestVehiclesListHandler_NeverEnrichedCarServesPlaceholdersNotNulls(t *testi
 		t.Errorf("trimLabel = %v (%T), want null. It is a NULLABLE side-table column, so "+
 			"unlike `model` its 'not determined' spelling is null, not \"\"", got, got)
 	}
+
+	// location (MYR-515): a car that has never streamed has no fix, so the key
+	// is present and null. Same nullable-object spelling as trimLabel and for
+	// the same reason — this surface CAN express absence, so it does.
+	got, ok = row["location"]
+	if !ok {
+		t.Fatalf("missing `location`; keys: %v", keysOfRow(row))
+	}
+	if got != nil {
+		t.Errorf("location = %v (%T), want null for a car that has never streamed", got, got)
+	}
 }
 
 // TestViewerSummaryCarriesTrimLabel is the assertion MYR-507 actually turns on.
@@ -202,6 +213,154 @@ func TestViewerSummaryCarriesTrimLabel(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestVehiclesListHandler_LocationOnWire covers the MYR-515 position object on
+// OWNER rows: present when the server holds a fix, and explicitly null when it
+// does not — including the case that would actually lie.
+func TestVehiclesListHandler_LocationOnWire(t *testing.T) {
+	now := time.Date(2026, 8, 9, 13, 53, 0, 0, time.UTC)
+	lat, lng := 37.7749, -122.4194
+	zeroLat, zeroLng := 0.0, 0.0
+	halfLat := 37.7749
+
+	rows := []VehicleCatalogRow{
+		{
+			ID: "clloc0000000000000001", VIN: "7SAXCDE2NTF000001", Name: "Has a fix",
+			Model: "Model X", Year: 2026, LastUpdated: now, Status: "parked",
+			Latitude: &lat, Longitude: &lng,
+		},
+		{
+			ID: "clloc0000000000000002", VIN: "5YJ3E1EA7TF000003", Name: "Never streamed",
+			Model: "Model 3", Year: 2026, LastUpdated: now, Status: "offline",
+			Latitude: nil, Longitude: nil,
+		},
+		{
+			ID: "clloc0000000000000003", VIN: "7SAYGDEF9TF000002", Name: "Streamed 0,0",
+			Model: "Model Y", Year: 2026, LastUpdated: now, Status: "parked",
+			Latitude: &zeroLat, Longitude: &zeroLng,
+		},
+		{
+			ID: "clloc0000000000000004", VIN: "5YJSA1E20TF000004", Name: "Half pair",
+			Model: "Model S", Year: 2026, LastUpdated: now, Status: "parked",
+			Latitude: &halfLat, Longitude: nil,
+		},
+	}
+
+	resp := serveVehiclesList(t, rows)
+	if len(resp) != 4 {
+		t.Fatalf("want 4 items, got %d", len(resp))
+	}
+
+	// Row 0 — a real fix, emitted whole and at full precision. Full precision
+	// is deliberate: the viewer mask already serves exactly this value on the
+	// streaming path, so rounding here would protect nothing and would degrade
+	// the short-hop pickup ETA the field exists for.
+	loc, ok := resp[0]["location"]
+	if !ok {
+		t.Fatalf("items[0] missing `location`; keys: %v", keysOfRow(resp[0]))
+	}
+	obj, isObj := loc.(map[string]any)
+	if !isObj {
+		t.Fatalf("items[0].location = %v (%T), want an object", loc, loc)
+	}
+	if obj["latitude"] != lat || obj["longitude"] != lng {
+		t.Errorf("items[0].location = %v, want {latitude: %v, longitude: %v} at full precision",
+			obj, lat, lng)
+	}
+
+	// Row 1 — never streamed. The key is present and null.
+	loc, ok = resp[1]["location"]
+	if !ok {
+		t.Fatalf("items[1] missing `location` — the key is always emitted; keys: %v",
+			keysOfRow(resp[1]))
+	}
+	if loc != nil {
+		t.Errorf("items[1].location = %v, want null for a car with no fix", loc)
+	}
+
+	// Row 2 — THE ASSERTION THAT MATTERS. A stored (0,0) is the §2.3 no-fix
+	// sentinel, and §7.0 can express absence, so it must. Asserted in the
+	// direction that would actually lie: a picker handed {0,0} does not fail
+	// loudly, it confidently renders a pickup ETA to a point in the Atlantic
+	// ~600km off Ghana.
+	loc, ok = resp[2]["location"]
+	if !ok {
+		t.Fatalf("items[2] missing `location`; keys: %v", keysOfRow(resp[2]))
+	}
+	if loc != nil {
+		t.Errorf("items[2].location = %v, want null. A stored (0,0) is the no-fix "+
+			"sentinel and MUST NOT reach a consumer as a Gulf-of-Guinea coordinate", loc)
+	}
+
+	// Row 3 — a half pair is corruption, not half a location. The atomic-group
+	// rule is why `location` is one nullable object rather than two nullable
+	// scalars: this state has no representation on the wire at all.
+	loc, ok = resp[3]["location"]
+	if !ok {
+		t.Fatalf("items[3] missing `location`; keys: %v", keysOfRow(resp[3]))
+	}
+	if loc != nil {
+		t.Errorf("items[3].location = %v, want null — a latitude with no longitude "+
+			"must never be plotted against a stale or zero mate", loc)
+	}
+}
+
+// TestViewerSummaryCarriesLocation is the assertion MYR-515 turns on.
+//
+// The viewer is the party the field exists for: the picker ranks SHARED cars by
+// pickup ETA, and a viewer cannot fetch a per-row /snapshot (403 by design,
+// MYR-432/449). If the viewer mask ever stops projecting this, the picker
+// silently loses per-row ETAs for every row but the watched one — with every
+// owner-side test still green.
+func TestViewerSummaryCarriesLocation(t *testing.T) {
+	now := time.Date(2026, 8, 9, 13, 53, 0, 0, time.UTC)
+	lat, lng := 37.7749, -122.4194
+	zero := 0.0
+
+	t.Run("a shared car with a fix", func(t *testing.T) {
+		row := VehicleCatalogRow{
+			ID: "clshared515000000000", VIN: "7SAXCDE2NTF000001", Name: "Amruth's X Plaid",
+			Model: "Model X", Year: 2026, Color: "UltraRed", LastUpdated: now,
+			Status: "parked", Latitude: &lat, Longitude: &lng,
+		}
+
+		projected := viewerSummaryMap(row, auth.ShareGrant{AllowRides: true}, now)
+
+		loc, ok := projected["location"]
+		if !ok {
+			t.Fatalf("the VIEWER projection dropped `location`. This is the role the "+
+				"field exists for — a viewer cannot fetch a per-row /snapshot; keys: %v",
+				keysOfRow(projected))
+		}
+		obj, isObj := loc.(map[string]any)
+		if !isObj {
+			t.Fatalf("viewer location = %v (%T), want an object", loc, loc)
+		}
+		if obj["latitude"] != lat || obj["longitude"] != lng {
+			t.Errorf("viewer location = %v, want the same full-precision pair the "+
+				"viewer already receives on the streaming path", obj)
+		}
+	})
+
+	t.Run("a shared car with the 0,0 sentinel serves null to the viewer too", func(t *testing.T) {
+		row := VehicleCatalogRow{
+			ID: "clshared515000000001", VIN: "7SAYGDEF9TF000002", Name: "Sam's Model Y",
+			Model: "Model Y", Year: 2026, LastUpdated: now, Status: "parked",
+			Latitude: &zero, Longitude: &zero,
+		}
+
+		projected := viewerSummaryMap(row, auth.ShareGrant{AllowRides: true}, now)
+
+		loc, ok := projected["location"]
+		if !ok {
+			t.Fatalf("the VIEWER projection dropped `location`; keys: %v", keysOfRow(projected))
+		}
+		if loc != nil {
+			t.Errorf("viewer location = %v, want null — the sentinel collapse is not an "+
+				"owner-only courtesy", loc)
+		}
+	})
 }
 
 // serveVehiclesList runs the owner path end-to-end and returns the raw item

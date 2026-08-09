@@ -227,6 +227,10 @@ func (a *vehicleListerAdapter) ListByUser(ctx context.Context, userID string) ([
 			// MYR-507: the display-safe trim, carried straight through — the
 			// same column /snapshot reads, so neither surface can rename a car.
 			TrimLabel: v.TrimLabel,
+			// MYR-515: the decrypted position pair; the handler applies the
+			// (0,0) sentinel collapse and builds the wire object.
+			Latitude:  v.Latitude,
+			Longitude: v.Longitude,
 			// MYR-491: raw schedule; the handler derives the wire state.
 			SetupSchedule: setupScheduleRow(v.SetupSchedule),
 		})

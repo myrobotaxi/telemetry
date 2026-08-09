@@ -71,6 +71,17 @@ type VehicleCatalogRow struct {
 	// than render a stray separator.
 	TrimLabel *string
 
+	// Latitude / Longitude are the car's freshest known position (MYR-515),
+	// already decrypted by the store from the SAME `latitudeEnc`/`longitudeEnc`
+	// pair the /snapshot serves. An ATOMIC PAIR: both set or both nil.
+	//
+	// RAW, in the sense that no privacy transform is applied — but NOT emitted
+	// verbatim: newVehicleSummary collapses the (0, 0) no-fix sentinel to a null
+	// `location`, because a catalog row must never hand a picker a coordinate in
+	// the Gulf of Guinea to measure an ETA against.
+	Latitude  *float64
+	Longitude *float64
+
 	// SetupSchedule is the car's fleet-config schedule row (MYR-491), LEFT
 	// JOINed from go_fleet_config_attempts. RAW, like the service-window pair:
 	// the wire field `setupState` is DERIVED from it together with Status and
@@ -243,6 +254,10 @@ func newVehicleSummary(v *VehicleCatalogRow, role auth.Role, grant auth.ShareGra
 		// /snapshot reads. Identity, not telemetry and not privacy-bearing —
 		// see the mask allow-list for why a viewer sees it.
 		TrimLabel: v.TrimLabel,
+		// MYR-515: resolved here so the atomic-pair rule and the (0,0)
+		// sentinel collapse are applied exactly once per surface, in the same
+		// place the MYR-316 window resolves its precedence.
+		Location: newVehicleLocation(v.Latitude, v.Longitude),
 		// MYR-491: the SAME derivation the snapshot runs, over the same inputs.
 		// Calling it from both surfaces rather than copying the rules is what
 		// makes "the catalog and the detail sheet can never disagree" a
