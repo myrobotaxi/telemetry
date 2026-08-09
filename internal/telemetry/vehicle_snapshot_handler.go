@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/auth"
 	"github.com/myrobotaxi/telemetry/internal/mask"
@@ -147,7 +148,7 @@ func (h *VehicleSnapshotHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	resp := buildSnapshotResponse(row)
+	resp := buildSnapshotResponse(row, time.Now())
 	h.writeMaskedResponse(r, w, vehicleID, userID, access, resp)
 }
 

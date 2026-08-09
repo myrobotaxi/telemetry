@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "description": "Happy-path response for GET /api/vehicles — the SDK's vehicle-enumeration entry point (rest-api.md §7.0). Owner-tier projection: every VehicleSummary field is present. The list is deliberately a thin catalog — no GPS, no nav, no climate (those live in /snapshot). v1 returns owned vehicles only; viewer-merged enumeration is PLANNED. MYR-233 adds the optional P0 `hasActiveRide` flag: Stumpy is parked at a pickup with an open INSTANT ride (accepted/arrived/enroute) so it renders Busy; Lightning is free. The flag is derived read-time from the `uq_go_ride_requests_active_instant_vehicle` index predicate — scheduled rides and `requested` never set it. MYR-286 adds the P1 owner-entered `licensePlate`, shown here in BOTH of its states: Stumpy has one, Lightning's owner has not entered one and carries an EMPTY STRING rather than a missing key (the same always-emitted convention as `color`). Consumers keep the `VIN ····xxxx` fallback for the empty case and must never render an empty plate. MYR-316 adds the P0 nullable `serviceEstimatedEndAt` — the resolved end of the car's current service visit, COALESCE(Tesla `service_data.service_etc`, owner-entered expected-back), emitted ONLY while `status` is `in_service`. Neither row here is in service (`parked` / `charging`), so both carry the honest `null`; a null means NO scheduling bound at all, never 'unknown, block the picker'.",
+    "description": "Happy-path response for GET /api/vehicles — the SDK's vehicle-enumeration entry point (rest-api.md §7.0). Owner-tier projection: every VehicleSummary field is present. The list is deliberately a thin catalog — no GPS, no nav, no climate (those live in /snapshot). v1 returns owned vehicles only; viewer-merged enumeration is PLANNED. MYR-233 adds the optional P0 `hasActiveRide` flag: Stumpy is parked at a pickup with an open INSTANT ride (accepted/arrived/enroute) so it renders Busy; Lightning is free. The flag is derived read-time from the `uq_go_ride_requests_active_instant_vehicle` index predicate — scheduled rides and `requested` never set it. MYR-286 adds the P1 owner-entered `licensePlate`, shown here in BOTH of its states: Stumpy has one, Lightning's owner has not entered one and carries an EMPTY STRING rather than a missing key (the same always-emitted convention as `color`). Consumers keep the `VIN ····xxxx` fallback for the empty case and must never render an empty plate. MYR-316 adds the P0 nullable `serviceEstimatedEndAt` — the resolved end of the car's current service visit, COALESCE(Tesla `service_data.service_etc`, owner-entered expected-back), emitted ONLY while `status` is `in_service`. Neither of the first two rows is in service (`parked` / `charging`), so both carry the honest `null`; a null means NO scheduling bound at all, never 'unknown, block the picker'. MYR-491 adds the P0 nullable `setupState` object, shown here in BOTH of its states. Stumpy and Lightning are set up and streaming, so both carry `null` — which means NO CLAIM, not 'ready': a consumer must never paint a positive 'set up ✓' badge from it. The third row is the MYR-503 scenario verbatim: a car linked minutes ago whose owner has not yet paired the virtual key, so Tesla refused the telemetry config with `missing_key`, `status` is still the write-once `offline` schema default, and every signed command against it will be rejected. That row is exactly the one an owner would otherwise meet as a silent 0%/unavailable card with a dead Lock button — the card renders from `setupState` BEFORE any command is attempted, and `since` is what lets the copy age ('for 4 minutes').",
     "anchoredFRs": ["FR-4.x", "FR-5.4", "NFR-3.21"],
     "scenario": "happy-path",
     "addedBy": "MYR-91"
@@ -20,7 +20,8 @@
       "role": "owner",
       "hasActiveRide": true,
       "licensePlate": "ABC 1234",
-      "serviceEstimatedEndAt": null
+      "serviceEstimatedEndAt": null,
+      "setupState": null
     },
     {
       "vehicleId": "clmno5678901234ghijkl",
@@ -36,7 +37,28 @@
       "role": "owner",
       "hasActiveRide": false,
       "licensePlate": "",
-      "serviceEstimatedEndAt": null
+      "serviceEstimatedEndAt": null,
+      "setupState": null
+    },
+    {
+      "vehicleId": "clsetup491newownercar",
+      "name": "Amruth's X Plaid",
+      "model": "Model X",
+      "year": 2025,
+      "color": "",
+      "vinLast4": "6683",
+      "status": "offline",
+      "chargeLevel": 0,
+      "estimatedRange": 0,
+      "lastUpdated": "2026-08-09T02:10:00Z",
+      "role": "owner",
+      "hasActiveRide": false,
+      "licensePlate": "",
+      "serviceEstimatedEndAt": null,
+      "setupState": {
+        "state": "awaiting_virtual_key",
+        "since": "2026-08-09T02:10:00Z"
+      }
     }
   ]
 }

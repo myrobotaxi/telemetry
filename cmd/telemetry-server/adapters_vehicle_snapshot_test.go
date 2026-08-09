@@ -188,10 +188,25 @@ func fillNonZero(dst reflect.Value, name string) error {
 		}
 		dst.Set(p)
 	case reflect.Struct:
-		if dst.Type() != reflect.TypeOf(time.Time{}) {
-			return fmt.Errorf("no filler for struct type %s", dst.Type())
+		if dst.Type() == reflect.TypeOf(time.Time{}) {
+			dst.Set(reflect.ValueOf(time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)))
+			return nil
 		}
-		dst.Set(reflect.ValueOf(time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)))
+		// Any other struct is a nested value object on the row —
+		// store.SetupSchedule (MYR-491) is the first. RECURSE rather than
+		// naming the type: a nested struct whose fields were left at their
+		// zero values would make the outer field non-zero and the drift gate
+		// pass vacuously, which is the exact failure mode this whole test
+		// exists to prevent, one level down.
+		for i := range dst.NumField() {
+			f := dst.Type().Field(i)
+			if !dst.Field(i).CanSet() {
+				return fmt.Errorf("unexported field %s.%s cannot be filled", dst.Type(), f.Name)
+			}
+			if err := fillNonZero(dst.Field(i), name+"."+f.Name); err != nil {
+				return err
+			}
+		}
 	default:
 		return fmt.Errorf("no filler for kind %s (type %s)", dst.Kind(), dst.Type())
 	}

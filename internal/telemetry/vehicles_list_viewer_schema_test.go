@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
@@ -44,7 +45,7 @@ func TestViewerSummaryRowMatchesVehicleSummarySchema(t *testing.T) {
 	for name, grant := range grants {
 		t.Run(name, func(t *testing.T) {
 			row := sharedCatalogRow(grant.AllowRides)
-			projected := viewerSummaryMap(row.VehicleCatalogRow, grant)
+			projected := viewerSummaryMap(row.VehicleCatalogRow, grant, time.Now())
 
 			// Serialize and re-parse through the schema library's decoder so
 			// what is validated is the BYTES a client receives, not the Go map.
@@ -78,7 +79,7 @@ func TestViewerMaskKeepsEverySchemaRequiredField(t *testing.T) {
 
 	grant := auth.ShareGrant{AllowRides: true}
 	row := sharedCatalogRow(grant.AllowRides)
-	projected := viewerSummaryMap(row.VehicleCatalogRow, grant)
+	projected := viewerSummaryMap(row.VehicleCatalogRow, grant, time.Now())
 
 	for _, field := range required {
 		if _, ok := projected[field]; !ok {

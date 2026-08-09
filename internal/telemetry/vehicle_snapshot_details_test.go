@@ -1,6 +1,9 @@
 package telemetry
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // TestBuildSnapshotResponse_VehicleDetails covers MYR-279: the full vin plus the
 // nullable softwareVersion / trim read-backs are mapped onto the snapshot
@@ -14,7 +17,7 @@ func TestBuildSnapshotResponse_VehicleDetails(t *testing.T) {
 		SoftwareVersion: &ver,
 		Trim:            &trim,
 	}
-	resp := buildSnapshotResponse(row)
+	resp := buildSnapshotResponse(row, time.Now())
 	if resp.VIN != "7SAYGDET7TA613795" {
 		t.Errorf("VIN = %q, want full vin", resp.VIN)
 	}
@@ -41,7 +44,7 @@ func TestBuildSnapshotResponse_VehicleDetails(t *testing.T) {
 // version / trim surfaces as JSON null (nil in the mask map), never a fabricated
 // value.
 func TestBuildSnapshotResponse_NilDetailsAreNull(t *testing.T) {
-	m := buildSnapshotResponse(VehicleSnapshotRow{ID: "veh_1", VIN: "7SAYGDET7TA613795"}).toMaskMap()
+	m := buildSnapshotResponse(VehicleSnapshotRow{ID: "veh_1", VIN: "7SAYGDET7TA613795"}, time.Now()).toMaskMap()
 	if m["softwareVersion"] != nil {
 		t.Errorf("nil softwareVersion should map to nil, got %v", m["softwareVersion"])
 	}
@@ -66,7 +69,7 @@ func TestBuildSnapshotResponse_ClimateMode(t *testing.T) {
 		HvacAutoMode:  &mode,
 		HvacAcEnabled: &acOn,
 	}
-	resp := buildSnapshotResponse(row)
+	resp := buildSnapshotResponse(row, time.Now())
 	if resp.HvacAutoMode == nil || *resp.HvacAutoMode != mode {
 		t.Errorf("HvacAutoMode = %v, want %q", resp.HvacAutoMode, mode)
 	}
@@ -86,7 +89,7 @@ func TestBuildSnapshotResponse_ClimateMode(t *testing.T) {
 // TestBuildSnapshotResponse_NilClimateModeIsNull asserts a never-read climate mode
 // surfaces as JSON null (nil in the mask map), never a fabricated Auto/Cool/Heat.
 func TestBuildSnapshotResponse_NilClimateModeIsNull(t *testing.T) {
-	m := buildSnapshotResponse(VehicleSnapshotRow{ID: "veh_1"}).toMaskMap()
+	m := buildSnapshotResponse(VehicleSnapshotRow{ID: "veh_1"}, time.Now()).toMaskMap()
 	if m["hvacAutoMode"] != nil {
 		t.Errorf("nil hvacAutoMode should map to nil, got %v", m["hvacAutoMode"])
 	}
@@ -107,7 +110,7 @@ func TestBuildSnapshotResponse_SeatVentMedia(t *testing.T) {
 		MediaPlaybackStatus: &media,
 	}
 
-	resp := buildSnapshotResponse(row)
+	resp := buildSnapshotResponse(row, time.Now())
 	if resp.SeatVentEnabled == nil || !*resp.SeatVentEnabled {
 		t.Errorf("SeatVentEnabled = %v, want true", resp.SeatVentEnabled)
 	}
@@ -128,7 +131,7 @@ func TestBuildSnapshotResponse_SeatVentMedia(t *testing.T) {
 // or media status surfaces as JSON null (nil in the mask map) — the honest-unknown
 // contract, never a fabricated false/"Stopped". Matches the MYR-274 siblings.
 func TestBuildSnapshotResponse_NilSeatVentMediaIsNull(t *testing.T) {
-	m := buildSnapshotResponse(VehicleSnapshotRow{ID: "veh_1"}).toMaskMap()
+	m := buildSnapshotResponse(VehicleSnapshotRow{ID: "veh_1"}, time.Now()).toMaskMap()
 	if m["seatVentEnabled"] != nil {
 		t.Errorf("nil seatVentEnabled should map to nil, got %v", m["seatVentEnabled"])
 	}
@@ -159,7 +162,7 @@ func TestBuildSnapshotResponse_MYR320Details(t *testing.T) {
 		FSDVersion:      &fsd,
 	}
 
-	resp := buildSnapshotResponse(row)
+	resp := buildSnapshotResponse(row, time.Now())
 	if resp.TrimLabel == nil || *resp.TrimLabel != label {
 		t.Errorf("TrimLabel = %v, want %q", resp.TrimLabel, label)
 	}
@@ -186,7 +189,7 @@ func TestBuildSnapshotResponse_MYR320Details(t *testing.T) {
 // null is NOT a claim that the car lacks FSD, and the contract tells consumers to
 // OMIT the row entirely rather than render a placeholder.
 func TestBuildSnapshotResponse_NilMYR320DetailsAreNull(t *testing.T) {
-	m := buildSnapshotResponse(VehicleSnapshotRow{ID: "veh_1"}).toMaskMap()
+	m := buildSnapshotResponse(VehicleSnapshotRow{ID: "veh_1"}, time.Now()).toMaskMap()
 	if m["trimLabel"] != nil {
 		t.Errorf("nil trimLabel should map to nil, got %v", m["trimLabel"])
 	}

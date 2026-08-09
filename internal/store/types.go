@@ -163,6 +163,17 @@ type Vehicle struct {
 	// and the reservation sweeper uses the dedicated VehicleRepo.RideShareEnabled
 	// statement instead of a vehicle read at all.
 	RideShareEnabled bool
+
+	// SetupSchedule is this car's go_fleet_config_attempts row (MYR-491), LEFT
+	// JOINed by the snapshot read. RAW STORAGE for the derived wire field
+	// VehicleState.setupState — the precedence-and-gates reading lives in
+	// internal/telemetry, exactly as it does for the ServiceETC pair above.
+	//
+	// POPULATED ONLY BY GetByID, like its side-table neighbours. Unlike
+	// RideShareEnabled the zero value points the SAFE way: Present false means
+	// "no claim", so a Vehicle from GetByVIN or the wide ListByUser simply
+	// carries no setup state rather than a wrong one.
+	SetupSchedule SetupSchedule
 }
 
 // VehicleUpdate holds the subset of vehicle fields that can change from

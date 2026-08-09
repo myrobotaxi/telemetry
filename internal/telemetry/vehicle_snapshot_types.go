@@ -133,6 +133,13 @@ type VehicleSnapshotRow struct {
 	// caller is authorised against one snapshot of the vehicle and gated against
 	// another.
 	RideShareEnabled bool
+
+	// MYR-491 fleet-config setup schedule, LEFT JOINed from the Go-owned
+	// go_fleet_config_attempts table (a SECOND side table on this read, not the
+	// control-state one above). RAW STORAGE: the wire field `setupState` is
+	// DERIVED from it by deriveSetupState together with Status and LastUpdated,
+	// and is never emitted raw — the same discipline as the ServiceETC pair.
+	SetupSchedule VehicleSetupSchedule
 }
 
 // VehicleSnapshotReader returns the snapshot row for a Prisma cuid.
@@ -320,6 +327,26 @@ type vehicleSnapshotResponse struct {
 	// SNAPSHOT-ONLY: owner intent, not telemetry — a WS vehicle_update frame
 	// NEVER carries it, and no Tesla field feeds it.
 	RideShareEnabled bool `json:"rideShareEnabled"`
+
+	// SetupState names the ONE thing still standing between this car and live
+	// telemetry, or is null when there is nothing to say (MYR-491,
+	// contracts v0.24.0).
+	//
+	// A POINTER WITH NO omitempty, so the key is ALWAYS present and "nothing to
+	// finish" is an explicit `null` — the same honest-unknown convention as
+	// serviceEstimatedEndAt. There is deliberately no `ready` member: a client
+	// handed one would badge a car green off a value that really means "no
+	// claim", which is also what a pre-MYR-491 server emits by omitting the key.
+	//
+	// SERVER-DERIVED, exactly once, in deriveSetupState. No client re-derives
+	// it, and both read surfaces call the same function with the same inputs so
+	// the catalog row and the snapshot cannot disagree.
+	//
+	// SNAPSHOT/LIST-ONLY: a WS vehicle_update frame NEVER carries it. Its
+	// inputs change on reconciler passes and owner actions, not on telemetry
+	// frames — and a car in any of these states is by definition not sending
+	// frames to attach it to.
+	SetupState *SetupState `json:"setupState"`
 }
 
 // toMaskMap returns the response as a wire-name-keyed map suitable for
@@ -439,11 +466,34 @@ func addSnapshotMediaFields(m map[string]any, r vehicleSnapshotResponse) {
 	// MYR-342 — the owner's switch, emitted raw (nothing to resolve). Keyed
 	// unconditionally, and permitted for BOTH roles by the mask tables.
 	m["rideShareEnabled"] = r.RideShareEnabled
+	// MYR-491 — already derived by buildSnapshotResponse; this is the emitted
+	// value. Keyed unconditionally (an explicit null when there is no claim) and
+	// permitted for BOTH roles: a rider looking at a shared car needs to read
+	// "setting up" rather than a bare "offline" (MYR-437).
+	//
+	// setupStateWire keeps the nil pointer out of the map as an untyped nil:
+	// a typed (*SetupState)(nil) stored in an `any` is NOT equal to nil, and
+	// downstream mask/JSON handling treats the two differently.
+	m["setupState"] = setupStateWire(r.SetupState)
+}
+
+// setupStateWire normalises the optional setup state for the mask map. A nil
+// *SetupState becomes an untyped nil so the key encodes as JSON `null` and
+// compares equal to nil for any consumer that checks.
+func setupStateWire(s *SetupState) any {
+	if s == nil {
+		return nil
+	}
+	return s
 }
 
 // buildSnapshotResponse maps the store-layer row into the wire shape.
 // Time formatting matches rest-api.md §7.1's RFC 3339 example.
-func buildSnapshotResponse(row VehicleSnapshotRow) vehicleSnapshotResponse {
+//
+// now is passed rather than read here so the MYR-491 setup derivation — whose
+// every rule is a comparison against the clock — is testable without waiting,
+// and so one request cannot straddle two readings of the time.
+func buildSnapshotResponse(row VehicleSnapshotRow, now time.Time) vehicleSnapshotResponse {
 	return vehicleSnapshotResponse{
 		VehicleID:            row.ID,
 		Name:                 row.Name,
@@ -518,5 +568,8 @@ func buildSnapshotResponse(row VehicleSnapshotRow) vehicleSnapshotResponse {
 		// MYR-342: passed straight through — the owner's answer IS the wire
 		// value, with no precedence to apply and no status to gate it on.
 		RideShareEnabled: row.RideShareEnabled,
+		// MYR-491: derived here, so the streaming gate and the expiry window
+		// are applied exactly once per surface (vehicle_setup_state.go).
+		SetupState: deriveSetupState(now, row.Status, row.LastUpdated, row.SetupSchedule),
 	}
 }

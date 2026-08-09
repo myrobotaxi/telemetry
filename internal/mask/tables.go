@@ -255,6 +255,19 @@ var vehicleStateOwnerFields = []string{
 	// filling in a pickup and a dropoff, which is the feature failing.
 	// MYR-435 kept it viewer-visible for exactly that reason.
 	"rideShareEnabled",
+	// MYR-491 — the setup state of a car that is not yet streaming. P0 both
+	// roles: operational state about the CAR, the same tier as `status`, which
+	// it exists to qualify ("offline" vs "offline BECAUSE the virtual key is
+	// not paired yet"). It carries no VIN, no coordinate, no token and no user
+	// content — an enum member plus a timestamp — so it is log-safe in full.
+	//
+	// Viewer-visible for the same reason as `rideShareEnabled`, and the
+	// argument is if anything stronger: MYR-437's rider-side picker renders a
+	// never-streamed shared car as permanently "offline", and the honest
+	// answer — "this car is still being set up" — is precisely what the viewer
+	// needs before trying to book it. Withholding it would leave the picker
+	// with the wrong word for the only state it gets wrong today.
+	"setupState",
 	// Odometer / FSD. Both roles — neither media, cabin, nor a control.
 	"odometerMiles",
 	"fsdMilesSinceReset",
@@ -362,6 +375,11 @@ var vehicleStateViewerFields = []string{
 	// composing a whole trip request.
 	"serviceEstimatedEndAt",
 	"rideShareEnabled",
+	// MYR-491 setup state — operational state about the car, listed EXPLICITLY
+	// (this arm subtracts nothing by derivation any more) because a viewer
+	// looking at a shared car that has never streamed must read "still being
+	// set up" rather than a bare "offline" they can do nothing with.
+	"setupState",
 	// Odometer / FSD lifetime counters. Kept: these are neither media, cabin,
 	// nor a control tile, so MYR-435 does not reach them, and `odometerMiles` /
 	// `fsdMilesSinceReset` are both `required` in vehicle-state.schema.json.
@@ -541,6 +559,13 @@ var vehicleSummaryOwnerFields = []string{
 	// after composing a whole request. The viewer list below inherits it (that
 	// list subtracts nothing).
 	"rideShareEnabled",
+	// MYR-491 — the setup state of a car that is not yet streaming, the same
+	// object and the same derivation as VehicleState.setupState (§7.1). P0, and
+	// NOT owner-private: this is the field the rider-side picker needs in order
+	// to stop calling a never-streamed shared car "offline" (MYR-437), and the
+	// picker reads catalog rows, not snapshots. The viewer list below inherits
+	// it (that list subtracts nothing).
+	"setupState",
 }
 
 // vehicleSummaryViewerFields is the owner list PLUS `sharePermission`, with

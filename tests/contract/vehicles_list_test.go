@@ -150,6 +150,24 @@ func TestContract_GETVehicles(t *testing.T) {
 					t.Errorf("rideShareEnabled = %v, want true (no control-state row = enabled)", share)
 				}
 
+				// MYR-491: `setupState` is OPTIONAL in the schema
+				// (absence = a pre-v0.24.0 server, which MUST be read
+				// exactly like null), but THIS server always emits the
+				// key. The seeded vehicle has no fleet-config schedule
+				// row — the ordinary state — so the honest answer is an
+				// explicit null: NO CLAIM, which a consumer must not
+				// render as "ready". Asserting null and not merely
+				// presence is the guard that matters: a derivation that
+				// fabricated a state here would put a "Finish setup"
+				// card on every healthy car in the fleet.
+				setup, ok := row["setupState"]
+				if !ok {
+					t.Errorf("missing `setupState` in items[0]; row keys: %v", keysOf(row))
+				} else if setup != nil {
+					t.Errorf("setupState = %v, want null (no fleet-config schedule row "+
+						"means no claim)", setup)
+				}
+
 				// Cross-check against the canonical schema so any
 				// future field rename / type change surfaces here.
 				// The file's root is the LIST ENVELOPE (VehicleListResponse);

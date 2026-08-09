@@ -209,6 +209,11 @@ func toSharedVehicleRows(rows []store.SharedVehicleSummary) []telemetry.SharedVe
 				// rider learns the shared car is not taking requests from the
 				// catalog, not from a 409.
 				RideShareEnabled: row.RideShareEnabled,
+				// MYR-491: viewers see the setup state too, and for the sharper
+				// version of the same argument — MYR-437's picker must show a
+				// shared car as "setting up" rather than silently omitting it or
+				// badging a never-streamed car "offline".
+				SetupSchedule: setupScheduleRow(row.SetupSchedule),
 			},
 			AllowRides: row.AllowRides,
 		})

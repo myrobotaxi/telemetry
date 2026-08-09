@@ -224,9 +224,30 @@ func (a *vehicleListerAdapter) ListByUser(ctx context.Context, userID string) ([
 			ServiceExpectedEndAt: v.ServiceExpectedEndAt,
 			// MYR-342: emitted raw — no precedence, no status gate.
 			RideShareEnabled: v.RideShareEnabled,
+			// MYR-491: raw schedule; the handler derives the wire state.
+			SetupSchedule: setupScheduleRow(v.SetupSchedule),
 		})
 	}
 	return out, nil
+}
+
+// setupScheduleRow maps the store's fleet-config schedule onto the telemetry
+// package's copy of the same shape (MYR-491).
+//
+// It exists in ONE place for the same reason the derivation does: three
+// adapters — the owner catalog, the shared catalog, and the snapshot — feed the
+// same rule, and a field silently dropped in one of them would show a different
+// setup state on the list than on the detail sheet for the same car. The two
+// structs are deliberately separate types (internal/telemetry must not import
+// internal/store), so nothing but this function keeps them in step.
+func setupScheduleRow(s store.SetupSchedule) telemetry.VehicleSetupSchedule {
+	return telemetry.VehicleSetupSchedule{
+		Present:         s.Present,
+		LastOutcome:     s.LastOutcome,
+		LastAttemptAt:   s.LastAttemptAt,
+		SignedCommandAt: s.SignedCommandAt,
+		ForcedRepushAt:  s.ForcedRepushAt,
+	}
 }
 
 // driveListerAdapter adapts store.DriveRepo.ListByVehicleID to the

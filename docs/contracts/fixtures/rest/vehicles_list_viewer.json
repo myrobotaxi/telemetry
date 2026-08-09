@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "description": "Forward-looking viewer-tier response for GET /api/vehicles. The viewer projection per rest-api.md §5.2.0 subtracts NOTHING from the owner field set and adds `sharePermission`. MYR-184 removed the previous `name` subtraction: the rider UI renders a shared car as '{Owner}'s {Vehicle}', and `name` is in the `required` list of vehicle-summary.schema.json, so masking it made every viewer row invalid against its own shape. Any field a future viewer mask removes MUST be optional in that schema. The viewer merge is LIVE as of MYR-184 (a rider who has redeemed an invite code sees these rows appended to their own cars), so this fixture is the canonical viewer response, not a forward-looking one. The MYR-233 `hasActiveRide` flag is in BOTH role allow-lists — it is derived operational state (P0, same tier as `status`), not owner-curated data. The MYR-286 `licensePlate` is in BOTH allow-lists too — a deliberate product decision, because the entire purpose of the plate is that a rider can identify the correct car at pickup. Contrast the full `vin`, which the catalog never carries at all (`vinLast4` only) and which the /snapshot gates to owners. The MYR-316 `serviceEstimatedEndAt` is in BOTH allow-lists too — P0 operational timing, same tier as `status`, and a rider needs it for exactly the reason the owner does: it FLOORS the scheduling picker. This row is `parked`, so the value is `null` (no bound; scheduling stays fully open).",
+    "description": "Forward-looking viewer-tier response for GET /api/vehicles. The viewer projection per rest-api.md §5.2.0 subtracts NOTHING from the owner field set and adds `sharePermission`. MYR-184 removed the previous `name` subtraction: the rider UI renders a shared car as '{Owner}'s {Vehicle}', and `name` is in the `required` list of vehicle-summary.schema.json, so masking it made every viewer row invalid against its own shape. Any field a future viewer mask removes MUST be optional in that schema. The viewer merge is LIVE as of MYR-184 (a rider who has redeemed an invite code sees these rows appended to their own cars), so this fixture is the canonical viewer response, not a forward-looking one. The MYR-233 `hasActiveRide` flag is in BOTH role allow-lists — it is derived operational state (P0, same tier as `status`), not owner-curated data. The MYR-286 `licensePlate` is in BOTH allow-lists too — a deliberate product decision, because the entire purpose of the plate is that a rider can identify the correct car at pickup. Contrast the full `vin`, which the catalog never carries at all (`vinLast4` only) and which the /snapshot gates to owners. The MYR-316 `serviceEstimatedEndAt` is in BOTH allow-lists too — P0 operational timing, same tier as `status`, and a rider needs it for exactly the reason the owner does: it FLOORS the scheduling picker. The first row is `parked`, so the value is `null` (no bound; scheduling stays fully open). The MYR-491 `setupState` is in BOTH allow-lists as well, and the SECOND row is why: a car whose owner has linked it but not yet paired the virtual key has never streamed, so `status` sits at the write-once `offline` schema default forever — and MYR-437 is the report that a rider's picker therefore calls a perfectly fine shared car 'offline', permanently, with no explanation and no way to book it. `setupState` is what lets the picker say 'still being set up' and grey the row with a reason instead. The viewer is the party the value is ABOUT, exactly as with `rideShareEnabled`. A `null` means NO CLAIM (the first row), never 'ready'.",
     "anchoredFRs": ["FR-5.4"],
     "scenario": "happy-path",
     "addedBy": "MYR-91"
@@ -21,7 +21,29 @@
       "hasActiveRide": false,
       "licensePlate": "ABC 1234",
       "serviceEstimatedEndAt": null,
+      "setupState": null,
       "sharePermission": "live_history"
+    },
+    {
+      "vehicleId": "clsetup491sharedcar00",
+      "name": "Sam's Model Y",
+      "model": "Model Y",
+      "year": 2025,
+      "color": "",
+      "vinLast4": "6683",
+      "status": "offline",
+      "chargeLevel": 0,
+      "estimatedRange": 0,
+      "lastUpdated": "2026-08-09T02:10:00Z",
+      "role": "viewer",
+      "hasActiveRide": false,
+      "licensePlate": "",
+      "serviceEstimatedEndAt": null,
+      "setupState": {
+        "state": "awaiting_virtual_key",
+        "since": "2026-08-09T02:10:00Z"
+      },
+      "sharePermission": "rides"
     }
   ]
 }

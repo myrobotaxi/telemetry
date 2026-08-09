@@ -344,7 +344,32 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	CREATE UNIQUE INDEX uq_go_ride_requests_active_instant_vehicle
 		ON go_ride_requests (vehicle_id)
 		WHERE scheduled_for IS NULL
-		  AND status IN ('accepted', 'enroute', 'arrived');`
+		  AND status IN ('accepted', 'enroute', 'arrived');
+
+	-- go_fleet_config_attempts: the Go-owned fleet-config retry schedule
+	-- (migrations 0031 + 0036, MYR-448 / MYR-489). MYR-491 LEFT JOINs it into
+	-- BOTH the snapshot read and both catalog reads to derive setupState, so
+	-- the harness MUST provision it or /snapshot and GET /api/vehicles hit a
+	-- missing relation and 500 — exactly how this table announced itself when
+	-- the join first landed.
+	--
+	-- Full shape rather than the reader's four columns. The two paths that
+	-- write here in production (RecordFleetConfigAttempt, the link-time seed)
+	-- supply attempt_count and next_attempt_at, and a harness missing them
+	-- would refuse any seed a future setup-state test wants to plant.
+	CREATE TABLE go_fleet_config_attempts (
+		"vehicle_id"        TEXT PRIMARY KEY,
+		"attempt_count"     INTEGER     NOT NULL DEFAULT 0,
+		"last_attempt_at"   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		"next_attempt_at"   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		"last_outcome"      TEXT        NOT NULL DEFAULT '',
+		-- Nullable with NO default, exactly as migration 0036 declares them:
+		-- NULL means "never observed", which is materially different from
+		-- "observed at row creation" and is what the derivation reads as the
+		-- absence of a pairing epoch.
+		"signed_command_at" TIMESTAMPTZ,
+		"forced_repush_at"  TIMESTAMPTZ
+	);`
 	if _, err := pool.Exec(ctx, schema); err != nil {
 		return fmt.Errorf("create schema: %w", err)
 	}
@@ -486,9 +511,29 @@ func (a *contractVehicleLister) ListByUser(ctx context.Context, userID string) (
 			// false reads as PAUSED, so leaving it out would make the harness
 			// assert against a withdrawn vehicle the store never produced.
 			RideShareEnabled: v.RideShareEnabled,
+			// MYR-491: raw schedule, mirroring cmd/telemetry-server's
+			// setupScheduleRow. The handler derives the wire state from it
+			// together with Status and LastUpdated above, so all three must
+			// travel together or the harness exercises a projection production
+			// does not have.
+			SetupSchedule: contractSetupSchedule(v.SetupSchedule),
 		})
 	}
 	return out, nil
+}
+
+// contractSetupSchedule mirrors cmd/telemetry-server's setupScheduleRow: the
+// store and telemetry copies of this shape are deliberately separate types (the
+// telemetry package must not import the store), so every adapter — production
+// and harness alike — needs the same five-field copy.
+func contractSetupSchedule(s store.SetupSchedule) telemetry.VehicleSetupSchedule {
+	return telemetry.VehicleSetupSchedule{
+		Present:         s.Present,
+		LastOutcome:     s.LastOutcome,
+		LastAttemptAt:   s.LastAttemptAt,
+		SignedCommandAt: s.SignedCommandAt,
+		ForcedRepushAt:  s.ForcedRepushAt,
+	}
 }
 
 type contractVehicleSnapshotReader struct{ repo *store.VehicleRepo }
@@ -535,6 +580,8 @@ func (a *contractVehicleSnapshotReader) GetByID(ctx context.Context, vehicleID s
 		// MYR-342: same trap as the catalog projection above — an omitted copy
 		// is not a missing field on the wire, it is a `false`, i.e. PAUSED.
 		RideShareEnabled: v.RideShareEnabled,
+		// MYR-491: raw schedule; the handler derives setupState from it.
+		SetupSchedule: contractSetupSchedule(v.SetupSchedule),
 	}, nil
 }
 
@@ -726,6 +773,29 @@ func (h *seedHelpers) seedVehicle(ctx context.Context, t *testing.T, v vehicleSe
 	)
 	if err != nil {
 		t.Fatalf("seedVehicle(%s): %v", v.ID, err)
+	}
+}
+
+// seedFleetConfigAttempt plants one go_fleet_config_attempts row — the state
+// behind the MYR-491 setupState derivation.
+//
+// Written as a raw INSERT rather than through the store writers on purpose:
+// every writer supplies its own attempt_count and next_attempt_at, and a
+// contract test wants to state the exact schedule shape it is asserting the
+// WIRE projection of, not inherit whichever backoff the caller happened to
+// compute. attempt_count and next_attempt_at take their schema defaults because
+// the derivation deliberately reads neither.
+func (h *seedHelpers) seedFleetConfigAttempt(
+	ctx context.Context, t *testing.T,
+	vehicleID, outcome string, lastAttemptAt time.Time,
+) {
+	t.Helper()
+	_, err := h.pool.Exec(ctx, `
+		INSERT INTO go_fleet_config_attempts (vehicle_id, last_outcome, last_attempt_at)
+		VALUES ($1, $2, $3)`,
+		vehicleID, outcome, lastAttemptAt)
+	if err != nil {
+		t.Fatalf("seedFleetConfigAttempt(%s): %v", vehicleID, err)
 	}
 }
 

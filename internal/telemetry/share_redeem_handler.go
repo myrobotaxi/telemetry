@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/auth"
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
@@ -237,9 +238,11 @@ const shareCodeWireLength = 6
 // field more here than they will see in their catalog a second later.
 func buildSharedSummaries(rows []SharedVehicleRow) []map[string]any {
 	out := make([]map[string]any, 0, len(rows))
+	// One clock reading for the whole response — see viewerSummaryMap.
+	now := time.Now()
 	for i := range rows {
 		row := &rows[i]
-		out = append(out, viewerSummaryMap(row.VehicleCatalogRow, auth.ShareGrant{AllowRides: row.AllowRides}))
+		out = append(out, viewerSummaryMap(row.VehicleCatalogRow, auth.ShareGrant{AllowRides: row.AllowRides}, now))
 	}
 	return out
 }
