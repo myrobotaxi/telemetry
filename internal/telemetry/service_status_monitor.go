@@ -101,6 +101,9 @@ type ServiceStatusMonitor struct {
 	// service_status_vehicle_details.go.
 	releaseNotes ReleaseNotesReader
 	vehicleColor VehicleColorWriter
+	// vehicleIdentity is the MYR-507 VIN-derived model / model-year backfill
+	// (service_status_vehicle_identity.go). Nil leaves both columns alone.
+	vehicleIdentity VehicleIdentityWriter
 
 	// MYR-320 periodic in-service re-poll. Set together by
 	// WithPeriodicInServicePoll; nil lister disables the pass entirely. See
