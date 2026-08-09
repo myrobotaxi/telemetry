@@ -70,6 +70,14 @@ const (
 	// whose process died before it recorded an outcome — a crash/SIGTERM in
 	// the claim→record window. Set by the startup reconciler.
 	codeDispatchInterrupted = "dispatch_interrupted"
+	// codeNavSuperseded marks a leg that was NOT pushed (or was stopped
+	// mid-push) because a LATER leg of the same ride had already taken the
+	// car's navigation (MYR-526). Recorded with outcome `skipped`, not
+	// `failed`: nothing went wrong — the ride simply moved on, and pushing the
+	// older target would have dragged the dash backwards. It is a distinct code
+	// so this is legible in the row and the audit line instead of masquerading
+	// as a cancellation.
+	codeNavSuperseded = "nav_superseded"
 )
 
 // Permanent (non-retryable) resolution-failure sentinels. The cmd/ adapters
