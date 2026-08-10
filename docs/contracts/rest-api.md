@@ -4849,9 +4849,11 @@ Owner-authenticated "finish setting this car up now" — the action half of the
 **Why this endpoint has to exist.** After [MYR-489](https://linear.app/myrobotaxi/issue/MYR-489)
 the server can heal a car that was linked but never streamed, and after
 [MYR-491](https://linear.app/myrobotaxi/issue/MYR-491) it can say on the wire
-what a car is waiting for. What it could not do was **start**. The heal fires on
-a background reconciler pass (up to 45 minutes) or on a *signed vehicle command
-that applied* — so in practice a new owner's onboarding finished when somebody
+what a car is waiting for. What it could not do was **start**. The heal fired on
+a background reconciler pass — up to 45 minutes at the time this endpoint was
+written, and since [MYR-529](https://linear.app/myrobotaxi/issue/MYR-529) a few
+minutes for a car whose key is proven paired — or on a *signed vehicle command
+that applied*, so in practice a new owner's onboarding finished when somebody
 told them to tap **Lock**. A lock tap is not a setup step; it was a trigger
 wearing a control's clothes, and it is exactly where a live beta onboarding
 stalled. The client, meanwhile, knows the precise moment: it handed the owner
