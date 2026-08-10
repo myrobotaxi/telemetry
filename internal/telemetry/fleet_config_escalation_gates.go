@@ -29,14 +29,15 @@ import (
 //     verbatim with the MYR-505 on-demand path (fleet_config_force_now.go) so
 //     the two entry points cannot ration the same car differently.
 //
-// INSIDE A HOT PAIRING EPOCH GATE 2 IS RESTATED, NOT REMOVED (MYR-529). Gate 2
-// asks "has this car had long enough to connect on its own?", and it answered
-// that question in units of the steady-state backoff — fifteen minutes — which
-// is why Joey Verrone's car, paired and silent, was still waiting when its owner
-// gave up on it. While the epoch is fresh the same question is asked in the hot
-// ladder's units instead: hotForceMinAttempts examinations at +1 and +3 minutes.
-// Gates 1 and 3 are untouched, so the force still requires a REPEAT observation
-// and still costs exactly one spend per epoch.
+// INSIDE A HOT PAIRING EPOCH GATE 2 GAINS A SECOND WAY TO BE SATISFIED, and
+// loses nothing (MYR-529). Gate 2 asks "has this car had long enough to connect
+// on its own?", and it could only answer in units of the steady-state backoff —
+// fifteen minutes — which is why Joey Verrone's car, paired and silent, was
+// still waiting when its owner gave up on it. While the epoch is fresh the same
+// question can also be answered in the hot ladder's units. Gates 1 and 3 are
+// untouched, so the force still requires a REPEAT observation and still costs
+// exactly one spend per epoch; the net effect is that it lands at about three
+// minutes past pairing instead of never.
 func (r *FleetConfigReconciler) escalationBlocker(c FleetConfigCandidate) (string, bool) {
 	if c.LastOutcome != outcomeSyncedQuiet {
 		return "first synced-but-quiet observation; giving the car a cycle to connect", false
@@ -57,16 +58,17 @@ func (r *FleetConfigReconciler) escalationBlocker(c FleetConfigCandidate) (strin
 // original answer is a wall-clock one — SyncedQuietGrace since the observation
 // — and it stays exactly as it was, which is what keeps Nabil's car (synced,
 // silent for two days, last examined eight hours ago) escalating the instant a
-// signed command proves its key. The problem it could not solve is a car
-// examined SECONDS ago, because a fresh pairing epoch resets `attempt_count`
-// and re-stamps `last_attempt_at`, so a car one minute past pairing always
-// looks like it has just been looked at — which is precisely how Joey
+// signed command proves its key. What it cannot answer is a car examined
+// SECONDS ago: opening a pairing epoch triggers an immediate examination, and
+// that examination stamps `last_attempt_at`, so a car one minute past pairing
+// always looks like it has just been looked at — which is precisely how Joey
 // Verrone's row spent fifteen minutes doing nothing while he drove.
 //
 // So inside a hot epoch there is a SECOND way to satisfy the same question:
-// hotForceMinAttempts examinations, which the hot ladder delivers at +1 and +3
-// minutes. It is an OR, never a replacement — a hot car whose wall-clock grace
-// has already elapsed is not made to wait for the ladder.
+// hotForceMinAttempts examinations already recorded in this epoch. With the
+// ladder that is the epoch-instant pass plus the one at +1 minute, so the gate
+// opens on the pass at +3. It is an OR, never a replacement — a hot car whose
+// wall-clock grace has already elapsed is not made to wait for the ladder.
 func (r *FleetConfigReconciler) quietGraceElapsed(c FleetConfigCandidate) (string, bool) {
 	if c.LastAttemptAt.IsZero() || r.now().Sub(c.LastAttemptAt) >= r.cfg.SyncedQuietGrace {
 		return "", true
