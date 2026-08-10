@@ -101,21 +101,22 @@ func TestPairingSignalNoOps(t *testing.T) {
 			pairing: &fakePairingResetter{found: false},
 		},
 		{
-			// MYR-517: the store now CREATES the schedule row rather than
-			// no-opping, so the pairing epoch is recorded — but a car we have
-			// never recorded a failed attempt against is not evidence of a
-			// broken car, and it is overwhelmingly likely to be streaming.
-			// Turning every first command from every healthy car into a Tesla
-			// round-trip (and an attempt_count climbing toward the escalation
-			// MYR-489 rations so carefully) would be worse than the bug this
-			// fixes. The periodic pass owns that question.
-			name: "a freshly created schedule row records the epoch and calls nobody",
+			// MYR-517 declined to examine a freshly CREATED schedule row at
+			// all, because a car we have never recorded a failure against is
+			// overwhelmingly likely to be streaming and a Tesla round-trip per
+			// healthy car would have been worse than the bug. MYR-529 keeps the
+			// outcome and moves the reason: the car is examined, discovers from
+			// its own row that it is streaming, and calls nobody. The guarantee
+			// under test is unchanged — a healthy car costs zero Tesla traffic.
+			name: "a streaming car proves itself from its own row and calls nobody",
 			pairing: &fakePairingResetter{
 				found: true,
 				candidate: FleetConfigCandidate{
 					VehicleID:       "veh-1",
 					VIN:             reconTestVIN,
 					UserID:          "user-1",
+					Status:          "parked",
+					LastUpdated:     forceNow.Add(-20 * time.Second),
 					SignedCommandAt: forceNow,
 					ScheduleCreated: true,
 				},

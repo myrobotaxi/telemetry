@@ -74,7 +74,7 @@ func derefTime(t *time.Time) time.Time {
 // single round-trip.
 const queryResetFleetConfigScheduleOnPairing = `
 WITH veh AS (
-    SELECT "id", "vin", "userId", "lastUpdated"
+    SELECT "id", "vin", "userId", "lastUpdated", "status"
     FROM "Vehicle"
     WHERE "vin" = $1
 ), ups AS (
@@ -91,7 +91,7 @@ WITH veh AS (
     RETURNING vehicle_id, last_outcome, last_attempt_at, forced_repush_at,
               (xmax = 0) AS created
 )
-SELECT veh."id", veh."vin", veh."userId", veh."lastUpdated",
+SELECT veh."id", veh."vin", veh."userId", veh."lastUpdated", veh."status",
        ups.last_outcome, ups.last_attempt_at, ups.forced_repush_at, ups.created
 FROM ups JOIN veh ON veh."id" = ups.vehicle_id`
 
@@ -124,7 +124,7 @@ func (r *VehicleRepo) ResetFleetConfigScheduleOnPairing(
 
 	var c FleetConfigCandidate
 	var lastAttemptAt, forcedRepushAt *time.Time
-	err := row.Scan(&c.VehicleID, &c.VIN, &c.UserID, &c.LastUpdated,
+	err := row.Scan(&c.VehicleID, &c.VIN, &c.UserID, &c.LastUpdated, &c.Status,
 		&c.LastOutcome, &lastAttemptAt, &forcedRepushAt, &c.ScheduleCreated)
 	if errors.Is(err, pgx.ErrNoRows) {
 		r.metrics.ObserveQueryDuration("vehicle.reset_fleet_config_on_pairing", time.Since(start).Seconds())

@@ -41,6 +41,18 @@ const pairingSignalBuffer = 32
 // clock the once-per-epoch escalation budget is measured against.
 const pairingResetDebounce = 10 * time.Minute
 
+// pairingExamDedupe is the minimum gap between two IMMEDIATE examinations of
+// the same vehicle, and it is what keeps MYR-529's widening of the trigger
+// surface from multiplying Tesla traffic.
+//
+// Three doors now hand the reconciler the same fact — the signed-command
+// observer, §7.23's `fleet_status` paired answer, and a link-time push that
+// APPLIED — and an owner finishing setup can plausibly trip all three inside a
+// few seconds. The reset itself is already debounced at ten minutes, but the
+// reset is not the expensive half; the examination is. One per minute per
+// vehicle, evaluated on the loop goroutine so it needs no lock.
+const pairingExamDedupe = time.Minute
+
 // FleetConfigPairingResetter opens a new pairing epoch for a VIN: it clears the
 // vehicle's backoff, stamps the epoch, and returns the candidate so the caller
 // can reconcile it at once. Satisfied by *store.VehicleRepo via a cmd/ adapter.
@@ -70,7 +82,40 @@ func (r *FleetConfigReconciler) SignedCommandApplied(vin string) {
 	}
 }
 
-// handlePairingSignal reacts to one applied signed command.
+// PairingEvidence is the ONE entry point every door uses to tell the reconciler
+// that a vehicle's virtual key is proven paired (MYR-529).
+//
+// SignedCommandApplied is its original name and remains the
+// commands.SignedCommandObserver implementation; this alias exists so the
+// §7.23 completion sequence and the link-time provisioning hook can say what
+// they actually observed — Tesla's `fleet_status` answer, and a config push
+// that APPLIED — without either of them pretending to be a signed command.
+// Same inbox, same debounce, same dedupe: N signals for one car in one minute
+// produce exactly one examination.
+func (r *FleetConfigReconciler) PairingEvidence(vin string) { r.SignedCommandApplied(vin) }
+
+// recentlyExamined reports whether this VIN has had an immediate examination
+// inside pairingExamDedupe, and records the attempt when it has not.
+//
+// Called only from handlePairingSignal, which runs on the loop goroutine, so
+// the map is single-threaded by construction. Pruned on every call, which keeps
+// it bounded by the number of DISTINCT vehicles signalling within one window
+// rather than by uptime.
+func (r *FleetConfigReconciler) recentlyExamined(vin string) bool {
+	now := r.now()
+	for k, at := range r.examined {
+		if now.Sub(at) >= pairingExamDedupe {
+			delete(r.examined, k)
+		}
+	}
+	if at, ok := r.examined[vin]; ok && now.Sub(at) < pairingExamDedupe {
+		return true
+	}
+	r.examined[vin] = now
+	return false
+}
+
+// handlePairingSignal reacts to one piece of pairing evidence.
 //
 // RACE NOTE. This runs on the reconcile loop's own goroutine, in the same
 // select as the periodic tick, so it can never overlap a pass. A command
@@ -79,6 +124,12 @@ func (r *FleetConfigReconciler) SignedCommandApplied(vin string) {
 // that pass just wrote. That ordering is why the reset is a single conditional
 // UPDATE rather than a read-modify-write.
 func (r *FleetConfigReconciler) handlePairingSignal(ctx context.Context, vin string) {
+	if r.recentlyExamined(vin) {
+		r.logger.Debug("fleet-config reconcile: pairing signal deduped (this vehicle was just examined)",
+			slog.String("vin", redactVIN(vin)))
+		return
+	}
+
 	now := r.now()
 	c, found, err := r.deps.Pairing.ResetFleetConfigScheduleOnPairing(
 		ctx, vin, now, now.Add(-pairingResetDebounce))
@@ -98,32 +149,27 @@ func (r *FleetConfigReconciler) handlePairingSignal(ctx context.Context, vin str
 		return
 	}
 
-	if c.ScheduleCreated {
-		// THE MYR-517 ARM. There was no schedule row, so the epoch is now
-		// RECORDED — which is the durable half of what MYR-489 wanted and what
-		// Spencer White's onboarding lost — but a car we have never recorded a
-		// single failed attempt against is not evidence of a car that is broken,
-		// and it is overwhelmingly likely to be one that is simply streaming.
-		// Turning every first command from every healthy car into an immediate
-		// Tesla config read (and an attempt_count that climbs toward the
-		// escalation the reconciler rations so carefully) would be a worse bug
-		// than the one this fixes. The periodic pass owns the question of whether
-		// this car is actually quiet; it will pick the row up on the ordinary
-		// staleness rule, now with a pairing epoch already in hand.
-		r.logger.Info("fleet-config reconcile: virtual key proven paired by applied signed command — pairing epoch recorded",
-			slog.String("event", "fleet_config_pairing_epoch_seeded"),
-			slog.String("vehicle_id", c.VehicleID),
-			slog.String("vin", redactVIN(vin)))
-		return
-	}
-
 	// THE HEADLINE FIX FOR HOLE 2. The backoff this car accumulated was earned
 	// entirely by attempts made before the key existed; the evidence that it
 	// exists now invalidates every one of them.
-	r.logger.Info("fleet-config reconcile: virtual key proven paired by applied signed command — backoff reset",
+	//
+	// THE MYR-517 ARM USED TO RETURN HERE, and MYR-529 lets it fall through.
+	// Its objection was sound at the time: a car we have never recorded a
+	// failed attempt against is overwhelmingly likely to be simply streaming,
+	// and turning every first command from every healthy car into a Tesla
+	// config read would have been a worse bug than the one it fixed. What has
+	// changed is that "is this car streaming?" is now answered for FREE, from
+	// the very row this reset just returned — `status` plus `lastUpdated`, no
+	// upstream call — so the healthy majority exits reconcileOne at zero cost
+	// and the objection no longer applies. What is left is the case MYR-517
+	// wrote the seed FOR: a car that is not streaming, whose key is proven
+	// paired, and which used to wait out the staleness rule before anyone
+	// looked at it. Those get looked at now.
+	r.logger.Info("fleet-config reconcile: virtual key proven paired — backoff reset, examining now",
 		slog.String("event", "fleet_config_pairing_detected"),
 		slog.String("vehicle_id", c.VehicleID),
 		slog.String("vin", redactVIN(vin)),
+		slog.Bool("schedule_created", c.ScheduleCreated),
 		slog.String("previous_outcome", c.LastOutcome))
 
 	var out ReconcileOutcome
@@ -133,6 +179,7 @@ func (r *FleetConfigReconciler) handlePairingSignal(ctx context.Context, vin str
 		slog.String("event", "fleet_config_pairing_reconcile"),
 		slog.String("vehicle_id", c.VehicleID),
 		slog.Int("repaired", out.Repaired),
+		slog.Int("already_streaming", out.AlreadyStreaming),
 		slog.Int("already_synced", out.AlreadySynced),
 		slog.Int("forced_repushes", out.ForcedRepushes),
 		slog.Int("awaiting_virtual_key", out.AwaitingKey))

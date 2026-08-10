@@ -39,7 +39,7 @@ func setupVehicleReaddEndpoint(deps httpRouteDeps) {
 	var provisioner telemetry.VehicleReaddProvisioner
 	if deps.encryptor != nil {
 		prov := store.NewOwnerProvisioner(deps.pool, deps.encryptor, logger)
-		hook := buildOwnerStreamHook(deps.cfg, prov, logger)
+		hook := buildOwnerStreamHook(deps.cfg, prov, deps.fleetConfigReconciler, logger)
 		resolver := newTeslaTokenResolver(deps.cfg, deps.accountRepo, logger)
 		provisioner = &readdProvisionerAdapter{tokens: resolver, hook: hook, logger: logger}
 	}

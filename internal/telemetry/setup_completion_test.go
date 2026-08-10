@@ -106,6 +106,9 @@ type fakeRepusher struct {
 	applied bool
 	calls   int
 	got     []FleetConfigCandidate
+	// onPush runs inside the push, so a test can observe what had and had not
+	// happened yet at that instant (MYR-529 ordering).
+	onPush func()
 }
 
 func (f *fakeRepusher) ForceConfigRepushNow(_ context.Context, c FleetConfigCandidate, _ string) bool {
@@ -113,6 +116,9 @@ func (f *fakeRepusher) ForceConfigRepushNow(_ context.Context, c FleetConfigCand
 	defer f.mu.Unlock()
 	f.calls++
 	f.got = append(f.got, c)
+	if f.onPush != nil {
+		f.onPush()
+	}
 	return f.applied
 }
 

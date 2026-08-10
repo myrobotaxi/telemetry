@@ -110,9 +110,9 @@ type fleetConfigCandidateAdapter struct {
 }
 
 func (a *fleetConfigCandidateAdapter) ListFleetConfigCandidates(
-	ctx context.Context, cutoff, now time.Time, limit int,
+	ctx context.Context, cutoff, now, hotSince time.Time, limit int,
 ) ([]telemetry.FleetConfigCandidate, error) {
-	rows, err := a.repo.ListFleetConfigCandidates(ctx, cutoff, now, limit)
+	rows, err := a.repo.ListFleetConfigCandidates(ctx, cutoff, now, hotSince, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list fleet-config candidates: %w", err)
 	}
@@ -145,6 +145,7 @@ func toTelemetryFleetConfigCandidate(r *store.FleetConfigCandidate) telemetry.Fl
 		VIN:             r.VIN,
 		UserID:          r.UserID,
 		LastUpdated:     r.LastUpdated,
+		Status:          r.Status,
 		AttemptCount:    r.AttemptCount,
 		LastOutcome:     r.LastOutcome,
 		LastAttemptAt:   r.LastAttemptAt,

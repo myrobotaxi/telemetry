@@ -324,7 +324,7 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 
 	setupFleetConfigEndpoint(deps.cfg, deps.srv, deps.authenticator, deps.vinCache, deps.accountRepo, deps.vehicleRepo, deps.logger)
 
-	setupTeslaLinkEndpoints(deps.cfg, deps.srv, deps.authenticator, deps.pool, deps.encryptor, deps.logger)
+	setupTeslaLinkEndpoints(deps.cfg, deps.srv, deps.authenticator, deps.pool, deps.encryptor, deps.fleetConfigReconciler, deps.logger)
 
 	// Per-feature endpoint groups, each in its own wiring_*.go.
 	setupVehicleTeardownEndpoint(deps)

@@ -61,7 +61,7 @@ func TestVehicleRepo_ListFleetConfigCandidates(t *testing.T) {
 	cutoff := time.Now().Add(-30 * time.Minute)
 
 	t.Run("names quiet cars and nothing else", func(t *testing.T) {
-		rows, err := repo.ListFleetConfigCandidates(ctx, cutoff, time.Now(), 100)
+		rows, err := repo.ListFleetConfigCandidates(ctx, cutoff, time.Now(), time.Time{}, 100)
 		if err != nil {
 			t.Fatalf("ListFleetConfigCandidates: %v", err)
 		}
@@ -87,7 +87,7 @@ func TestVehicleRepo_ListFleetConfigCandidates(t *testing.T) {
 	})
 
 	t.Run("carries the fields the reconciler needs", func(t *testing.T) {
-		rows, err := repo.ListFleetConfigCandidates(ctx, cutoff, time.Now(), 100)
+		rows, err := repo.ListFleetConfigCandidates(ctx, cutoff, time.Now(), time.Time{}, 100)
 		if err != nil {
 			t.Fatalf("ListFleetConfigCandidates: %v", err)
 		}
@@ -102,7 +102,7 @@ func TestVehicleRepo_ListFleetConfigCandidates(t *testing.T) {
 	})
 
 	t.Run("longest-quiet car sorts first so it is never starved", func(t *testing.T) {
-		rows, err := repo.ListFleetConfigCandidates(ctx, cutoff, time.Now(), 1)
+		rows, err := repo.ListFleetConfigCandidates(ctx, cutoff, time.Now(), time.Time{}, 1)
 		if err != nil {
 			t.Fatalf("ListFleetConfigCandidates: %v", err)
 		}
@@ -119,7 +119,7 @@ func TestVehicleRepo_ListFleetConfigCandidates(t *testing.T) {
 
 	t.Run("non-positive limit refuses to scan", func(t *testing.T) {
 		for _, limit := range []int{0, -1} {
-			rows, err := repo.ListFleetConfigCandidates(ctx, cutoff, time.Now(), limit)
+			rows, err := repo.ListFleetConfigCandidates(ctx, cutoff, time.Now(), time.Time{}, limit)
 			if err != nil {
 				t.Fatalf("ListFleetConfigCandidates(limit=%d): %v", limit, err)
 			}
@@ -163,7 +163,7 @@ func TestFleetConfigCandidates_TombstoneMatchesOnVINWhenTeslaIDIsNull(t *testing
 	seedFCCTombstone(t, owner, "tv_gone", vin)
 
 	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
-	rows, err := repo.ListFleetConfigCandidates(ctx, time.Now().Add(-30*time.Minute), time.Now(), 100)
+	rows, err := repo.ListFleetConfigCandidates(ctx, time.Now().Add(-30*time.Minute), time.Now(), time.Time{}, 100)
 	if err != nil {
 		t.Fatalf("ListFleetConfigCandidates: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestFleetConfigCandidates_DuplicateTeslaAccountsDoNotFanOut(t *testing.T) {
 		time.Now().Add(-3*time.Hour))
 
 	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
-	rows, err := repo.ListFleetConfigCandidates(ctx, time.Now().Add(-30*time.Minute), time.Now(), 100)
+	rows, err := repo.ListFleetConfigCandidates(ctx, time.Now().Add(-30*time.Minute), time.Now(), time.Time{}, 100)
 	if err != nil {
 		t.Fatalf("ListFleetConfigCandidates: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestFleetConfigCandidates_RespectAttemptSchedule(t *testing.T) {
 	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
 	cutoff := time.Now().Add(-30 * time.Minute)
 
-	rows, err := repo.ListFleetConfigCandidates(ctx, cutoff, time.Now(), 100)
+	rows, err := repo.ListFleetConfigCandidates(ctx, cutoff, time.Now(), time.Time{}, 100)
 	if err != nil {
 		t.Fatalf("ListFleetConfigCandidates: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestFleetConfigCandidates_RespectAttemptSchedule(t *testing.T) {
 		t.Fatalf("RecordFleetConfigAttempt: %v", err)
 	}
 
-	rows, err = repo.ListFleetConfigCandidates(ctx, cutoff, time.Now(), 100)
+	rows, err = repo.ListFleetConfigCandidates(ctx, cutoff, time.Now(), time.Time{}, 100)
 	if err != nil {
 		t.Fatalf("ListFleetConfigCandidates: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestFleetConfigCandidates_RespectAttemptSchedule(t *testing.T) {
 	if err := repo.RecordFleetConfigAttempt(ctx, "veh_a", past, past, "awaiting_virtual_key"); err != nil {
 		t.Fatalf("RecordFleetConfigAttempt: %v", err)
 	}
-	rows, err = repo.ListFleetConfigCandidates(ctx, cutoff, time.Now(), 100)
+	rows, err = repo.ListFleetConfigCandidates(ctx, cutoff, time.Now(), time.Time{}, 100)
 	if err != nil {
 		t.Fatalf("ListFleetConfigCandidates: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestFleetConfigCandidates_RespectAttemptSchedule(t *testing.T) {
 	if err := repo.ClearFleetConfigAttempts(ctx, "veh_a"); err != nil {
 		t.Fatalf("ClearFleetConfigAttempts: %v", err)
 	}
-	rows, err = repo.ListFleetConfigCandidates(ctx, cutoff, time.Now(), 100)
+	rows, err = repo.ListFleetConfigCandidates(ctx, cutoff, time.Now(), time.Time{}, 100)
 	if err != nil {
 		t.Fatalf("ListFleetConfigCandidates: %v", err)
 	}

@@ -84,6 +84,12 @@ type FleetConfigReconcileConfig struct {
 	// AwakeWindow is how recently a signed command must have applied for that
 	// stamp alone to prove the car is alive.
 	AwakeWindow time.Duration
+	// TickInterval is how often the loop LOOKS for due rows (MYR-529). It is
+	// not the backoff base — see defaultFleetConfigTickInterval.
+	TickInterval time.Duration
+	// HotEpochWindow is how long a fresh pairing epoch earns the hot ladder and
+	// the candidate query's staleness exemption (MYR-529).
+	HotEpochWindow time.Duration
 }
 
 // backoffForOutcome is backoffFor with the MYR-489 awaiting-key override.
@@ -166,6 +172,18 @@ func (c FleetConfigReconcileConfig) withDefaults() FleetConfigReconcileConfig {
 	if c.AwakeWindow <= 0 {
 		c.AwakeWindow = defaultFleetConfigAwakeWindow
 	}
+	if c.TickInterval <= 0 {
+		c.TickInterval = defaultFleetConfigTickInterval
+	}
+	if c.TickInterval > c.Interval {
+		// A tick slower than the backoff base would put every car's real gap at
+		// the tick rather than at its schedule, which is the MYR-529 bug with a
+		// different number in it.
+		c.TickInterval = c.Interval
+	}
+	if c.HotEpochWindow <= 0 {
+		c.HotEpochWindow = defaultFleetConfigHotEpochWindow
+	}
 	return c
 }
 
@@ -179,8 +197,16 @@ func (c FleetConfigReconcileConfig) withDefaults() FleetConfigReconcileConfig {
 // promptly enough to be useful to whoever is watching the deploy.
 const startupDelay = 30 * time.Second
 
-// RunReconcileLoop runs a pass shortly after start and then every Interval,
-// until ctx is cancelled. It ALSO drains the MYR-489 pairing inbox.
+// RunReconcileLoop runs a pass shortly after start and then every
+// TickInterval, until ctx is cancelled. It ALSO drains the MYR-489 pairing
+// inbox.
+//
+// THE TICK IS NOT THE CADENCE (MYR-529). Every vehicle's real gap is its own
+// `next_attempt_at`, enforced in SQL; the tick only decides how promptly a row
+// that has come due is noticed. Ticking at Interval conflated the two and made
+// "scheduled for 01:38" mean "examined somewhere in 01:38–01:53", which is what
+// made the hot pairing ladder impossible and what left Joey Verrone's car
+// unexamined while he drove it. A tick with nothing due costs one indexed query.
 //
 // A pass error is logged and the loop continues: the next tick is the retry.
 //
@@ -202,7 +228,7 @@ func (r *FleetConfigReconciler) RunReconcileLoop(ctx context.Context) {
 	}
 	r.runPass(ctx)
 
-	ticker := time.NewTicker(r.cfg.Interval)
+	ticker := time.NewTicker(r.cfg.TickInterval)
 	defer ticker.Stop()
 
 	for {

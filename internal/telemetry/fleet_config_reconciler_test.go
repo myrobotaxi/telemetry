@@ -13,16 +13,18 @@ const reconTestVIN = "7SAYGDED5TA736164"
 // --- fakes -----------------------------------------------------------------
 
 type fakeCandidateLister struct {
-	rows      []FleetConfigCandidate
-	err       error
-	gotCutoff time.Time
-	gotLimit  int
+	rows        []FleetConfigCandidate
+	err         error
+	gotCutoff   time.Time
+	gotHotSince time.Time
+	gotLimit    int
 }
 
 func (f *fakeCandidateLister) ListFleetConfigCandidates(
-	_ context.Context, cutoff, _ time.Time, limit int,
+	_ context.Context, cutoff, _, hotSince time.Time, limit int,
 ) ([]FleetConfigCandidate, error) {
 	f.gotCutoff = cutoff
+	f.gotHotSince = hotSince
 	f.gotLimit = limit
 	return f.rows, f.err
 }
