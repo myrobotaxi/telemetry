@@ -129,3 +129,29 @@ func (s *SetupCompleter) candidate(ctx context.Context, row VehicleSnapshotRow) 
 		ForcedRepushAt:  row.SetupSchedule.ForcedRepushAt,
 	}
 }
+
+// pairingEvidenceNotifier receives "Tesla says this VIN's virtual key is
+// enrolled" (MYR-529). Satisfied by *FleetConfigReconciler; nil when the
+// deployment has no reconciler at all.
+//
+// It is a NON-BLOCKING hand-off into the reconcile loop's inbox, which is why
+// this endpoint can afford to fire it on paths where it has just done nothing
+// itself — a paired car whose wake was refused, or one whose epoch budget was
+// already spent. Those are exactly the answers that used to leave the schedule
+// standing, and they are now the ones that arm the hot ladder.
+type pairingEvidenceNotifier interface {
+	PairingEvidence(vin string)
+}
+
+// notifyPairing hands Tesla's paired answer to the reconciler. Best-effort and
+// non-blocking by contract; a deployment with no reconciler simply has no one
+// to tell.
+func (s *SetupCompleter) notifyPairing(rawVIN, vin string) {
+	if s.deps.Notifier == nil {
+		return
+	}
+	s.logger.Info("complete-setup: handing proven pairing to the reconciler",
+		slog.String("event", "setup_complete_pairing_signalled"),
+		slog.String("vin", vin))
+	s.deps.Notifier.PairingEvidence(rawVIN)
+}

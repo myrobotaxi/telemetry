@@ -63,6 +63,10 @@ type FleetConfigCandidate struct {
 	VIN         string
 	UserID      string
 	LastUpdated time.Time
+	// Status is "Vehicle"."status". With LastUpdated it answers "is this car
+	// streaming right now?" from the row alone, which is the zero-cost check
+	// MYR-529's hot schedule runs before spending anything on Tesla.
+	Status string
 	// AttemptCount is the number of consecutive unsuccessful attempts already
 	// made against this vehicle, and is what the backoff is computed from.
 	AttemptCount int
@@ -88,8 +92,12 @@ type FleetConfigCandidate struct {
 // FleetConfigCandidateLister is the reconciler's view of "which cars look like
 // they are not streaming and are due another try". Satisfied by
 // *store.VehicleRepo via a cmd/ adapter.
+// hotSince (MYR-529) exempts vehicles inside a fresh pairing epoch from the
+// staleness cutoff: a car that proved its key sixty seconds ago has by
+// definition NOT been quiet for cutoff, and excluding it is what made the
+// pairing triggers write schedules nobody ever read.
 type FleetConfigCandidateLister interface {
-	ListFleetConfigCandidates(ctx context.Context, cutoff, now time.Time, limit int) ([]FleetConfigCandidate, error)
+	ListFleetConfigCandidates(ctx context.Context, cutoff, now, hotSince time.Time, limit int) ([]FleetConfigCandidate, error)
 }
 
 // FleetConfigAttemptRecorder persists the per-vehicle retry schedule.
@@ -149,6 +157,9 @@ type FleetConfigReconciler struct {
 	// drained by RunReconcileLoop in the same select as the periodic tick so a
 	// signal can never race a pass.
 	pairing chan string
+	// examined dedupes immediate examinations per VIN (MYR-529). Touched only
+	// on the loop goroutine, from handlePairingSignal, so it needs no lock.
+	examined map[string]time.Time
 }
 
 // NewFleetConfigReconciler builds a reconciler. Every dependency is required;
@@ -170,28 +181,8 @@ func NewFleetConfigReconciler(
 		logger:   logger,
 		now:      time.Now,
 		pairing:  make(chan string, pairingSignalBuffer),
+		examined: make(map[string]time.Time),
 	}
-}
-
-// ReconcileOutcome counts what one pass did, for the completion log line and
-// for tests to assert against.
-type ReconcileOutcome struct {
-	Examined      int
-	AlreadySynced int
-	Repaired      int
-	AwaitingKey   int
-	SkippedOther  int
-	TokenFailures int
-	ReadFailures  int
-	PushFailures  int
-	// ForcedRepushes counts MYR-489 escalations that applied: a
-	// synced-but-quiet car, proven awake, whose config was deleted and
-	// recreated to make its firmware re-establish the telemetry session.
-	ForcedRepushes int
-	// Truncated is set when the pass ended early (shutdown or an expired
-	// budget) rather than after examining every candidate — without it a pass
-	// that did almost nothing logs identically to a complete one.
-	Truncated bool
 }
 
 // Reconcile runs ONE pass: list quiet, due cars, ask Tesla what each one's
@@ -206,7 +197,8 @@ func (r *FleetConfigReconciler) Reconcile(ctx context.Context) (ReconcileOutcome
 
 	now := r.now()
 	cutoff := now.Add(-r.cfg.Staleness)
-	candidates, err := r.deps.Candidates.ListFleetConfigCandidates(ctx, cutoff, now, r.cfg.MaxPerPass)
+	hotSince := now.Add(-r.cfg.HotEpochWindow)
+	candidates, err := r.deps.Candidates.ListFleetConfigCandidates(ctx, cutoff, now, hotSince, r.cfg.MaxPerPass)
 	if err != nil {
 		return out, fmt.Errorf("FleetConfigReconciler.Reconcile: list candidates: %w", err)
 	}
@@ -242,25 +234,15 @@ func (r *FleetConfigReconciler) Reconcile(ctx context.Context) (ReconcileOutcome
 	return out, nil
 }
 
-func (r *FleetConfigReconciler) logPassComplete(out ReconcileOutcome) {
-	r.logger.Info("fleet-config reconcile: pass complete",
-		slog.Int("examined", out.Examined),
-		slog.Int("already_synced", out.AlreadySynced),
-		slog.Int("repaired", out.Repaired),
-		slog.Int("awaiting_virtual_key", out.AwaitingKey),
-		slog.Int("skipped_other", out.SkippedOther),
-		slog.Int("token_failures", out.TokenFailures),
-		slog.Int("read_failures", out.ReadFailures),
-		slog.Int("push_failures", out.PushFailures),
-		slog.Int("forced_repushes", out.ForcedRepushes),
-		slog.Bool("truncated", out.Truncated))
-}
-
 // reconcileOne heals a single candidate. It never returns an error: every
 // outcome is a counted, logged, rescheduled fact so a single bad car cannot
 // abort the pass.
 func (r *FleetConfigReconciler) reconcileOne(ctx context.Context, c FleetConfigCandidate, out *ReconcileOutcome) {
 	vin := redactVIN(c.VIN)
+
+	if r.cancelIfStreaming(ctx, c, vin, out) {
+		return
+	}
 
 	callCtx, cancel := context.WithTimeout(ctx, r.cfg.CallTimeout)
 	defer cancel()

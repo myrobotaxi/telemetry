@@ -105,6 +105,10 @@ type SetupCompleterDeps struct {
 	Pairing FleetConfigPairingResetter
 	// Repusher runs the MYR-489 forced re-push. Nil disables the push step.
 	Repusher forcedConfigRepusher
+	// Notifier tells the reconciler that pairing is proven, so the hot
+	// schedule is armed even on the branches this endpoint cannot finish
+	// itself (MYR-529). Nil disables the nudge.
+	Notifier pairingEvidenceNotifier
 }
 
 // SetupCompleter runs the zero-touch completion sequence for one vehicle.
@@ -179,13 +183,28 @@ func (s *SetupCompleter) Complete(ctx context.Context, row VehicleSnapshotRow) (
 		// Paired, but we could not reach the car. Deliberately NOT
 		// `awaiting_virtual_key` (the key is fine) and NOT `configuring` (we
 		// pushed nothing). Transient — the SDK backs off and retries.
+		//
+		// The reconciler is told anyway (MYR-529): Tesla has just confirmed the
+		// key, which is the one fact that arms the hot schedule, and a car we
+		// could not wake this second is precisely the car a background pass
+		// three minutes from now should be looking at.
 		s.logger.Info("complete-setup: key is paired but the vehicle could not be woken; not pushing config",
 			slog.String("event", "setup_complete_wake_refused"),
 			slog.String("vehicle_id", row.ID), slog.String("vin", vin))
+		s.notifyPairing(row.VIN, vin)
 		return SetupState{}, ErrSetupVehicleUnreachable
 	}
 
-	return s.configure(ctx, tok.AccessToken, row, vin)
+	st, err := s.configure(ctx, tok.AccessToken, row, vin)
+	// AFTER configure, never before. Fired first, the loop's own reset and
+	// reconcile could run against this vehicle while the sequence below is
+	// mid-probe and mid-force, and the two would race for the epoch's single
+	// escalation. Fired here, the reset the loop attempts is inside the
+	// ten-minute pairing debounce that configure's own reset just refreshed, so
+	// the common case is a no-op and the uncommon one (an epoch older than the
+	// debounce, whose budget was already spent) is a legitimate new epoch.
+	s.notifyPairing(row.VIN, vin)
+	return st, err
 }
 
 // wake issues the unsigned wake and reports whether Tesla ACCEPTED it.

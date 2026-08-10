@@ -12,6 +12,7 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/identity"
 	"github.com/myrobotaxi/telemetry/internal/server"
 	"github.com/myrobotaxi/telemetry/internal/store"
+	"github.com/myrobotaxi/telemetry/internal/telemetry"
 	"github.com/myrobotaxi/telemetry/internal/teslaauth"
 	"github.com/myrobotaxi/telemetry/internal/teslalink"
 	"github.com/myrobotaxi/telemetry/internal/ws"
@@ -57,6 +58,7 @@ func setupTeslaLinkEndpoints(
 	authenticator ws.Authenticator,
 	pool *pgxpool.Pool,
 	encryptor cryptox.Encryptor,
+	reconciler *telemetry.FleetConfigReconciler,
 	logger *slog.Logger,
 ) {
 	linkCfg := cfg.TeslaLink()
@@ -71,7 +73,7 @@ func setupTeslaLinkEndpoints(
 
 	linkLogger := logger.With(slog.String("component", "tesla-link"))
 	provisioner := store.NewOwnerProvisioner(pool, encryptor, linkLogger)
-	hook := buildOwnerStreamHook(cfg, provisioner, linkLogger)
+	hook := buildOwnerStreamHook(cfg, provisioner, reconciler, linkLogger)
 	linker := &ownerLink{
 		provisioner: provisioner,
 		profiles:    identity.NewPgStore(pool),

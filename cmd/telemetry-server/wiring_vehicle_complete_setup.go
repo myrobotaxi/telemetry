@@ -46,6 +46,10 @@ func setupVehicleCompleteSetupEndpoint(deps httpRouteDeps) {
 	// first paired car.
 	if deps.fleetConfigReconciler != nil {
 		completerDeps.Repusher = deps.fleetConfigReconciler
+		// MYR-529: the same guarded assignment, for the same reason. Tesla's
+		// paired answer is handed to the reconcile loop so the hot schedule is
+		// armed even on the branches this endpoint cannot finish itself.
+		completerDeps.Notifier = deps.fleetConfigReconciler
 	} else {
 		logger.Warn("complete-setup: no fleet-config reconciler (proxy/telemetry endpoint not configured) — " +
 			"pairing can be checked but no config can be pushed")

@@ -47,7 +47,7 @@ func TestResetFleetConfigScheduleOnPairing(t *testing.T) {
 	}
 
 	t.Run("not due before the reset", func(t *testing.T) {
-		rows, err := repo.ListFleetConfigCandidates(ctx, time.Now().Add(-30*time.Minute), time.Now(), 100)
+		rows, err := repo.ListFleetConfigCandidates(ctx, time.Now().Add(-30*time.Minute), time.Now(), time.Time{}, 100)
 		if err != nil {
 			t.Fatalf("ListFleetConfigCandidates: %v", err)
 		}
@@ -81,7 +81,7 @@ func TestResetFleetConfigScheduleOnPairing(t *testing.T) {
 	})
 
 	t.Run("the car is immediately due again", func(t *testing.T) {
-		rows, err := repo.ListFleetConfigCandidates(ctx, time.Now().Add(-30*time.Minute), time.Now(), 100)
+		rows, err := repo.ListFleetConfigCandidates(ctx, time.Now().Add(-30*time.Minute), time.Now(), time.Time{}, 100)
 		if err != nil {
 			t.Fatalf("ListFleetConfigCandidates: %v", err)
 		}
@@ -99,7 +99,7 @@ func TestResetFleetConfigScheduleOnPairing(t *testing.T) {
 	t.Run("last_attempt_at is not advanced by a command", func(t *testing.T) {
 		// It records when we last asked TESLA about this car; the escalation
 		// gate measures quiet time from it, so a command must not reset it.
-		rows, err := repo.ListFleetConfigCandidates(ctx, time.Now().Add(-30*time.Minute), time.Now(), 100)
+		rows, err := repo.ListFleetConfigCandidates(ctx, time.Now().Add(-30*time.Minute), time.Now(), time.Time{}, 100)
 		if err != nil {
 			t.Fatalf("ListFleetConfigCandidates: %v", err)
 		}
@@ -238,7 +238,7 @@ func TestRecordForcedFleetConfigRepush(t *testing.T) {
 		t.Fatalf("RecordForcedFleetConfigRepush: %v", err)
 	}
 
-	rows, err := repo.ListFleetConfigCandidates(ctx, time.Now().Add(-30*time.Minute), time.Now(), 100)
+	rows, err := repo.ListFleetConfigCandidates(ctx, time.Now().Add(-30*time.Minute), time.Now(), time.Time{}, 100)
 	if err != nil {
 		t.Fatalf("ListFleetConfigCandidates: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestRecordForcedFleetConfigRepush_PreservesPairingEpoch(t *testing.T) {
 		t.Fatalf("RecordFleetConfigAttempt: %v", err)
 	}
 
-	rows, err := repo.ListFleetConfigCandidates(ctx, time.Now().Add(-30*time.Minute), time.Now(), 100)
+	rows, err := repo.ListFleetConfigCandidates(ctx, time.Now().Add(-30*time.Minute), time.Now(), time.Time{}, 100)
 	if err != nil {
 		t.Fatalf("ListFleetConfigCandidates: %v", err)
 	}

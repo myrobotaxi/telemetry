@@ -159,7 +159,7 @@ func TestSeedFleetConfigSchedule(t *testing.T) {
 			t.Errorf("next_attempt_at = %v, want no later than %v — a seed must not delay the first attempt", next, now)
 		}
 
-		rows, err := repo.ListFleetConfigCandidates(ctx, time.Now().Add(-30*time.Minute), time.Now(), 100)
+		rows, err := repo.ListFleetConfigCandidates(ctx, time.Now().Add(-30*time.Minute), time.Now(), time.Time{}, 100)
 		if err != nil {
 			t.Fatalf("ListFleetConfigCandidates: %v", err)
 		}

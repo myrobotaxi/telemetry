@@ -90,7 +90,7 @@ func (r *FleetConfigReconciler) push(
 // rate. That is the pre-backoff behaviour, i.e. degraded but not broken.
 func (r *FleetConfigReconciler) reschedule(ctx context.Context, c FleetConfigCandidate, outcome string) {
 	now := r.now()
-	next := now.Add(r.cfg.backoffForOutcome(c.AttemptCount, outcome))
+	next := now.Add(r.nextAttemptGap(c, outcome))
 	if err := r.deps.Attempts.RecordFleetConfigAttempt(ctx, c.VehicleID, now, next, outcome); err != nil {
 		r.logger.Warn("fleet-config reconcile: could not record attempt schedule (vehicle stays due)",
 			slog.String("vehicle_id", c.VehicleID),

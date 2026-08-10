@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"time"
 
@@ -17,7 +16,16 @@ import (
 // tesla-http-proxy + telemetry endpoint are configured — otherwise it stays nil
 // and the config push is left to ops/web. This runtime guard is what keeps a
 // live push out of any dev/test process. Always returns a non-nil hook.
-func buildOwnerStreamHook(cfg *config.Config, upsert vehicleUpserter, logger *slog.Logger) *ownerStreamHook {
+// reconciler may be nil (the safety guard kept it off); it is assigned through
+// an explicit check rather than straight into the interface field, because a
+// nil *FleetConfigReconciler in an interface is a NON-nil interface holding a
+// nil pointer and would sail past `h.pairing == nil` into a nil-receiver send.
+func buildOwnerStreamHook(
+	cfg *config.Config,
+	upsert vehicleUpserter,
+	reconciler *telemetry.FleetConfigReconciler,
+	logger *slog.Logger,
+) *ownerStreamHook {
 	lister := telemetry.NewFleetAPIClient(telemetry.FleetAPIConfig{
 		BaseURL: cfg.Proxy().FleetAPIBaseURL, // empty => default NA Fleet API
 	}, logger.With(slog.String("component", "fleet-list")))
@@ -40,7 +48,11 @@ func buildOwnerStreamHook(cfg *config.Config, upsert vehicleUpserter, logger *sl
 		logger.Warn("owner-onboarding fleet-config auto-push disabled: proxy/telemetry endpoint not configured")
 	}
 
-	return &ownerStreamHook{lister: lister, upsert: upsert, pusher: pusher, logger: logger}
+	hook := &ownerStreamHook{lister: lister, upsert: upsert, pusher: pusher, logger: logger}
+	if reconciler != nil {
+		hook.pairing = reconciler
+	}
+	return hook
 }
 
 // vehicleLister lists a linked owner's vehicles from the Fleet API.
@@ -82,7 +94,17 @@ type ownerStreamHook struct {
 	lister vehicleLister
 	upsert vehicleUpserter
 	pusher fleetConfigPusher // nil => push disabled (proxy unconfigured); guard keeps live pushes out of tests
-	logger *slog.Logger
+	// pairing receives proof of virtual-key pairing when the link-time push
+	// APPLIES (MYR-529). Nil => nobody to tell (no reconciler wired).
+	pairing pairingEvidenceNotifier
+	logger  *slog.Logger
+}
+
+// pairingEvidenceNotifier is the reconciler's inbox for "this VIN's virtual key
+// is proven paired". Consumer-site interface, satisfied by
+// *telemetry.FleetConfigReconciler.
+type pairingEvidenceNotifier interface {
+	PairingEvidence(vin string)
 }
 
 // AfterLink implements postLinkHook. It is the PASSIVE bulk sync: it provisions
@@ -197,128 +219,31 @@ func (h *ownerStreamHook) provisionVehicle(ctx context.Context, userID, accessTo
 	// MYR-517: the seed is UNCONDITIONAL and idempotent, and it is the last
 	// thing this function does on every path that provisioned a car. See
 	// seedSetupSchedule for why the push outcome may vary but the write may not.
-	h.seedSetupSchedule(ctx, userID, vin, h.pushConfig(ctx, userID, accessToken, vin))
+	pushOutcome, applied := h.pushConfig(ctx, userID, accessToken, vin)
+	h.seedSetupSchedule(ctx, userID, vin, pushOutcome)
+	if applied {
+		// MYR-529: the link-time push landed, which Tesla only does for an
+		// enrolled virtual key. Signalled AFTER the seed, so the reconciler's
+		// pairing reset lands on a row that exists rather than creating a
+		// second one, and the epoch is stamped on the same row the card reads.
+		h.signalPairing(userID, vin)
+	}
 	return true
 }
 
-// pushConfig performs the link-time fleet-config push and returns the
-// go_fleet_config_attempts.last_outcome label that describes what happened.
+// signalPairing hands proven pairing to the reconciler so a car that is not yet
+// streaming gets its hot schedule from the very first door (MYR-529).
 //
-// SetupOutcomeNone (” — no claim) covers the three cases where there is
-// nothing to say about this car yet: no signing proxy is configured, the VIN is
-// not pushable, or the push APPLIED. The last one is the important one to read
-// as "no claim" rather than as success-with-a-row: a config Tesla accepted is
-// not evidence of anything the owner has to finish, and the wire derivation
-// treats it accordingly.
-func (h *ownerStreamHook) pushConfig(ctx context.Context, userID, accessToken, vin string) string {
-	if h.pusher == nil {
-		return store.SetupOutcomeNone // proxy unconfigured — stream starts when ops/web pushes config
+// Best-effort and non-blocking, like every other step in this hook: the
+// notifier is a buffered inbox drained by the reconcile loop, and a deployment
+// with no reconciler (no signing proxy) simply has nobody to tell.
+func (h *ownerStreamHook) signalPairing(userID, vin string) {
+	if h.pairing == nil {
+		return
 	}
-	if len(vin) != vinLength {
-		return store.SetupOutcomeNone // malformed VIN — nothing safe to push against
-	}
-	err := h.pusher.PushForVIN(ctx, accessToken, vin)
-	if err == nil {
-		return store.SetupOutcomeNone
-	}
-	// The EXPECTED outcome at link time: the owner cannot have paired the
-	// virtual key yet, because pairing is a later, Tesla-app-side step. This
-	// is not a fault and needs no operator attention — the MYR-448
-	// reconciler re-pushes once pairing lands. Logged so the state is
-	// visible rather than silent.
-	var skipped *telemetry.SkippedVehicleError
-	if errors.As(err, &skipped) && skipped.AwaitingVirtualKey() {
-		h.logger.Info("owner stream setup: config not applied, awaiting virtual-key pairing (reconciler will re-push)",
-			slog.String("event", "fleet_config_awaiting_virtual_key"),
-			slog.String("user_id", userID),
-			slog.String("vin", redactVIN(vin)),
-			slog.String("reason", skipped.Reason))
-		return store.SetupOutcomeAwaitingVirtualKey
-	}
-	h.logger.Warn("owner stream setup: fleet-config push failed (owner still linked; reconciler will retry)",
-		slog.String("event", "fleet_config_push_failed"),
+	h.logger.Info("owner stream setup: link-time config push APPLIED — virtual key already paired, reconciler notified",
+		slog.String("event", "fleet_config_pairing_at_link"),
 		slog.String("user_id", userID),
-		slog.String("vin", redactVIN(vin)),
-		slog.String("error", err.Error()))
-	return store.SetupOutcomePushFailed
-}
-
-// seedSetupSchedule persists the link-time schedule row (MYR-491, widened by
-// MYR-517) so the owner's vehicle card can name the pairing step immediately —
-// rather than rendering empty until the reconciler's first pass reaches this
-// car, up to Staleness + Interval later, which for MYR-503's tester would have
-// been long after he gave up on the Lock button.
-//
-// WHY IT RUNS FOR EVERY OUTCOME AND NOT JUST `missing_key`. MYR-491 wrote this
-// row only when Tesla answered the push with a missing virtual key, on the
-// reading that any other answer meant there was nothing to record. Prod
-// disagreed: Spencer White's car (linked 18:07:47Z on 2026-08-09) has no row at
-// all, so nothing that keys off the row could see it — the in-band pairing
-// signal no-opped when he finally sent a command, and the MYR-491 card had
-// nothing to render while he sat watching a silent car. A row costs one
-// bounded INSERT per provisioned vehicle and is scheduling- and wire-identical
-// to no row; not having one costs the whole self-heal machinery its handle.
-//
-// BEST-EFFORT, LIKE EVERY OTHER STEP IN THIS HOOK. A failure to write a card's
-// input must never surface to an owner who has just successfully linked their
-// Tesla account, so this logs and returns.
-func (h *ownerStreamHook) seedSetupSchedule(ctx context.Context, userID, vin, outcome string) {
-	if err := h.upsert.SeedFleetConfigSchedule(ctx, vin, outcome, time.Now()); err != nil {
-		h.logger.Warn("owner stream setup: could not record the setup schedule row (card and self-heal will fill in on the next reconcile pass)",
-			slog.String("user_id", userID),
-			slog.String("vin", redactVIN(vin)),
-			slog.String("outcome", outcome),
-			slog.String("error", err.Error()))
-	}
-}
-
-// vinLength is the fixed Tesla VIN length used to guard the fleet push.
-const vinLength = 17
-
-// redactVIN returns a VIN with only the last 4 characters visible, for log
-// safety (data-classification §2.1 VIN redaction rule).
-func redactVIN(vin string) string {
-	if len(vin) <= 4 {
-		return vin
-	}
-	return "***" + vin[len(vin)-4:]
-}
-
-// realFleetPusher is the runtime fleetConfigPusher. It is only constructed when
-// a proxy URL + telemetry endpoint are configured, so it never exists in tests.
-type realFleetPusher struct {
-	client   *telemetry.FleetAPIClient
-	endpoint telemetry.EndpointConfig
-}
-
-// PushForVIN pushes the default field config + endpoint to one VIN. Mirrors the
-// request construction in `ops fleet-config push` (cmd/ops/fleet.go).
-func (p *realFleetPusher) PushForVIN(ctx context.Context, token, vin string) error {
-	expTime := time.Now().Add(350 * 24 * time.Hour).Unix()
-	var ca *string
-	if p.endpoint.CA != "" {
-		ca = &p.endpoint.CA
-	}
-	req := telemetry.FleetConfigRequest{
-		VINs: []string{vin},
-		Config: telemetry.FleetConfig{
-			Hostname:   p.endpoint.Hostname,
-			Port:       p.endpoint.Port,
-			CA:         ca,
-			Fields:     telemetry.DefaultFieldConfig(),
-			AlertTypes: []string{"service"},
-			Exp:        &expTime,
-		},
-	}
-	result, err := p.client.PushTelemetryConfig(ctx, token, req)
-	if err != nil {
-		return err
-	}
-	// A 200 from Tesla does NOT mean the config was applied (MYR-448). An
-	// unpaired car comes back as `skipped_vehicles: {vin: "missing_key"}` with
-	// updated_vehicles: 0. Before this check that was recorded as success, so
-	// the single automatic push in the whole system silently no-op'd for every
-	// new owner — the config push necessarily runs during the OAuth callback,
-	// which is always BEFORE the owner pairs the virtual key.
-	return telemetry.SkipErrorFor(result, vin)
+		slog.String("vin", redactVIN(vin)))
+	h.pairing.PairingEvidence(vin)
 }

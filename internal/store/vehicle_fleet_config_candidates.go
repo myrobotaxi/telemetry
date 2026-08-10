@@ -19,6 +19,13 @@ type FleetConfigCandidate struct {
 	// for logging only — the reconciler asks Tesla for the authoritative
 	// config state.
 	LastUpdated time.Time
+	// Status is "Vehicle"."status" — the Prisma column a streamed frame folds a
+	// motion value into (MYR-454). Carried since MYR-529 so the reconciler can
+	// answer "is this car already streaming?" from the listing row it already
+	// holds, with NO Tesla call. That free check is what lets the hot
+	// pairing-epoch schedule below examine a freshly paired car every minute
+	// without costing Fleet API traffic for the cars that come up on their own.
+	Status string
 	// AttemptCount is how many consecutive unsuccessful attempts this vehicle
 	// has already had; 0 for a car never attempted. Drives the backoff the
 	// caller computes when recording the next attempt.
@@ -79,6 +86,22 @@ type FleetConfigCandidate struct {
 //     "lastUpdated" is what stops unfixable cars permanently occupying the
 //     LIMIT (see migration 0031).
 //
+// THE STALENESS ARM HAS AN EXEMPTION AS OF MYR-529, AND IT IS THE FIX FOR THE
+// BUG THAT ISSUE WAS FILED ABOUT. `v."lastUpdated" < $1` demands thirty minutes
+// of total silence on the "Vehicle" row before a car may be examined at all —
+// which is correct for the steady state and catastrophic for the first half
+// hour after a link, because that is the ONLY window in which virtual-key
+// pairing happens. Joey Verrone's car (linked 2026-08-10 01:22Z) proved the key
+// paired at 01:23:10 and was scheduled for 01:38, but its "Vehicle" row kept
+// being written by ordinary provisioning and web-sync traffic (01:41:33), so
+// the staleness arm excluded it from every pass — the schedule said "due" and
+// the listing never returned it. A car with a LIVE PAIRING EPOCH
+// (`signed_command_at >= $4`) is therefore admitted on its schedule alone. It
+// is a strictly narrower exemption than it looks: the epoch is stamped only by
+// proof of pairing, it ages out of the hot window in minutes, and the caller's
+// first act on such a candidate is a free row-shaped streaming check that costs
+// Tesla nothing (see telemetry.reconcileOne).
+//
 // A READ of the Prisma-owned "Vehicle" and "Account" tables; the
 // data-lifecycle.md §1.4 carve-outs constrain WRITES only.
 // The MYR-489 columns (last_outcome, last_attempt_at, signed_command_at,
@@ -86,14 +109,15 @@ type FleetConfigCandidate struct {
 // reads, so the escalation decision costs no extra query — and, because it is
 // one row, cannot be inconsistent with the attempt_count it is judged against.
 const queryFleetConfigCandidates = `
-SELECT v."id", v."vin", v."userId", v."lastUpdated",
+SELECT v."id", v."vin", v."userId", v."lastUpdated", v."status",
        COALESCE(fa.attempt_count, 0),
        COALESCE(fa.last_outcome, ''),
        fa.last_attempt_at, fa.signed_command_at, fa.forced_repush_at
 FROM "Vehicle" v
 LEFT JOIN go_fleet_config_attempts fa ON fa.vehicle_id = v."id"
 WHERE length(v."vin") = 17
-  AND v."lastUpdated" < $1
+  AND (v."lastUpdated" < $1
+       OR (fa.signed_command_at IS NOT NULL AND fa.signed_command_at >= $4))
   AND (fa.vehicle_id IS NULL OR fa.next_attempt_at <= $2)
   AND EXISTS (
         SELECT 1
@@ -110,13 +134,18 @@ WHERE length(v."vin") = 17
 ORDER BY COALESCE(fa.next_attempt_at, TO_TIMESTAMP(0)) ASC, v."lastUpdated" ASC
 LIMIT $3`
 
-// ListFleetConfigCandidates returns up to limit vehicles that have been quiet
-// since cutoff and are due another reconcile attempt as of now.
+// ListFleetConfigCandidates returns up to limit vehicles that are due another
+// reconcile attempt as of now and are either quiet since cutoff OR inside a
+// pairing epoch opened at or after hotSince (MYR-529).
 //
 // The set is deliberately WIDE — a sleeping but correctly configured car
 // matches too — because the cheap authoritative check is a Fleet API config
 // read per candidate, not a DB predicate. Narrowing here would risk excluding
 // the very cars that are broken.
+//
+// A zero hotSince disables the pairing-epoch exemption and restores the
+// pre-MYR-529 staleness-only behaviour, which is what callers that want a plain
+// steady-state sweep should pass.
 //
 // A non-positive limit returns no rows and no error: refusing to run an
 // unbounded scan against the Prisma table is the safer reading of a zero.
@@ -124,13 +153,21 @@ func (r *VehicleRepo) ListFleetConfigCandidates(
 	ctx context.Context,
 	cutoff time.Time,
 	now time.Time,
+	hotSince time.Time,
 	limit int,
 ) ([]FleetConfigCandidate, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
+	if hotSince.IsZero() {
+		// A zero time.Time is year 1, which would admit EVERY row that has ever
+		// recorded a pairing epoch. Pushed to the far future instead, so the
+		// exemption matches nothing rather than everything — a disabled guard
+		// must fail closed.
+		hotSince = now.Add(100 * 365 * 24 * time.Hour)
+	}
 	start := time.Now()
-	rows, err := r.pool.Query(ctx, queryFleetConfigCandidates, cutoff, now, limit)
+	rows, err := r.pool.Query(ctx, queryFleetConfigCandidates, cutoff, now, limit, hotSince)
 	if err != nil {
 		r.metrics.IncQueryError("vehicle.list_fleet_config_candidates")
 		return nil, fmt.Errorf("VehicleRepo.ListFleetConfigCandidates: %w", err)
@@ -145,7 +182,7 @@ func (r *VehicleRepo) ListFleetConfigCandidates(
 		// the event they name actually happens. Scanned through pointers and
 		// left as the zero Time, which every caller reads as "never".
 		var lastAttemptAt, signedCommandAt, forcedRepushAt *time.Time
-		if err := rows.Scan(&c.VehicleID, &c.VIN, &c.UserID, &c.LastUpdated,
+		if err := rows.Scan(&c.VehicleID, &c.VIN, &c.UserID, &c.LastUpdated, &c.Status,
 			&c.AttemptCount, &c.LastOutcome,
 			&lastAttemptAt, &signedCommandAt, &forcedRepushAt); err != nil {
 			r.metrics.IncQueryError("vehicle.list_fleet_config_candidates")

@@ -86,77 +86,6 @@ func (r *FleetConfigReconciler) handleSyncedQuiet(
 	r.forceRepush(callCtx, schedCtx, c, accessToken, vin, out)
 }
 
-// escalationBlocker answers whether this candidate is eligible for its one
-// forced re-push, and names the blocker when it is not.
-//
-// Three gates, each closing a distinct failure mode:
-//
-//  1. REPEAT OBSERVATION. The previous attempt must ALSO have ended in
-//     synced-not-streaming. A car that has just been configured is legitimately
-//     a few minutes from its first connection (James Guan's did exactly that),
-//     and forcing a re-push at it would tear down a config it is in the middle
-//     of acting on.
-//  2. QUIET GRACE. At least SyncedQuietGrace must have passed since that
-//     observation. Redundant with the backoff at default settings and
-//     deliberately so — it is what keeps the gate honest if Interval is ever
-//     tuned down.
-//  3. EPOCH BUDGET. One force per pairing epoch — `epochForceSpent`, shared
-//     verbatim with the MYR-505 on-demand path (fleet_config_force_now.go) so
-//     the two entry points cannot ration the same car differently.
-func (r *FleetConfigReconciler) escalationBlocker(c FleetConfigCandidate) (string, bool) {
-	if c.LastOutcome != outcomeSyncedQuiet {
-		return "first synced-but-quiet observation; giving the car a cycle to connect", false
-	}
-	if !c.LastAttemptAt.IsZero() && r.now().Sub(c.LastAttemptAt) < r.cfg.SyncedQuietGrace {
-		return "synced-quiet grace period has not elapsed", false
-	}
-	if epochForceSpent(c) {
-		return "forced re-push already spent for this key-pairing epoch", false
-	}
-	return "", true
-}
-
-// provenAwake establishes that this is a live car worth spending an escalation
-// on, rather than one that is off the network.
-//
-// Cheap proof first: a signed command applied within AwakeWindow is already on
-// the row and costs nothing. Only when that is absent or stale do we pay for a
-// GetVehicle read — which means the extra Fleet API call happens at most once
-// per car per epoch, since a declined escalation reschedules and a spent one is
-// blocked by the budget.
-//
-// Tesla's `asleep` is NOT treated as awake. A sleeping car cannot act on a new
-// config either, so forcing one at it burns the epoch budget on a no-op and
-// leaves the car briefly unconfigured for nothing; it will be re-examined when
-// the backoff elapses.
-func (r *FleetConfigReconciler) provenAwake(
-	ctx context.Context, c FleetConfigCandidate, accessToken, vin string,
-) bool {
-	if !c.SignedCommandAt.IsZero() && r.now().Sub(c.SignedCommandAt) <= r.cfg.AwakeWindow {
-		return true
-	}
-
-	state, err := r.deps.Reader.GetVehicle(ctx, accessToken, c.VIN)
-	if err != nil {
-		// Not a reason to escalate blind. The read is the cheap call; if it is
-		// failing, a delete-then-create is a bad bet.
-		r.logger.Info("fleet-config reconcile: could not confirm the vehicle is awake; not escalating",
-			slog.String("vehicle_id", c.VehicleID),
-			slog.String("vin", vin),
-			slog.String("error", redactedErrorText(err)))
-		return false
-	}
-	if state == nil || state.State != "online" {
-		r.logger.Info("fleet-config reconcile: not escalating an offline/asleep vehicle",
-			slog.String("event", "fleet_config_escalation_declined"),
-			slog.String("vehicle_id", c.VehicleID),
-			slog.String("vin", vin),
-			slog.String("reason", "vehicle is not online"))
-		return false
-	}
-	return true
-}
-
 // forceRepush performs the escalation: DELETE the existing config, then create
 // it again.
 //
@@ -231,7 +160,7 @@ func (r *FleetConfigReconciler) forceRepush(
 	// the epoch budget as spent — is what guarantees that a car which STILL
 	// does not stream falls back into plain backoff instead of re-forcing every
 	// pass.
-	r.recordForce(schedCtx, c, r.now().Add(r.cfg.backoffFor(c.AttemptCount)), outcomeForcedRepush)
+	r.recordForce(schedCtx, c, r.now().Add(r.nextAttemptGap(c, outcomeForcedRepush)), outcomeForcedRepush)
 }
 
 // recordFailedForce handles a forced re-push whose create step did not apply.
@@ -257,9 +186,16 @@ func (r *FleetConfigReconciler) recordFailedForce(
 		slog.String("error", redactedErrorText(err)))
 
 	// Base interval, not the doubled backoff: whatever else is true, this car
-	// may now be unconfigured, and the ordinary push path can fix that. The
-	// epoch budget is still stamped, so this cannot become a forced-push loop.
-	r.recordForce(ctx, c, r.now().Add(r.cfg.Interval), outcomeForcedRepushFail)
+	// may now be unconfigured, and the ordinary push path can fix that. Inside
+	// a hot pairing epoch the ladder's gap is used instead, which is shorter
+	// still — the one state worse than "silent" deserves the fastest repair the
+	// schedule can offer, not a fifteen-minute one. The epoch budget is stamped
+	// either way, so this cannot become a forced-push loop.
+	retry := r.cfg.Interval
+	if hot := r.nextAttemptGap(c, outcomeForcedRepushFail); hot < retry {
+		retry = hot
+	}
+	r.recordForce(ctx, c, r.now().Add(retry), outcomeForcedRepushFail)
 }
 
 // recordForce writes the attempt and stamps the pairing epoch's escalation
