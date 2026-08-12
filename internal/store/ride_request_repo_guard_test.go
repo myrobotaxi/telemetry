@@ -737,3 +737,111 @@ func TestRideRequestRepo_UpdateStatusFrom_CancelVsDecline(t *testing.T) {
 		t.Errorf("final status %q does not match the winning transition %q", final.Status, wantStatus)
 	}
 }
+
+// MYR-522 — the INITIATOR-STAMPING cancel: the same guarded UPDATE also writes
+// cancelled_by, first writer wins, arbitrated by exactly the WHERE that decides
+// whether the cancel wins at all.
+func TestRideRequestRepo_UpdateStatusFromCancelled(t *testing.T) {
+	repo, _ := setupRideRequestRepo(t)
+	ctx := context.Background()
+
+	t.Run("owner cancel stamps cancelled_by=owner", func(t *testing.T) {
+		created, err := repo.Create(ctx, scheduledRideRequest())
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if _, err := repo.UpdateStatusFrom(ctx, created.ID,
+			[]store.RideRequestStatus{store.RideRequestStatusRequested},
+			store.RideRequestStatusAccepted); err != nil {
+			t.Fatalf("accept: %v", err)
+		}
+		got, err := repo.UpdateStatusFromCancelled(ctx, created.ID,
+			[]store.RideRequestStatus{store.RideRequestStatusAccepted, store.RideRequestStatusArrived},
+			"owner")
+		if err != nil {
+			t.Fatalf("UpdateStatusFromCancelled: %v", err)
+		}
+		if got.Status != store.RideRequestStatusCancelled {
+			t.Errorf("status: %q", got.Status)
+		}
+		if got.CancelledBy == nil || *got.CancelledBy != "owner" {
+			t.Errorf("cancelled_by: %v", got.CancelledBy)
+		}
+		// The stamp survives a read, so a client refetch can say who.
+		read, err := repo.GetByID(ctx, created.ID)
+		if err != nil {
+			t.Fatalf("GetByID: %v", err)
+		}
+		if read.CancelledBy == nil || *read.CancelledBy != "owner" {
+			t.Errorf("cancelled_by after read: %v", read.CancelledBy)
+		}
+	})
+
+	t.Run("rider cancel stamps cancelled_by=rider", func(t *testing.T) {
+		created, err := repo.Create(ctx, scheduledRideRequest())
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		got, err := repo.UpdateStatusFromCancelled(ctx, created.ID,
+			[]store.RideRequestStatus{store.RideRequestStatusRequested, store.RideRequestStatusAccepted},
+			"rider")
+		if err != nil {
+			t.Fatalf("UpdateStatusFromCancelled: %v", err)
+		}
+		if got.CancelledBy == nil || *got.CancelledBy != "rider" {
+			t.Errorf("cancelled_by: %v", got.CancelledBy)
+		}
+	})
+
+	t.Run("guard refuses outside the allowed-from set and stamps nothing", func(t *testing.T) {
+		created, err := repo.Create(ctx, scheduledRideRequest())
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		// Owner's window excludes `requested` — the guarded write must refuse.
+		_, err = repo.UpdateStatusFromCancelled(ctx, created.ID,
+			[]store.RideRequestStatus{store.RideRequestStatusAccepted, store.RideRequestStatusArrived},
+			"owner")
+		if !errors.Is(err, store.ErrRideRequestConflict) {
+			t.Fatalf("expected ErrRideRequestConflict, got %v", err)
+		}
+		read, err := repo.GetByID(ctx, created.ID)
+		if err != nil {
+			t.Fatalf("GetByID: %v", err)
+		}
+		if read.CancelledBy != nil {
+			t.Errorf("a refused cancel must stamp nothing, got %v", read.CancelledBy)
+		}
+		if read.Status != store.RideRequestStatusRequested {
+			t.Errorf("status moved on a refusal: %q", read.Status)
+		}
+	})
+
+	t.Run("first writer wins the stamp", func(t *testing.T) {
+		created, err := repo.Create(ctx, scheduledRideRequest())
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if _, err := repo.UpdateStatusFromCancelled(ctx, created.ID,
+			[]store.RideRequestStatus{store.RideRequestStatusRequested, store.RideRequestStatusAccepted},
+			"rider"); err != nil {
+			t.Fatalf("first cancel: %v", err)
+		}
+		// A second cancel loses on the status guard, so the stamp cannot move;
+		// the CASE arm is belt-and-braces for any future from-set that could
+		// re-enter the write.
+		_, err = repo.UpdateStatusFromCancelled(ctx, created.ID,
+			[]store.RideRequestStatus{store.RideRequestStatusAccepted, store.RideRequestStatusArrived},
+			"owner")
+		if !errors.Is(err, store.ErrRideRequestConflict) {
+			t.Fatalf("expected ErrRideRequestConflict, got %v", err)
+		}
+		read, err := repo.GetByID(ctx, created.ID)
+		if err != nil {
+			t.Fatalf("GetByID: %v", err)
+		}
+		if read.CancelledBy == nil || *read.CancelledBy != "rider" {
+			t.Errorf("stamp must stay the first writer's: %v", read.CancelledBy)
+		}
+	})
+}

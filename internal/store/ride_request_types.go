@@ -117,4 +117,10 @@ type RideRequestRecord struct {
 	DispatchStatus *DispatchStatus
 	DispatchedAt   *time.Time
 	DispatchError  *string
+
+	// CancelledBy records which PARTY initiated a cancellation — 'rider' or
+	// 'owner' (MYR-522). Nil on every non-cancelled row, and on rows
+	// cancelled before migration 0037: absence means "initiator unknown",
+	// and consumers must not guess.
+	CancelledBy *string
 }

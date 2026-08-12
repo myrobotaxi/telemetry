@@ -94,9 +94,22 @@ func NewRideRequestHandler(
 	return h
 }
 
-// ServeCancel handles POST /api/ride-requests/{id}/cancel. Rider-only;
-// legal only from requested/accepted (→ cancelled). Every other current
-// status is a 409 conflict.
+// ServeCancel handles POST /api/ride-requests/{id}/cancel. PARTY-AWARE from
+// MYR-522 (client decision, 2026-08-12: "add ability for owner to cancel ride
+// from their end as well"):
+//
+//   - The RIDER may cancel from requested/accepted — unchanged since MYR-174.
+//   - The OWNER may cancel from accepted/arrived. A `requested` ride keeps the
+//     existing DECLINE as the owner's one exit (two owner verbs for one moment
+//     would be two copies of one decision), and once the rider is aboard
+//     (`enroute`) there is no owner cancel at all — ending early is what
+//     "Dropped off" already is.
+//
+// Both paths stamp WHO cancelled into the same guarded UPDATE that decides
+// whether the cancel wins (`cancelled_by`, first writer wins), and both
+// publish through the one shared transition path — so the WS frame, the
+// rider's push and the nav stand-down ride the same delivery every other
+// transition uses. Every other current status is a 409 conflict.
 func (h *RideRequestHandler) ServeCancel(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userID, ok := h.authUser(w, r)
@@ -108,10 +121,13 @@ func (h *RideRequestHandler) ServeCancel(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
+
+	// A self-ride caller (owner riding their own car) is BOTH parties and takes
+	// the rider path — their cancel is their own, exactly as before MYR-522.
 	if userID != rec.RiderID {
-		// The owner is a party but cancel is rider-only; non-parties were
-		// already 404'd by loadForParty.
-		h.writeError(w, http.StatusForbidden, wserrors.ErrCodePermissionDenied, "only the rider may cancel this request")
+		// The owner's cancel (MYR-522). Non-parties were already 404'd by
+		// loadForParty, so this caller is the owner.
+		h.serveOwnerCancel(ctx, w, rec)
 		return
 	}
 
@@ -122,16 +138,55 @@ func (h *RideRequestHandler) ServeCancel(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	updated, ok := h.mutateStatus(ctx, w, rec, rideCancellableFrom, rideStatusCancelled)
+	updated, ok := h.mutateStatusCancelled(ctx, w, rec, rideCancellableFrom, rideCancelledByRider)
 	if !ok {
 		return
 	}
 	h.writeJSON(w, http.StatusOK, toRideRequestWire(updated))
 }
 
+// serveOwnerCancel is the owner's arm of ServeCancel (MYR-522). The two
+// refusals that are NOT plain status conflicts get sentences that name the
+// door the owner should use instead — a refusal the server can explain must
+// be explained (MYR-329's rule): a `requested` ride's exit is DECLINE, and a
+// ride with the rider aboard ends only through "Dropped off".
+func (h *RideRequestHandler) serveOwnerCancel(ctx context.Context, w http.ResponseWriter, rec RideRequestData) {
+	switch rec.Status {
+	case rideStatusRequested:
+		h.writeError(w, http.StatusConflict, wserrors.ErrCodeConflict, "decline a requested ride instead of cancelling it")
+		return
+	case rideStatusEnroute:
+		h.writeError(w, http.StatusConflict, wserrors.ErrCodeConflict, "the rider is aboard — end the ride with dropped-off")
+		return
+	}
+	if !ownerCancellableFrom(rec.Status) {
+		h.writeError(w, http.StatusConflict, wserrors.ErrCodeConflict, "ride request cannot be cancelled from status "+rec.Status)
+		return
+	}
+
+	updated, ok := h.mutateStatusCancelled(ctx, w, rec, rideOwnerCancellableFrom, rideCancelledByOwner)
+	if !ok {
+		return
+	}
+	h.writeJSON(w, http.StatusOK, toRideRequestWire(updated))
+}
+
+// The two cancelled_by stamps. Written once here and consumed by the push
+// notifier's copy fork; the wire projection carries them verbatim.
+const (
+	rideCancelledByRider = "rider"
+	rideCancelledByOwner = "owner"
+)
+
 // rideCancellableFrom is the allowed-from set for a rider cancel; must stay
 // in lockstep with cancellableFrom and the rest-api.md §7.8 matrix.
 var rideCancellableFrom = []string{rideStatusRequested, rideStatusAccepted}
+
+// rideOwnerCancellableFrom is the allowed-from set for an OWNER cancel
+// (MYR-522); must stay in lockstep with ownerCancellableFrom and the
+// rest-api.md §7.8 matrix. `requested` is deliberately absent (decline is
+// that moment's owner verb) and so is `enroute` (the rider is aboard).
+var rideOwnerCancellableFrom = []string{rideStatusAccepted, rideStatusArrived}
 
 // The guarded-transition helpers (mutateStatus and its dormancy-guarded
 // sibling) live in ride_request_status_mutation.go.
@@ -141,6 +196,13 @@ var rideCancellableFrom = []string{rideStatusRequested, rideStatusAccepted}
 // progress) and the terminal states (declined/completed/cancelled) are not.
 func cancellableFrom(status string) bool {
 	return status == rideStatusRequested || status == rideStatusAccepted
+}
+
+// ownerCancellableFrom reports whether an OWNER cancel is legal from the
+// given status (MYR-522). Legal only from accepted/arrived — before the rider
+// is aboard, after the request stopped being declinable.
+func ownerCancellableFrom(status string) bool {
+	return status == rideStatusAccepted || status == rideStatusArrived
 }
 
 // loadForParty fetches the ride by {id} and enforces party membership: a

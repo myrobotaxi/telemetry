@@ -54,3 +54,4 @@ docker-compose.override.yml
 
 # local ops helper binary (never commit)
 /ops
+.worktrees/

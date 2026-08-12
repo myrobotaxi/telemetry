@@ -43,6 +43,11 @@ type rideRequestWire struct {
 	// nav-dispatch push resolves (ride-request.schema.json $defs.RideRequest).
 	DispatchStatus *string `json:"dispatchStatus,omitempty"`
 	DispatchedAt   *string `json:"dispatchedAt,omitempty"`
+	// CancelledBy names the party that initiated a cancellation — "rider" |
+	// "owner" (MYR-522). Optional, additive; omitted on every non-cancelled
+	// ride and on rides cancelled before the field existed (absence =
+	// initiator unknown, consumers must not guess).
+	CancelledBy *string `json:"cancelledBy,omitempty"`
 }
 
 // rideActiveErrorResponse is the 409 `ride_active` body (MYR-230). It carries

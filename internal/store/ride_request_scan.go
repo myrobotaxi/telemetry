@@ -70,6 +70,7 @@ func (r *RideRequestRepo) scanRideRequest(row pgx.Row) (RideRequestRecord, error
 		&rec.ScheduledFor, &rec.RescheduleProposedFor, &reschedStatus,
 		&rec.AcceptedAt, &rec.CompletedAt, &rec.CreatedAt, &rec.UpdatedAt,
 		&dispatchStatus, &rec.DispatchedAt, &rec.DispatchError,
+		&rec.CancelledBy,
 		&requesterName, &requesterEmail, &requesterExists,
 	)
 	if err != nil {

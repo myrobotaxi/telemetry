@@ -38,6 +38,19 @@ func (h *RideRequestHandler) mutateStatus(ctx context.Context, w http.ResponseWr
 	return h.mutateStatusWith(ctx, w, rec, from, to, h.store.UpdateStatusFrom)
 }
 
+// mutateStatusCancelled is mutateStatus over the store's INITIATOR-STAMPING
+// cancel write (MYR-522): the same guarded UPDATE, with `cancelled_by` written
+// first-writer-wins in the same statement. It backs BOTH cancel paths — the
+// rider's and the owner's — which differ only in their allowed-from set and in
+// the party they stamp, so neither can drift in how a cancel is persisted or
+// published.
+func (h *RideRequestHandler) mutateStatusCancelled(ctx context.Context, w http.ResponseWriter, rec RideRequestData, from []string, by string) (RideRequestData, bool) {
+	return h.mutateStatusWith(ctx, w, rec, from, rideStatusCancelled,
+		func(ctx context.Context, id string, from []string, _ string) (RideRequestData, error) {
+			return h.store.UpdateStatusFromCancelled(ctx, id, from, by)
+		})
+}
+
 // mutateStatusDispatched is mutateStatus over the store's DORMANCY-GUARDED
 // write (MYR-376), and it backs exactly one caller: the owner pickup
 // transition (accepted → arrived).
@@ -100,7 +113,11 @@ func (h *RideRequestHandler) mutateStatusWith(
 		// Carried so the rider's push copy can tell a reservation from an
 		// instant request (MYR-360); not projected onto the WS frame.
 		ScheduledFor: updated.ScheduledFor,
-		UpdatedAt:    updated.UpdatedAt,
+		// Nil on every transition but a cancel — read off the UPDATED row, so
+		// the initiator the push notifier sees is the one the guarded write
+		// stamped (MYR-522).
+		CancelledBy: updated.CancelledBy,
+		UpdatedAt:   updated.UpdatedAt,
 	})
 
 	return updated, true

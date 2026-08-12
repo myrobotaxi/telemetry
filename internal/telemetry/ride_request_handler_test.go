@@ -47,6 +47,7 @@ type fakeRideStore struct {
 	updatedState string
 	updatedFrom  []string
 	updateCalls  int
+	cancelledBy  string
 	// dispatchGuardedCalls counts the writes that went through the MYR-376
 	// DORMANCY-guarded variant, so a test can pin that the pickup path uses it
 	// (and that nothing else does).
@@ -199,6 +200,21 @@ func (f *fakeRideStore) UpdateStatusFrom(_ context.Context, id string, from []st
 		rec = f.getRec
 	}
 	rec.Status = to
+	return rec, nil
+}
+
+// UpdateStatusFromCancelled mimics the MYR-522 initiator-stamping cancel
+// write: the same guarded transition with to fixed to "cancelled", recording
+// the party stamp the way the single UPDATE writes cancelled_by. The returned
+// record carries the stamp so handler tests can assert the wire projection.
+func (f *fakeRideStore) UpdateStatusFromCancelled(ctx context.Context, id string, from []string, by string) (RideRequestData, error) {
+	f.cancelledBy = by
+	rec, err := f.UpdateStatusFrom(ctx, id, from, "cancelled")
+	if err != nil {
+		return RideRequestData{}, err
+	}
+	stamp := by
+	rec.CancelledBy = &stamp
 	return rec, nil
 }
 
@@ -668,7 +684,9 @@ func TestRideRequestHandler_Cancel(t *testing.T) {
 		{name: "conflict from completed", caller: rideUserID, rec: fixtureRideData(rideUserID, rideStatusCompleted), wantStatus: http.StatusConflict, wantErrCode: wserrors.ErrCodeConflict},
 		{name: "conflict from cancelled", caller: rideUserID, rec: fixtureRideData(rideUserID, rideStatusCancelled), wantStatus: http.StatusConflict, wantErrCode: wserrors.ErrCodeConflict},
 		{name: "conflict from enroute", caller: rideUserID, rec: fixtureRideData(rideUserID, rideStatusEnroute), wantStatus: http.StatusConflict, wantErrCode: wserrors.ErrCodeConflict},
-		{name: "owner cannot cancel (rider-only)", caller: rideOwnerID + "X", rec: fixtureRideData(rideOwnerID+"X", rideStatusRequested), wantStatus: http.StatusForbidden, wantErrCode: wserrors.ErrCodePermissionDenied},
+		// MYR-522: the owner's cancel exists now, but a REQUESTED ride keeps
+		// decline as the owner's one exit — a 409 naming that door, not a 403.
+		{name: "owner cancel of a requested ride points at decline", caller: rideOwnerID + "X", rec: fixtureRideData(rideOwnerID+"X", rideStatusRequested), wantStatus: http.StatusConflict, wantErrCode: wserrors.ErrCodeConflict},
 		{name: "non-party gets 404", caller: rideOtherUsr, rec: fixtureRideData(rideUserID, rideStatusRequested), wantStatus: http.StatusNotFound, wantErrCode: wserrors.ErrCodeNotFound},
 		{name: "unknown id 404", caller: rideUserID, getErr: fmtNotFound(), wantStatus: http.StatusNotFound, wantErrCode: wserrors.ErrCodeNotFound},
 	}

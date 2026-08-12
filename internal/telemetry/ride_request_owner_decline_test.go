@@ -271,6 +271,19 @@ func newRacingDeclineStore(rec RideRequestData) *racingDeclineStore {
 	return &racingDeclineStore{rec: rec}
 }
 
+// UpdateStatusFromCancelled reuses the same compare-and-set arbitration with
+// the target fixed to "cancelled" (MYR-522); the stamp is carried onto the
+// winning row exactly as the single UPDATE writes cancelled_by.
+func (s *racingDeclineStore) UpdateStatusFromCancelled(ctx context.Context, id string, from []string, by string) (RideRequestData, error) {
+	rec, err := s.UpdateStatusFrom(ctx, id, from, "cancelled")
+	if err != nil {
+		return RideRequestData{}, err
+	}
+	stamp := by
+	rec.CancelledBy = &stamp
+	return rec, nil
+}
+
 func (s *racingDeclineStore) GetByID(context.Context, string) (RideRequestData, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

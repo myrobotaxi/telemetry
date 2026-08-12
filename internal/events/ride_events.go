@@ -75,7 +75,13 @@ type RideStatusChangedEvent struct {
 	// tell a RESERVATION from an instant request (MYR-360). It is NOT projected
 	// onto the `ride_status_changed` WS frame, which stays summary-only.
 	ScheduledFor *time.Time
-	UpdatedAt    time.Time
+	// CancelledBy names the party that initiated a cancellation — "rider" |
+	// "owner" (MYR-522), read off the updated row so it is nil on every other
+	// transition. Carried so the rider's push copy can tell an OWNER's cancel
+	// (worth waking a phone for) from the rider's own (noise). Not projected
+	// onto the WS frame, which stays summary-only — the detail read carries it.
+	CancelledBy *string
+	UpdatedAt   time.Time
 }
 
 // EventTopic returns TopicRideStatusChanged.

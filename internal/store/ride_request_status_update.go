@@ -35,6 +35,23 @@ func (r *RideRequestRepo) UpdateStatusFrom(ctx context.Context, id string, from 
 	}, id, from, to)
 }
 
+// UpdateStatusFromCancelled is UpdateStatusFrom pointed at exactly one target
+// status — `cancelled` — plus the MYR-522 initiator stamp: the same guarded
+// single-statement UPDATE also writes `cancelled_by` (first writer wins, the
+// timestamp stamps' own style), so who cancelled is decided by the same
+// database arbitration that decides whether the cancel wins at all. `by` is
+// the initiating party ('rider' | 'owner'); the caller's allowed-from set is
+// what makes the two parties' different legality windows honest under
+// concurrency.
+func (r *RideRequestRepo) UpdateStatusFromCancelled(ctx context.Context, id string, from []RideRequestStatus, by string) (RideRequestRecord, error) {
+	return r.updateStatusGuarded(ctx, r.pool, statusGuard{
+		name:        "UpdateStatusFromCancelled",
+		op:          "ride_request.update_status_from_cancelled",
+		query:       queryRideRequestUpdateStatusFromCancelled,
+		cancelledBy: by,
+	}, id, from, RideRequestStatusCancelled)
+}
+
 // UpdateStatusFromDispatched is UpdateStatusFrom plus the MYR-376 RESERVATION
 // DORMANCY predicate, and it backs exactly one caller: the owner pickup
 // transition (accepted → arrived).
@@ -176,6 +193,10 @@ type statusGuard struct {
 	// reservation-dormancy predicate. It changes NOTHING about the write — only
 	// how a zero-row miss is explained to the caller.
 	dormancyGuarded bool
+	// cancelledBy, when non-empty, is bound as $4 for the MYR-522 cancel
+	// variant, whose SET also stamps the initiating party. Empty for every
+	// other guard, whose statements have no fourth placeholder.
+	cancelledBy string
 }
 
 // updateStatusGuarded runs one guarded transition statement on q and
@@ -191,8 +212,12 @@ func (r *RideRequestRepo) updateStatusGuarded(
 		fromStrs = append(fromStrs, string(s))
 	}
 
+	args := []any{id, string(to), fromStrs}
+	if g.cancelledBy != "" {
+		args = append(args, g.cancelledBy)
+	}
 	start := time.Now()
-	row := q.QueryRow(ctx, g.query, id, string(to), fromStrs)
+	row := q.QueryRow(ctx, g.query, args...)
 	rec, err := r.scanRideRequest(row)
 	r.metrics.ObserveQueryDuration(g.op, time.Since(start).Seconds())
 	if err == nil {
