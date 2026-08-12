@@ -74,6 +74,20 @@ const queryRideRequestUpdateStatusFrom = rideRequestStatusStamp + `
 WHERE id = $1 AND status = ANY($3)
 RETURNING ` + rideRequestColumns
 
+// queryRideRequestUpdateStatusFromCancelled is the guarded transition PLUS the
+// MYR-522 initiator stamp: the SAME single-statement guard, with `cancelled_by`
+// written in the identical first-entry-only style the timestamp stamps use, so
+// a replayed or racing cancel can never overwrite who cancelled first. $4 is
+// the initiating party ('rider' | 'owner'); it backs BOTH cancel paths, which
+// is what keeps the two from drifting in how they stamp the row.
+const queryRideRequestUpdateStatusFromCancelled = rideRequestStatusStamp + `,
+	cancelled_by = CASE
+		WHEN cancelled_by IS NULL THEN $4
+		ELSE cancelled_by
+	END
+WHERE id = $1 AND status = ANY($3)
+RETURNING ` + rideRequestColumns
+
 // queryRideRequestUpdateStatusFromDispatched is the guarded transition PLUS the
 // MYR-376 reservation-dormancy predicate. It backs the owner pickup transition
 // (accepted → arrived) and nothing else.

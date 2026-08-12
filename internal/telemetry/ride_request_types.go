@@ -80,6 +80,14 @@ type RideRequestData struct {
 	// sweeper leaves the ride's own status at `accepted`, so nothing else on
 	// this record distinguishes an expired reservation from a live one.
 	DispatchError *string
+
+	// CancelledBy names the PARTY that initiated a cancellation — "rider" or
+	// "owner" (MYR-522). Nil on every non-cancelled ride, and on rides
+	// cancelled before the field existed: absence means "initiator unknown"
+	// and a consumer must not guess. Surfaced on the party-only detail
+	// payload so the rider's client can render the honest "had to cancel"
+	// copy from a refetch rather than inferring it from "not my own tap".
+	CancelledBy *string
 }
 
 // BookedWindowData is one interval in which a vehicle cannot take a new
@@ -219,6 +227,13 @@ type RideRequestStore interface {
 	// ErrRideStatusConflict (row exists, status outside `from`) or an
 	// sdk.ErrNotFound-wrapping error (row gone).
 	UpdateStatusFrom(ctx context.Context, id string, from []string, to string) (RideRequestData, error)
+	// UpdateStatusFromCancelled is UpdateStatusFrom pointed at exactly one
+	// target status — `cancelled` — whose guarded UPDATE also stamps the
+	// initiating party (`by`: "rider" | "owner") into cancelled_by, first
+	// writer wins (MYR-522). It backs BOTH cancel paths; the caller's
+	// allowed-from set is what expresses each party's different legality
+	// window. Miss outcomes are UpdateStatusFrom's.
+	UpdateStatusFromCancelled(ctx context.Context, id string, from []string, by string) (RideRequestData, error)
 	// UpdateStatusFromDispatched is UpdateStatusFrom plus the MYR-376
 	// RESERVATION DORMANCY precondition, carried in the SAME guarded UPDATE:
 	// the row must also satisfy `scheduled_for IS NULL OR dispatch_status =

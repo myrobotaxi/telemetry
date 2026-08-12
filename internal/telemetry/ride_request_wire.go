@@ -33,6 +33,7 @@ func toRideRequestWire(d RideRequestData) rideRequestWire {
 		UpdatedAt:             d.UpdatedAt.UTC().Format(time.RFC3339),
 		DispatchStatus:        d.DispatchStatus,
 		DispatchedAt:          formatRideTimePtr(d.DispatchedAt),
+		CancelledBy:           d.CancelledBy,
 	}
 }
 

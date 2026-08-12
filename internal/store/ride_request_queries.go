@@ -54,7 +54,7 @@ const rideRequestColumns = `id, rider_id, owner_id, vehicle_id,
 	status, passenger_name, passenger_phone,
 	scheduled_for, reschedule_proposed_for, reschedule_status,
 	accepted_at, completed_at, created_at, updated_at,
-	dispatch_status, dispatched_at, dispatch_error` + requesterIdentitySelect
+	dispatch_status, dispatched_at, dispatch_error, cancelled_by` + requesterIdentitySelect
 
 const queryRideRequestInsert = `INSERT INTO go_ride_requests (
 	id, rider_id, owner_id, vehicle_id,
