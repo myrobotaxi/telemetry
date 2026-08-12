@@ -45,12 +45,20 @@ const rideRequestDueColumns = `d.id, d.rider_id, d.owner_id, d.vehicle_id,
 //	                             sent/failed/skipped) can never be re-selected,
 //	                             so a ride is dispatched at most once no matter
 //	                             how many sweepers or ticks run.
-//	scheduled_for <= $1        — the reservation instant has arrived, judged
-//	                             against the SWEEPER's clock (passed in, not
-//	                             NOW()) so one clock governs both this
-//	                             selection and the Go-side lateness deadline
-//	                             — no app/DB skew can put them at odds — and
-//	                             so the due/not-yet-due boundary is exactly
+//	scheduled_for <= $1        — the reservation is inside the DISPATCH
+//	                             HORIZON. $1 is `now + LeadCap` (MYR-535), not
+//	                             the sweeper's bare clock: `scheduled_for` is
+//	                             the instant the car should ARRIVE at the
+//	                             pickup, so candidates are selected up to the
+//	                             maximum dispatch lead early and the per-row
+//	                             leave-time is decided in Go — the pickup and
+//	                             vehicle coordinates the lead needs are
+//	                             encrypted at rest, so it cannot be computed
+//	                             here. Both bind instants derive from the
+//	                             SWEEPER's clock (never NOW()) so one clock
+//	                             governs this selection, the Go-side lead gate
+//	                             and the lateness deadline — no app/DB skew can
+//	                             put them at odds — and the boundary is exactly
 //	                             testable.
 //
 // Those four are exactly the predicate + leading column of
