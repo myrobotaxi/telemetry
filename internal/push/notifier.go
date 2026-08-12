@@ -276,7 +276,8 @@ func (n *Notifier) handleStatusChanged(evt events.Event) {
 	// for both parties. Which transitions speak does not depend on scheduling
 	// or on either name, so the probes can pass empty values.
 	scheduled := ev.ScheduledFor != nil
-	_, notifyRider := statusAlert(ev.Status, "", scheduled)
+	byOwnerCancel := ownerCancelled(ev.Status, ev.CancelledBy)
+	_, notifyRider := statusAlert(ev.Status, "", scheduled, byOwnerCancel)
 	_, notifyOwner := ownerStatusAlert(ev.Status, nil)
 
 	// An owner riding their own car is both parties, and this platform makes
@@ -295,7 +296,7 @@ func (n *Notifier) handleStatusChanged(evt events.Event) {
 
 	n.async(func(ctx context.Context) {
 		if notifyRider {
-			a, _ := statusAlert(ev.Status, n.vehicleName(ctx, ev.VehicleID), scheduled)
+			a, _ := statusAlert(ev.Status, n.vehicleName(ctx, ev.VehicleID), scheduled, byOwnerCancel)
 			n.fanOut(ctx, delivery{
 				userID:   ev.RiderID,
 				rideID:   ev.RideRequestID,

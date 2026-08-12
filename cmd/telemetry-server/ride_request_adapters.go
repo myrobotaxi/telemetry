@@ -78,6 +78,17 @@ func (a *rideRequestStoreAdapter) UpdateStatusFrom(ctx context.Context, id strin
 	return a.guardedUpdate(ctx, a.repo.UpdateStatusFrom, id, from, to)
 }
 
+// UpdateStatusFromCancelled delegates to the repo's INITIATOR-STAMPING cancel
+// variant (MYR-522) — the same guarded single statement, whose SET also writes
+// `cancelled_by` first-writer-wins. The target status is fixed to `cancelled`
+// by the repo, so the writer shape differs from guardedUpdate's; the sentinel
+// translation is shared by delegating to the same classifier.
+func (a *rideRequestStoreAdapter) UpdateStatusFromCancelled(ctx context.Context, id string, from []string, by string) (telemetry.RideRequestData, error) {
+	return a.guardedUpdate(ctx, func(ctx context.Context, id string, from []store.RideRequestStatus, _ store.RideRequestStatus) (store.RideRequestRecord, error) {
+		return a.repo.UpdateStatusFromCancelled(ctx, id, from, by)
+	}, id, from, string(store.RideRequestStatusCancelled))
+}
+
 // UpdateStatusFromDispatched delegates to the repo's DORMANCY-guarded variant
 // (MYR-376) — the same single statement plus `AND (scheduled_for IS NULL OR
 // dispatch_status = 'sent' OR scheduled_for <= NOW())` — and additionally
@@ -279,6 +290,7 @@ func fromStoreRideRequest(rec store.RideRequestRecord) telemetry.RideRequestData
 		DispatchStatus:        dispatchStatus,
 		DispatchedAt:          rec.DispatchedAt,
 		DispatchError:         rec.DispatchError,
+		CancelledBy:           rec.CancelledBy,
 	}
 }
 

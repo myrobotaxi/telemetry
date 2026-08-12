@@ -33,11 +33,11 @@ func TestVehicleLabel(t *testing.T) {
 // produces nonsense on exactly the notifications that matter most.
 func TestVehicleLabelFallbackReadsNaturally(t *testing.T) {
 	label := vehicleLabel("")
-	declined, ok := statusAlert(statusDeclined, "", false)
+	declined, ok := statusAlert(statusDeclined, "", false, false)
 	if !ok {
 		t.Fatal("declined produced no alert")
 	}
-	scheduledDeclined, ok := statusAlert(statusDeclined, "", true)
+	scheduledDeclined, ok := statusAlert(statusDeclined, "", true, false)
 	if !ok {
 		t.Fatal("scheduled declined produced no alert")
 	}
@@ -93,7 +93,7 @@ func TestStatusAlertSelectsOnlyNotifiableTransitions(t *testing.T) {
 	for _, status := range all {
 		for _, scheduled := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/scheduled=%v", status, scheduled), func(t *testing.T) {
-				a, ok := statusAlert(status, "Blue Whale", scheduled)
+				a, ok := statusAlert(status, "Blue Whale", scheduled, false)
 				if ok != notifiable[status] {
 					t.Fatalf("statusAlert(%q) notifies = %v, want %v", status, ok, notifiable[status])
 				}
@@ -177,11 +177,11 @@ func TestOwnerStatusAlertNamesOnlyTheFirstName(t *testing.T) {
 // time zone, so an absolute rendering here would be either wrong or unreadable
 // — the same standing rule createdAlert follows.
 func TestStatusAlertDeclinedNamesTheReservation(t *testing.T) {
-	instant, ok := statusAlert(statusDeclined, "Blue Whale", false)
+	instant, ok := statusAlert(statusDeclined, "Blue Whale", false, false)
 	if !ok {
 		t.Fatal("instant declined produced no alert")
 	}
-	scheduled, ok := statusAlert(statusDeclined, "Blue Whale", true)
+	scheduled, ok := statusAlert(statusDeclined, "Blue Whale", true, false)
 	if !ok {
 		t.Fatal("scheduled declined produced no alert")
 	}
@@ -204,8 +204,8 @@ func TestStatusAlertDeclinedNamesTheReservation(t *testing.T) {
 	// Only `declined` forks on scheduling — accepted/arrived read identically
 	// either way, so the fork stays as narrow as the defect it fixes.
 	for _, status := range []string{statusAccepted, statusArrived} {
-		a, _ := statusAlert(status, "Blue Whale", false)
-		b, _ := statusAlert(status, "Blue Whale", true)
+		a, _ := statusAlert(status, "Blue Whale", false, false)
+		b, _ := statusAlert(status, "Blue Whale", true, false)
 		if a != b {
 			t.Errorf("statusAlert(%q) must not fork on scheduling: %+v vs %+v", status, a, b)
 		}

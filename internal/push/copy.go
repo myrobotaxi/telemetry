@@ -34,18 +34,27 @@ const (
 const maxNameRunes = 32
 
 // Ride statuses that are worth waking a phone for. Every other transition
-// (`requested`, `completed`, `cancelled`) is either the recipient's own action
-// or invisible to them, so it sends nothing.
+// (`requested`, `completed`) is either the recipient's own action or invisible
+// to them, so it sends nothing. `cancelled` forks on WHO cancelled (MYR-522):
+// the rider's own cancel is their own action and stays silent, an OWNER's
+// cancel is exactly the news a rider is waiting on a locked phone for.
 //
 // `enroute` is the one status that speaks to the OWNER and not the rider: the
 // rider pressed Start ride themselves, so telling them is noise, but it is the
 // owner's only signal that their car has left the kerb with somebody in it.
 // See ownerStatusAlert (MYR-462).
 const (
-	statusAccepted = "accepted"
-	statusDeclined = "declined"
-	statusArrived  = "arrived"
+	statusAccepted  = "accepted"
+	statusDeclined  = "declined"
+	statusArrived   = "arrived"
+	statusCancelled = "cancelled"
 )
+
+// cancelledByOwner is the `cancelled_by` stamp that makes a cancellation the
+// OWNER's (MYR-522), matching the handler's rideCancelledByOwner. Absence —
+// the rider's own cancel, or a row cancelled before the stamp existed — sends
+// nothing, which is also the safe reading of an un-upgraded event.
+const cancelledByOwner = "owner"
 
 // alert is the title/body pair for one notification.
 type alert struct {
@@ -95,7 +104,13 @@ func createdAlert(ev events.RideRequestCreatedEvent) alert {
 // zone, so an absolute rendering would be either wrong ("5:30 PM" in the wrong
 // zone) or unreadable ("Aug 1, 5:30 PM UTC"). Correct local rendering belongs
 // to the client, which refetches the ride anyway.
-func statusAlert(status, vehicleName string, scheduled bool) (alert, bool) {
+// ownerCancelled reports whether this event is an OWNER's cancellation — the
+// one `cancelled` transition worth waking the rider for (MYR-522).
+func ownerCancelled(status string, cancelledBy *string) bool {
+	return status == statusCancelled && cancelledBy != nil && *cancelledBy == cancelledByOwner
+}
+
+func statusAlert(status, vehicleName string, scheduled, byOwnerCancel bool) (alert, bool) {
 	switch status {
 	case statusAccepted:
 		return alert{title: "Your ride is confirmed", body: bodySeeDetails}, true
@@ -114,6 +129,25 @@ func statusAlert(status, vehicleName string, scheduled bool) (alert, bool) {
 		return alert{
 			title: "Your car is here — your turn to start",
 			body:  "Open MyRoboTaxi to start the ride.",
+		}, true
+	case statusCancelled:
+		// MYR-522: only an OWNER's cancel speaks — the rider's own cancel is
+		// their own action. The grammar is declined's, because it is the same
+		// news one status later: the car is not coming, try another one. The
+		// vehicle nickname is the only interpolation, per the payload policy —
+		// the owner's NAME never travels on a lock-screen surface.
+		if !byOwnerCancel {
+			return alert{}, false
+		}
+		if scheduled {
+			return alert{
+				title: vehicleLabel(vehicleName) + " had to cancel your scheduled ride",
+				body:  "Try booking another car.",
+			}, true
+		}
+		return alert{
+			title: vehicleLabel(vehicleName) + " had to cancel your ride",
+			body:  "Try booking another car.",
 		}, true
 	default:
 		return alert{}, false

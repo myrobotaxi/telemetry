@@ -288,7 +288,7 @@ Per-site audit (REST surface in `internal/telemetry/`, WS surface in `internal/w
 | [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — second open instant ride on create (pre-check) | 409 | `ErrCodeRideActive` | Rider already holds an OPEN instant ride; body carries `activeRideRequest` (MYR-230, §7.8) |
 | [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — second open instant ride on create (unique-index race backstop) | 409 | `ErrCodeRideActive` | Concurrent instant create rejected by `uq_go_ride_requests_active_instant_rider` (23505); winner re-read into `activeRideRequest` (MYR-230, §7.8) |
 | [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — unknown / non-party ride | 404 | `ErrCodeNotFound` | `GetByID` miss, or caller is neither rider nor owner (no existence leak) |
-| [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — owner attempts cancel (rider-only) | 403 | `ErrCodePermissionDenied` | A party, but wrong role for the action |
+| [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — owner cancel outside its window (MYR-522; this row was a blanket 403 while cancel was rider-only) | 409 | `ErrCodeConflict` | The owner's cancel is legal from `accepted`/`arrived` only; the refusal for `requested` names decline, and for `enroute` names dropped-off |
 | [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — illegal lifecycle transition | 409 | `ErrCodeConflict` | Cancel from a non-`{requested,accepted}` state (§7.8) |
 | [`ride_request_handler.go`](../../internal/telemetry/ride_request_handler.go) — store failure | 500 | `ErrCodeInternalError` | DB error on create / status update / list |
 | [`ride_share_gate.go`](../../internal/telemetry/ride_share_gate.go) — ride-request create OR owner accept against a vehicle whose owner has PAUSED ride sharing (MYR-342) | 409 | `ErrCodeVehicleUnavailable` | `Ride sharing is paused for this vehicle`. A CAPABILITY refusal, sharing the code with the MYR-266 busy guard and the MYR-277 in-service/offline gate — the request is well-formed and the caller authorised, the car simply cannot serve it. **Applies to SCHEDULED rides too**, unlike the MYR-313 exemption (§7.8): a service visit ends, an owner's pause does not |
@@ -630,7 +630,7 @@ No contract changes are required for the new role's wire shape (the REST respons
 | `GET` | `/api/ride-requests` | Rider's own ride-request history (paginated) | Bearer (self as rider) | FR-9.1, FR-9.3 |
 | `GET` | `/api/ride-requests/incoming` | Owner's feed of open (`requested`) ride requests across their vehicles (paginated). Two mutually exclusive params select different slices of the same feed: `?upcomingForVehicle={vehicleId}` — the owner's **accepted, still-future reservations** for one car, soonest first (MYR-360); `?activeForVehicle={vehicleId}` — the ride that car is **serving right now** (MYR-400) | Bearer (self as owner) | FR-9.1, FR-9.3 |
 | `GET` | `/api/ride-requests/{id}` | Single ride-request detail | Bearer + party (rider or owner) | FR-9.3 |
-| `POST` | `/api/ride-requests/{id}/cancel` | Rider cancels a requested/accepted ride | Bearer (rider) | FR-9.3 |
+| `POST` | `/api/ride-requests/{id}/cancel` | Party-aware cancel (MYR-522): the RIDER from `requested`/`accepted`, the OWNER from `accepted`/`arrived` | Bearer + party (rider or owner) | FR-9.3 |
 | `POST` | `/api/ride-requests/{id}/picked-up` | Owner confirms pickup — rider is aboard (accepted→arrived) | Bearer (owner) | FR-9.3 |
 | `POST` | `/api/ride-requests/{id}/start` | Rider starts the ride (arrived→enroute; triggers the leg-2 dropoff nav push) | Bearer (rider) | FR-9.3 |
 | `POST` | `/api/ride-requests/{id}/dropped-off` | Owner confirms dropoff — ride complete (enroute→completed) | Bearer (owner) | FR-9.3 |
@@ -1910,7 +1910,7 @@ The field is **OMITTED** (never an empty string) in exactly one case: the rider 
 
 - **Create** derives `ownerId` from the target vehicle's owner and enforces a vehicle-access check: the caller must be the vehicle's **owner**, OR hold an accepted share at the **`rides`** tier (§7.5). A rider ≠ owner request is therefore normal as of **MYR-184**, and `ownerId` is still the VEHICLE's owner — that asymmetry is what routes the accept/decline to the right person. **CORRECTION (MYR-184, 2026-07-29):** this bullet previously said shared-viewer requests would "light up automatically" when `GetUserVehicles` gained the viewer merge, with "no change to this handler required". **That was wrong.** The create-time check is a SEPARATE code path from the read-side access set (`internal/telemetry/ride_request_handler.go`, an owner-equality test on the `GetByID` row): widening the access set put shared cars in a viewer's list and let them read the snapshot, but this check still refused every one of their ride requests. Granting `rides` required changing it, and MYR-184 did. The identical claim in `internal/telemetry/ride_request_handler.go`'s type doc has been corrected in lockstep. **AMENDED BY [MYR-369](https://linear.app/myrobotaxi/issue/MYR-369):** the gate no longer reads a tier. It reads the grant's **`allow_rides` flag**, which the owner can switch off in place through §7.5.7 without revoking the grant, and which a **suspended** grant never satisfies. The check is therefore live state rather than something fixed at invite time — and it is now backed by two more layers, the owner-accept backstop and the reservation-dispatch probe (§7.5.7). Unknown vehicle → `404 not_found`; visible-but-not-accessible, and any viewer whose grant lacks the ride capability → `403 vehicle_not_owned`. A rider may hold only **one OPEN instant ride** (MYR-230): a second **instant** create while one is open is `409 ride_active` and returns the existing ride for the client to adopt; **scheduled** creates are exempt (see the `POST` section below).
 - **Detail (`GET {id}`)** is **party-only**: rider OR vehicle owner. A caller who is neither gets `404 not_found` (not `403`) so the server never confirms the existence of a ride the caller has no relation to.
-- **Cancel** is **rider-only**. The owner is a party but cannot cancel → `403 permission_denied`. A non-party → `404`.
+- **Cancel** is **party-aware** (MYR-522; rider-only before it). The RIDER may cancel from `requested`/`accepted` — unchanged. The OWNER may cancel from `accepted`/`arrived`; a `requested` ride keeps DECLINE as the owner's one exit (409 naming it), and once the rider is aboard (`enroute`) there is no owner cancel — ending early is what dropped-off already is (409 naming it). A non-party → `404`. A self-ride caller (owner == rider) takes the rider path. Both paths stamp `cancelledBy` ("rider" | "owner") in the same guarded write.
 - **Accept / decline** are **owner-only**. The rider is a party but cannot decide → `403 permission_denied`. A non-party → `404`. (MYR-175)
 - **Owner-driven handshake (MYR-270).** **picked-up** (`accepted → arrived`) and **dropped-off** (`enroute → completed`) are **owner-only** (the rider is a party but cannot confirm → `403`); **start** (`arrived → enroute`) is **rider-only** (the owner is a party but cannot start → `403`). A non-party → `404` on all three.
 - **Incoming feed** is scoped to the authenticated owner (`owner_id == JWT sub`) — no cross-owner reads are expressible. (MYR-175)
@@ -2006,7 +2006,18 @@ Party-only (rider or vehicle owner). Returns the bare `RideRequest`. Errors: `40
 
 #### `POST /api/ride-requests/{id}/cancel`
 
-Rider-only. Legal only from `requested` or `accepted` → `cancelled`; any other current status is `409 conflict`. Responds `200 OK` with the updated `RideRequest` and unicasts `ride_status_changed`. Errors: `401 auth_failed`, `403 permission_denied` (owner/non-rider party), `404 not_found` (unknown id / non-party), `409 conflict` (illegal transition), `500 internal_error`.
+**Party-aware** (MYR-522 — client decision 2026-08-12; rider-only before it). Which party is calling decides the legality window, and both windows are enforced by the same guarded single-statement UPDATE:
+
+| Caller | Legal from | Refusals |
+|--------|-----------|----------|
+| Rider (including a self-ride owner) | `requested`, `accepted` | any other status → `409 conflict` |
+| Owner | `accepted`, `arrived` | `requested` → `409 conflict` naming **decline** (that moment's owner verb); `enroute` → `409 conflict` naming **dropped-off** (the rider is aboard); any other status → `409 conflict` |
+
+The winning write also stamps **`cancelledBy`** (`"rider"` \| `"owner"`) into the same UPDATE, first writer wins — so who cancelled is arbitrated by exactly the race discipline that decides whether the cancel wins. The stamp is surfaced on the party-only `RideRequest` payload as optional `cancelledBy`, and consumers MUST treat absence (any row cancelled before the field existed) as "initiator unknown", never guess. Responds `200 OK` with the updated `RideRequest` and unicasts `ride_status_changed` through the same delivery every other transition uses (nav stand-down and Live Activity teardown ride the same event).
+
+**Push (MYR-522):** an OWNER's cancel notifies the RIDER — `{vehicle nickname} had to cancel your ride` (scheduled variant: `… your scheduled ride`, naming no time per the standing rule), body `Try booking another car.` — under the `ride_lifecycle` category. The rider's own cancel, and any event with no `cancelledBy`, stays silent, which keeps every pre-MYR-522 publisher behaving exactly as before. The owner's name never travels on a lock-screen surface (payload policy).
+
+Errors: `401 auth_failed`, `404 not_found` (unknown id / non-party), `409 conflict` (illegal transition / wrong door, see table), `500 internal_error`. The pre-MYR-522 `403 permission_denied` for an owner cancel is RETIRED.
 
 #### Owner-driven dispatch handshake (MYR-270)
 
@@ -2037,7 +2048,7 @@ A **SCHEDULED** ride's pickup is refused **`409 conflict`** — the SAME code, m
 >
 > Equivalently, the pickup requires `scheduledFor` **absent** OR `dispatchStatus == "sent"` OR `scheduledFor <= now()`.
 
-**The defect this closes.** MYR-179 moved a reservation's pickup nav push from accept time to `scheduledFor`, which left a reservation sitting in `accepted` — indistinguishable, to the lifecycle, from an instant ride whose car is already rolling. In production an owner accepted a ride due the **next day** and immediately tapped "Picked up". The ride reached `arrived` with `dispatchStatus` still absent, the car never dispatched and in service; from `arrived` the rider's `start` would have pushed a real **dropoff** nav to that vehicle, and the ride had no legal exit (cancel is illegal from `arrived`, per the matrix below). The gate makes "picked up" mean what it says: the car was actually sent.
+**The defect this closes.** MYR-179 moved a reservation's pickup nav push from accept time to `scheduledFor`, which left a reservation sitting in `accepted` — indistinguishable, to the lifecycle, from an instant ride whose car is already rolling. In production an owner accepted a ride due the **next day** and immediately tapped "Picked up". The ride reached `arrived` with `dispatchStatus` still absent, the car never dispatched and in service; from `arrived` the rider's `start` would have pushed a real **dropoff** nav to that vehicle, and the ride had no legal exit (the rider's cancel is illegal from `arrived`, per the matrix below; the owner's `arrived` cancel arrived later, with MYR-522). The gate makes "picked up" mean what it says: the car was actually sent.
 
 **Why dormancy ends at the DUE INSTANT and not at a successful dispatch.** Requiring `dispatchStatus == "sent"` would contradict the reservation-expiry contract stated in the transition-matrix notes below and under "Reservation-time dispatch": a reservation the sweeper failed (`failed` / `reservation_expired`), skipped (kill-switch), or never reached stays `accepted`, and its parties "may still **cancel or proceed manually**". Under a `sent`-only gate every such ride would have **cancel as its only exit** — the same stranding the defect produced, arrived at from the other direction. Past `scheduledFor`, the owner is at the car and the ride is owed: a manual pickup **is** the documented recovery path, dispatch or no dispatch. What is refused is strictly the **pre-due** pickup, which is the defect and nothing more.
 
@@ -2322,15 +2333,15 @@ A cell naming an endpoint means the transition is **legal from that status**; it
 | From \ To | `accepted` | `declined` | `arrived` | `enroute` | `completed` | `cancelled` |
 |-----------|-----------|-----------|-----------|-----------|-------------|-------------|
 | `requested` | `accept` (owner, MYR-175) | `decline` (owner, MYR-175) | `409` | `409` | `409` | `cancel` (rider, MYR-174) |
-| `accepted` | — | `decline` (owner, MYR-360 — **SCHEDULED rides only**; instant stays `409`) | `picked-up` (owner, MYR-270 — **`409` for a SCHEDULED ride that is neither dispatched nor yet due**, MYR-376) | `409` | `409` | `cancel` (rider, MYR-174) |
-| `arrived` | `409` | `409` | — | `start` (rider, MYR-270) | `409` | `409` |
+| `accepted` | — | `decline` (owner, MYR-360 — **SCHEDULED rides only**; instant stays `409`) | `picked-up` (owner, MYR-270 — **`409` for a SCHEDULED ride that is neither dispatched nor yet due**, MYR-376) | `409` | `409` | `cancel` (rider, MYR-174; **owner, MYR-522**) |
+| `arrived` | `409` | `409` | — | `start` (rider, MYR-270) | `409` | `cancel` (**owner only**, MYR-522 — the rider's cancel stays `409` here) |
 | `enroute` | `409` | `409` | `409` | — | `dropped-off` (owner, MYR-270) | `409` |
 | `declined` (terminal) | `409` | `409` | `409` | `409` | `409` | `409` |
 | `completed` (terminal) | `409` | `409` | `409` | `409` | `409` | `409` |
 | `cancelled` (terminal) | `409` | `409` | `409` | `409` | `409` | `409` |
 
 - **Atomicity / race semantics (MYR-174/175):** every transition executes as a single guarded UPDATE (`WHERE id = … AND status = ANY(<legal-from>)` — `store.RideRequestRepo.UpdateStatusFrom`), so concurrent conflicting mutations serialize in the database: **exactly one wins; every loser receives `409 conflict`** even if its pre-check read saw a legal state (e.g. rider-cancel racing owner-decline, or an owner double-tapping accept from two devices). The WS `ride_status_changed` frame and the `ride.accepted` dispatch event are published only by the winning write — the dispatch seam is exactly-once per accept by construction.
-- **MYR-174 (this story)** implements only the two `→ cancelled` transitions. Cancel from `enroute`/`arrived` (ride in progress) and from any terminal state is `409` — cancel is legal only from `{requested, accepted}`.
+- **MYR-174 (this story)** implements only the two `→ cancelled` transitions. For the RIDER, cancel from `enroute`/`arrived` (ride in progress) and from any terminal state is `409` — the rider's cancel is legal only from `{requested, accepted}`. **MYR-522 adds the OWNER's cancel** from `{accepted, arrived}` (never `requested` — decline is that moment's owner verb — and never `enroute`: the rider is aboard, and ending early is dropped-off). Both stamp `cancelledBy` in the same guarded write.
 - **MYR-175** implements `requested → accepted` / `requested → declined` (owner-only endpoints above). Accepting or declining a ride already past `requested` — including one the rider cancelled while the owner sheet was open — is the race the `409` protects.
 - **Reschedule confirm/decline (owner)** is NOT part of MYR-175: the rider-side propose endpoint (`ProposeReschedule`) has no HTTP surface yet, so an owner resolve endpoint would be unreachable dead code. The whole reschedule negotiation (propose + resolve, `rescheduleStatus` sub-state) ships together in **MYR-192**; the store layer (`ResolveReschedule`) is already in place.
 - **MYR-176** performs the leg-1 (pickup) nav push on accept but records it as an orthogonal `dispatchStatus`/`dispatchedAt` annotation (see "Dispatch outcome" above) — it does **not** advance the main lifecycle.
@@ -3412,9 +3423,13 @@ the behavior a client can rely on.
 | `ride.status.changed` → `declined` | **rider** | `«Vehicle» can't take this ride` (`Your car can't take this ride`) | `Try booking another car.` |
 | `ride.status.changed` → `arrived` | **rider** | `Your car is here — your turn to start` | `Open MyRoboTaxi to start the ride.` |
 | `ride.due` | **rider** | `«Vehicle» is heading your way` (`Your car is heading your way`) | `Your scheduled ride is starting now.` |
+| `ride.status.changed` → `cancelled` **by the OWNER** (MYR-522, `cancelledBy == "owner"`) | **rider** | `«Vehicle» had to cancel your ride` (scheduled: `«Vehicle» had to cancel your scheduled ride`; fallback `Your car …`) | `Try booking another car.` |
 
-Every other transition (`requested`, `enroute`, `completed`, `cancelled`) sends
-nothing — each is either the recipient's own action or invisible to them.
+Every other transition (`requested`, `enroute`, `completed`, and a `cancelled`
+whose event carries no `cancelledBy` or the rider's own) sends nothing — each is
+either the recipient's own action or invisible to them. An un-upgraded publisher
+omits `cancelledBy` entirely, which reads as the silent arm — exactly the
+pre-MYR-522 behaviour.
 
 **Payload policy — first names and vehicle nicknames ONLY.** A notification
 renders on a **locked screen**, to whoever is holding the phone. Pickup and
