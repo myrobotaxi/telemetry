@@ -30,6 +30,10 @@ const (
 	// decisionLost: the claim went to a peer sweeper, or the ride was
 	// cancelled/advanced between the SELECT and the claim. Silent by design.
 	decisionLost
+	// decisionWaiting: the candidate is inside the SELECT horizon but before
+	// its computed leave-time (MYR-535). Untouched, unlogged per row, and
+	// re-decided next tick with the car's newer position.
+	decisionWaiting
 )
 
 // sweepResult counts one pass, for logging and tests.
@@ -39,6 +43,7 @@ type sweepResult struct {
 	held       int // skipped this tick: vehicle busy, or unknown state
 	expired    int // failed honestly: past the lateness ceiling
 	lost       int // claim lost to a peer sweeper, or the ride moved on
+	waiting    int // inside the horizon, before the computed leave-time
 }
 
 func (r *sweepResult) count(d sweepDecision) {
@@ -51,6 +56,8 @@ func (r *sweepResult) count(d sweepDecision) {
 		r.lost++
 	case decisionHeld:
 		r.held++
+	case decisionWaiting:
+		r.waiting++
 	}
 }
 
@@ -70,8 +77,13 @@ func (s *ReservationSweeper) sweepOnce(ctx context.Context) sweepResult {
 	// gets its own OverallTimeout-bounded context, exactly like an instant
 	// dispatch — a 30s pass budget must never guillotine a nav push mid-flight
 	// and leave the row claimed-but-unresolved.
+	// The horizon is now + LeadCap (MYR-535): scheduledFor is an ARRIVAL
+	// instant, so a candidate must be visible for the whole window it could
+	// legally leave in. The per-row leave-time gate lives in the worker
+	// (holdIfBeforeLeaveTime); the lateness deadline stays anchored on the
+	// bare clock.
 	listCtx, cancel := context.WithTimeout(ctx, s.cfg.SweepTimeout)
-	dueList, err := s.store.ListDueReservations(listCtx, now, now.Add(-s.cfg.MaxLateness), s.cfg.MaxPerSweep)
+	dueList, err := s.store.ListDueReservations(listCtx, now.Add(s.cfg.LeadCap), now.Add(-s.cfg.MaxLateness), s.cfg.MaxPerSweep)
 	cancel()
 	if err != nil {
 		s.logger.Error("reservation sweep: list due failed", slog.String("error", err.Error()))
@@ -105,6 +117,7 @@ func (s *ReservationSweeper) sweepOnce(ctx context.Context) sweepResult {
 			slog.Int("held", res.held),
 			slog.Int("expired", res.expired),
 			slog.Int("lost", res.lost),
+			slog.Int("waiting", res.waiting),
 		)
 	}
 	return res

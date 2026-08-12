@@ -227,9 +227,21 @@ func TestDueBannerSurvivesALiveCard(t *testing.T) {
 	n.handleDue(dueEvent())
 	n.Wait()
 
-	if got := len(sender.Sent()); got != 1 {
-		t.Errorf("sent %d notifications on ride.due, want 1 — the due push is not "+
-			"a phase the island announces", got)
+	// MYR-535: ride.due wakes both parties, so the count is 2. What this test
+	// pins is that the RIDER's banner is among them — the gate must not
+	// suppress it, because the due push is not a phase the island announces.
+	sent := sender.Sent()
+	if got := len(sent); got != 2 {
+		t.Fatalf("sent %d notifications on ride.due, want 2 (rider + owner)", got)
+	}
+	riderSeen := false
+	for i := range sent {
+		if sent[i].DeviceToken == riderDevice {
+			riderSeen = true
+		}
+	}
+	if !riderSeen {
+		t.Error("the rider's due banner was suppressed — it is not a phase the island announces")
 	}
 }
 

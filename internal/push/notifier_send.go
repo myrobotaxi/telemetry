@@ -203,6 +203,24 @@ func (n *Notifier) dropDevice(ctx context.Context, deviceToken, topic string) {
 // vehicleName resolves a vehicle nickname for the copy, best-effort. A failure
 // is logged at debug and yields "", which the copy renders as a generic label
 // — a notification with a slightly blander title beats no notification.
+// requesterFirstName resolves the rider's first name for owner-facing copy,
+// or "" when unwired, unknown or unreadable — the copy's anonymous fallback
+// handles all three the same way. The value is P1 and is never logged.
+func (n *Notifier) requesterFirstName(ctx context.Context, userID string) string {
+	if n.requesters == nil || userID == "" {
+		return ""
+	}
+	name, err := n.requesters.RequesterFirstName(ctx, userID)
+	if err != nil {
+		n.logger.Debug("push: requester name lookup failed",
+			slog.String("user_id", userID),
+			slog.String("error", err.Error()),
+		)
+		return ""
+	}
+	return name
+}
+
 func (n *Notifier) vehicleName(ctx context.Context, vehicleID string) string {
 	if n.vehicles == nil || vehicleID == "" {
 		return ""

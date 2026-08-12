@@ -189,11 +189,34 @@ func ownerStatusAlert(status string, requesterName *string) (alert, bool) {
 }
 
 // dueAlert is the RIDER's copy for a scheduled ride whose pickup nav has
-// reached the car.
+// reached the car. Since MYR-535 dispatch fires EARLY — the car leaves in
+// time to ARRIVE at the reserved instant — so the body states the fact that
+// is true at send time (the pickup is coming up) rather than the old
+// "starting now", which would land up to half an hour before the pickup.
+// No absolute time, per the standing rule: the server holds the instant in
+// UTC and knows no client time zone.
 func dueAlert(vehicleName string) alert {
 	return alert{
 		title: vehicleLabel(vehicleName) + " is heading your way",
-		body:  "Your scheduled ride is starting now.",
+		body:  "Your scheduled pickup is coming up.",
+	}
+}
+
+// ownerDueAlert is the OWNER's copy for the same moment (MYR-535, client
+// decision 2026-08-12): the route just landed on the car's dash, and the
+// owner is the person who has to walk out and drive it. Payload policy as
+// everywhere: the requester's FIRST NAME is the only interpolation — no
+// pickup, no address, no time.
+func ownerDueAlert(requesterName string) alert {
+	if name := displayName(&requesterName); name != "" {
+		return alert{
+			title: name + "'s pickup is coming up",
+			body:  "Your car has the route — time to head out.",
+		}
+	}
+	return alert{
+		title: "Your rider's pickup is coming up",
+		body:  "Your car has the route — time to head out.",
 	}
 }
 

@@ -154,12 +154,13 @@ type RideDueEvent struct {
 	ScheduledFor time.Time
 	// DueAt is the sweeper-clock instant the reservation was picked up for
 	// dispatch (read in the worker, just before the claim — the push itself
-	// then takes up to the dispatcher's OverallTimeout). It is >= ScheduledFor
-	// by up to one sweep interval plus any vehicle-busy hold, and is bounded
-	// above by ScheduledFor + the lateness ceiling: past that the reservation
-	// is failed instead and no RideDueEvent is ever published. So a consumer
-	// can tell a punctual dispatch from a held-then-released one without
-	// re-reading the row.
+	// then takes up to the dispatcher's OverallTimeout). Since MYR-535 it
+	// ordinarily PRECEDES ScheduledFor by the computed dispatch lead
+	// (ScheduledFor is the pickup ARRIVAL instant; the car is sent out early
+	// enough to make it), and it is bounded above by ScheduledFor + the
+	// lateness ceiling: past that the reservation is failed instead and no
+	// RideDueEvent is ever published. So a consumer can tell an on-lead
+	// dispatch from a held-then-released one without re-reading the row.
 	DueAt time.Time
 }
 

@@ -161,6 +161,11 @@ func TestNotifier_RideLifecyclePrefOffSendsNothing(t *testing.T) {
 	// RIDER, and a status change wakes whichever party the transition is news
 	// to — the rider for accepted/declined/arrived, the owner for `enroute`
 	// (MYR-462). The gate must read the RECIPIENT's row in every one of them.
+	// devices maps each recipient to their registered device token, so the
+	// assertion can be scoped to the RECIPIENT's phone: since MYR-535 the
+	// `ride.due` event wakes BOTH parties, and the other party's preference is
+	// their own row's business, not this case's.
+	devices := map[string]string{testOwnerID: ownerDevice, testRiderID: riderDevice}
 	cases := []struct {
 		name      string
 		recipient string
@@ -196,6 +201,11 @@ func TestNotifier_RideLifecyclePrefOffSendsNothing(t *testing.T) {
 			recipient: testRiderID,
 			deliver:   func(n *Notifier) { n.handleDue(dueEvent()) },
 		},
+		{
+			name:      "ride.due (owner, MYR-535)",
+			recipient: testOwnerID,
+			deliver:   func(n *Notifier) { n.handleDue(dueEvent()) },
+		},
 	}
 
 	for _, tc := range cases {
@@ -209,9 +219,15 @@ func TestNotifier_RideLifecyclePrefOffSendsNothing(t *testing.T) {
 			tc.deliver(n)
 			n.Wait()
 
-			if got := sender.Sent(); len(got) != 0 {
-				t.Errorf("sent %d notification(s) with ride_lifecycle OFF, want 0 — the "+
-					"switch is decorative again: %+v", len(got), got)
+			var toRecipient []Notification
+			for _, s := range sender.Sent() {
+				if s.DeviceToken == devices[tc.recipient] {
+					toRecipient = append(toRecipient, s)
+				}
+			}
+			if len(toRecipient) != 0 {
+				t.Errorf("sent %d notification(s) to the recipient with ride_lifecycle OFF, "+
+					"want 0 — the switch is decorative again: %+v", len(toRecipient), toRecipient)
 			}
 			if prefs.lookups() == 0 {
 				t.Error("the preference store was never consulted — the gate is not on this path")
@@ -236,8 +252,10 @@ func TestNotifier_RideLifecyclePrefOnStillSends(t *testing.T) {
 	n.handleDue(dueEvent())
 	n.Wait()
 
-	if got := sender.Sent(); len(got) != 5 {
-		t.Errorf("sent %d notification(s) with ride_lifecycle ON, want 5", len(got))
+	// 6 = created + accepted + declined + arrived + the due pair (MYR-535:
+	// ride.due wakes both parties).
+	if got := sender.Sent(); len(got) != 6 {
+		t.Errorf("sent %d notification(s) with ride_lifecycle ON, want 6", len(got))
 	}
 }
 

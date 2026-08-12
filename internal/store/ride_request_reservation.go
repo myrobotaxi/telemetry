@@ -45,21 +45,26 @@ type DueReservation struct {
 }
 
 // ListDueReservations returns the accepted, still-unclaimed reservations whose
-// `scheduled_for` is at or before now and which are ACTIONABLE this pass —
-// either their vehicle is free, or they are already past expiredBefore and must
-// be resolved regardless. Oldest first. See queryRideRequestListDue for why
-// each conjunct is load-bearing.
+// `scheduled_for` is at or before dueBefore and which are ACTIONABLE this pass
+// — either their vehicle is free, or they are already past expiredBefore and
+// must be resolved regardless. Oldest first. See queryRideRequestListDue for
+// why each conjunct is load-bearing.
 //
-// now is the SWEEPER's clock rather than the database's NOW() on purpose — the
-// same instant then decides the lateness deadline in Go, so the two decisions
-// can never straddle a clock skew, and tests can sit exactly on the boundary.
-// expiredBefore is `now - MaxLateness`, passed in for the same reason.
+// dueBefore is the sweeper's DISPATCH HORIZON, not its clock (MYR-535):
+// `scheduledFor` is the instant the car should ARRIVE at the pickup, so the
+// sweeper selects candidates up to its maximum dispatch lead EARLY and decides
+// the exact leave-time per row in Go — the coordinates it needs for that are
+// encrypted at rest, so the lead cannot be computed in SQL. Both instants
+// derive from the SWEEPER's clock rather than the database's NOW() on purpose:
+// the same clock then decides the per-row lead gate and the lateness deadline,
+// so no decision can straddle a clock skew, and tests can sit exactly on the
+// boundary. expiredBefore is `now - MaxLateness`.
 //
 // Returns an empty (non-nil) slice when nothing is due; that is the steady
 // state, not an error.
 func (r *RideRequestRepo) ListDueReservations(
 	ctx context.Context,
-	now, expiredBefore time.Time,
+	dueBefore, expiredBefore time.Time,
 	limit int,
 ) ([]DueReservation, error) {
 	if limit <= 0 {
@@ -67,7 +72,7 @@ func (r *RideRequestRepo) ListDueReservations(
 	}
 	const op = "ride_request.list_due_reservations"
 	start := time.Now()
-	rows, err := r.pool.Query(ctx, queryRideRequestListDue, now, expiredBefore, limit)
+	rows, err := r.pool.Query(ctx, queryRideRequestListDue, dueBefore, expiredBefore, limit)
 	if err != nil {
 		r.metrics.ObserveQueryDuration(op, time.Since(start).Seconds())
 		r.metrics.IncQueryError(op)

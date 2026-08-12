@@ -34,7 +34,11 @@ const codeReservationExpired = "reservation_expired"
 //     car whose rider gave up, which is strictly worse than an honest,
 //     alertable failure (the MYR-176 reconciler stance, applied to the
 //     sweeper's much larger lateness surface).
-//  2. Ask every "may this car be dispatched right now?" question BEFORE
+//  2. The leave-time gate (MYR-535, holdIfBeforeLeaveTime). The SELECT
+//     horizon is now + LeadCap, so a candidate may be up to LeadCap early;
+//     it waits here — one lean position read, nothing claimed, no per-row
+//     log — until now >= scheduledFor - lead.
+//  3. Ask every "may this car be dispatched right now?" question BEFORE
 //     claiming — busy, then the vehicle's service state and the owner's
 //     ride-sharing pause together in one read (MYR-372 / MYR-342), then the
 //     rider's ride capability (MYR-369). The claim is irreversible (the latch
@@ -45,12 +49,12 @@ const codeReservationExpired = "reservation_expired"
 //     a refusal. Note what is NOT asked: whether the car is `offline`. See
 //     holdIfVehicleBlocked — that one is the dispatcher's wake ladder to
 //     answer, not ours to pre-empt.
-//  3. Claim, atomically, and only then. The claim re-validates status in SQL,
+//  4. Claim, atomically, and only then. The claim re-validates status in SQL,
 //     so a rider cancel or an owner picked-up landing after the pass SELECTed
 //     the row loses the claim and we do nothing.
-//  4. Push, then publish `ride.due` only if the push actually reached the car.
+//  5. Push, then publish `ride.due` only if the push actually reached the car.
 //
-// TOCTOU, honestly stated: an instant ride accepted in the gap between step 2
+// TOCTOU, honestly stated: an instant ride accepted in the gap between step 3
 // and the push still races the reservation, and last writer wins the car's
 // navigation. That gap is now SECONDS (one busy probe plus one claim, both
 // adjacent to the push in the same worker) rather than the minutes the
@@ -62,6 +66,14 @@ func (s *ReservationSweeper) handleDue(ctx context.Context, r *DueReservation) s
 
 	if s.pastDeadline(r, now) {
 		return s.expire(ctx, r)
+	}
+
+	// MYR-535: the SELECT horizon is now + LeadCap, so a candidate may be up
+	// to LeadCap early. Gate on the computed leave-time BEFORE any other
+	// probe — a waiting candidate costs one lean position read per tick and
+	// burns nothing else.
+	if s.holdIfBeforeLeaveTime(ctx, r, now) {
+		return decisionWaiting
 	}
 
 	busy, err := s.store.VehicleHasActiveInstantRide(ctx, r.VehicleID)

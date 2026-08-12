@@ -15,8 +15,15 @@ import (
 //	accept of a scheduled ride → Dispatcher.process returns without claiming
 //	                             (see dispatcher_leg.go); the row stays
 //	                             latch-unclaimed / outcome-absent.
-//	scheduledFor arrives       → this sweeper claims the SAME dispatched_at
+//	the leave-time arrives     → this sweeper claims the SAME dispatched_at
 //	                             latch and runs the SAME runClaimedLeg push.
+//
+// The leave-time is scheduledFor MINUS a computed dispatch lead (MYR-535,
+// client decision 2026-08-12): `scheduledFor` is the instant the car should
+// ARRIVE at the pickup, so dispatching at that instant guaranteed the car left
+// exactly one trip late. The lead is the estimated drive time from the car's
+// current position to the pickup plus a small buffer, clamped to
+// [LeadFloor, LeadCap] — see reservation_lead.go.
 //
 // Everything downstream is inherited, not re-derived: exactly-once (the latch
 // admits one winner across any number of sweepers or ticks), the bounded
@@ -66,11 +73,13 @@ type VehicleDispatchState struct {
 // columns an instant ride does.
 type ReservationStore interface {
 	// ListDueReservations returns accepted, latch-unclaimed reservations whose
-	// scheduledFor is at or before now AND which are actionable this pass:
-	// either the vehicle is free, or the reservation is already past
-	// expiredBefore (= now - MaxLateness) and must be resolved regardless.
-	// Oldest first, capped at limit.
-	ListDueReservations(ctx context.Context, now, expiredBefore time.Time, limit int) ([]DueReservation, error)
+	// scheduledFor is at or before dueBefore — the DISPATCH HORIZON, now +
+	// LeadCap, so a candidate is visible for the whole window it could
+	// legally leave in (MYR-535) — AND which are actionable this pass: either
+	// the vehicle is free, or the reservation is already past expiredBefore
+	// (= now - MaxLateness) and must be resolved regardless. Oldest first,
+	// capped at limit.
+	ListDueReservations(ctx context.Context, dueBefore, expiredBefore time.Time, limit int) ([]DueReservation, error)
 	// VehicleHasActiveInstantRide reports whether the vehicle is mid-ride on
 	// an active INSTANT ride (the MYR-266 per-vehicle busy predicate).
 	VehicleHasActiveInstantRide(ctx context.Context, vehicleID string) (bool, error)
@@ -90,6 +99,14 @@ type ReservationStore interface {
 	// table with no opinion on existence — but a missing vehicle is not a
 	// missing opinion, and the sweeper holds either way.)
 	VehicleDispatchState(ctx context.Context, vehicleID string) (VehicleDispatchState, error)
+	// VehiclePosition returns the car's freshest known position, or a nil
+	// pair when the server holds none. Feeds the dispatch-lead estimate
+	// (MYR-535) and NOTHING else — a wrong or stale position can only move
+	// WHEN the car is dispatched (bounded by [LeadFloor, LeadCap]), never
+	// whether or where. The (0, 0) no-fix sentinel may come back as a
+	// non-nil pair (storage does not collapse it) and callers must treat it
+	// as no fix, per vehicle-state-schema.md §2.3.
+	VehiclePosition(ctx context.Context, vehicleID string) (lat, lng *float64, err error)
 	// RiderMayRequestRides reports whether riderID is still permitted to
 	// ride in vehicleID (MYR-369) — true when they OWN the car, and
 	// otherwise true only when they hold a LIVE accepted share whose
@@ -137,6 +154,17 @@ type ReservationConfig struct {
 	// is the sweeper's OWN budget, deliberately separate from (and much
 	// smaller than) the dispatcher's instant-dispatch pool.
 	MaxConcurrent int
+	// LeadBuffer / LeadFloor / LeadCap shape the dispatch lead (MYR-535):
+	// lead = clamp(estimated drive time + LeadBuffer, LeadFloor, LeadCap),
+	// and the car is dispatched once now >= scheduledFor - lead. The buffer
+	// absorbs the owner walking to the car and the estimate's optimism; the
+	// floor is what a car with no known position (or one already at the
+	// pickup) gets; the cap bounds both the estimate's pessimism and the
+	// SELECT horizon — no reservation is ever visible to a pass more than
+	// LeadCap before its pickup instant.
+	LeadBuffer time.Duration
+	LeadFloor  time.Duration
+	LeadCap    time.Duration
 }
 
 const (
@@ -160,6 +188,11 @@ const (
 	// instant accept's pickup push. Small: reservation punctuality is measured
 	// in tens of seconds, instant dispatch in hundreds of milliseconds.
 	defaultReservationConcurrency = 2
+	// Dispatch-lead defaults (MYR-535, client decision 2026-08-12: "computed
+	// travel time … + ~3 min buffer, floored ~5 min, capped 30 min").
+	defaultLeadBuffer = 3 * time.Minute
+	defaultLeadFloor  = 5 * time.Minute
+	defaultLeadCap    = 30 * time.Minute
 )
 
 func (c ReservationConfig) withDefaults() ReservationConfig {
@@ -177,6 +210,15 @@ func (c ReservationConfig) withDefaults() ReservationConfig {
 	}
 	if c.MaxConcurrent <= 0 {
 		c.MaxConcurrent = defaultReservationConcurrency
+	}
+	if c.LeadBuffer <= 0 {
+		c.LeadBuffer = defaultLeadBuffer
+	}
+	if c.LeadFloor <= 0 {
+		c.LeadFloor = defaultLeadFloor
+	}
+	if c.LeadCap <= 0 {
+		c.LeadCap = defaultLeadCap
 	}
 	return c
 }

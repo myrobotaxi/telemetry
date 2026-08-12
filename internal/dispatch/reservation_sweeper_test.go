@@ -163,6 +163,14 @@ type fakeReservationStore struct {
 	ungranted map[string]bool
 	grantErr  error
 	grantCnt  int
+
+	// MYR-535 dispatch-lead position read. A vehicle ABSENT from the map has
+	// NO KNOWN POSITION (nil pair → floor lead), so every pre-existing test —
+	// all of which run at-or-past scheduledFor and therefore never reach the
+	// position read — keeps its meaning without being touched.
+	positions map[string][2]float64
+	posErr    error
+	posCnt    int
 }
 
 func (f *fakeReservationStore) ListDueReservations(
@@ -220,6 +228,33 @@ func (f *fakeReservationStore) VehicleDispatchState(
 		InService:        f.inService[vehicleID],
 		RideShareEnabled: !f.paused[vehicleID],
 	}, nil
+}
+
+// VehiclePosition serves the MYR-535 leave-time gate. Absent vehicles answer
+// the nil pair (no known position), matching production for a car that has
+// never streamed.
+func (f *fakeReservationStore) VehiclePosition(
+	_ context.Context,
+	vehicleID string,
+) (lat, lng *float64, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.posCnt++
+	if f.posErr != nil {
+		return nil, nil, f.posErr
+	}
+	pos, ok := f.positions[vehicleID]
+	if !ok {
+		return nil, nil, nil
+	}
+	la, ln := pos[0], pos[1]
+	return &la, &ln, nil
+}
+
+func (f *fakeReservationStore) posCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.posCnt
 }
 
 func (f *fakeReservationStore) stateCount() int {
@@ -876,8 +911,11 @@ func TestSweep_PassesSweeperClockToTheStore(t *testing.T) {
 
 	resStore.mu.Lock()
 	defer resStore.mu.Unlock()
-	if !resStore.lastNow.Equal(testSweepNow) {
-		t.Errorf("due query now = %v, want the sweeper clock %v", resStore.lastNow, testSweepNow)
+	// MYR-535: the due bound is the DISPATCH HORIZON — the sweeper clock plus
+	// LeadCap — so a candidate is visible for the whole window it could
+	// legally leave in. Still derived from the injected clock, never NOW().
+	if want := testSweepNow.Add(s.cfg.LeadCap); !resStore.lastNow.Equal(want) {
+		t.Errorf("due query horizon = %v, want sweeper clock + LeadCap %v", resStore.lastNow, want)
 	}
 	if want := testSweepNow.Add(-testMaxLateness); !resStore.lastExpiredBefore.Equal(want) {
 		t.Errorf("due query expiredBefore = %v, want now - MaxLateness %v", resStore.lastExpiredBefore, want)

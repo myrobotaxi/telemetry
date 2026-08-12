@@ -34,6 +34,15 @@ type VehicleNamer interface {
 	VehicleName(ctx context.Context, vehicleID string) (string, error)
 }
 
+// RequesterNamer resolves a user id to a FIRST NAME for interpolation into
+// owner-facing copy (MYR-535's "time to head out" push). Resolved at delivery
+// time, like the vehicle nickname, so dispatch-side events stay summary-only
+// — RideDueEvent deliberately carries ids and instants, no PII. An empty name
+// (or an error) is not fatal — the copy falls back to an anonymous title.
+type RequesterNamer interface {
+	RequesterFirstName(ctx context.Context, userID string) (string, error)
+}
+
 // Config tunes the notifier. Zero values get defaults via withDefaults.
 type Config struct {
 	// Enabled is the kill-switch (PUSH_ENABLED). False sends nothing and logs
@@ -87,8 +96,13 @@ type Notifier struct {
 	sender   Sender
 	stores   notifierStores
 	vehicles VehicleNamer
-	cfg      Config
-	logger   *slog.Logger
+	// requesters resolves a rider's first name for the owner's due push
+	// (MYR-535). Nil is the ordinary unwired state — the copy falls back to
+	// its anonymous title — so it rides an optional wither rather than the
+	// constructor.
+	requesters RequesterNamer
+	cfg        Config
+	logger     *slog.Logger
 
 	sem  chan struct{}
 	mu   sync.Mutex
@@ -134,6 +148,15 @@ func NewNotifier(
 		logger:   logger,
 		sem:      make(chan struct{}, cfg.MaxConcurrent),
 	}
+}
+
+// WithRequesterNames wires the rider-first-name resolver for the owner's due
+// push (MYR-535). Optional, following the sweeper's WithActivityEnder
+// precedent: nil (never calling this) is the ordinary unwired state and the
+// copy falls back to its anonymous title.
+func (n *Notifier) WithRequesterNames(r RequesterNamer) *Notifier {
+	n.requesters = r
+	return n
 }
 
 // active reports whether a send would actually reach Apple.
@@ -330,7 +353,16 @@ func (n *Notifier) handleStatusChanged(evt events.Event) {
 	})
 }
 
-// handleDue notifies the RIDER that their reserved car is moving.
+// handleDue notifies BOTH parties that a reserved ride just dispatched: the
+// RIDER that their car is moving, and — MYR-535 — the OWNER that the route
+// landed on their dash and it is time to head out. The dispatch itself fires
+// EARLY by the computed lead, so both land when the owner still has time to
+// make the pickup instant.
+//
+// A SELF-RIDE (owner riding their own car, MYR-325) gets the rider push
+// alone, exactly as before this issue: both alerts would land on one phone
+// announcing one fact, and the rider one is the surface their Live Activity
+// and tracking sheet already continue from.
 func (n *Notifier) handleDue(evt events.Event) {
 	ev, ok := evt.Payload.(events.RideDueEvent)
 	if !ok {
@@ -344,6 +376,17 @@ func (n *Notifier) handleDue(evt events.Event) {
 			topic:    string(evt.Topic),
 			category: CategoryRideLifecycle,
 		}, dueAlert(n.vehicleName(ctx, ev.VehicleID)))
+		if ev.OwnerID != ev.RiderID {
+			n.fanOut(ctx, delivery{
+				userID:   ev.OwnerID,
+				rideID:   ev.RideRequestID,
+				topic:    string(evt.Topic),
+				category: CategoryRideLifecycle,
+				// islandAlerts stays false for the owner, the standing
+				// MYR-413 reasoning: only the rider holds a Live Activity,
+				// so an owner banner has no card to defer to.
+			}, ownerDueAlert(n.requesterFirstName(ctx, ev.RiderID)))
+		}
 	})
 }
 

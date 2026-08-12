@@ -57,6 +57,16 @@ type fakeVehicleNamer struct {
 	err  error
 }
 
+// fakeRequesterNamer stands in for the MYR-535 rider-first-name resolver.
+type fakeRequesterNamer struct {
+	name string
+	err  error
+}
+
+func (f *fakeRequesterNamer) RequesterFirstName(context.Context, string) (string, error) {
+	return f.name, f.err
+}
+
 func (f *fakeVehicleNamer) VehicleName(context.Context, string) (string, error) {
 	return f.name, f.err
 }
@@ -386,17 +396,101 @@ func TestNotifierDueNotifiesRider(t *testing.T) {
 			n.handleDue(dueEvent())
 			n.Wait()
 
+			// MYR-535: ride.due wakes BOTH parties — the rider ("heading your
+			// way") and the owner ("time to head out"). The rider's copy is
+			// what this test pins; the owner's has its own test below.
 			sent := sender.Sent()
-			if len(sent) != 1 {
-				t.Fatalf("sent %d notifications, want 1", len(sent))
+			if len(sent) != 2 {
+				t.Fatalf("sent %d notifications, want 2 (rider + owner)", len(sent))
 			}
-			if sent[0].DeviceToken != riderDevice {
-				t.Errorf("device = %q, want the RIDER's device", sent[0].DeviceToken)
+			var rider *Notification
+			for i := range sent {
+				if sent[i].DeviceToken == riderDevice {
+					rider = &sent[i]
+				}
 			}
-			if sent[0].Title != tt.wantTitle {
-				t.Errorf("title = %q, want %q", sent[0].Title, tt.wantTitle)
+			if rider == nil {
+				t.Fatal("no notification reached the RIDER's device")
+			}
+			if rider.Title != tt.wantTitle {
+				t.Errorf("title = %q, want %q", rider.Title, tt.wantTitle)
 			}
 		})
+	}
+}
+
+// TestNotifierDueNotifiesOwner pins the MYR-535 owner half: at dispatch —
+// which now fires EARLY enough for the car to make the pickup instant — the
+// owner is told to head out, named with the rider's first name when the
+// resolver has one and anonymously otherwise. Payload policy holds: no time,
+// no place.
+func TestNotifierDueNotifiesOwner(t *testing.T) {
+	tests := []struct {
+		name      string
+		requester *fakeRequesterNamer
+		wantTitle string
+	}{
+		{name: "names the rider", requester: &fakeRequesterNamer{name: "Sam"}, wantTitle: "Sam's pickup is coming up"},
+		{name: "no usable name falls back", requester: &fakeRequesterNamer{}, wantTitle: "Your rider's pickup is coming up"},
+		{name: "lookup failure falls back", requester: &fakeRequesterNamer{err: errors.New("db down")}, wantTitle: "Your rider's pickup is coming up"},
+		{name: "unwired resolver falls back", requester: nil, wantTitle: "Your rider's pickup is coming up"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sender := NewFakeSender()
+			n := newTestNotifier(t, sender, &fakeVehicleNamer{name: "Blue Whale"})
+			if tt.requester != nil {
+				n = n.WithRequesterNames(tt.requester)
+			}
+
+			n.handleDue(dueEvent())
+			n.Wait()
+
+			var owner *Notification
+			sent := sender.Sent()
+			for i := range sent {
+				if sent[i].DeviceToken == ownerDevice {
+					owner = &sent[i]
+				}
+			}
+			if owner == nil {
+				t.Fatal("no notification reached the OWNER's device")
+			}
+			if owner.Title != tt.wantTitle {
+				t.Errorf("title = %q, want %q", owner.Title, tt.wantTitle)
+			}
+			if owner.Body != "Your car has the route — time to head out." {
+				t.Errorf("body = %q", owner.Body)
+			}
+		})
+	}
+}
+
+// TestNotifierDueSelfRideSendsOnce: an owner riding their own car (MYR-325)
+// is both parties, and two pushes to one phone announcing one fact is noise —
+// the rider push alone survives, exactly as before MYR-535.
+func TestNotifierDueSelfRideSendsOnce(t *testing.T) {
+	sender := NewFakeSender()
+	n := newTestNotifier(t, sender, &fakeVehicleNamer{name: "Blue Whale"})
+
+	evt := events.NewEvent(events.RideDueEvent{
+		RideRequestID: testRideID,
+		VehicleID:     testVehicleID,
+		RiderID:       testRiderID,
+		OwnerID:       testRiderID, // one account in both roles
+		ScheduledFor:  time.Now(),
+		DueAt:         time.Now(),
+	})
+	n.handleDue(evt)
+	n.Wait()
+
+	sent := sender.Sent()
+	if len(sent) != 1 {
+		t.Fatalf("sent %d notifications, want 1 — a self-ride gets the rider push alone", len(sent))
+	}
+	if sent[0].Title != "Blue Whale is heading your way" {
+		t.Errorf("title = %q, want the rider copy", sent[0].Title)
 	}
 }
 
@@ -413,7 +507,8 @@ func TestNotifierNoP1Leakage(t *testing.T) {
 	)
 
 	sender := NewFakeSender()
-	n := newTestNotifier(t, sender, &fakeVehicleNamer{name: "Blue Whale"})
+	n := newTestNotifier(t, sender, &fakeVehicleNamer{name: "Blue Whale"}).
+		WithRequesterNames(&fakeRequesterNamer{name: "Ada"})
 
 	scheduled := time.Now().Add(time.Hour)
 	n.handleCreated(createdEvent(strptr("Ada "+surname), nil))
@@ -425,8 +520,8 @@ func TestNotifierNoP1Leakage(t *testing.T) {
 	n.Wait()
 
 	sent := sender.Sent()
-	if len(sent) != 6 {
-		t.Fatalf("sent %d notifications, want 6", len(sent))
+	if len(sent) != 7 {
+		t.Fatalf("sent %d notifications, want 7", len(sent))
 	}
 	for _, s := range sent {
 		payload := strings.Join([]string{s.Title, s.Body, s.RideID}, " | ")
@@ -607,16 +702,17 @@ func TestNotifierSubscribeDeliversFromRealBus(t *testing.T) {
 		}
 	}
 
-	// The bus delivers asynchronously; poll until all three land.
+	// The bus delivers asynchronously; poll until all four land — ride.due
+	// wakes BOTH parties since MYR-535.
 	deadline := time.Now().Add(2 * time.Second)
-	for len(sender.Sent()) < 3 && time.Now().Before(deadline) {
+	for len(sender.Sent()) < 4 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
 	n.Wait()
 
 	sent := sender.Sent()
-	if len(sent) != 3 {
-		t.Fatalf("received %d notifications, want 3 (one per topic)", len(sent))
+	if len(sent) != 4 {
+		t.Fatalf("received %d notifications, want 4 (one per topic, two for ride.due)", len(sent))
 	}
 
 	titles := map[string]bool{}
@@ -627,6 +723,7 @@ func TestNotifierSubscribeDeliversFromRealBus(t *testing.T) {
 		"Ada wants a ride",
 		"Blue Whale can't take this ride",
 		"Blue Whale is heading your way",
+		"Your rider's pickup is coming up",
 	} {
 		if !titles[want] {
 			t.Errorf("missing notification %q (got %v)", want, titles)

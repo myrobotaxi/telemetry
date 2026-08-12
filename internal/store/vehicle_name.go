@@ -53,3 +53,44 @@ func (r *VehicleNameRepo) VehicleName(ctx context.Context, vehicleID string) (st
 	}
 	return name, nil
 }
+
+// RequesterFirstName resolves a rider's FIRST NAME for the owner's
+// "time to head out" push (MYR-535). Same repo as the nickname read because it
+// serves the same consumer the same way: the push notifier resolving one
+// display string at delivery time, keeping the dispatch pipeline's events
+// summary-only (RideDueEvent deliberately carries ids and instants, no PII).
+//
+// The identity sources are the MYR-229 three-source ladder, reused verbatim
+// (queryOwnerFirstNameSources — the query resolves ANY user id; "owner" is its
+// first caller's role, not a constraint). The terminal differs on purpose:
+// name token → email local-part → "" — the push copy has its own anonymous
+// fallback title, and handing it a literal like "Rider" would render
+// "Rider's pickup is coming up". The resolved value is P1 and is never logged.
+func (r *VehicleNameRepo) RequesterFirstName(ctx context.Context, userID string) (string, error) {
+	if strings.TrimSpace(userID) == "" {
+		return "", fmt.Errorf("store.RequesterFirstName: empty user id")
+	}
+	var name, email *string
+	err := r.pool.QueryRow(ctx, queryOwnerFirstNameSources, userID).Scan(&name, &email)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("store.RequesterFirstName(%s): %w", userID, err)
+	}
+	return requesterFirstNameToken(name, email), nil
+}
+
+// requesterFirstNameToken is the pure ladder: first whitespace-separated token
+// of the display name → email local-part → "". Pure — unit-tested without a
+// database.
+func requesterFirstNameToken(name, email *string) string {
+	if name != nil {
+		if token := firstNameToken(*name); token != "" {
+			return token
+		}
+	}
+	if email != nil {
+		if local := emailLocalPart(*email); local != "" {
+			return local
+		}
+	}
+	return ""
+}
