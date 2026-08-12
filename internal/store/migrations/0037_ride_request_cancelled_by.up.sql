@@ -4,4 +4,4 @@
 -- rather than inferring it from "not my own tap". NULL on every row that is
 -- not cancelled, and on rows cancelled before this migration (consumers MUST
 -- treat absence as "initiator unknown", never guess).
-ALTER TABLE go_ride_requests ADD COLUMN cancelled_by text;
+ALTER TABLE go_ride_requests ADD COLUMN IF NOT EXISTS cancelled_by text;

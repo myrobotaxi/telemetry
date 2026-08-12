@@ -1,1 +1,1 @@
-ALTER TABLE go_ride_requests DROP COLUMN cancelled_by;
+ALTER TABLE go_ride_requests DROP COLUMN IF EXISTS cancelled_by;
