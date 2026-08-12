@@ -43,6 +43,14 @@ const (
 	// asleep-vehicle reservation pushes can never delay an instant accept's
 	// pickup push.
 	reservationMaxConcurrent = 2
+	// Dispatch-lead policy (MYR-535, client decision 2026-08-12):
+	// `scheduledFor` is the pickup ARRIVAL instant, so the car is dispatched
+	// early by the estimated drive time from its current position plus a
+	// buffer, clamped to [floor, cap]. The cap doubles as the sweep's SELECT
+	// horizon.
+	reservationLeadBuffer = 3 * time.Minute
+	reservationLeadFloor  = 5 * time.Minute
+	reservationLeadCap    = 30 * time.Minute
 )
 
 // startReservationSweeper builds the sweeper over the already-constructed
@@ -76,6 +84,9 @@ func startReservationSweeper(
 			SweepTimeout:  reservationSweepTimeout,
 			MaxPerSweep:   reservationMaxPerSweep,
 			MaxConcurrent: reservationMaxConcurrent,
+			LeadBuffer:    reservationLeadBuffer,
+			LeadFloor:     reservationLeadFloor,
+			LeadCap:       reservationLeadCap,
 		},
 		logger.With(slog.String("component", "reservation-sweeper")),
 	).WithActivityEnder(activities)
@@ -140,6 +151,18 @@ func (a *reservationStoreAdapter) ListDueReservations(
 
 func (a *reservationStoreAdapter) VehicleHasActiveInstantRide(ctx context.Context, vehicleID string) (bool, error) {
 	return a.repo.VehicleHasActiveInstantRide(ctx, vehicleID)
+}
+
+// VehiclePosition serves the MYR-535 dispatch-lead estimate: the car's
+// freshest decrypted position, or a nil pair when the server holds none.
+// Delegates to the vehicle repo's lean two-column read — never the wide
+// snapshot — because the sweeper re-asks every tick for every candidate
+// inside the lead window.
+func (a *reservationStoreAdapter) VehiclePosition(
+	ctx context.Context,
+	vehicleID string,
+) (lat, lng *float64, err error) {
+	return a.vehicles.VehiclePosition(ctx, vehicleID)
 }
 
 // VehicleDispatchState answers the MYR-372 service re-check and the MYR-342

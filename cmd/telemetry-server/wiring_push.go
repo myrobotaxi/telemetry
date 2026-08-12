@@ -91,7 +91,7 @@ func setupPushNotifier(
 		vehicleNames,
 		push.Config{Enabled: pushCfg.Enabled},
 		log,
-	)
+	).WithRequesterNames(vehicleNames)
 	if err := notifier.Subscribe(bus); err != nil {
 		return nil, fmt.Errorf("subscribe push notifier: %w", err)
 	}
