@@ -82,6 +82,11 @@ type AccountDeletionCounts struct {
 	// and the audit row is P0-only (CG-DL-5), so what is recorded is that two
 	// rows went, never where they pointed.
 	SavedPlacesDeleted int `json:"savedPlacesDeleted"`
+	// RideMembershipsDeleted is the number of GROUP-RIDE memberships the user
+	// held that were deleted (MYR-540) — the rides they JOINED, as opposed to
+	// RidesCancelled, which counts the rides they BOOKED. A count, never a ride
+	// id and never the other parties: the audit row is P0-only (CG-DL-5).
+	RideMembershipsDeleted int `json:"rideMembershipsDeleted"`
 	// RefreshTokensRevoked is the number of live refresh tokens revoked.
 	RefreshTokensRevoked int `json:"refreshTokensRevoked"`
 	// HadPrismaUser records whether a sibling-schema "User" row existed —
@@ -146,6 +151,20 @@ func (a *AccountDeleter) DeletePushDevices(ctx context.Context, userID string) (
 // belong to this person alone and that nobody else has a claim on.
 func (a *AccountDeleter) DeleteSavedPlaces(ctx context.Context, userID string) (int, error) {
 	return a.execCount(ctx, "DeleteSavedPlaces", queryDeleteSavedPlacesForUser, userID)
+}
+
+// DeleteRideMemberships removes every group-ride membership the user holds
+// (MYR-540), so a deleted account cannot keep appearing in a live ride's
+// `members` array or in the access set that admits a WebSocket to that ride's
+// vehicle. Returns the number of rows deleted. Idempotent.
+//
+// Ordering note: it runs immediately after the open-ride cancellation, because
+// the two are the same fact from the two sides — that step ends the rides this
+// person BOOKED, this one ends the rides they merely JOINED. It must run before
+// the identity delete for the same reason every destructive step does, and
+// nothing later in the sequence reads these rows.
+func (a *AccountDeleter) DeleteRideMemberships(ctx context.Context, userID string) (int, error) {
+	return a.execCount(ctx, "DeleteRideMemberships", queryDeleteRideMembershipsForUser, userID)
 }
 
 // RevokeRefreshTokens revokes every live refresh token in the user's name, so

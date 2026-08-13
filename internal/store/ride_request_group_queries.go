@@ -116,17 +116,24 @@ RETURNING joined_at`
 const queryRideMemberExists = `
 SELECT EXISTS (SELECT 1 FROM go_ride_members WHERE ride_id = $1 AND user_id = $2)`
 
-// queryDeleteRideMembershipsForUsers drops every membership held by the
-// accounts being deleted (MYR-355's sweep).
+// queryDeleteRideMembershipsForUser drops every membership held by the account
+// being deleted (MYR-355's sweep).
 //
 // The CASCADE on ride_id covers the other direction — a ride's rows die with
-// the ride — but says nothing about a member's own deletion: their rows would
+// the ride — but says nothing about a MEMBER's own deletion: their rows would
 // otherwise survive on somebody else's live ride, keeping a deleted account in
 // a `members` array and, worse, in the access set that admits a WebSocket to
 // that ride's vehicle. Deleting them here makes the membership die with EITHER
 // end of the relationship.
-const queryDeleteRideMembershipsForUsers = `
-DELETE FROM go_ride_members WHERE user_id = ANY($1)`
+//
+// A DELETE rather than a tombstone, and for the saved-places reason rather than
+// the revoked-share one: a membership is not evidence in anybody's audit trail.
+// The car owner's record of who rode is the RIDE, which survives; a joiner's
+// row on it is this person's own participation, and nobody is owed a note that
+// a deleted account once sat in a car. Deleting zero rows on a re-run is a
+// clean no-op.
+const queryDeleteRideMembershipsForUser = `
+DELETE FROM go_ride_members WHERE user_id = $1`
 
 // queryRideVehicleIDsForMember is the ACCESS-SET leg (MYR-540): the vehicles a
 // person may see because they are riding along on a LIVE group ride.
