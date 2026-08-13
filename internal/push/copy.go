@@ -220,6 +220,18 @@ func ownerDueAlert(requesterName string) alert {
 	}
 }
 
+// navUnappliedAlert is the OWNER's copy for a nav share the car never applied
+// (MYR-527): the ride is live, the dash may not have the route, and the owner
+// is the only person who can fix it in under a minute. Payload policy holds —
+// the vehicle nickname is the only interpolation; the destination itself (P1)
+// never travels, so the copy says WHERE TO LOOK rather than where to go.
+func navUnappliedAlert(vehicleName string) alert {
+	return alert{
+		title: vehicleLabel(vehicleName) + " may not have the route",
+		body:  "Check the dash and set the destination manually if needed.",
+	}
+}
+
 // Shared bodies.
 const (
 	bodyReviewRequest = "Open MyRoboTaxi to accept or decline."
