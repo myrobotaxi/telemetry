@@ -80,6 +80,11 @@ func setupNavDispatcher(
 		},
 		logger.With(slog.String("component", "nav-dispatch")),
 	)
+	// MYR-527 nav-apply close-loop: the CAR's own reported destination is the
+	// confirmation `sent` never was. Wired on the server's root ctx so an
+	// in-flight verification dies with the process instead of stalling
+	// shutdown; bus carries the owner's "check the dash" seam.
+	d = d.WithNavVerify(ctx, &navVerifyStoreAdapter{vehicles: vehicleRepo, rides: rideRepo}, bus)
 	if _, err := d.Subscribe(bus); err != nil {
 		return fmt.Errorf("subscribe nav dispatcher: %w", err)
 	}
@@ -205,4 +210,23 @@ func (a *dispatchOutcomeStoreAdapter) ListInterruptedDispatches(ctx context.Cont
 // (MYR-266).
 func (a *dispatchOutcomeStoreAdapter) ListInterruptedDropoffDispatches(ctx context.Context, olderThan time.Duration) ([]string, error) {
 	return a.repo.ListInterruptedDropoffDispatches(ctx, olderThan)
+}
+
+// navVerifyStoreAdapter adapts the two lean reads the MYR-527 nav-apply
+// verifier needs onto dispatch.NavVerifyStore. Same cross-repo seam shape as
+// reservationStoreAdapter, for the same dependency-rule reason.
+type navVerifyStoreAdapter struct {
+	vehicles *store.VehicleRepo
+	rides    *store.RideRequestRepo
+}
+
+func (a *navVerifyStoreAdapter) VehicleNavDestination(
+	ctx context.Context,
+	vehicleID string,
+) (lat, lng *float64, err error) {
+	return a.vehicles.VehicleNavDestination(ctx, vehicleID)
+}
+
+func (a *navVerifyStoreAdapter) RideStatus(ctx context.Context, rideID string) (string, error) {
+	return a.rides.RideStatus(ctx, rideID)
 }
