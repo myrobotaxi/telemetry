@@ -118,7 +118,10 @@ type VehiclesListHandler struct {
 	// shared supplies the MYR-184 viewer merge. Nil leaves the endpoint
 	// owner-only (see vehicles_list_viewer.go).
 	shared SharedVehicleLister
-	logger *slog.Logger
+	// members supplies the MYR-540 group-ride member merge. Nil leaves the
+	// endpoint owner+shared (see vehicles_list_member.go).
+	members RideMemberVehicleLister
+	logger  *slog.Logger
 }
 
 // NewVehiclesListHandler creates a handler that serves the
@@ -183,6 +186,9 @@ func (h *VehiclesListHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	// (MYR-184 / MYR-91 viewer merge) — owner rows first, then shared.
 	resp := h.buildResponse(rows, auth.RoleOwner)
 	resp = h.appendSharedRows(ctx, userID, resp)
+	// MYR-540: the vehicles of live group rides the caller JOINED, viewer
+	// rows, deduplicated against the two halves above (vehicles_list_member.go).
+	resp = h.appendMemberRows(ctx, userID, resp)
 	h.writeJSON(w, http.StatusOK, resp)
 }
 
