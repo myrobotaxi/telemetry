@@ -160,6 +160,11 @@ func (n *Notifier) send(ctx context.Context, d Device, rideID, topic string, a a
 		Title:       a.title,
 		Body:        a.body,
 		RideID:      rideID,
+		// MYR-554: the (ride, topic) pair the collapse id is built from. It is
+		// the fan-out's OWN topic string — the same one every log line here
+		// carries — so the id names the notification's intent and nothing about
+		// the attempt that carries it.
+		EventTopic: topic,
 	})
 	if err == nil {
 		return true

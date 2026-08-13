@@ -80,6 +80,12 @@ type apnsMessage struct {
 	// expiration is the apns-expiration header, omitted when empty. APNs stores
 	// and retries an undeliverable push until this instant.
 	expiration string
+	// collapseID is the apns-collapse-id header, omitted when empty (MYR-554).
+	// It is a property of the MESSAGE, not of an attempt, which is precisely
+	// what makes deliver()'s retry idempotent at Apple: both trips through the
+	// loop present the same value. Empty on every ActivityKit message — see
+	// apns_collapse.go.
+	collapseID string
 	body       []byte
 }
 
@@ -97,7 +103,10 @@ func (c *Client) Send(ctx context.Context, n Notification) error {
 		pushType:    pushTypeAlert,
 		topic:       c.topic,
 		priority:    priorityImmediate,
-		body:        body,
+		// MYR-554: computed HERE, once, outside deliver's retry loop. Computing
+		// it per attempt would defeat the entire mechanism.
+		collapseID: collapseID(n.RideID, n.EventTopic),
+		body:       body,
 	})
 }
 
@@ -273,6 +282,12 @@ func (c *Client) newRequest(ctx context.Context, m apnsMessage) (*http.Request, 
 	req.Header.Set("apns-priority", m.priority)
 	if m.expiration != "" {
 		req.Header.Set("apns-expiration", m.expiration)
+	}
+	// MYR-554. Absent rather than empty when there is nothing to key on: APNs
+	// treats a present-but-empty header as a value, and an empty collapse id
+	// would merge every push that carried one.
+	if m.collapseID != "" {
+		req.Header.Set("apns-collapse-id", m.collapseID)
 	}
 	req.Header.Set("content-type", "application/json")
 	return req, nil

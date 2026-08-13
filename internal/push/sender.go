@@ -21,6 +21,15 @@ type Notification struct {
 	Body    string
 	// RideID is the sole userInfo key delivered to the app.
 	RideID string
+	// EventTopic is the DOMAIN event this alert answers to — `ride.due`,
+	// `ride.status.changed`, … It is NOT the APNs topic (the app's bundle id),
+	// which the Client holds and which never varies per notification.
+	//
+	// It exists for one purpose: with RideID it forms the `apns-collapse-id`
+	// that makes the transport's one retry idempotent at Apple (MYR-554, see
+	// apns_collapse.go). Empty is harmless — the header is then keyed on the
+	// ride alone.
+	EventTopic string
 }
 
 // Sender delivers a single notification. Implementations are best-effort: a
