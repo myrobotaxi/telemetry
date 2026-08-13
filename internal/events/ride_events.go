@@ -77,7 +77,16 @@ type RideStatusChangedEvent struct {
 	ScheduledFor *time.Time
 	// TripVersion is the ride's trip-shape version after this event (MYR-541),
 	// projected onto the WS frame so a client holding a lower version
-	// refetches the record. 0 for pre-MYR-541 publishers and never-edited rows.
+	// refetches the record. 0 only for a never-edited row.
+	//
+	// EVERY PUBLISHER CARRIES IT, not just the trip-edit one (MYR-548). A
+	// lifecycle transition does not BUMP the version — the trip's shape did not
+	// change — and until MYR-548 the lifecycle publishers therefore left the
+	// field at its zero value. That is not "no opinion", it is the WIRE VALUE 0:
+	// the frame's `tripVersion` is omitempty, so a cancel of a ride at version 5
+	// arrived at the client claiming version 0, and a consumer that treats the
+	// signal as monotonic never refetched the record that says the ride is over.
+	// Not bumping and not carrying are different things.
 	TripVersion int
 	// TripEdit marks an event published for a TRIP-SHAPE change rather than a
 	// lifecycle transition (MYR-541): Status is the ride's UNCHANGED current

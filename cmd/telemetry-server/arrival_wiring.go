@@ -156,7 +156,11 @@ func (a *arrivalStoreAdapter) MarkArrived(ctx context.Context, rideID string) (e
 		RescheduleStatus: reschedule,
 		ScheduledFor:     updated.ScheduledFor,
 		CancelledBy:      updated.CancelledBy,
-		UpdatedAt:        updated.UpdatedAt,
+		// MYR-548: the frame's refetch signal, carried here too — this adapter's
+		// whole promise is that no consumer can tell the auto-arrival writer from
+		// the HTTP one, and a field only one of them populates breaks it.
+		TripVersion: updated.TripVersion,
+		UpdatedAt:   updated.UpdatedAt,
 	}, nil
 }
 

@@ -113,6 +113,20 @@ func (h *RideRequestHandler) mutateStatusWith(
 		// Carried so the rider's push copy can tell a reservation from an
 		// instant request (MYR-360); not projected onto the WS frame.
 		ScheduledFor: updated.ScheduledFor,
+		// MYR-548: the ride's CURRENT trip-shape version, read off the updated
+		// row — never left at zero.
+		//
+		// A lifecycle transition does not BUMP the version (the trip's shape did
+		// not change), and MYR-541 read that as "so it need not carry one". It
+		// must. `tripVersion` is the refetch signal on the `ride_status_changed`
+		// frame, and the frame omits it at 0 — so on a ride that had been edited
+		// even once, every accept/arrive/start/complete/CANCEL frame told a
+		// client holding version N that the record was at version 0. A consumer
+		// that gates its refetch on the version it is handed sees a REGRESSION
+		// and converges on nothing; the cancel is the one where that is not a
+		// cosmetic lag but a ride the rider's surface never lets go of
+		// (prod 2026-08-13, server v275 — the cancelled row was at trip_version 5).
+		TripVersion: updated.TripVersion,
 		// The pre-check read's status — the "from" this caller believed it was
 		// transitioning out of (MYR-537; see the event field's race caveat).
 		PreviousStatus: rec.Status,
