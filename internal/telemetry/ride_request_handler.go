@@ -69,6 +69,12 @@ type RideRequestHandler struct {
 	// access busts a fresh member's cached vehicle set so the car they just
 	// joined a ride in appears on their very next request (MYR-540).
 	access AccessCacheInvalidator
+	// dispatchNow runs the reservation sweeper's claimed dispatch path for the
+	// owner's MYR-556 "send it now" tap. Nil leaves POST
+	// /api/ride-requests/{id}/dispatch-now answering 500 — a deployment error,
+	// not a runtime state, and deliberately not a fail-open: there is no safe
+	// way to pretend a car was sent.
+	dispatchNow ReservationDispatcher
 	// joinLimiter is the per-user attempt budget on POST /api/ride-requests/join.
 	// Its OWN instance, never shared with the invite redeem's: the two code
 	// spaces are separate, so spending one endpoint's allowance must not close

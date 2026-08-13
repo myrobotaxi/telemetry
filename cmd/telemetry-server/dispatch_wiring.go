@@ -39,6 +39,13 @@ const (
 // (the same sidecar the vehicle-command endpoint uses), the owner-token
 // resolver, and the store adapter, then subscribes the dispatcher on the
 // ride.accepted seam. The subscription lives until bus.Close on shutdown.
+//
+// It RETURNS the reservation sweeper (MYR-556). The sweeper is not only a
+// background loop any more: the owner's `dispatch-now` endpoint runs its
+// claimed dispatch path synchronously, so the composition root has to carry the
+// instance across to the HTTP routes. Nil when reservation dispatch could not be
+// composed at all, which leaves that endpoint answering 500 — the same
+// fail-closed reading every other unwired ride-request option gets.
 func setupNavDispatcher(
 	ctx context.Context,
 	cfg *config.Config,
@@ -49,7 +56,7 @@ func setupNavDispatcher(
 	rideRepo *store.RideRequestRepo,
 	shareRepo *store.VehicleShareRepo,
 	logger *slog.Logger,
-) error {
+) (*dispatch.ReservationSweeper, error) {
 	transport := newCommandTransport(cfg.Proxy().URL, cfg.Proxy().FleetAPIBaseURL,
 		logger.With(slog.String("component", "dispatch-transport")))
 	executor := commands.NewExecutor(transport, logger.With(slog.String("component", "dispatch-executor")))
@@ -90,7 +97,7 @@ func setupNavDispatcher(
 	// nav to it — through the same sequencer and the same verifier above.
 	d = d.WithStopAdvance(&dispatchStopStoreAdapter{repo: rideRepo})
 	if _, err := d.Subscribe(bus); err != nil {
-		return fmt.Errorf("subscribe nav dispatcher: %w", err)
+		return nil, fmt.Errorf("subscribe nav dispatcher: %w", err)
 	}
 
 	// Startup reconciliation: resolve any dispatch orphaned by a crash/SIGTERM
@@ -120,7 +127,7 @@ func setupNavDispatcher(
 	// pickup at `scheduledFor` instead, claiming the SAME leg-1 latch. Started
 	// AFTER the reconciliation above so orphaned claims from the previous
 	// process are resolved before new ones are made.
-	startReservationSweeper(ctx, cfg, bus, activities, d, rideRepo, vehicleRepo, shareRepo, logger)
+	sweeper := startReservationSweeper(ctx, cfg, bus, activities, d, rideRepo, vehicleRepo, shareRepo, logger)
 
 	logger.Info("nav-dispatch subscriber enabled",
 		slog.Bool("dispatch_enabled", cfg.DispatchEnabled()),
@@ -128,7 +135,7 @@ func setupNavDispatcher(
 		slog.Bool("signing_transport", transport.Enabled()),
 		slog.Int("retry_max", dispatchRetryMax),
 	)
-	return nil
+	return sweeper, nil
 }
 
 // dispatchVehicleResolverAdapter resolves a vehicle cuid to its VIN over the

@@ -649,7 +649,8 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	// recorded as a dispatch failure and leaves the ride row at `accepted`, so
 	// that ending is invisible on the event bus and has to be handed to the
 	// Activity directly (MYR-172).
-	if err := setupNavDispatcher(ctx, cfg, bus, activityNotifier, vehicleRepo, accountRepo, rideRepo, shareRepo, logger); err != nil {
+	reservationSweeper, err := setupNavDispatcher(ctx, cfg, bus, activityNotifier, vehicleRepo, accountRepo, rideRepo, shareRepo, logger)
+	if err != nil {
 		return fmt.Errorf("setting up nav dispatcher: %w", err)
 	}
 
@@ -755,6 +756,9 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 		activityNotifier: activityNotifier,
 		shareRepo:        shareRepo,
 		inviteLinks:      gates.inviteLinks,
+		// MYR-556: the reservation sweeper, so the owner's dispatch-now tap
+		// runs the SAME claimed dispatch path the scheduled sweep runs.
+		reservationSweeper: reservationSweeper,
 		// The authenticator owns the access-set cache the sharing handlers
 		// bust on redeem and revoke.
 		accessInvalidator: accessInvalidator,

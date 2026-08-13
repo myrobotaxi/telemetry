@@ -27,6 +27,15 @@ type fakeRideStore struct {
 
 	getRec RideRequestData
 	getErr error
+	// getRecAfter / getErrAfter serve the SECOND GetByID onwards (MYR-556).
+	// dispatch-now re-reads the ride after the dispatch commits, and the whole
+	// point of the response is that it carries columns the first read did not,
+	// so a fake that answered one fixed row could not tell a refreshed record
+	// from a stale one. Nil/absent keeps every pre-existing test's meaning:
+	// every read answers getRec, exactly as before.
+	getRecAfter *RideRequestData
+	getErrAfter error
+	getCalls    int
 
 	// MYR-541: the last trip edit handed to UpdateTrip.
 	tripEdit *RideTripEditData
@@ -179,6 +188,15 @@ func (f *fakeRideStore) Create(_ context.Context, in RideRequestCreateInput) (Ri
 }
 
 func (f *fakeRideStore) GetByID(_ context.Context, _ string) (RideRequestData, error) {
+	f.getCalls++
+	if f.getCalls > 1 {
+		if f.getErrAfter != nil {
+			return RideRequestData{}, f.getErrAfter
+		}
+		if f.getRecAfter != nil {
+			return *f.getRecAfter, nil
+		}
+	}
 	if f.getErr != nil {
 		return RideRequestData{}, f.getErr
 	}
