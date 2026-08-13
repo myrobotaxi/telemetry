@@ -82,16 +82,20 @@ func (d *Dispatcher) pickupLeg(rideID, vehicleID, ownerID string, pickup events.
 	}
 }
 
-// processDropoff runs the leg-2 (dropoff) dispatch for one started ride
-// (MYR-270): identical pipeline to process, claiming/recording the independent
-// dropoff_* columns and pushing the DROPOFF coordinate. Safe to call in tests.
+// processDropoff runs the leg-2 dispatch for one started ride (MYR-270):
+// identical pipeline to process, claiming/recording the independent dropoff_*
+// columns and pushing the event's TARGET — which since MYR-539 is the trip's
+// first stop when it has stops, and the drop-off otherwise. The leg keeps its
+// name and its columns either way: it is one leg that walks forward through
+// every post-pickup target, and its claim is "leg 2 has been dispatched", not
+// "the drop-off has been shared". Safe to call in tests.
 func (d *Dispatcher) processDropoff(ctx context.Context, ev events.RideStartedEvent) {
 	d.runLeg(ctx, dispatchLeg{
 		name:      "dropoff",
 		rideID:    ev.RideRequestID,
 		vehicleID: ev.VehicleID,
 		ownerID:   ev.OwnerID,
-		coord:     ev.Dropoff,
+		coord:     ev.Target,
 		claim:     d.store.ClaimDropoffDispatch,
 		record:    d.store.RecordDropoffDispatchOutcome,
 		order:     legOrderDropoff,

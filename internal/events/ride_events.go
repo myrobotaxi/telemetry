@@ -138,17 +138,22 @@ func (RideAcceptedEvent) EventTopic() Topic { return TopicRideAccepted }
 // RideStartedEvent is the leg-2 dispatch seam (MYR-270, was RideBoardedEvent in
 // MYR-265): published once when the RIDER starts the ride — the guarded
 // arrived→enroute transition (POST /api/ride-requests/{id}/start). It carries
-// the DROPOFF place the nav-dispatch pipeline pushes as the car's new Tesla
-// navigation destination for leg 2 (car en route to dropoff). Coordinates are
-// P1 GPS data — internal-only, never logged. Like RideAcceptedEvent it never
-// reaches the WS broadcast path; the client-visible start signal is the summary
-// `ride_status_changed` (status `enroute`).
+// the place the nav-dispatch pipeline pushes as the car's new Tesla navigation
+// destination for leg 2. Coordinates are P1 GPS data — internal-only, never
+// logged. Like RideAcceptedEvent it never reaches the WS broadcast path; the
+// client-visible start signal is the summary `ride_status_changed` (status
+// `enroute`).
 type RideStartedEvent struct {
 	BasePayload
 	RideRequestID string
 	VehicleID     string
 	OwnerID       string
-	Dropoff       RidePlace
+	// Target is where leg 2 GOES — the trip's FIRST STOP when it has stops
+	// (MYR-539), the drop-off otherwise. It was named Dropoff until multi-stop
+	// trips made that a lie: on a three-stop trip the car's next destination is
+	// not the drop-off, and a dispatcher reading a field called Dropoff would
+	// have driven straight past the stops.
+	Target RidePlace
 }
 
 // EventTopic returns TopicRideStarted.
@@ -239,6 +244,17 @@ type RideTripChangedEvent struct {
 	// P1 coordinates — never logged, never pushed, never on a WS frame.
 	NewPickup  *RidePlace
 	NewDropoff *RidePlace
+	// StopsChanged reports that this edit REPLACED the ride's stop list
+	// (MYR-539). It is a separate fact from the endpoints because a stop edit
+	// can move the CURRENT leg's target without either endpoint moving at all —
+	// which is precisely what the dispatcher must not miss.
+	StopsChanged bool
+	// LegTarget is where the car should be driving after this edit: the
+	// current (or earliest upcoming) stop when the trip has stops, else the
+	// drop-off. Set ONLY when StopsChanged — for an endpoint-only edit the
+	// NewPickup/NewDropoff fields already say it, and computing it twice is how
+	// two answers to one question start disagreeing. P1 — never logged.
+	LegTarget *RidePlace
 	// RequesterName, as on RideStatusChangedEvent (P1, never logged).
 	RequesterName *string
 	UpdatedAt     time.Time

@@ -71,9 +71,11 @@ type arrivalStoreAdapter struct {
 }
 
 // ListArrivalCandidates projects the repo's lean rows onto the detector's type.
-// This is where the P1 pickup coordinates cross into the arrival package —
+// This is where the P1 target coordinates cross into the arrival package —
 // already decrypted by the repo's scan, exactly as the reservation adapter
-// hands the sweeper its pickup.
+// hands the sweeper its pickup. The waypoint label is carried across untouched:
+// the SQL chose it alongside the coordinate, and re-deriving it here is how the
+// two would come to disagree.
 func (a *arrivalStoreAdapter) ListArrivalCandidates(ctx context.Context, limit int) ([]arrival.Candidate, error) {
 	rows, err := a.repo.ListArrivalCandidates(ctx, limit)
 	if err != nil {
@@ -90,8 +92,9 @@ func (a *arrivalStoreAdapter) ListArrivalCandidates(ctx context.Context, limit i
 			RiderID:         r.RiderID,
 			OwnerID:         r.OwnerID,
 			VIN:             r.VIN,
-			PickupLatitude:  r.PickupLatitude,
-			PickupLongitude: r.PickupLongitude,
+			Waypoint:        r.Waypoint,
+			TargetLatitude:  r.TargetLatitude,
+			TargetLongitude: r.TargetLongitude,
 		})
 	}
 	return out, nil

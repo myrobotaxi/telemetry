@@ -85,6 +85,10 @@ func setupNavDispatcher(
 	// in-flight verification dies with the process instead of stalling
 	// shutdown; bus carries the owner's "check the dash" seam.
 	d = d.WithNavVerify(ctx, &navVerifyStoreAdapter{vehicles: vehicleRepo, rides: rideRepo}, bus)
+	// MYR-539 multi-stop leg advance: a waypoint event for an intermediate stop
+	// marks it completed, makes the next one current, and re-shares the car's
+	// nav to it — through the same sequencer and the same verifier above.
+	d = d.WithStopAdvance(&dispatchStopStoreAdapter{repo: rideRepo})
 	if _, err := d.Subscribe(bus); err != nil {
 		return fmt.Errorf("subscribe nav dispatcher: %w", err)
 	}
@@ -210,6 +214,42 @@ func (a *dispatchOutcomeStoreAdapter) ListInterruptedDispatches(ctx context.Cont
 // (MYR-266).
 func (a *dispatchOutcomeStoreAdapter) ListInterruptedDropoffDispatches(ctx context.Context, olderThan time.Duration) ([]string, error) {
 	return a.repo.ListInterruptedDropoffDispatches(ctx, olderThan)
+}
+
+// dispatchStopStoreAdapter adapts the MYR-539 leg-advance write onto
+// dispatch.StopStore, translating the store's "already advanced" refusal into
+// the dispatch sentinel so the dispatcher can no-op on it without coupling to
+// internal/store — the same translation shape every other adapter here uses.
+type dispatchStopStoreAdapter struct {
+	repo *store.RideRequestRepo
+}
+
+func (a *dispatchStopStoreAdapter) AdvanceStopArrival(
+	ctx context.Context, rideID, stopID string,
+) (dispatch.StopAdvance, error) {
+	adv, err := a.repo.AdvanceStopArrival(ctx, rideID, stopID)
+	if err != nil {
+		if errors.Is(err, store.ErrRideStopNotAdvanced) {
+			return dispatch.StopAdvance{}, fmt.Errorf("advance ride stop: %w: %w", dispatch.ErrStopNotAdvanced, err)
+		}
+		return dispatch.StopAdvance{}, fmt.Errorf("advance ride stop: %w", err)
+	}
+	return dispatch.StopAdvance{
+		NextStopID: adv.NextStopID,
+		NextTarget: toEventRidePlace(adv.NextTarget),
+	}, nil
+}
+
+// toEventRidePlace projects a store place onto the events shape, address
+// flattened to "" when absent — the same projection the accept path and the
+// reservation sweeper perform, so every caller hands the leg pipeline an
+// identically shaped place.
+func toEventRidePlace(p store.RidePlace) events.RidePlace {
+	out := events.RidePlace{Latitude: p.Latitude, Longitude: p.Longitude, Label: p.Label}
+	if p.Address != nil {
+		out.Address = *p.Address
+	}
+	return out
 }
 
 // navVerifyStoreAdapter adapts the two lean reads the MYR-527 nav-apply

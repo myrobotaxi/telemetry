@@ -122,6 +122,9 @@ type Dispatcher struct {
 	nav *navSequencer
 	// verify is the optional nav-apply close-loop (MYR-527). Nil = off.
 	verify *navVerify
+	// stops is the optional multi-stop leg-advance seam (MYR-539). Nil = off:
+	// waypoint events are then observed and ignored.
+	stops StopStore
 	// workers counts the in-flight dispatch goroutines. Not a sync.WaitGroup —
 	// see Wait, and internal/drain for the argument (MYR-410).
 	workers drain.Group
@@ -176,6 +179,11 @@ func (d *Dispatcher) Subscribe(bus events.Bus) (events.Subscription, error) {
 	// (and re-verifies, MYR-527) through the same pool.
 	if _, err := bus.Subscribe(events.TopicRideTripChanged, d.handleTripChanged); err != nil {
 		return events.Subscription{}, fmt.Errorf("dispatch.Subscribe(trip_changed): %w", err)
+	}
+	// MYR-539: the car reaching an intermediate STOP advances the leg and
+	// points the dash at the next target, through the same pool.
+	if err := d.subscribeWaypoints(bus); err != nil {
+		return events.Subscription{}, err
 	}
 	return sub, nil
 }

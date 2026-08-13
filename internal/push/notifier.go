@@ -432,7 +432,7 @@ func (n *Notifier) handleTripChanged(evt events.Event) {
 		return
 	}
 	n.async(func(ctx context.Context) {
-		part := tripEditedPart(ev.NewPickup != nil, ev.NewDropoff != nil)
+		part := tripEditedPart(ev.NewPickup != nil, ev.NewDropoff != nil, ev.StopsChanged)
 		if ev.EditorUserID != ev.RiderID && ev.RiderID != ev.OwnerID {
 			// The owner edited: tell the rider.
 			n.fanOut(ctx, delivery{

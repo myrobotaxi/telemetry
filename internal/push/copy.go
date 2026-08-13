@@ -271,24 +271,49 @@ func navUnappliedAlert(vehicleName string) alert {
 }
 
 // tripEditedPart names what moved, for the MYR-541 copy: "pickup",
-// "drop-off", or "trip" when one edit moved both.
-func tripEditedPart(pickup, dropoff bool) string {
+// "drop-off", "stops" (MYR-539), or "trip" when one edit moved more than one of
+// them. Naming the PART is the whole payload policy here — the place itself
+// never reaches a lock screen.
+func tripEditedPart(pickup, dropoff, stops bool) string {
 	switch {
-	case pickup && dropoff:
+	case countTrue(pickup, dropoff, stops) > 1:
 		return "trip"
 	case pickup:
 		return "pickup"
+	case stops:
+		return tripPartStops
 	default:
 		return "drop-off"
 	}
+}
+
+// tripPartStops is the one edited part that is plural, and the copy has to
+// agree with it in two places.
+const tripPartStops = "stops"
+
+// countTrue counts the set flags — how many parts of the trip one edit moved.
+func countTrue(flags ...bool) int {
+	n := 0
+	for _, f := range flags {
+		if f {
+			n++
+		}
+	}
+	return n
 }
 
 // riderTripChangedAlert is the RIDER's copy when the OWNER edits the trip
 // (MYR-541). The edited PART is named, the place never is (P1 on a locked
 // screen); the client refetches for the rest.
 func riderTripChangedAlert(part string) alert {
+	// "stops" is the one plural part, and "Your stops was changed" is the kind
+	// of sentence that makes a product feel unattended.
+	verb := " was changed"
+	if part == tripPartStops {
+		verb = " were changed"
+	}
 	return alert{
-		title: "Your " + part + " was changed",
+		title: "Your " + part + verb,
 		body:  bodySeeDetails,
 	}
 }

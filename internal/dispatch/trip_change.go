@@ -7,8 +7,15 @@
 // The decision table, over the ride's (unchanged) status at edit time:
 //
 //	pickup edited  + status accepted + leg-1 `sent` → re-share leg 1
+//	stops edited   + status enroute                 → re-share leg 2 (LegTarget)
 //	dropoff edited + status enroute                 → re-share leg 2
 //	everything else                                 → nothing to push
+//
+// The stops arm SUPERSEDES the dropoff arm rather than adding to it (MYR-539):
+// once a trip has stops, the current leg's target is the current stop, and the
+// server states it on LegTarget — which for a trip whose stops were all cleared
+// is the (possibly just-edited) drop-off. One edit is one re-share; two arms
+// firing would race two pushes for one decision.
 //
 // A drop-off edited before the rider's Start needs no push at all: leg 2 has
 // not dispatched, and the Start will dispatch the NEW drop-off for free. A
@@ -54,7 +61,23 @@ func (d *Dispatcher) processTripChanged(ctx context.Context, ev events.RideTripC
 			order:     legOrderPickup,
 		})
 	}
-	if ev.NewDropoff != nil && ev.Status == "enroute" {
+	if ev.Status != statusEnroute {
+		return
+	}
+	switch {
+	case ev.StopsChanged && ev.LegTarget != nil:
+		// The stop list moved, so the CURRENT leg's target may have moved with
+		// it even though neither endpoint did. The server already resolved
+		// which place that is.
+		d.reshareEditedLeg(ctx, dispatchLeg{
+			name:      "stop",
+			rideID:    ev.RideRequestID,
+			vehicleID: ev.VehicleID,
+			ownerID:   ev.OwnerID,
+			coord:     *ev.LegTarget,
+			order:     legOrderDropoff,
+		})
+	case ev.NewDropoff != nil:
 		d.reshareEditedLeg(ctx, dispatchLeg{
 			name:      "dropoff",
 			rideID:    ev.RideRequestID,
@@ -63,8 +86,22 @@ func (d *Dispatcher) processTripChanged(ctx context.Context, ev events.RideTripC
 			coord:     *ev.NewDropoff,
 			order:     legOrderDropoff,
 		})
+	case ev.StopsChanged:
+		// The publisher computes LegTarget for every stops edit, so reaching
+		// here means that invariant broke — a future publisher, a bad merge.
+		// The consequence is a car still driving to a stop the trip no longer
+		// has, which is exactly the silence this line refuses to keep.
+		d.logger.Error("dispatch: stops edit carried no leg target, nav not re-shared",
+			slog.String("ride_id", ev.RideRequestID),
+			slog.String("vehicle_id", ev.VehicleID),
+		)
 	}
 }
+
+// statusEnroute is the ride status in which leg 2's target is the car's
+// rightful destination — the only one in which a post-pickup re-share means
+// anything.
+const statusEnroute = "enroute"
 
 // reshareEditedLeg pushes an edited endpoint and arms verification.
 func (d *Dispatcher) reshareEditedLeg(ctx context.Context, leg dispatchLeg) {

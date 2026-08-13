@@ -4,29 +4,52 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/myrobotaxi/telemetry/internal/events"
 )
 
-// Candidate is one ride whose car is currently driving to its pickup. Built by
-// the cmd/ adapter from the store's lean projection; the detector needs the VIN
-// to match frames, the pickup to measure against, and the ids to write and
+// Candidate is one ride whose car is currently driving to one of that ride's
+// waypoints. Built by the cmd/ adapter from the store's lean projection; the
+// detector needs the VIN to match frames, the target to measure against, the
+// waypoint label to say WHICH place was reached, and the ids to write and
 // publish with.
 //
-// The pickup coordinate is P1 GPS data — never logged.
+// Since MYR-539 the waypoint is not always the pickup: a ride under way is
+// watched against its CURRENT stop, or against the destination when no stop is
+// left ahead of the car.
+//
+// The target coordinate is P1 GPS data — never logged.
 type Candidate struct {
-	RideRequestID   string
-	VehicleID       string
-	RiderID         string
-	OwnerID         string
-	VIN             string
-	PickupLatitude  float64
-	PickupLongitude float64
+	RideRequestID string
+	VehicleID     string
+	RiderID       string
+	OwnerID       string
+	VIN           string
+	// Waypoint is the events vocabulary: "pickup", "stop:{id}",
+	// "destination". It decides what an arrival MEANS — only the pickup moves
+	// the ride's lifecycle status.
+	Waypoint        string
+	TargetLatitude  float64
+	TargetLongitude float64
 }
+
+// isPickup reports whether this candidate is watching leg 1's endpoint — the
+// only waypoint whose arrival writes a ride status.
+func (c Candidate) isPickup() bool { return c.Waypoint == events.WaypointPickup }
+
+// trackKey identifies the dwell state for this candidate. It is keyed by
+// (ride, waypoint) rather than by ride alone (MYR-539): one ride now reaches
+// several places in sequence, and a latch keyed only by ride would silence
+// every stop after the first.
+func (c Candidate) trackKey() string { return c.RideRequestID + "|" + c.Waypoint }
 
 // CandidateStore is the detector's read seam, satisfied by the ride-request
 // repo through a cmd/ adapter.
 type CandidateStore interface {
-	// ListArrivalCandidates returns the rides whose car is `accepted` with
-	// leg-1 dispatch resolved `sent`, capped at limit, pickup decrypted.
+	// ListArrivalCandidates returns the rides whose car is driving to a
+	// waypoint — `accepted` with leg-1 dispatch resolved `sent` (the pickup),
+	// or `enroute` (the current stop, else the destination) — capped at limit,
+	// target decrypted.
 	ListArrivalCandidates(ctx context.Context, limit int) ([]Candidate, error)
 }
 
@@ -128,7 +151,7 @@ func (c *candidateCache) serveStale(now time.Time, err error) map[string]Candida
 // indexByVIN keys the candidate rows by VIN, DROPPING any VIN that carries more
 // than one candidate ride.
 //
-// One car with two live leg-1 rides should not be reachable — migration 0013's
+// One car with two live rides should not be reachable — migration 0013's
 // partial unique index admits a single active instant ride per vehicle — but
 // "should not" is not the standard here. If it ever happens, the detector
 // cannot tell which of the two rides the car being at a pickup means, and
@@ -147,7 +170,7 @@ func indexByVIN(cands []Candidate, logger *slog.Logger) map[string]Candidate {
 	}
 	for vin := range ambiguous {
 		delete(byVIN, vin)
-		logger.Warn("auto-arrival: vehicle has multiple leg-1 rides, skipping",
+		logger.Warn("auto-arrival: vehicle has multiple live rides, skipping",
 			slog.String("vin", redactVIN(vin)))
 	}
 	return byVIN

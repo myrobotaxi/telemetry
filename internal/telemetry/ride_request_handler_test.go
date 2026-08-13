@@ -30,6 +30,13 @@ type fakeRideStore struct {
 
 	// MYR-541: the last trip edit handed to UpdateTrip.
 	tripEdit *RideTripEditData
+	// MYR-539: stopsErr makes a stop replacement refuse (the guard's conflict
+	// or the unknown-id 400); the StartFirstStop counters pin that the rider's
+	// start promotes the first stop exactly once, and its error drives the
+	// fall-back-to-dropoff path.
+	stopsErr            error
+	startFirstStopCalls int
+	startFirstStopErr   error
 
 	// Active-instant guard (MYR-230). activeErr short-circuits; otherwise a
 	// zero-value activeRec (empty ID) is reported as "no open instant ride"
@@ -230,8 +237,74 @@ func (f *fakeRideStore) UpdateTrip(_ context.Context, _ string, edit RideTripEdi
 	if edit.Dropoff != nil {
 		rec.Dropoff = *edit.Dropoff
 	}
+	if edit.Stops != nil {
+		if f.stopsErr != nil {
+			return RideRequestData{}, f.stopsErr
+		}
+		// The replacement the store would have written back: ids minted for
+		// new entries, kept ids preserved, and — for a ride already under way —
+		// the earliest upcoming stop promoted, exactly as the transaction does.
+		rec.Stops = fakeReplaceStops(rec.Stops, *edit.Stops, rec.Status)
+	}
 	rec.TripVersion++
 	return rec, nil
+}
+
+// fakeReplaceStops applies REPLACE semantics the way the store's transaction
+// does, so handler tests exercise the same shapes the real write returns.
+func fakeReplaceStops(existing []RideStopData, desired []RideStopEditData, status string) []RideStopData {
+	byID := make(map[string]RideStopData, len(existing))
+	for _, s := range existing {
+		byID[s.ID] = s
+	}
+	out := make([]RideStopData, 0, len(desired))
+	for i, d := range desired {
+		stop := RideStopData{ID: d.ID, Place: d.Place, Status: rideStopUpcoming}
+		if kept, ok := byID[d.ID]; ok {
+			stop.Status = kept.Status
+		}
+		if stop.ID == "" {
+			stop.ID = fmt.Sprintf("crs%02d", i)
+		}
+		out = append(out, stop)
+	}
+	if status != rideStatusEnroute {
+		return out
+	}
+	for i := range out {
+		if out[i].Status == rideStopCurrent {
+			return out
+		}
+	}
+	for i := range out {
+		if out[i].Status == rideStopUpcoming {
+			out[i].Status = rideStopCurrent
+			break
+		}
+	}
+	return out
+}
+
+// StartFirstStop mimics the MYR-539 promotion the rider's Start performs: the
+// earliest upcoming stop becomes current and is returned as the leg-2 target;
+// a trip with no stops answers nil.
+func (f *fakeRideStore) StartFirstStop(_ context.Context, _ string) (*RideStopData, error) {
+	f.startFirstStopCalls++
+	if f.startFirstStopErr != nil {
+		return nil, f.startFirstStopErr
+	}
+	rec := f.updated
+	if rec.ID == "" {
+		rec = f.getRec
+	}
+	for i := range rec.Stops {
+		if rec.Stops[i].Status == rideStopUpcoming {
+			stop := rec.Stops[i]
+			stop.Status = rideStopCurrent
+			return &stop, nil
+		}
+	}
+	return nil, nil //nolint:nilnil // "this trip has no stops" is the store seam's ordinary answer
 }
 
 func (f *fakeRideStore) UpdateStatusFromCancelled(ctx context.Context, id string, from []string, by string) (RideRequestData, error) {

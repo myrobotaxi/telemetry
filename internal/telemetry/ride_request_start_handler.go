@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/myrobotaxi/telemetry/internal/events"
@@ -71,12 +72,46 @@ func (h *RideRequestHandler) ServeStart(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Leg 2's target is the FIRST STOP when the trip has one (MYR-539). The
+	// promotion and the target come from ONE guarded write, so the place the
+	// car is sent to is by construction the stop the database now calls
+	// `current` — which is also the stop the arrival detector will watch.
+	//
+	// Only the winning transition above reaches this, so the promotion runs
+	// once per start; the statement is idempotent anyway.
+	target := updated.Dropoff
+	if stop, err := h.store.StartFirstStop(ctx, updated.ID); err != nil {
+		// The ride HAS started — that is committed, and refusing to dispatch
+		// now would leave a rider aboard a car with no destination. Fall back
+		// to the drop-off: the trip still ends where it should, the skipped
+		// stop is visible in the app, and re-adding it is one trip edit.
+		h.logger.Error("ride-request: promoting the first stop failed, dispatching the drop-off",
+			slog.String("ride_id", updated.ID),
+			slog.String("error", err.Error()),
+		)
+	} else if stop != nil {
+		updated.Stops = withPromotedStop(updated.Stops, *stop)
+		target = stop.Place
+	}
+
 	// Guarded above: only the winning arrived→enroute write reaches this
 	// publish, so the dropoff dispatch seam (and thus the Tesla nav push) fires
 	// exactly once per start even under a double-tap / two-device race.
-	h.publish(ctx, buildRideStartedEvent(updated))
+	h.publish(ctx, buildRideStartedEvent(updated, target))
 
 	h.writeJSON(w, http.StatusOK, toRideRequestWire(updated))
+}
+
+// withPromotedStop reflects the promotion onto the record the response is built
+// from, so the rider's own 200 already shows the stop the car is driving to
+// rather than a list that says `upcoming` for a leg already under way.
+func withPromotedStop(stops []RideStopData, promoted RideStopData) []RideStopData {
+	for i := range stops {
+		if stops[i].ID == promoted.ID {
+			stops[i].Status = promoted.Status
+		}
+	}
+	return stops
 }
 
 // rideStartableFrom is the allowed-from set for a rider start; must stay in
@@ -86,14 +121,16 @@ func (h *RideRequestHandler) ServeStart(w http.ResponseWriter, r *http.Request) 
 var rideStartableFrom = []string{rideStatusArrived}
 
 // buildRideStartedEvent projects the just-started record onto the leg-2
-// dispatch-seam payload (MYR-270). Only the DROPOFF place is needed — the car
-// is already at/near the pickup. The place travels plaintext on the internal
-// bus (the repo already decrypted it); it is never broadcast to WS clients.
-func buildRideStartedEvent(rec RideRequestData) events.RideStartedEvent {
+// dispatch-seam payload (MYR-270). One place is needed — where the car goes
+// NEXT — and the caller resolves it: the first stop on a multi-stop trip
+// (MYR-539), the drop-off otherwise. The place travels plaintext on the
+// internal bus (the repo already decrypted it); it is never broadcast to WS
+// clients.
+func buildRideStartedEvent(rec RideRequestData, target RidePlaceData) events.RideStartedEvent {
 	return events.RideStartedEvent{
 		RideRequestID: rec.ID,
 		VehicleID:     rec.VehicleID,
 		OwnerID:       rec.OwnerID,
-		Dropoff:       toEventPlace(rec.Dropoff),
+		Target:        toEventPlace(target),
 	}
 }

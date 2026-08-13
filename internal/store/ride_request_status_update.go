@@ -205,7 +205,7 @@ type statusGuard struct {
 // single-statement variants and the open transaction for the MYR-383
 // booking-locked one — the statement itself is identical either way.
 func (r *RideRequestRepo) updateStatusGuarded(
-	ctx context.Context, q pgxQuerier, g statusGuard, id string, from []RideRequestStatus, to RideRequestStatus,
+	ctx context.Context, q pgxRowQuerier, g statusGuard, id string, from []RideRequestStatus, to RideRequestStatus,
 ) (RideRequestRecord, error) {
 	fromStrs := make([]string, 0, len(from))
 	for _, s := range from {
@@ -221,6 +221,16 @@ func (r *RideRequestRepo) updateStatusGuarded(
 	rec, err := r.scanRideRequest(row)
 	r.metrics.ObserveQueryDuration(g.op, time.Since(start).Seconds())
 	if err == nil {
+		// The winning write answers with the whole RideRequest object, so it
+		// carries the ride's stop list like every other §7.8 projection
+		// (MYR-539). A lifecycle transition never CHANGES the list — it is read
+		// back, on the same querier, so the response cannot disagree with the
+		// detail read a client would make next.
+		rec, err = r.withStops(ctx, q, rec)
+		if err != nil {
+			r.metrics.IncQueryError(g.op)
+			return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.%s(%s): %w", g.name, id, err)
+		}
 		return rec, nil
 	}
 	// The per-vehicle one-active-ride guard (0013) losing the race is an
