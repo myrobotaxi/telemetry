@@ -101,8 +101,12 @@ type Notifier struct {
 	// its anonymous title — so it rides an optional wither rather than the
 	// constructor.
 	requesters RequesterNamer
-	cfg        Config
-	logger     *slog.Logger
+	// members resolves a ride's joined group members so the RIDER-flavoured
+	// pushes reach them too (MYR-540). Nil is the ordinary unwired state — see
+	// notifier_members.go.
+	members RideMemberLister
+	cfg     Config
+	logger  *slog.Logger
 
 	sem  chan struct{}
 	mu   sync.Mutex
@@ -330,7 +334,7 @@ func (n *Notifier) handleStatusChanged(evt events.Event) {
 	n.async(func(ctx context.Context) {
 		if notifyRider {
 			a, _ := statusAlert(ev.Status, n.vehicleName(ctx, ev.VehicleID), scheduled, byOwnerCancel)
-			n.fanOut(ctx, delivery{
+			riderDelivery := delivery{
 				userID:   ev.RiderID,
 				rideID:   ev.RideRequestID,
 				topic:    string(evt.Topic),
@@ -342,7 +346,15 @@ func (n *Notifier) handleStatusChanged(evt events.Event) {
 				// push are not gated even though one of their statuses is on
 				// the ladder.
 				islandAlerts: carriesIslandAlert(ev.Status),
-			}, a)
+			}
+			n.fanOut(ctx, riderDelivery, a)
+			// MYR-540: everybody riding along hears the same thing, in the same
+			// words, marked the same way. A member holds a Live Activity of
+			// their own (§7.21 keys registrations on (ride, user)), so the
+			// island-alert marking carries over unchanged — it is the recipient's
+			// own card the gate defers to, and each of them has one.
+			n.fanOutMembers(ctx, riderDelivery,
+				n.memberIDs(ctx, ev.RideRequestID, ev.RiderID, ev.OwnerID), a)
 		}
 		if notifyOwner {
 			a, _ := ownerStatusAlert(ev.Status, ev.RequesterName, byRiderCancel)
@@ -380,12 +392,19 @@ func (n *Notifier) handleDue(evt events.Event) {
 		return
 	}
 	n.async(func(ctx context.Context) {
-		n.fanOut(ctx, delivery{
+		riderDelivery := delivery{
 			userID:   ev.RiderID,
 			rideID:   ev.RideRequestID,
 			topic:    string(evt.Topic),
 			category: CategoryRideLifecycle,
-		}, dueAlert(n.vehicleName(ctx, ev.VehicleID)))
+		}
+		dueCopy := dueAlert(n.vehicleName(ctx, ev.VehicleID))
+		n.fanOut(ctx, riderDelivery, dueCopy)
+		// MYR-540: "your car is on its way" is as true for a member as for the
+		// requester, and it is the one push a group most needs — it is what
+		// tells everybody to start walking outside.
+		n.fanOutMembers(ctx, riderDelivery,
+			n.memberIDs(ctx, ev.RideRequestID, ev.RiderID, ev.OwnerID), dueCopy)
 		if ev.OwnerID != ev.RiderID {
 			n.fanOut(ctx, delivery{
 				userID:   ev.OwnerID,
@@ -433,6 +452,17 @@ func (n *Notifier) handleTripChanged(evt events.Event) {
 	}
 	n.async(func(ctx context.Context) {
 		part := tripEditedPart(ev.NewPickup != nil, ev.NewDropoff != nil, ev.StopsChanged)
+		// MYR-540: the members are the rest of "the other participants", and
+		// they hear it in the RIDER's words whoever edited — the copy fork is
+		// about what the recipient can do next, and a member's options are a
+		// passenger's. The EDITOR is excluded here as everywhere: nobody is told
+		// about their own thumb.
+		n.fanOutMembers(ctx, delivery{
+			rideID:   ev.RideRequestID,
+			topic:    string(evt.Topic),
+			category: CategoryRideLifecycle,
+		}, n.memberIDs(ctx, ev.RideRequestID, ev.RiderID, ev.OwnerID, ev.EditorUserID),
+			riderTripChangedAlert(part))
 		if ev.EditorUserID != ev.RiderID && ev.RiderID != ev.OwnerID {
 			// The owner edited: tell the rider.
 			n.fanOut(ctx, delivery{

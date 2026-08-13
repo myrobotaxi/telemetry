@@ -135,22 +135,8 @@ SELECT EXISTS (SELECT 1 FROM go_ride_members WHERE ride_id = $1 AND user_id = $2
 const queryDeleteRideMembershipsForUser = `
 DELETE FROM go_ride_members WHERE user_id = $1`
 
-// queryRideVehicleIDsForMember is the ACCESS-SET leg (MYR-540): the vehicles a
-// person may see because they are riding along on a LIVE group ride.
-//
-// It is the third source of vehicle access, beside ownership and an accepted
-// share, and it is deliberately the narrowest of the three:
-//
-//   - RIDE-SCOPED — one ride, not a standing grant on the car. The membership
-//     row is the whole grant and it dies with the ride.
-//   - LIVE ONLY — the terminal statuses are excluded, so access ENDS when the
-//     ride does, with no revocation step to remember and nothing to sweep.
-//   - VIEWER TIER — this statement only puts the vehicle in the set; the role
-//     resolution (auth.ResolveVehicleAccess) is what decides the tier, and it
-//     resolves a member to RoleViewer with the zero-value capability set.
-const queryRideVehicleIDsForMember = `
-SELECT r.vehicle_id
-FROM go_ride_members m
-JOIN go_ride_requests r ON r.id = m.ride_id
-WHERE m.user_id = $1
-  AND r.status NOT IN ('completed', 'declined', 'cancelled')`
+// queryRideMemberIDs is the LEAN member read — ids only, no identity ladder.
+// The push fan-out's read; see RideMemberIDs for why it does not reuse
+// queryRideMembersByRides. Served by the composite primary key.
+const queryRideMemberIDs = `
+SELECT user_id FROM go_ride_members WHERE ride_id = $1 ORDER BY joined_at, user_id`

@@ -201,3 +201,46 @@ func (r *RideRequestRepo) IsRideMember(ctx context.Context, rideID, userID strin
 	}
 	return exists, nil
 }
+
+// RideMemberIDs returns the user ids of a ride's joined members, in join order
+// (MYR-540). It backs the push notifier's group fan-out and nothing else, which
+// is why it is deliberately NOT loadMembers: that read resolves each member's
+// display name through three identity subselects, and the notifier addresses
+// PHONES — it has no use for a name, and P1 PII resolved for no reader is the
+// RideAcceptedEvent passenger mistake (MYR-447) waiting to be repeated.
+//
+// UNFILTERED BY STATUS, unlike the access-set query. The caller is reacting to a
+// lifecycle transition that may itself be the terminal one, and "your ride was
+// cancelled" is precisely the push a member most needs — a status filter here
+// would silence the fan-out at the only moment it is load-bearing.
+func (r *RideRequestRepo) RideMemberIDs(ctx context.Context, rideID string) ([]string, error) {
+	if rideID == "" {
+		return nil, nil
+	}
+	const op = "ride_request.member_ids"
+	start := time.Now()
+	rows, err := r.pool.Query(ctx, queryRideMemberIDs, rideID)
+	if err != nil {
+		r.metrics.ObserveQueryDuration(op, time.Since(start).Seconds())
+		r.metrics.IncQueryError(op)
+		return nil, fmt.Errorf("RideRequestRepo.RideMemberIDs(%s): query: %w", rideID, err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			r.metrics.ObserveQueryDuration(op, time.Since(start).Seconds())
+			r.metrics.IncQueryError(op)
+			return nil, fmt.Errorf("RideRequestRepo.RideMemberIDs(%s): scan: %w", rideID, err)
+		}
+		ids = append(ids, id)
+	}
+	r.metrics.ObserveQueryDuration(op, time.Since(start).Seconds())
+	if err := rows.Err(); err != nil {
+		r.metrics.IncQueryError(op)
+		return nil, fmt.Errorf("RideRequestRepo.RideMemberIDs(%s): rows: %w", rideID, err)
+	}
+	return ids, nil
+}

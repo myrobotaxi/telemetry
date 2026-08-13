@@ -138,35 +138,11 @@ func (h *AccountDeletionHandler) run(ctx context.Context, userID string) (accoun
 	}
 	counts.RideMembershipsDeleted = memberships
 
-	// (7) Push devices — the address book goes whole.
-	devices, err := h.sumOverScope(ctx, scope, h.deps.Data.DeletePushDevices)
-	if err != nil {
-		return accountDeletionResult{}, &accountDeletionError{step: "delete_push_devices", cause: err}
+	// (7)-(9) The personal effects, in their own helper — see runPersonalEffects
+	// for what "personal effects" means and why the three sit together.
+	if derr := h.runPersonalEffects(ctx, scope, &counts); derr != nil {
+		return accountDeletionResult{}, derr
 	}
-	counts.PushDevicesDeleted = devices
-
-	// (8) Saved places — the person's Home and Work rows (MYR-321). Slotted
-	// here, next to the push devices and BEFORE the identity delete, because
-	// both are personal effects with no counterparty: rows that belong to this
-	// account alone, that no other person has a claim on, and that nothing
-	// later in the sequence reads. Deleting them cannot be deferred past step 10
-	// — the identity rows go there, and a saved place that outlived its owner
-	// would be AES-256-GCM ciphertext of where a deleted person lives, keyed by
-	// a cuid nobody can resolve and reachable by nothing but a table scan.
-	places, err := h.sumOverScope(ctx, scope, h.deps.Data.DeleteSavedPlaces)
-	if err != nil {
-		return accountDeletionResult{}, &accountDeletionError{step: "delete_saved_places", cause: err}
-	}
-	counts.SavedPlacesDeleted = places
-
-	// (9) Refresh tokens — revoked so no stored session can mint a new access
-	// token. The CURRENT access token deliberately keeps working until step 11,
-	// because it is what authenticates a re-run if step 10 fails.
-	tokens, err := h.sumOverScope(ctx, scope, h.deps.Data.RevokeRefreshTokens)
-	if err != nil {
-		return accountDeletionResult{}, &accountDeletionError{step: "revoke_refresh_tokens", cause: err}
-	}
-	counts.RefreshTokensRevoked = tokens
 
 	// (10) Identity + audit, one transaction, LAST. Scope-wide: this is the
 	// statement that takes the Apple binding, and a binding left standing is
@@ -358,4 +334,54 @@ var accountDeletionCancellableFrom = []string{rideStatusRequested, rideStatusAcc
 
 func accountDeletionCancellable(status string) bool {
 	return status == rideStatusRequested || status == rideStatusAccepted
+}
+
+// runPersonalEffects runs the three steps whose rows belong to THIS ACCOUNT
+// ALONE and that no other person has a claim on: the APNs address book, the
+// saved places, and the refresh-token family. Split out of run (MYR-540 pushed
+// it past the 80-line cap) rather than inlined, because they share one argument
+// and it is worth stating once.
+//
+// All three run BEFORE the identity delete, and their order among themselves is
+// unconstrained — nothing later in the sequence reads any of them, and no
+// teardown, cascade or event depends on them. What IS constrained is that they
+// precede step 10: a saved place that outlived its owner would be AES-256-GCM
+// ciphertext of where a deleted person lives, keyed by a cuid nothing can
+// resolve and reachable by nothing but a table scan.
+//
+// counts is mutated in place; the caller hands the same tally to DeleteIdentity.
+func (h *AccountDeletionHandler) runPersonalEffects(
+	ctx context.Context, scope AccountDeletionScope, counts *AccountDeletionCounts,
+) *accountDeletionError {
+	// (7) Push devices — the address book goes whole.
+	devices, err := h.sumOverScope(ctx, scope, h.deps.Data.DeletePushDevices)
+	if err != nil {
+		return &accountDeletionError{step: "delete_push_devices", cause: err}
+	}
+	counts.PushDevicesDeleted = devices
+
+	// (8) Saved places — the person's Home and Work rows (MYR-321). Slotted
+	// here, next to the push devices and BEFORE the identity delete, because
+	// both are personal effects with no counterparty: rows that belong to this
+	// account alone, that no other person has a claim on, and that nothing
+	// later in the sequence reads. Deleting them cannot be deferred past step 10
+	// — the identity rows go there, and a saved place that outlived its owner
+	// would be AES-256-GCM ciphertext of where a deleted person lives, keyed by
+	// a cuid nobody can resolve and reachable by nothing but a table scan.
+	places, err := h.sumOverScope(ctx, scope, h.deps.Data.DeleteSavedPlaces)
+	if err != nil {
+		return &accountDeletionError{step: "delete_saved_places", cause: err}
+	}
+	counts.SavedPlacesDeleted = places
+
+	// (9) Refresh tokens — revoked so no stored session can mint a new access
+	// token. The CURRENT access token deliberately keeps working until step 11,
+	// because it is what authenticates a re-run if step 10 fails.
+	tokens, err := h.sumOverScope(ctx, scope, h.deps.Data.RevokeRefreshTokens)
+	if err != nil {
+		return &accountDeletionError{step: "revoke_refresh_tokens", cause: err}
+	}
+	counts.RefreshTokensRevoked = tokens
+
+	return nil
 }
