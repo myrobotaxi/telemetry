@@ -18,27 +18,48 @@ type ridePlaceWire struct {
 	Address *string `json:"address,omitempty"`
 }
 
+// rideStopWire is the wire RideStop ($defs.RideStop, MYR-539): the place, the
+// server-minted id, and the server-owned status. Position is not a field — the
+// array index IS the travel order.
+type rideStopWire struct {
+	Place  ridePlaceWire `json:"place"`
+	ID     string        `json:"id"`
+	Status string        `json:"status"`
+}
+
+// rideStopPatchWire is one entry of the desired list a client submits
+// ($defs.RideStopPatch). `id` absent = a new stop; `place` is required on every
+// entry, including one that keeps an existing id.
+type rideStopPatchWire struct {
+	Place *ridePlaceWire `json:"place"`
+	ID    *string        `json:"id"`
+}
+
 // rideRequestWire is the wire RideRequest object. Optional keys are omitted
 // (omitempty) when their source pointer is nil, matching the schema's
 // omit-when-absent convention.
 type rideRequestWire struct {
-	ID                    string        `json:"id"`
-	RiderID               string        `json:"riderId"`
-	OwnerID               string        `json:"ownerId"`
-	VehicleID             string        `json:"vehicleId"`
-	Pickup                ridePlaceWire `json:"pickup"`
-	Dropoff               ridePlaceWire `json:"dropoff"`
-	Status                string        `json:"status"`
-	RequesterName         *string       `json:"requesterName,omitempty"`
-	PassengerName         *string       `json:"passengerName,omitempty"`
-	PassengerPhone        *string       `json:"passengerPhone,omitempty"`
-	ScheduledFor          *string       `json:"scheduledFor,omitempty"`
-	RescheduleProposedFor *string       `json:"rescheduleProposedFor,omitempty"`
-	RescheduleStatus      *string       `json:"rescheduleStatus,omitempty"`
-	AcceptedAt            *string       `json:"acceptedAt,omitempty"`
-	CompletedAt           *string       `json:"completedAt,omitempty"`
-	CreatedAt             string        `json:"createdAt"`
-	UpdatedAt             string        `json:"updatedAt"`
+	ID        string        `json:"id"`
+	RiderID   string        `json:"riderId"`
+	OwnerID   string        `json:"ownerId"`
+	VehicleID string        `json:"vehicleId"`
+	Pickup    ridePlaceWire `json:"pickup"`
+	Dropoff   ridePlaceWire `json:"dropoff"`
+	// Stops (MYR-539) — optional and additive, OMITTED when the trip has none
+	// so every pre-MYR-539 ride serializes byte-identically. Absent or empty
+	// means a plain two-endpoint trip, never "unknown".
+	Stops                 []rideStopWire `json:"stops,omitempty"`
+	Status                string         `json:"status"`
+	RequesterName         *string        `json:"requesterName,omitempty"`
+	PassengerName         *string        `json:"passengerName,omitempty"`
+	PassengerPhone        *string        `json:"passengerPhone,omitempty"`
+	ScheduledFor          *string        `json:"scheduledFor,omitempty"`
+	RescheduleProposedFor *string        `json:"rescheduleProposedFor,omitempty"`
+	RescheduleStatus      *string        `json:"rescheduleStatus,omitempty"`
+	AcceptedAt            *string        `json:"acceptedAt,omitempty"`
+	CompletedAt           *string        `json:"completedAt,omitempty"`
+	CreatedAt             string         `json:"createdAt"`
+	UpdatedAt             string         `json:"updatedAt"`
 	// Dispatch outcome (MYR-176) — optional, additive. Omitted until the
 	// nav-dispatch push resolves (ride-request.schema.json $defs.RideRequest).
 	DispatchStatus *string `json:"dispatchStatus,omitempty"`

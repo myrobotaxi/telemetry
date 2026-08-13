@@ -20,6 +20,7 @@ func toRideRequestWire(d RideRequestData) rideRequestWire {
 		VehicleID:             d.VehicleID,
 		Pickup:                toRidePlaceWire(d.Pickup),
 		Dropoff:               toRidePlaceWire(d.Dropoff),
+		Stops:                 toRideStopsWire(d.Stops),
 		Status:                d.Status,
 		RequesterName:         d.RequesterName,
 		PassengerName:         d.PassengerName,
@@ -45,6 +46,25 @@ func toRidePlaceWire(p RidePlaceData) ridePlaceWire {
 		w.Address = p.Address
 	}
 	return w
+}
+
+// toRideStopsWire projects the stop list in travel order (MYR-539). A trip with
+// no stops projects to nil — the omitted key, which the contract reads as "no
+// stops" exactly as it reads an empty array, and which keeps every ride written
+// before stops existed byte-identical on the wire.
+func toRideStopsWire(stops []RideStopData) []rideStopWire {
+	if len(stops) == 0 {
+		return nil
+	}
+	out := make([]rideStopWire, 0, len(stops))
+	for i := range stops {
+		out = append(out, rideStopWire{
+			Place:  toRidePlaceWire(stops[i].Place),
+			ID:     stops[i].ID,
+			Status: stops[i].Status,
+		})
+	}
+	return out
 }
 
 // formatRideTimePtr renders a nullable timestamp as an RFC 3339 UTC string

@@ -23,6 +23,25 @@ type RidePlaceData struct {
 	Address   *string
 }
 
+// RideStopData is one intermediate stop of a multi-stop trip in the handler
+// layer (MYR-539, contracts $defs.RideStop). ID and Status are SERVER-owned: a
+// client edits the list by PATCHing the whole desired shape and reads these
+// back.
+type RideStopData struct {
+	ID     string
+	Place  RidePlaceData
+	Status string
+}
+
+// RideStopEditData is one entry of the DESIRED list a client submits
+// (contracts $defs.RideStopPatch). An empty ID is a brand-new stop; a non-empty
+// one keeps the existing stop with that id at this position. Place is always
+// present — the submitted list is the full desired trip.
+type RideStopEditData struct {
+	ID    string
+	Place RidePlaceData
+}
+
 // RideRequestCreateInput is what the handler hands the store on create. The
 // rider/owner ids are server-derived (rider = JWT sub; owner = the vehicle's
 // owner), never client-supplied.
@@ -40,13 +59,16 @@ type RideRequestCreateInput struct {
 // RideRequestData is the full ride-request aggregate the store returns and
 // the handler projects onto the wire RideRequest object.
 type RideRequestData struct {
-	ID                    string
-	RiderID               string
-	OwnerID               string
-	VehicleID             string
-	Pickup                RidePlaceData
-	Dropoff               RidePlaceData
-	Status                string
+	ID        string
+	RiderID   string
+	OwnerID   string
+	VehicleID string
+	Pickup    RidePlaceData
+	Dropoff   RidePlaceData
+	Status    string
+	// Stops are the ordered intermediate stops between the endpoints
+	// (MYR-539), travel order. Empty is a plain two-endpoint trip.
+	Stops                 []RideStopData
 	PassengerName         *string
 	PassengerPhone        *string
 	ScheduledFor          *time.Time
@@ -124,6 +146,14 @@ type RideRequestListPage struct {
 // store.ErrRideRequestConflict into this sentinel so the handler layer
 // stays decoupled from internal/store.
 var ErrRideStatusConflict = errors.New("ride request status conflict")
+
+// ErrRideStopUnknown is returned by RideRequestStore.UpdateTrip when a
+// submitted stop entry names an id the ride does not have (MYR-539). It is the
+// one stop refusal that is NOT a conflict: the contract forbids treating an
+// unknown id as a new stop, and unlike a stale version there is nothing a
+// refetch-and-retry could fix, so the handler answers 400 invalid_request. The
+// cmd adapter translates store.ErrRideStopUnknown into it.
+var ErrRideStopUnknown = errors.New("ride stop not on this ride")
 
 // ErrRideReservationDormant is returned by
 // RideRequestStore.UpdateStatusFromDispatched when the guarded write matched no
@@ -238,8 +268,16 @@ type RideRequestStore interface {
 	UpdateStatusFromCancelled(ctx context.Context, id string, from []string, by string) (RideRequestData, error)
 	// UpdateTrip is the guarded, versioned trip-shape write (MYR-541): the
 	// status window, the version match and the place writes ride one UPDATE.
-	// A guard refusal surfaces as the store's conflict error.
+	// A guard refusal surfaces as the store's conflict error. Since MYR-539 the
+	// same write also REPLACES the ride's stop list inside that write's
+	// transaction; a replacement that rewrites the road behind the car is a
+	// conflict too, and an unknown stop id is ErrRideStopUnknown.
 	UpdateTrip(ctx context.Context, id string, edit RideTripEditData, from []string) (RideRequestData, error)
+	// StartFirstStop makes a ride's earliest upcoming stop CURRENT and returns
+	// it — the rider's Start on a multi-stop trip (MYR-539). Nil stop = a plain
+	// two-endpoint trip, i.e. leg 2 targets the drop-off. Idempotent: a ride
+	// that already has a current stop promotes nothing.
+	StartFirstStop(ctx context.Context, id string) (*RideStopData, error)
 	// UpdateStatusFromDispatched is UpdateStatusFrom plus the MYR-376
 	// RESERVATION DORMANCY precondition, carried in the SAME guarded UPDATE:
 	// the row must also satisfy `scheduled_for IS NULL OR dispatch_status =
@@ -314,6 +352,14 @@ const (
 	rideStatusArrived   = "arrived"
 	rideStatusCompleted = "completed"
 	rideStatusCancelled = "cancelled"
+)
+
+// Stop-status values (mirror the contracts RideStop.status enum, MYR-539).
+// Only the two the server READS are named here: the handler asks "which stop is
+// the current leg's target", and `completed` is never a member of that answer.
+const (
+	rideStopUpcoming = "upcoming"
+	rideStopCurrent  = "current"
 )
 
 // Ride-request list pagination bounds (rest-api.md §4.2.1, same envelope as

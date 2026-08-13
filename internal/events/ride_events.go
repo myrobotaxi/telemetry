@@ -239,6 +239,17 @@ type RideTripChangedEvent struct {
 	// P1 coordinates — never logged, never pushed, never on a WS frame.
 	NewPickup  *RidePlace
 	NewDropoff *RidePlace
+	// StopsChanged reports that this edit REPLACED the ride's stop list
+	// (MYR-539). It is a separate fact from the endpoints because a stop edit
+	// can move the CURRENT leg's target without either endpoint moving at all —
+	// which is precisely what the dispatcher must not miss.
+	StopsChanged bool
+	// LegTarget is where the car should be driving after this edit: the
+	// current (or earliest upcoming) stop when the trip has stops, else the
+	// drop-off. Set ONLY when StopsChanged — for an endpoint-only edit the
+	// NewPickup/NewDropoff fields already say it, and computing it twice is how
+	// two answers to one question start disagreeing. P1 — never logged.
+	LegTarget *RidePlace
 	// RequesterName, as on RideStatusChangedEvent (P1, never logged).
 	RequesterName *string
 	UpdatedAt     time.Time

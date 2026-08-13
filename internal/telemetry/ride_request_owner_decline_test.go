@@ -385,3 +385,9 @@ func sameStatusSet(got, want []string) bool {
 func (s *racingDeclineStore) UpdateTrip(context.Context, string, RideTripEditData, []string) (RideRequestData, error) {
 	return RideRequestData{}, ErrRideStatusConflict
 }
+
+// StartFirstStop is unreachable from the decline race; the ride this double
+// models has no stops (MYR-539).
+func (s *racingDeclineStore) StartFirstStop(context.Context, string) (*RideStopData, error) {
+	return nil, nil //nolint:nilnil // "this trip has no stops" is the store seam's ordinary answer
+}

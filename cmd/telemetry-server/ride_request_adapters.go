@@ -258,6 +258,30 @@ func fromStorePlace(p store.RidePlace) telemetry.RidePlaceData {
 	}
 }
 
+// fromStoreRideStop projects one stop across the boundary (MYR-539). The place
+// is already plaintext — the repo is the decrypt boundary — so this moves
+// values only, like every other translation here.
+func fromStoreRideStop(s store.RideStop) telemetry.RideStopData {
+	return telemetry.RideStopData{
+		ID:     s.ID,
+		Place:  fromStorePlace(s.Place),
+		Status: string(s.Status),
+	}
+}
+
+// fromStoreRideStops projects a whole list, preserving travel order. Nil stays
+// nil so the wire key is omitted for a plain two-endpoint trip.
+func fromStoreRideStops(stops []store.RideStop) []telemetry.RideStopData {
+	if len(stops) == 0 {
+		return nil
+	}
+	out := make([]telemetry.RideStopData, 0, len(stops))
+	for i := range stops {
+		out = append(out, fromStoreRideStop(stops[i]))
+	}
+	return out
+}
+
 func fromStoreRideRequest(rec store.RideRequestRecord) telemetry.RideRequestData {
 	var reschedule *string
 	if rec.RescheduleStatus != nil {
@@ -276,6 +300,7 @@ func fromStoreRideRequest(rec store.RideRequestRecord) telemetry.RideRequestData
 		VehicleID:             rec.VehicleID,
 		Pickup:                fromStorePlace(rec.Pickup),
 		Dropoff:               fromStorePlace(rec.Dropoff),
+		Stops:                 fromStoreRideStops(rec.Stops),
 		Status:                string(rec.Status),
 		RequesterName:         optionalString(rec.RequesterName),
 		PassengerName:         rec.PassengerName,
@@ -329,6 +354,16 @@ func (a *rideRequestStoreAdapter) UpdateTrip(
 		p := toStorePlace(*edit.Dropoff)
 		storeEdit.Dropoff = &p
 	}
+	if edit.Stops != nil {
+		// The nil/non-nil distinction is the contract's own (MYR-539): absent
+		// leaves the list alone, an empty list clears it. It survives this
+		// boundary because both sides model it as a pointer to a slice.
+		stops := make([]store.RideStopEdit, 0, len(*edit.Stops))
+		for _, s := range *edit.Stops {
+			stops = append(stops, store.RideStopEdit{ID: s.ID, Place: toStorePlace(s.Place)})
+		}
+		storeEdit.Stops = &stops
+	}
 	rec, err := a.repo.UpdateTrip(ctx, id, storeEdit, from)
 	if err != nil {
 		// The guard refusal maps to the handler-layer conflict sentinel, the
@@ -336,7 +371,27 @@ func (a *rideRequestStoreAdapter) UpdateTrip(
 		if errors.Is(err, store.ErrRideRequestConflict) {
 			return telemetry.RideRequestData{}, fmt.Errorf("update trip: %w", telemetry.ErrRideStatusConflict)
 		}
+		// An unknown stop id is the one refusal here that a retry cannot fix —
+		// it stays a 400, so it needs its own sentinel across the boundary.
+		if errors.Is(err, store.ErrRideStopUnknown) {
+			return telemetry.RideRequestData{}, fmt.Errorf("update trip: %w", telemetry.ErrRideStopUnknown)
+		}
 		return telemetry.RideRequestData{}, fmt.Errorf("update trip: %w", err)
 	}
 	return fromStoreRideRequest(rec), nil
+}
+
+// StartFirstStop promotes the ride's earliest upcoming stop to CURRENT and
+// hands it back as the leg-2 target (MYR-539). A nil stop crosses the boundary
+// as a nil pointer: the trip has no stops and leg 2 targets the drop-off.
+func (a *rideRequestStoreAdapter) StartFirstStop(ctx context.Context, id string) (*telemetry.RideStopData, error) {
+	stop, err := a.repo.StartFirstStop(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("start first ride stop: %w", err)
+	}
+	if stop == nil {
+		return nil, nil //nolint:nilnil // "this trip has no stops" is an ordinary answer, not an error
+	}
+	out := fromStoreRideStop(*stop)
+	return &out, nil
 }

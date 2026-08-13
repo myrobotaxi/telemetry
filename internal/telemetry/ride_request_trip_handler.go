@@ -7,6 +7,10 @@
 //     Once arrived (the car is at the kerb) the pickup is history — the
 //     refusal names the drop-off as the thing still editable.
 //   - DROP-OFF editable through every live status.
+//   - STOPS (MYR-539) take the DROP-OFF's window, because that is what they
+//     are: the trip ahead of the car. What protects the trip BEHIND it is not
+//     the status window but the stop rules themselves — a completed or current
+//     stop cannot be removed or reordered, whatever the ride's status.
 //
 // THE ACL is the ride's participant set — rider and owner today, plus every
 // joined group member when MYR-540's membership lands (this handler is where
@@ -24,23 +28,32 @@ package telemetry
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/myrobotaxi/telemetry/internal/events"
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
 )
 
-// rideTripPatchBody mirrors contracts $defs.RideRequestTripPatch (v0.33.0).
+// rideTripPatchBody mirrors contracts $defs.RideRequestTripPatch (v0.34.0).
 type rideTripPatchBody struct {
-	Pickup      *ridePlaceWire `json:"pickup"`
-	Dropoff     *ridePlaceWire `json:"dropoff"`
-	TripVersion *int           `json:"tripVersion"`
+	Pickup  *ridePlaceWire `json:"pickup"`
+	Dropoff *ridePlaceWire `json:"dropoff"`
+	// Stops is the FULL desired list — REPLACE semantics, not diff ops
+	// (MYR-539). A double pointer in effect: the outer nil is "the key was
+	// absent, leave the stops alone", an empty array is "clear them".
+	Stops       *[]rideStopPatchWire `json:"stops"`
+	TripVersion *int                 `json:"tripVersion"`
 }
 
 // RideTripEditData is the telemetry-layer trip edit handed to the store seam.
 type RideTripEditData struct {
-	Pickup        *RidePlaceData
-	Dropoff       *RidePlaceData
+	Pickup  *RidePlaceData
+	Dropoff *RidePlaceData
+	// Stops nil = leave the list as it is; non-nil (possibly empty) = replace
+	// it with exactly this, in this order.
+	Stops         *[]RideStopEditData
 	ExpectVersion int
 }
 
@@ -89,6 +102,15 @@ func (h *RideRequestHandler) ServeTripPatch(w http.ResponseWriter, r *http.Reque
 
 	updated, err := h.store.UpdateTrip(ctx, rec.ID, edit, from)
 	if err != nil {
+		// An unknown stop id is the one refusal from this write that is a BAD
+		// REQUEST rather than a race: refetching and re-applying cannot fix an
+		// id the ride does not have, so it must not be dressed as a 409 the
+		// client would retry (MYR-539).
+		if errors.Is(err, ErrRideStopUnknown) {
+			h.writeError(w, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest,
+				"stops: unknown stop id — omit the id for a new stop")
+			return
+		}
 		h.writeTransitionError(w, rec.ID, "trip", err)
 		return
 	}
@@ -138,7 +160,39 @@ func (h *RideRequestHandler) publishTripChanged(
 	if edit.Dropoff != nil {
 		evt.NewDropoff = toEventPlacePtr(*edit.Dropoff)
 	}
+	if edit.Stops != nil {
+		// The dispatcher cannot infer the current leg's target from the
+		// endpoints once a trip has stops, so the server states it: the place
+		// the car should be driving to AFTER this edit, computed from the
+		// updated record the write returned (MYR-539).
+		evt.StopsChanged = true
+		evt.LegTarget = toEventPlacePtr(currentLegTarget(updated))
+	}
 	h.publish(ctx, evt)
+}
+
+// currentLegTarget is where the car is (or will be) driving for the ride's
+// current post-pickup leg: the CURRENT stop when the trip has one, else the
+// earliest upcoming stop, else the drop-off. It reads the record the guarded
+// write returned, which already carries the promotion that write performed —
+// so the dispatcher and the arrival detector are told the same target the
+// database holds.
+func currentLegTarget(rec RideRequestData) RidePlaceData {
+	var upcoming *RidePlaceData
+	for i := range rec.Stops {
+		switch rec.Stops[i].Status {
+		case rideStopCurrent:
+			return rec.Stops[i].Place
+		case rideStopUpcoming:
+			if upcoming == nil {
+				upcoming = &rec.Stops[i].Place
+			}
+		}
+	}
+	if upcoming != nil {
+		return *upcoming
+	}
+	return rec.Dropoff
 }
 
 // decodeTripPatch decodes and validates the PATCH body, returning the edit or
@@ -154,10 +208,17 @@ func decodeTripPatch(r *http.Request) (RideTripEditData, string) {
 	if body.TripVersion == nil {
 		return RideTripEditData{}, "tripVersion is required"
 	}
-	if body.Pickup == nil && body.Dropoff == nil {
-		return RideTripEditData{}, "nothing to change: provide pickup and/or dropoff"
+	if body.Pickup == nil && body.Dropoff == nil && body.Stops == nil {
+		return RideTripEditData{}, "nothing to change: provide pickup, dropoff and/or stops"
 	}
 	edit := RideTripEditData{ExpectVersion: *body.TripVersion}
+	if body.Stops != nil {
+		stops, msg := validateRideStops(*body.Stops)
+		if msg != "" {
+			return RideTripEditData{}, msg
+		}
+		edit.Stops = &stops
+	}
 	if body.Pickup != nil {
 		place, msg := validateRidePlace("pickup", body.Pickup)
 		if msg != "" {
@@ -173,6 +234,38 @@ func decodeTripPatch(r *http.Request) (RideTripEditData, string) {
 		edit.Dropoff = &place
 	}
 	return edit, ""
+}
+
+// validateRideStops turns the submitted list into the store-layer edit after
+// enforcing $defs.RideStopPatch: `place` is REQUIRED on every entry (including
+// one that keeps an existing id — the list is the full desired trip, so each
+// entry states its own place) and is validated exactly as an endpoint is. An
+// entry's `id`, when present, must be non-empty; whether the ride actually HAS
+// that stop is the store's question, because only the guarded write sees the
+// list it is being applied to.
+//
+// An EMPTY array is valid and means "clear every stop": a trip is allowed to go
+// back to being two endpoints.
+//
+//nolint:gocritic // the (stops, reason) pair matches validateRidePlace's own shape
+func validateRideStops(entries []rideStopPatchWire) ([]RideStopEditData, string) {
+	out := make([]RideStopEditData, 0, len(entries))
+	for i := range entries {
+		field := fmt.Sprintf("stops[%d].place", i)
+		place, msg := validateRidePlace(field, entries[i].Place)
+		if msg != "" {
+			return nil, msg
+		}
+		stop := RideStopEditData{Place: place}
+		if entries[i].ID != nil {
+			if *entries[i].ID == "" {
+				return nil, fmt.Sprintf("stops[%d].id must not be empty when present", i)
+			}
+			stop.ID = *entries[i].ID
+		}
+		out = append(out, stop)
+	}
+	return out, ""
 }
 
 // toEventPlacePtr projects a place onto the events shape, address flattened —
