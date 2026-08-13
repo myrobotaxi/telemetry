@@ -36,11 +36,15 @@ const (
 	// and also one still marked 'upcoming' — which is reachable if the
 	// promotion at Start was lost — so a missed promotion costs a status that
 	// was briefly wrong, never a trip that cannot advance past it.
+	//
+	// It RETURNS a constant on purpose: the caller reads whether a ROW came
+	// back, never a value, and returning a column would invite a future reader
+	// to think some part of the row feeds the decision.
 	queryRideStopComplete = `UPDATE go_ride_stops SET
 	status = 'completed',
 	updated_at = NOW()
 WHERE ride_id = $1 AND id = $2 AND status <> 'completed'
-RETURNING position`
+RETURNING 1`
 
 	// queryRideDropoffTarget reads the ride's final destination — the next
 	// target when the completed stop was the last one. Two ciphertext columns
@@ -83,8 +87,9 @@ func (r *RideRequestRepo) AdvanceStopArrival(ctx context.Context, rideID, stopID
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op after Commit
 
-	var position int
-	err = tx.QueryRow(ctx, queryRideStopComplete, rideID, stopID).Scan(&position)
+	// The scanned value is discarded: pgx.ErrNoRows vs a row IS the answer.
+	var won int
+	err = tx.QueryRow(ctx, queryRideStopComplete, rideID, stopID).Scan(&won)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RideStopAdvance{}, fmt.Errorf(
 			"RideRequestRepo.AdvanceStopArrival(%s, %s): %w", rideID, stopID, ErrRideStopNotAdvanced)

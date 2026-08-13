@@ -86,6 +86,15 @@ func (d *Dispatcher) processTripChanged(ctx context.Context, ev events.RideTripC
 			coord:     *ev.NewDropoff,
 			order:     legOrderDropoff,
 		})
+	case ev.StopsChanged:
+		// The publisher computes LegTarget for every stops edit, so reaching
+		// here means that invariant broke — a future publisher, a bad merge.
+		// The consequence is a car still driving to a stop the trip no longer
+		// has, which is exactly the silence this line refuses to keep.
+		d.logger.Error("dispatch: stops edit carried no leg target, nav not re-shared",
+			slog.String("ride_id", ev.RideRequestID),
+			slog.String("vehicle_id", ev.VehicleID),
+		)
 	}
 }
 
