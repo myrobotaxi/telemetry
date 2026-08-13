@@ -85,6 +85,7 @@ Every FR/NFR listed here is anchored in at least one section of this doc. The ta
    21. Live Activity token registration (2 operations — MYR-172; content-state progress track — MYR-398; the lifecycle banner defers to the island — MYR-413; the sixth island expansion rides an update, not the end — MYR-418; a rescued reservation may register again — MYR-461)
    22. `GET /api/vehicles/{vehicleId}/booked-windows` (schedule-picker conflict read — MYR-385)
    23. `POST /api/tesla/vehicles/{vehicleId}/complete-setup` (zero-touch setup completion — MYR-505)
+   24. `POST /api/ride-requests/join` (group-ride join — MYR-540)
 8. Resource schemas
 9. Observability
 10. Code <-> spec divergences
@@ -650,6 +651,7 @@ No contract changes are required for the new role's wire shape (the REST respons
 | `POST` | `/api/ride-requests/{id}/activity-token` | Register (or rotate) the ActivityKit push token for the rider's Live Activity on this ride — upsert on `(ride, rider)`, clears any end tombstone (§7.21.1) | Bearer + **rider** of the ride (owner → 403; non-party → 404) | FR-9.3, NFR-3.21, MYR-172 |
 | `DELETE` | `/api/ride-requests/{id}/activity-token` | End the Live Activity registration when the Activity ends on the phone — 200 `{ended}`, idempotent (§7.21.2) | Bearer + **rider** of the ride (owner → 403; non-party → 404) | FR-9.3, NFR-3.21, MYR-172 |
 | `GET` | `/api/vehicles/{vehicleId}/booked-windows` | The vehicle's blocked time windows so a rider's schedule picker can dim conflicting slots BEFORE submitting — the read side of the §7.8 MYR-383 gate, derived from the same predicate and constant (§7.22) | Bearer + **owner of vehicleId, or a viewer whose grant carries `allowRides`** — byte-for-byte the ride-CREATE gate | FR-9.1, FR-9.3, NFR-3.21, MYR-385 |
+| `POST` | `/api/ride-requests/join` | Redeem a group ride's shared link: join the ride as a member and receive the full `RideRequest` with yourself in `members` — idempotent per joiner, code in the BODY (§7.24) | Bearer (self); rate-limited 10/min | FR-9.3, NFR-3.21, NFR-3.23, MYR-540 |
 | `POST` | `/api/tesla/vehicles/{vehicleId}/complete-setup` | Finish onboarding without a human trigger: wake, confirm the virtual key with Tesla, force the fleet-config re-push, and answer with the resulting `setupState` (§7.23) | Bearer + owner of vehicleId | FR-1.1, NFR-3.21, MYR-505 |
 | `POST` | `/api/auth/apple` | Native Sign in with Apple → ES256 access + refresh pair | None (pre-auth; per-IP rate-limited) | FR-6.1, MYR-193 |
 | `POST` | `/api/auth/refresh` | Single-use refresh-token rotation | Refresh token in body (pre-auth; per-IP rate-limited) | FR-6.2, MYR-193 |
@@ -2377,6 +2379,65 @@ Owner-only. Legal from `requested` → `declined` for any ride, **and from `acce
 - **Accept is untouched.** `accepted → accepted` is still not a transition, and accepting a ride already past `requested` is still `409`.
 - **The rider's push copy forks.** `ride.status.changed` → rider fires exactly as it does for every other `declined` transition, but the copy for a **scheduled** ride reads "*&lt;Vehicle&gt; can't make your scheduled ride*" rather than "*…can't take this ride*", which would read as a reply to a request the rider had just made. Per the standing rule it **omits the time** — the server holds `scheduledFor` in UTC and knows no client time zone.
 
+#### Group rides (MYR-540, contracts v0.35.0 — CLIENT-DIRECTED)
+
+A **group ride** is a ride other people may join, through a signed link the server mints when the owner accepts. Three additive, optional fields on `RideRequest` carry it — `groupRide`, `shareUrl`, `members` — plus one new endpoint, `POST /api/ride-requests/join` (§7.24).
+
+Client decisions, all four (2026-08-13): joiners get the **full rider view**, joining requires **app + sign-in**, members have **full collaboration** (a member edits the trip exactly as the requester does), and there is **no cap** on group size — the group sorts out seats themselves.
+
+**THE FLAG IS THE ONLY CLIENT-SUPPLIED PART.** `groupRide` is set at create from `RideRequestCreateRequest.groupRide` and nothing changes it afterwards (the trip PATCH carries trip SHAPE only). It is **optional and additive: absent means false** — every ride written before MYR-540 and every ride booked with the toggle off — and a consumer MUST read absence as false, never as "unknown". `groupRide: true` with no `shareUrl` and no `members` is the ordinary state of a group ride still waiting for the owner's decision.
+
+**THE LINK IS MINTED AT ACCEPT, ONCE.** The owner's `requested → accepted` transition mints a 6-character join code (`^[A-Z0-9]{6}$`) and its expiry in the SAME guarded write that performs the transition, so only the winning accept mints and a repeated or re-delivered accept mints nothing — the ride keeps the code it already published, because a re-mint would silently kill every link already sent. A request the owner **declines** never mints one, and a ride that is not a group ride never mints one at all.
+
+`shareUrl` is the complete signed link and is **indivisible**: clients share it VERBATIM as the single activity item of the share sheet (the MYR-359 one-link rule), never parse it, never rebuild one out of parts. Shape, informative and not a licence to parse:
+
+```
+https://myrobotaxi.app/ride/{code}?k={keyId}.{expUnix}.{sigBase64url}
+```
+
+The `k` triple is §7.5.6's, unchanged — one-character key id so a rotation can serve both keys at once, expiry as unix seconds, base64url-unpadded 64-byte Ed25519 signature — over the canonical ASCII payload `ride:{code}:{expUnix}`. **The `ride:` prefix is DOMAIN SEPARATION**, and it is what makes it safe for both link kinds to share one private key and one compiled-in public key in the landing shell: nothing signed for one kind can be replayed as the other. Unlike an invite link it carries **no display names**, because a group link addresses nobody in particular.
+
+**PRESENCE RULES for `shareUrl`, in the order the server applies them:**
+
+1. Group rides only.
+2. **Accepted or later** — enforced by there being no code before the mint, not by a status test.
+3. Inside the code's own expiry (7 days, the invite link's TTL and for the same reason: it bounds a link that escaped into a group chat, and exists mainly for the row that never reaches a terminal status).
+4. **Terminal status plus a five-minute linger.**
+
+Rule 4 needs stating precisely, because the two halves differ. **THE CODE DIES AT TERMINAL WITH NO GRACE AT ALL**: the redeem predicate excludes `completed`/`declined`/`cancelled`, so a link redeemed one second after the drop-off answers `404` like any other dead code. The **linger governs only whether the FIELD is emitted**, and it exists for a rendering reason — a ride's ending and the requester's share sheet are not coordinated, and a control that blanks mid-interaction reads as a fault rather than as an ending. Five minutes is deliberately the same window MYR-421 holds a completed ride's Live Activity open for, so there is one number rather than two. Emitting a link that no longer redeems is safe precisely because the contract already says so: **the signature proves the link came from the server, not that the ride is still joinable** — redemption is authoritative. The linger is measured from `updatedAt`, not `completedAt`, because only one of the three terminal statuses stamps a completion instant.
+
+**ABSENCE OF `shareUrl` IS NEVER A STATEMENT ABOUT WHETHER THIS IS A GROUP RIDE.** `groupRide` is that field and the only one.
+
+**`members` IS THE JOINERS, AND THE REQUESTER IS NOT ONE OF THEM.** Each entry is `{userId, firstName}` (`$defs.RideMember`) — the smallest shape that lets a surface render the group. The requester is `riderId` and is never duplicated into the list; the owner is not in it either (a party to the ride, not a passenger). That reading is what keeps every pre-MYR-540 row byte-identical: **absent means no joiners**, so an old solo ride needs no `members: []`. Rendering "N riding" is `members.length + 1`. Order is server-defined (currently ascending join time). `firstName` is server-derived through the SAME identity ladder `requesterName` uses (first name → email local-part → a generic fallback), so it is always a non-empty string, and **first names only** — the same P1 policy that governs `requesterName` and the push payloads.
+
+**MEMBERSHIP IS RIDE-SCOPED AND SELF-EXPIRING.** It buys viewer-tier access to the ride and its VEHICLE for the ride's lifetime and dies with the ride, leaving no standing grant to revoke:
+
+- **Vehicle access.** A live membership is a THIRD source of vehicle access beside ownership and an accepted share — the narrowest of the three. It resolves to `viewer` with the **zero-value capability set**, so riding along never becomes permission to request rides in the car, and every viewer-facing surface (the catalog row, the `GET .../snapshot`, the WebSocket subscription) applies the ordinary MYR-435 viewer mask.
+- **It ENDS at terminal status**, in the access-set query itself, with nothing to revoke and nothing to sweep. A member's next WebSocket handshake after the ride ends resolves an access set without the vehicle and is refused for it.
+- **LIVE SOCKETS AGE OUT; THEY ARE NOT SEVERED.** The handshake access set is frozen for the session, and the only mechanism that narrows it mid-session is the MYR-373 revocation nudge, which fires on SHARE mutations and not on a ride ending. So a member connected when the ride completes keeps that socket until the 60-second `AccessRevalidator` backstop sweep re-derives their set and closes the session with `4002` — the same bound, and the same mechanism, that already governs a rider whose access ends. Bounded, and in the safe direction.
+- **A member who joins mid-session must RECONNECT.** The handshake set only ever narrows; nothing widens it in place. A joiner's app is reconnecting anyway (it has just navigated to the tracking surface), so this is invisible in practice — but a client that joined on an already-open socket and did not reconnect would see no telemetry until it did.
+
+**WHICH VERBS THE WIDENED PARTY SET REACHES.** `loadForParty` — the party check behind every `/api/ride-requests/{id}` surface — admits a joined member, so a member gets the §7.8 detail read, sees the ride in their own `GET /api/ride-requests` list, and may `PATCH .../trip` (the full-collaboration decision; the trip PATCH's ACL was always "the participant set", and this is that set). Two verbs deliberately did **not** widen:
+
+| Verb | Member | Why |
+|------|--------|-----|
+| `GET /api/ride-requests/{id}`, `GET /api/ride-requests` | ✅ | The full rider view is the client's decision. |
+| `PATCH /api/ride-requests/{id}/trip` | ✅ | Full collaboration — a member edits exactly as the requester does, under the same `tripVersion` guard. |
+| `POST .../activity-token` (both) | ✅ | A member is a passenger and holds their own Live Activity. Registration is keyed `(ride, user)` per §7.21, so a member is another row on the same ride and the ETA ticker — which fans out per REGISTRATION — picks it up unchanged. |
+| `POST .../cancel` | ❌ **403** | MYR-537 gave the cancel to the requester and the owner. **A member leaving is not a cancel**, and there is deliberately no leave endpoint in v1. |
+| `POST .../start` | ❌ **403** | "We're in, go" is one person's call, and it is the requester's. |
+| `POST .../accept`, `.../decline`, `.../picked-up`, `.../dropped-off` | ❌ **403** | Owner-only, unchanged. |
+
+Both refusals are **403, not 404**, and the difference is deliberate: this caller is a party looking at the ride in their own app, so answering "not found" would read as a bug. A **non-party** still gets `404` — the widening is membership, not a hole in the scoping — and an unreadable membership fails closed to the same `404`.
+
+**PUSH.** Every ride-lifecycle push a rider receives, the members receive too, in the RIDER's words verbatim — same alert, same category, same island-alert marking. Forking the copy would mean inventing a second voice for one fact. The editor of a trip change is excluded, as always. **Joining itself sends nobody anything** (client decision): a notification per joiner would be a group chat's worth of banners, and the requester finds out by looking at the ride.
+
+**NO WS FRAME FOR MEMBERSHIP CHANGES.** `ride_status_changed` stays summary-only and a client picks up a new member on the refetch it already performs. `shareUrl` and `members` are delivered on the **party-scoped REST surfaces only** — never on a broadcast frame, the same delivery rule `requesterName` follows.
+
+**ACCOUNT DELETION.** A deleted account's memberships are DELETED, not left inert. The `ON DELETE CASCADE` covers only the direction that needs no help (a ride's rows die with the ride); a member's own deletion is the other direction, and their rows would otherwise stand on somebody else's live ride — a deleted account named in a `members` array and, more to the point, present in the access set that admits a WebSocket to that ride's vehicle. The step runs beside the open-ride cancellation it completes: that one ends the rides the person BOOKED, this one ends the ones they merely JOINED.
+
+---
+
 #### Lifecycle transition matrix
 
 The main `RideRequestStatus` lifecycle is monotonic; the reschedule negotiation is a separate sub-state (`rescheduleStatus`, MYR-192). Every mutation endpoint enforces legality in the **handler** (the store stays a dumb persistence layer) and rejects an illegal transition with `409 conflict`. Rows are the current status; a cell names the endpoint that performs the transition (and the story that owns it), or `409` when no legal transition exists from that state.
@@ -2411,6 +2472,7 @@ A cell naming an endpoint means the transition is **legal from that status**; it
 - **MYR-270** replaces the retired MYR-265 auto-leg model with an **owner-driven handshake** over the three remaining transitions: `accepted → arrived` (owner **picked-up**), `arrived → enroute` (rider **start** — which fires the leg-2 dropoff nav push), and `enroute → completed` (owner **dropped-off**). Completion is now **owner-confirmed**: the MYR-265 drive-end auto-completion (`internal/ridecomplete`) and the rider `board` endpoint are removed, so a car parking no longer closes a ride and the rider can no longer advance the ride before the owner confirms pickup. Each transition is guarded + idempotent and emits the usual `ride_status_changed` summary. (The `enroute_at` column stamped on `arrived → enroute` remains as a lifecycle timestamp; it no longer feeds any drive-end correlation.)
 - **MYR-538** adds the first transition in this matrix with a writer that is **not an endpoint**: `accepted → arrived` is also performed by the server when telemetry shows the car parked at the pickup (see "Auto-arrival" under `POST .../picked-up`). The cell is unchanged and so is the endpoint — the detector runs the **same** guarded `UpdateStatusFromDispatched` with the same allowed-from set, so it is simply another contender in the race the first bullet describes, and the one that loses (usually it) is silent. No new status, no new code, no schema change.
 - **MYR-539** adds multi-stop trips and changes **no cell in this matrix**. A stop's `upcoming → current → completed` progression is a SEPARATE, per-stop lifecycle that lives on `RideStop.status` (see "Multi-stop trips" above): it advances on the same MYR-538 waypoint evidence, through its own guarded exactly-once write, and it neither reads nor writes `RideRequestStatus`. In particular the car reaching the final DESTINATION does **not** complete the ride — `enroute → completed` still has exactly one writer, the owner's `dropped-off` tap. The only thing multi-stop changes about this table is what `start` (`arrived → enroute`) SENDS THE CAR TO: the first stop when the trip has stops, the drop-off otherwise. No new status, no new error code, no new edge.
+- **MYR-540** adds group rides and changes **no cell in this matrix**. Nothing about a group ride is a status: the flag is set at create, the link is minted as a SIDE EFFECT of the existing `requested → accepted` write (inside that write's own transaction, so only the winner mints and a repeat mints nothing), and joining writes a membership row without touching `status` at all. What DOES change is who may take some of the existing cells: a joined member reaches the trip PATCH and the two read surfaces, and deliberately reaches neither `cancel` nor `start` — see "Group rides" above for the full table and for why both refusals are `403` rather than `404`. No new status, no new error code, no new edge.
 - Every transition that succeeds emits a `ride_status_changed` summary frame to the two parties.
 
 ---
@@ -5128,6 +5190,59 @@ against.
 
 ---
 
+### 7.24 `POST /api/ride-requests/join` (group-ride join — MYR-540)
+
+> **Anchored:** FR-9.3 (ride-hailing), NFR-3.21 (ownership/authorization), NFR-3.23 (P1 location data). Contracts v0.35.0 `$defs.RideRequestJoinRequest`. Implemented by MYR-540.
+
+The joiner-side redemption of a group ride's shared link — the other end of `RideRequest.shareUrl` (§7.8, "Group rides").
+
+**It mirrors `POST /api/invites/redeem` (§7.5.5) rule for rule**, because it is the same act with a different subject: a code, held by whoever received the link, exchanged for access. Same body-not-path placement, same normalization, same per-user rate limit, same deliberate indistinguishability of every dead code. What differs is the RESPONSE, and the reason is stated in the contract itself: the sharing redeem needed its own response shape because `ShareInvite` is owner-facing and could never be handed to the redeemer, whereas **the ride a joiner joins IS the object they are now a party to**.
+
+**Request**
+
+```http
+POST /api/ride-requests/join
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{ "code": "RBO246" }
+```
+
+`code` is the 6-character join code from the link's path segment, `^[A-Z0-9]{6}$`. It is a **separate, single-purpose code space** from `ShareInvite.code`: a join code is not an invite code, redeeming one at `POST /api/invites/redeem` answers `404`, and it grants membership of ONE ride rather than a standing grant on a vehicle. Server-minted at accept, never client-invented.
+
+**THE CODE TRAVELS IN THE BODY, NOT THE PATH**, exactly as the invite redeem does, so it is never in a URL, a proxy log or a `Referer` header. The web landing shell at `/ride/{code}` verifies the link's signature statically against its compiled-in public key and then hands the bare code here; this endpoint is the only thing that decides whether it still means anything.
+
+Clients normalize before sending exactly as the invite entry field does — upper-case, strip everything outside `[A-Z0-9]` — and **the server normalizes again**, so a code that survived a copy-paste with a stray space still redeems. A code that is still malformed after normalization is `400`.
+
+**AUTHENTICATED, and that is a product decision before it is an implementation one** (client, 2026-08-13): app plus sign-in are REQUIRED, the joining account is the JWT `sub` and is never client-supplied, and live car positions never render on the open web.
+
+**Response — `200 OK`: the full `RideRequest` the joiner now belongs to**, the same bare object `GET /api/ride-requests/{id}` returns, **with the caller already present in `members`**. That is the whole reason there is no separate response `$def`: the joiner goes straight to the rider tracking surface with no second round trip. The member list is read back inside the redemption's own transaction, so the body cannot race a concurrent join and omit the caller.
+
+**ATOMIC AND IDEMPOTENT PER JOINER.** Re-submitting a code the same account already redeemed answers `200` with the same ride rather than a second membership row, so a retry after a dropped response is safe. The idempotence is the database's — `INSERT … ON CONFLICT (ride_id, user_id) DO NOTHING` — so two concurrent redemptions by one account resolve the same way as two sequential ones. Only the redemption that actually inserted a row publishes the internal `ride.member_joined` event.
+
+**Errors**
+
+| Status | `code` | When |
+|--------|--------|------|
+| `400` | `invalid_request` | Malformed body, an unknown key (`additionalProperties: false`), or a `code` that is not 6 × `[A-Z0-9]` after normalization. |
+| `401` | `auth_failed` | Missing or invalid bearer token. |
+| `404` | `not_found` | The code is **unknown**, **expired**, or belongs to a ride that has reached a **terminal status**. |
+| `409` | `conflict` | The caller is already a party to the ride in another role — its requester, or the vehicle's owner. |
+| `429` | `rate_limited` | More than 10 attempts in a rolling minute from this account. |
+| `500` | `internal_error` | Lookup or write failure. |
+
+**THE `404` IS NOT AN ORACLE, and this is the endpoint's central security property.** All three dead-code cases answer `404` with an **identical body**. An enumerating caller must not learn that a guessed code exists but belongs to a ride that has already finished, which would be a hit worth following up. The property holds *by construction* rather than by discipline: the resolving statement carries the expiry and the terminal-status refusal in its own `WHERE`, so it returns "no row" for all three and the handler could not tell them apart even if a later edit wanted it to.
+
+**The `409` is deliberately NOT one of them.** A caller who is already the requester or the owner can see the ride in their own app, so there is nothing to conceal, and answering "not found" to them would read as a bug. It is also not a silent success: a requester in `members` would break the counting rule (`members.length + 1`).
+
+**RATE-LIMITED, on §7.5.5's reasoning** — the code space is 36⁶ ≈ 2.2 billion and small enough to be worth enumerating. **10 attempts per rolling minute, per authenticated account**, counted on EVERY attempt whatever its outcome (counting only failures would let an attacker interleave one valid code with guesses). The budget is this endpoint's **own** — a separate counter from the invite redeem's, with the same numbers — because the two code spaces are separate and spending one endpoint's allowance must not close the other. Same single-instance caveat as §7.5.5: the counter is in-process, and fly.toml declares one machine.
+
+**THE CODE IS P1 AND BEARER.** It is never logged, never echoed into an error message, and never rendered on any surface that is not already inside the ride.
+
+**What joining grants** — see §7.8 "Group rides" for the full account: the rider view of this ride, viewer-tier access to its VEHICLE for the ride's lifetime, full collaboration on the trip, and the ride-lifecycle pushes. Not the cancel, not the start, and nothing at all once the ride ends.
+
+---
+
 ## 8. Resource schemas
 
 The canonical v1 `VehicleState` schema is [`schemas/vehicle-state.schema.json`](schemas/vehicle-state.schema.json). The REST snapshot endpoint returns that shape directly via `$ref` in the OpenAPI spec -- it is NOT re-declared.
@@ -5199,6 +5314,7 @@ Same as [`websocket-protocol.md`](websocket-protocol.md) §10 divergence managem
 
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-08-13 | **Group rides: a ride other people can join, through a link the server mints at accept ([MYR-540](https://linear.app/myrobotaxi/issue/MYR-540), CLIENT-DIRECTED). Contracts v0.35.0.** Three additive optional fields on `RideRequest` — `groupRide` (absent = false, so every pre-540 row is correct unrewritten), `shareUrl` (the signed link) and `members` (`$defs.RideMember`, joiners only — the requester is `riderId` and is never duplicated in, which is what makes absence mean "no joiners") — plus one new endpoint, **`POST /api/ride-requests/join`** (§7.24), and one new create-body field. **MIGRATION 0040**: `group_ride` / `join_code` / `join_code_expires_at` on `go_ride_requests` (the invite link's storage idiom — code and expiry on the row the code grants access to) with a partial UNIQUE index over the code, plus `go_ride_members` (composite PK, `ON DELETE CASCADE`). **The link is minted AT ACCEPT, exactly once**, inside the accept's own guarded write — so a repeat mints nothing and the ride keeps the code it published — and only for a group ride. It reuses the MYR-368 signer verbatim (same key, same key id, same `k` triple) under the DOMAIN-SEPARATED payload `ride:{code}:{expUnix}`, so one compiled-in public key serves both link kinds and neither signature can be replayed as the other. `shareUrl` is emitted only while redeemable: accepted-or-later, inside the code's 7-day TTL, and terminal-plus-a-five-minute-linger — **the CODE dies at terminal with no grace at all** (the redeem predicate refuses it), the linger governs only whether the field is rendered, and it matches MYR-421's held-end window so there is one number. The join is **authenticated** (app + sign-in, client-decided), takes the code in the BODY, is **idempotent per joiner**, is rate-limited 10/min on its OWN budget, and answers an **indistinguishable `404`** for unknown / expired / terminal — by construction, since the resolving statement collapses all three. **ACL: the party set widens, two verbs do not.** A member gets the detail read, their own list, the trip PATCH (full collaboration, client-decided) and the §7.21 Live Activity registration (keyed `(ride, user)`, so the ticker fans out per registration unchanged); a member may **not** cancel (MYR-537 is unmoved — a member leaving is not a cancel, and there is no leave endpoint in v1) and may not start, both `403` rather than `404` because the caller is a party. Membership is a THIRD source of VEHICLE access after ownership and shares — ride-scoped, viewer-tier with the zero-value capability set, and ending at terminal status in the access-set query itself, so there is nothing to revoke; a live socket ages out on the 60s revalidation backstop rather than being severed, and a member who joins mid-session must reconnect. Ride-lifecycle pushes fan out to members in the RIDER's copy; joining itself notifies nobody. No WS frame for membership changes — clients refetch. Account deletion DELETES a member's rows. See §7.8 "Group rides" and §7.24. | Claude (Agent/go-engineer) |
 | 2026-08-13 | **The car flashes its headlights three times when it arrives ([MYR-542](https://linear.app/myrobotaxi/issue/MYR-542), CLIENT-DECIDED).** **No contracts version change, no new field/endpoint/error/state, NO MIGRATION, nothing on the wire** — this is a gesture at the CAR, not a change to any client's contract. A new internal subscriber on MYR-538's `ride.waypoint_arrived` seam sends the signed `flash_lights` command ×3, ~1.5 s apart; **no horn**, client-decided, because a horn carries down a street and reads as aggression at any hour while headlights are addressed to the one person looking for the car. The seam's provenance is the whole safety argument: it is published ONLY by the auto-arrival detector, i.e. only for a car whose own telemetry showed it parked at the pickup, so the owner's manual `picked-up` tap — which does not publish it — can never flash a car from three miles away. Exactly once per (ride, waypoint) via an in-memory latch on top of the detector's own exactly-once publish; **at most three commands per waypoint** (a failed flash is not retried and abandons the remainder — a partial greeting reads as a fault where silence reads as a car that simply did not flash); and **every failure is logged only, never surfaced to any party**, because a missed courtesy is not actionable by rider or owner and the ride's status was settled before the event existed. Gated by `ARRIVAL_FLASH_ENABLED` (default true), deliberately separate from `AUTO_ARRIVAL_ENABLED`. See "Auto-arrival" under §7.8 `POST .../picked-up`. | Claude (Agent/go-engineer) |
 | 2026-08-13 | **The server confirms the pickup itself when the car is observed at it ([MYR-538](https://linear.app/myrobotaxi/issue/MYR-538), CLIENT-DIRECTED).** Client: *"If car reaches destination you shouldn't require owner to mark as arrived we should be able to figure it out."* **No contracts version change, no migration, no wire change** — `accepted → arrived` simply gains a SECOND WRITER through the SAME dormancy-guarded `UpdateStatusFromDispatched` the owner's `picked-up` tap uses, so the two contend on one `UPDATE`, the database picks a winner, and the tap STAYS (unchanged endpoint, unchanged 409s, unchanged idempotent no-op). The rule, deliberately slow to fire: a ride `accepted` with leg-1 `dispatchStatus == "sent"` whose car is within ~80 m of the pickup, stopped, continuously for ~20 s — an interrupted dwell resets, an ambiguous vehicle is skipped, and an unrefreshable candidate set suspends detection rather than acting on it. The car's own `milesToArrival` is corroboration only, never a trigger (MYR-527: the dash can hold the wrong target). The winning write publishes the SAME `ride_status_changed` the tap does — rider push / Live Activity / WS fire identically — plus an internal-only `ride.waypoint_arrived` seam (ids + `"pickup"`, never broadcast) for MYR-542's light flash, because "the ride was picked up" and "the car is at the kerb" are different facts. Gated by `AUTO_ARRIVAL_ENABLED` (default true). See §7.8 "Auto-arrival" under `POST .../picked-up`. | Claude (Agent/go-engineer) |
 | 2026-08-13 | **The pickup and drop-off are editable mid-ride, versioned, verified onto the dash, and everyone else on the ride hears about it ([MYR-541](https://linear.app/myrobotaxi/issue/MYR-541), CLIENT-DIRECTED).** Contracts **v0.33.0**: optional `tripVersion` on `RideRequest` (absence = 0), `RideRequestTripPatch`, optional `tripVersion` on the summary-only `ride_status_changed` frame (refetch signal, never places). Migration **0038** adds `go_ride_requests.trip_version` (IF NOT EXISTS). New `PATCH /api/ride-requests/{id}/trip` — see its section under §7.8 for the window ("pickup until boarded, drop-off until the ride ends"), the instant-application ACL, the versioned guarded write, the participants' pushes, and the dispatch half: an edited CURRENT-leg target re-shares through the MYR-526 sequencer and verifies per MYR-527, which is what makes a mid-ride destination change trustworthy. Internal seams: `ride.trip_changed` + the `TripEdit`/`TripVersion`/`PreviousStatus` fields on the status event (notifier suppresses the status copy for trip-edit publishes — no spurious "Your ride is confirmed"). | Claude (Agent/go-engineer) |

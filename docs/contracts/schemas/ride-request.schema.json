@@ -1,0 +1,392 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://myrobotaxi.com/schemas/ride-request.schema.json",
+  "title": "RideRequestsListResponse",
+  "description": "Cursor-paginated envelope for ride-request list endpoints (P10 ride-hailing track, MYR-173). Wraps an array of RideRequest rows under `items`, newest first (ORDER BY createdAt DESC, id DESC). Mirrors the DrivesListResponse envelope shape so SDK pagination helpers are reusable across both surfaces. Serves both the rider's history/scheduled lists (ios-app design/app/shared-screens.jsx REQUESTED_RIDES / SCHEDULED_RIDES) and the owner's incoming-request feed (design/app/ride-request.jsx IncomingRequestSheet). Backed by the Go `go_ride_requests` table (telemetry/internal/store/ride_request_repo.go). The envelope is part of the wire contract: consumers MUST NOT strip it silently. Single-resource endpoints (e.g. GET /api/ride-requests/{id}, MYR-174; POST /api/ride-requests/join, MYR-540) return a bare RideRequest object from `$defs`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["items", "nextCursor", "hasMore"],
+  "properties": {
+    "items": {
+      "type": "array",
+      "description": "Ride-request rows for this page. Always present; an empty array (never null) means no rows — e.g. a rider with no requests. Ordered createdAt DESC, id DESC.",
+      "x-classification": "P0",
+      "items": { "$ref": "#/$defs/RideRequest" }
+    },
+    "nextCursor": {
+      "type": ["string", "null"],
+      "description": "Opaque base64 cursor for the next page, or null on the final page. Pass it back as the `cursor` query param to fetch the next page. Encodes (createdAt, id) so pagination is stable across concurrent writes. Nullable on the wire — the server emits JSON `null` (not an omitted key) when there is no further page. Redundant with `hasMore == false`. Mirrors DrivesListResponse.nextCursor.",
+      "x-classification": "P0"
+    },
+    "hasMore": {
+      "type": "boolean",
+      "description": "True iff more pages exist after this one. Redundant with `nextCursor != null`, provided for caller convenience.",
+      "x-classification": "P0"
+    }
+  },
+  "$defs": {
+    "RideRequestStatus": {
+      "type": "string",
+      "enum": ["requested", "accepted", "declined", "enroute", "arrived", "completed", "cancelled"],
+      "description": "Main ride-request lifecycle. Monotonic per ride; the reschedule negotiation is deliberately NOT part of this enum (see RideRequest.rescheduleStatus). States map to design-prototype moments (ios-app design/app/ride-request.jsx unless noted): 'requested' — sent, awaiting the owner's decision (PendingContent 'Request sent / Waiting for {owner}', jsx:617-628; SCHEDULED_RIDES status 'pending', shared-screens.jsx:16-19). 'accepted' — owner tapped Accept & send / Accept ride (IncomingRequestSheet, jsx:1404-1407; OutcomeContent accepted, jsx:673-695; scheduled 'confirmed', shared-screens.jsx:18). 'declined' — owner tapped Decline (jsx:1405; DeclinedNotice, jsx:1042-1065). 'enroute' — vehicle dispatched and moving; covers BOTH the to-pickup leg and the in-ride leg, because the prototype derives the leg split ('Heading your way' vs 'Heading to {destination}') from live tracking progress, not from a status flag (TrackingContent atPickup/pickupCut, jsx:753-781) — leg granularity is MYR-177 live-tracking territory. 'arrived' — vehicle arriving at the drop-off (arrivingDropoff 'Arriving' header, jsx:839-860). 'completed' — trip ended, ride summary shown (RideSummaryContent, jsx:909; isSummary trackProgress >= 0.999, jsx:1125). 'cancelled' — rider cancelled (PendingContent 'Cancel request', jsx:628,661; ScheduledRideSheet 'Cancel ride', shared-screens.jsx:271). Swift consumers get the decode-tolerant unrecognized(String) catch-all via codegen (MYR-195), so adding a member later never breaks installed clients.",
+      "x-classification": "P0"
+    },
+    "RescheduleStatus": {
+      "type": "string",
+      "enum": ["requested", "confirmed", "declined"],
+      "description": "Reschedule-negotiation sub-state, orthogonal to RideRequestStatus. 'requested' — the rider proposed a new pickup time and the owner has been asked to re-confirm (ScheduledRideSheet 'Reschedule requested / Waiting for {driver} to confirm the new pickup time', shared-screens.jsx:316-338; '{driver} will be asked to re-confirm the new time', shared-screens.jsx:313). 'confirmed' — the owner accepted the new time; scheduledFor now carries it. 'declined' — the owner rejected the new time; scheduledFor keeps the original reservation. Absent from the payload when no reschedule has ever been proposed for this ride. Kept OUT of the main RideRequestStatus enum on purpose: (1) the design models rescheduling as a sub-state of a still-alive accepted reservation — the ScheduledRideSheet flips the card back to 'Pending confirmation' while keeping the reservation (shared-screens.jsx:51,316-338) — so the ride's main status stays 'accepted' and the reservation is never destroyed by asking; (2) forward-compat — older clients that predate rescheduling still see a valid main status and render a sensible card instead of a tolerant-enum 'unrecognized' dead-end (MYR-195).",
+      "x-classification": "P0"
+    },
+    "DispatchStatus": {
+      "type": "string",
+      "enum": ["sent", "failed", "skipped"],
+      "description": "Outcome of the nav-dispatch push that fires once when an owner accepts a ride (MYR-176): the server pushes the rider's pickup into the vehicle's Tesla navigation. Orthogonal to RideRequestStatus — this is NOT a lifecycle transition; the ride's main status stays 'accepted' while dispatch resolves (the 'accepted → enroute' transition is separate MYR-177 live-tracking territory). 'sent' — the vehicle accepted the navigation push. 'failed' — the push failed terminally (e.g. the virtual key is not paired, or Tesla denied it) or after exhausting the bounded transport/asleep retry budget. 'skipped' — the server-side dispatch kill-switch was off, so no push was attempted. Absent from the payload until the push resolves (and always absent for a ride that was never accepted). Swift consumers get the decode-tolerant unrecognized(String) catch-all via codegen (MYR-195).",
+      "x-classification": "P0"
+    },
+    "RidePlace": {
+      "title": "RidePlace",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lat", "lng", "label"],
+      "description": "A pickup or drop-off point: coordinates plus the human-readable label the design renders ('Current location', 'Ferry Building', a pin-drop street address — design/app/ride-request.jsx SearchContent pickupLabel jsx:179, PinDropContent pinAddress jsx:722-737, DestRow label/sub jsx:57-87). Used as both RideRequest.pickup (where the vehicle collects the passenger — 'Current location', a saved/recent place, or a map pin-drop; SearchContent pickup row + 'Set on map', jsx:226-241) and RideRequest.dropoff (the destination the rider selected via 'Where to?' search / saved / recent / nearby, jsx:244-297). Coordinates are P1 GPS data: encrypted at rest server-side (NFR-3.23, telemetry data-classification.md), never logged.",
+      "properties": {
+        "lat": {
+          "type": "number",
+          "minimum": -90,
+          "maximum": 90,
+          "description": "WGS-84 latitude of the place. P1 — GPS coordinate (NFR-3.23): AES-256-GCM encrypted at rest in the Go store layer, never logged.",
+          "x-classification": "P1",
+          "x-encrypted-at-rest": true,
+          "x-unit": "degrees",
+          "examples": [37.7955]
+        },
+        "lng": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180,
+          "description": "WGS-84 longitude of the place. P1 — GPS coordinate (NFR-3.23): AES-256-GCM encrypted at rest in the Go store layer, never logged.",
+          "x-classification": "P1",
+          "x-encrypted-at-rest": true,
+          "x-unit": "degrees",
+          "examples": [-122.3937]
+        },
+        "label": {
+          "type": "string",
+          "description": "Short display name for the place — what the ride sheets print as the primary line (e.g. 'Ferry Building', 'Current location', 'Home'). Mirrors the design's place `label` (SAVED_PLACES/RECENT_PLACES, ride-request.jsx:15-26) and the from/to strings in the ride history fixtures (shared-screens.jsx:8-20). P1 — reveals location; log-redacted but not app-level encrypted (same tier rationale as Drive.startLocation).",
+          "x-classification": "P1",
+          "examples": ["Ferry Building"]
+        },
+        "address": {
+          "type": "string",
+          "description": "Optional street-address / secondary line for the place (e.g. '1 Ferry Building · Embarcadero') — the design's `sub` line under a destination (ride-request.jsx:22-26, ReviewContent dest.sub jsx:397, PendingContent dest.sub jsx:591). OPTIONAL on the wire: the key is omitted entirely when no address is known (pin-drops and 'Current location' pickups may carry label only). P1 — reveals location; log-redacted.",
+          "x-classification": "P1",
+          "examples": ["1 Ferry Building · Embarcadero"]
+        }
+      }
+    },
+    "RideStop": {
+      "title": "RideStop",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["place", "id", "status"],
+      "description": "One intermediate stop on a multi-stop trip (MYR-539, CLIENT-DIRECTED: exactly ONE pickup → N ordered stops → ONE destination). The pickup and the destination are NOT members of this shape — they stay RideRequest.pickup / RideRequest.dropoff — so a stop is always the middle of the trip. Read-side projection: position is the index in RideRequest.stops (pickup → stops[0] → … → dropoff), so a reorder is just a differently ordered list and there is no ordinal field to keep in sync. `place` is the same RidePlace shape as the endpoints (label, optional address, coordinates) and stays editable through the trip PATCH while the stop is ahead of the car; a 'current' or 'completed' stop is frozen. Both the id and the status are SERVER-owned; a client edits the trip by PATCHing the whole desired list (RideRequestTripPatch.stops) and reads this shape back. The place carries P1 GPS data — AES-256-GCM encrypted at rest server-side (NFR-3.23), never logged — exactly as RidePlace documents (the per-field P1 labels live there, as they do for pickup/dropoff).",
+      "properties": {
+        "place": { "$ref": "#/$defs/RidePlace" },
+        "id": {
+          "type": "string",
+          "description": "Opaque server-minted stop identifier, STABLE across reorders and place edits. It is how a client says 'keep this one' when it PATCHes the full list (RideRequestTripPatch.stops[].id), and how two people editing at once end up talking about the same rows rather than about list positions. Never client-supplied: a stop the client has just invented carries no id until the server answers with one.",
+          "x-classification": "P0",
+          "examples": ["crs0123456789abcdef0123456789abcd"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["upcoming", "current", "completed"],
+          "description": "Progress of the leg that ENDS at this stop — server-owned, never client-written. 'upcoming' — the vehicle has not started this leg yet. 'current' — the leg the vehicle is driving NOW; at most one stop is 'current' at a time, and everything before it is 'completed'. 'completed' — the vehicle has arrived here and the stop is behind the car. The server advances these on arrival detection (the MYR-538 waypoint events), never on a client tap. An advance is a lifecycle transition, NOT a trip edit: it does not bump tripVersion, because the trip's SHAPE did not change (a client that wants live leg progress reads it here after the refetch the frame already triggers). Swift consumers get the decode-tolerant unrecognized(String) catch-all via codegen (MYR-195).",
+          "x-classification": "P0",
+          "examples": ["upcoming"]
+        }
+      }
+    },
+    "RideStopPatch": {
+      "title": "RideStopPatch",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["place"],
+      "description": "One entry of the DESIRED stop list a client submits in RideRequestTripPatch.stops (MYR-539). `id` present = keep the existing stop with that id, whose `place` may have moved; `id` absent = a brand-new stop the server mints an id for. `place` is required on EVERY entry, including one that keeps an existing id — the submitted list is the full desired trip, so each entry always states its own place (the same P1 RidePlace shape as the endpoints). There is no `status` here — statuses are server-owned (RideStop.status) and a client that sent one would only be guessing at where the car is.",
+      "properties": {
+        "place": { "$ref": "#/$defs/RidePlace" },
+        "id": {
+          "type": "string",
+          "description": "The RideStop.id of an existing stop to KEEP at this position. OPTIONAL: omit it for a new stop. An id the ride does not have is 400 invalid_request (never silently treated as new), and an existing stop whose id appears nowhere in the submitted list is REMOVED — that is what replace semantics mean.",
+          "x-classification": "P0",
+          "examples": ["crs0123456789abcdef0123456789abcd"]
+        }
+      }
+    },
+    "RideMember": {
+      "title": "RideMember",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["userId", "firstName"],
+      "description": "One person who JOINED a group ride through its shared link (MYR-540) — an entry of RideRequest.members. Deliberately the smallest shape that lets every surface render the group: an identity to compare against your own account and a first name to print, nothing else. NOT the requester: the person who booked the ride is RideRequest.riderId and is never duplicated into this list (see RideRequest.members for why that reading is the one that keeps pre-MYR-540 rides byte-identical), and not the owner either — the owner is a party to the ride but is not riding in it. Membership is RIDE-SCOPED and dies with the ride: it is never a standing grant on the vehicle, so there is no residue to revoke afterwards. Server-owned end to end — a client joins by redeeming the link (RideRequestJoinRequest) and reads this shape back; there is no endpoint that writes a member directly. P1 — carries a person's name (see firstName).",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "User cuid of the joined member — the same id space as RideRequest.riderId / RideRequest.ownerId (the Prisma User id consumed elsewhere). Present so a client can tell WHICH row is itself: a member's own app compares this against its authenticated account id to render 'You' instead of its own first name, and to know that it may edit the trip as a full participant. Stable for the life of the membership. P0 — an opaque identifier, not PII on its own.",
+          "x-classification": "P0",
+          "examples": ["cljoiner234567890abcdef"]
+        },
+        "firstName": {
+          "type": "string",
+          "description": "The member's display FIRST NAME — what the 'N riding' row prints beside the count (the joiner list on the rider tracking sheet). Server-derived from the member's identity with the SAME ladder RideRequest.requesterName uses (first name -> email local-part -> a generic fallback), so it is always a non-empty string and consumers never need an absent-name branch. FIRST NAME ONLY, no surname, no email, no phone — the same P1 first-names-only policy that governs requesterName, RedeemShareInviteResponse.ownerFirstName and the push payloads: joining a ride tells the group who is coming, not who somebody is. Never client-supplied. P1 — PII (a person's name), log-redacted.",
+          "x-classification": "P1",
+          "examples": ["Sam"]
+        }
+      }
+    },
+    "RideRequestCreateRequest": {
+      "title": "RideRequestCreateRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vehicleId", "pickup", "dropoff"],
+      "description": "Request body for POST /api/ride-requests (MYR-174) — what the rider's review sheet submits on 'Request from {owner}' / 'Schedule with {owner}' (design/app/ride-request.jsx ReviewContent onConfirm, jsx:451-453,1234-1237). Deliberately a strict subset of RideRequest: riderId comes from the authenticated JWT sub (never client-supplied), ownerId is derived server-side from the vehicle's owner, and id/status/timestamps are server-assigned. The server responds 201 Created with the full RideRequest object.",
+      "properties": {
+        "vehicleId": {
+          "type": "string",
+          "description": "Vehicle cuid the rider picked in the fleet picker (ReviewContent 'Available rides', ride-request.jsx:462-497). The caller must have access to this vehicle (same authorization set as the WS vehicle subscriptions); the ride's ownerId is derived from it server-side.",
+          "x-classification": "P0",
+          "examples": ["clxyz1234567890abcdef"]
+        },
+        "pickup": { "$ref": "#/$defs/RidePlace" },
+        "dropoff": { "$ref": "#/$defs/RidePlace" },
+        "passengerName": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Booked-for passenger name ('Someone else' rides — PassengerPicker, ride-request.jsx:94-144). OPTIONAL: omitted when the rider is riding themselves. P1 — PII.",
+          "x-classification": "P1",
+          "examples": ["Maya Chen"]
+        },
+        "passengerPhone": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Booked-for passenger's mobile number, the tracking-link SMS target ('Mobile number' input + 'We'll text {name} a live tracking link', ride-request.jsx:133-141). OPTIONAL: send only alongside passengerName. Free-form display string; E.164 normalization is a server-side dispatch concern (MYR-176). P1 — PII, never logged.",
+          "x-classification": "P1",
+          "examples": ["(415) 555-0142"]
+        },
+        "scheduledFor": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 / RFC 3339 UTC reserved pickup instant for a scheduled ride ('Schedule pickup' picker, ride-request.jsx:300-343). OPTIONAL: omitted for an on-demand ('Now') request.",
+          "x-classification": "P0",
+          "examples": ["2026-06-18T16:00:00Z"]
+        },
+        "groupRide": {
+          "type": "boolean",
+          "description": "Book this ride as a GROUP RIDE — one other people may join through a link (MYR-540, CLIENT-DIRECTED: 'add a group rider mode where one rider can request a ride with the option to enable group ride and once the owner accepts it we generate a shareable link to send others to join the active ride'). The booking sheet's 'Group ride' toggle, OFF by default. OPTIONAL and additive: ABSENT MEANS FALSE — an ordinary solo ride — so a client that predates this field keeps creating exactly the ride it always created, unchanged BY CONSTRUCTION rather than by a server default it would have to know about. Sending `false` is identical to omitting it. Asking for a group ride buys nothing at create time: no link exists yet and nobody can join, because the link is minted AT ACCEPT (RideRequest.shareUrl) and a request the owner declines never mints one. The created 201 RideRequest echoes the value back as RideRequest.groupRide.",
+          "x-classification": "P0",
+          "examples": [true]
+        }
+      }
+    },
+    "RideRequestTripPatch": {
+      "title": "RideRequestTripPatch",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tripVersion"],
+      "description": "Body of PATCH /api/ride-requests/{id}/trip (MYR-541, CLIENT-DIRECTED: 'allow the users to change the pick up or drop off at anytime'; extended with the stop list by MYR-539). At least ONE of pickup/dropoff/stops MUST be present (a version-only body is 400 invalid_request). The WINDOW is the server's: pickup is editable while the ride is requested/accepted (until boarded — 'if pick up has past they can only change drop-off'), dropoff through every live status. The ACL is the ride's participant set — the rider, the owner, and (MYR-540) every joined group member in RideRequest.members, who edit the trip with exactly the same powers as the requester: 'full collaboration' is a client decision, and the membership list is the ACL the server consults; edits apply INSTANTLY with no approval gate (client decision), the other participants are pushed, and the server re-shares the car's nav when the edited endpoint is the CURRENT leg's target (verified end-to-end per MYR-527).",
+      "properties": {
+        "pickup": { "$ref": "#/$defs/RidePlace" },
+        "dropoff": { "$ref": "#/$defs/RidePlace" },
+        "stops": {
+          "type": "array",
+          "description": "The FULL desired stop list, in travel order — REPLACE semantics, NOT diff ops (MYR-539). The client sends every stop it wants the trip to have once the edit lands: an entry WITH an id keeps that existing stop (its place may have moved), an entry WITHOUT an id is new, and an existing stop the client left out is REMOVED. Deliberately a whole list rather than add/move/remove operations: tripVersion already serializes the editors (a stale list is refused 409), and a list is unambiguous where an operation replayed against a base the sender never saw is not. OPTIONAL: omit the key to leave the stop list exactly as it is (an edit that only moves the dropoff never has to restate the stops); send [] to clear every stop back to a plain two-endpoint trip. The server REFUSES the whole edit with 409 conflict when the submitted list would remove or reorder a stop that is already 'completed' or 'current' — the road behind the car cannot be rewritten — so the client sends what it holds and lets the guard decide instead of pre-filtering; on 409 it refetches and re-applies, the same loop a stale tripVersion runs. The ACL and the instant-apply rule are the ones this body already documents: the rider, the owner, and every joined group member (RideRequest.members, MYR-540). P1 — the places carry GPS coordinates.",
+          "x-classification": "P1",
+          "items": { "$ref": "#/$defs/RideStopPatch" }
+        },
+        "tripVersion": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The trip version the editor HOLDS (RideRequest.tripVersion, absent read as 0). The server accepts the edit only against the current version and answers 409 conflict on a stale one — the loser refetches and re-applies. This is optimistic concurrency, not an approval gate: the common case is one writer and zero friction.",
+          "x-classification": "P0",
+          "examples": [0, 3]
+        }
+      }
+    },
+    "RideRequestJoinRequest": {
+      "title": "RideRequestJoinRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code"],
+      "description": "Request body for POST /api/ride-requests/join (MYR-540) — the joiner-side redemption of a group ride's shared link. Mirrors POST /api/invites/redeem (vehicle-sharing.schema.json RedeemShareInviteRequest, rest-api.md §7.5.5) rule for rule, because it is the same act with a different subject: a code, held by whoever received the link, exchanged for access. The code travels in the BODY and not in the path, exactly as the invite redeem does — the web landing shell at /ride/{code} verifies the link's signature statically and then hands the bare code to this endpoint, which is the only thing that decides (see RideRequest.shareUrl). AUTHENTICATED, and that is a product decision, not just an implementation one: app + sign-in are REQUIRED (client, 2026-08-13), the joining account is the JWT sub and is never client-supplied, and live car positions never render on the open web. RESPONSE 200 = THE FULL RideRequest THE JOINER NOW BELONGS TO — the same bare object GET /api/ride-requests/{id} returns, with the caller already present in `members` — so the joiner goes straight to the rider tracking surface with no second round trip. There is deliberately NO separate response $def: the sharing redeem needed RedeemShareInviteResponse because ShareInvite is owner-facing and could never be handed to the redeemer, whereas the ride a joiner joins IS the object they are now a party to. ATOMIC AND IDEMPOTENT PER JOINER — re-submitting a code the same account already redeemed answers 200 with the same ride rather than a second membership row, so a retry after a dropped response is safe. RATE-LIMITED server-side (429 `rate_limited`), on the same reasoning as §7.5.5: the code space is small enough to enumerate. The error envelope is unchanged — 400 `invalid_request` for a code that is malformed after normalization; 404 `not_found`, with an INDISTINGUISHABLE body, for a code that is unknown, expired, or belongs to a ride that has reached a terminal status (membership is ride-scoped and dies with the ride), so the endpoint is not an oracle; 409 `conflict` when the caller is already a party in another role — the requester and the vehicle's owner cannot join their own ride as members.",
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 6,
+          "pattern": "^[A-Z0-9]{6}$",
+          "description": "The 6-character group-ride join code carried by the link's path segment, uppercase A-Z / 0-9 — the same alphabet and length as ShareInvite.code, in a SEPARATE, SINGLE-PURPOSE code space: a join code is not an invite code, redeeming one at POST /api/invites/redeem answers 404, and it grants membership of ONE ride rather than a standing grant on a vehicle. Server-minted at accept, never client-invented. Clients normalize before sending exactly as the invite entry field does — upper-case, strip everything outside [A-Z0-9] — so a code that survived a copy-paste with a stray space still redeems. Unknown, expired, and already-terminal codes all answer 404 `not_found` with an identical body; a malformed one is 400 `invalid_request`. A client obtains this value from the link ARRIVING as a universal link (the platform hands its app the path it matched), never by dissecting a URL it was given to share — RideRequest.shareUrl is indivisible and opaque on the sharing side. P1 — a live bearer credential for a ride's live location: never log it, never echo it into an error message, never render it on any surface that is not already inside the ride.",
+          "x-classification": "P1",
+          "examples": ["RBO246"]
+        }
+      }
+    },
+    "RideRequest": {
+      "title": "RideRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "riderId",
+        "ownerId",
+        "vehicleId",
+        "pickup",
+        "dropoff",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ],
+      "description": "A rider's request to take (or schedule) a ride in an owner's shared vehicle — the aggregate behind the whole P10 ride-hailing track: the rider's request sheet (design/app/ride-request.jsx ExpandingRequestSheet: search → review → pending → tracking → summary), the owner's IncomingRequestSheet (accept/decline, now + scheduled variants, jsx:1266-1421), the rider's Scheduled list + reschedule flow (shared-screens.jsx ScheduledRideSheet), and the ride history rows (shared-screens.jsx REQUESTED_RIDES). Persisted in the Go-owned go_ride_requests table (telemetry MYR-173).",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Opaque database identifier (cuid) for this ride request.",
+          "x-classification": "P0",
+          "examples": ["crr0123456789abcdef0123456789abcd"]
+        },
+        "riderId": {
+          "type": "string",
+          "description": "User cuid of the requesting rider (the shared viewer who tapped 'Request from {owner}' — ride-request.jsx:451-453). Matches the Prisma User id consumed elsewhere (e.g. Vehicle.userId).",
+          "x-classification": "P0",
+          "examples": ["clrider1234567890abcdef"]
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "User cuid of the vehicle owner who must accept or decline (IncomingRequestSheet, ride-request.jsx:1266; '{owner} must accept before the ride is confirmed', jsx:459).",
+          "x-classification": "P0",
+          "examples": ["clowner1234567890abcdef"]
+        },
+        "vehicleId": {
+          "type": "string",
+          "description": "Vehicle cuid of the requested vehicle — the fleet member the rider picked in the review sheet's 'Available rides' picker (ReviewContent fleet picker, ride-request.jsx:462-497). Matches VehicleState.vehicleId / VehicleSummary.vehicleId.",
+          "x-classification": "P0",
+          "examples": ["clxyz1234567890abcdef"]
+        },
+        "pickup": { "$ref": "#/$defs/RidePlace" },
+        "dropoff": { "$ref": "#/$defs/RidePlace" },
+        "status": { "$ref": "#/$defs/RideRequestStatus" },
+        "passengerName": {
+          "type": "string",
+          "description": "Booked-for passenger name, present only when the rider requested the ride for someone else ('Me' vs 'Someone else' chips + PassengerPicker, ride-request.jsx:201-213,94-144; the `for` field on ride fixtures and the 'For {name}' pill, shared-screens.jsx:10,19,23-32). OPTIONAL on the wire: the key is omitted when the rider is riding themselves. P1 — PII (a person's name).",
+          "x-classification": "P1",
+          "examples": ["Maya Chen"]
+        },
+        "passengerPhone": {
+          "type": "string",
+          "description": "Booked-for passenger's mobile number, used to text them the live tracking link once the owner accepts (PassengerPicker 'Mobile number' input + 'We'll text {name} a live tracking link', ride-request.jsx:133-141; 'gets link on confirm', shared-screens.jsx:418). OPTIONAL on the wire: omitted when the ride is for the rider themselves or no number was entered (the review sheet renders 'Add a mobile number to send the tracking link' for that case, jsx:425). Free-form display string as entered, e.g. '(415) 555-0142' — normalization to E.164 is the dispatch story's concern (MYR-176). P1 — PII, never logged.",
+          "x-classification": "P1",
+          "examples": ["(415) 555-0142"]
+        },
+        "scheduledFor": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 / RFC 3339 UTC instant of the reserved pickup time for a scheduled ride ('Schedule pickup' day/time picker, ride-request.jsx:300-343; SCHEDULED_RIDES day/time, shared-screens.jsx:17-20; 'reserved for {day} {time}', jsx:1369). OPTIONAL on the wire: the key is omitted for an on-demand ('Now') request. When a reschedule is confirmed, this field is updated to the confirmed time.",
+          "x-classification": "P0",
+          "examples": ["2026-06-17T13:30:00Z"]
+        },
+        "rescheduleProposedFor": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 / RFC 3339 UTC instant of the rider's proposed NEW pickup time while a reschedule is being negotiated ('Move to {day} {time}', shared-screens.jsx:309-314). OPTIONAL on the wire: omitted when no reschedule has been proposed. Retained after resolution (rescheduleStatus 'confirmed'/'declined') for audit; on confirm the value is also copied into scheduledFor.",
+          "x-classification": "P0",
+          "examples": ["2026-06-18T16:00:00Z"]
+        },
+        "rescheduleStatus": { "$ref": "#/$defs/RescheduleStatus" },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 / RFC 3339 UTC row-creation timestamp — when the request was sent (PendingContent 'sent {ago} ago', ride-request.jsx:619).",
+          "x-classification": "P0",
+          "examples": ["2026-06-15T16:12:00Z"]
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 / RFC 3339 UTC timestamp of the last mutation (status change, reschedule proposal/resolution).",
+          "x-classification": "P0",
+          "examples": ["2026-06-15T16:14:30Z"]
+        },
+        "acceptedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 / RFC 3339 UTC instant the owner accepted (IncomingRequestSheet accept choreography, ride-request.jsx:1276-1280). OPTIONAL on the wire: omitted until the request is accepted; never cleared afterwards.",
+          "x-classification": "P0",
+          "examples": ["2026-06-15T16:13:05Z"]
+        },
+        "completedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 / RFC 3339 UTC instant the trip completed — the ride-summary moment ('Arrived · {clock}', RideSummaryContent, ride-request.jsx:947). OPTIONAL on the wire: omitted until the ride reaches 'completed'.",
+          "x-classification": "P0",
+          "examples": ["2026-06-15T16:54:00Z"]
+        },
+        "dispatchStatus": {
+          "$ref": "#/$defs/DispatchStatus",
+          "description": "Outcome of the MYR-176 nav-dispatch push (sent/failed/skipped). OPTIONAL and additive: omitted until the push resolves after an accept; older clients ignore it. Surfaced on the party-only REST detail (GET /api/ride-requests/{id}); there is no WS frame for it. Does not change the main status — 'accepted' stays 'accepted'."
+        },
+        "dispatchedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 / RFC 3339 UTC instant the nav-dispatch was attempted (MYR-176). OPTIONAL on the wire: omitted until dispatch is claimed. Also the server's exactly-once latch — a re-delivered accept never double-pushes navigation.",
+          "x-classification": "P0",
+          "examples": ["2026-06-15T16:13:06Z"]
+        },
+        "tripVersion": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Monotonic version of the ride's TRIP SHAPE — the pickup/drop-off pair (MYR-541), and the stop list when it exists (MYR-539). Incremented by the server on every accepted trip edit; never by lifecycle transitions. OPTIONAL and additive: absence (a pre-MYR-541 server, or a row never edited) MUST be read as 0. Consumers use it two ways: a client PATCHing the trip MUST echo the version it holds (the server refuses a stale edit 409 so two people editing at once cannot silently clobber each other), and a client seeing a HIGHER version on the summary-only ride_status_changed frame than it holds refetches the record — the frame itself never carries places.",
+          "x-classification": "P0",
+          "examples": [0, 3]
+        },
+        "cancelledBy": {
+          "type": "string",
+          "enum": ["rider", "owner"],
+          "description": "Which PARTY initiated a cancellation (MYR-522). OPTIONAL and additive: present only on status='cancelled' rows written by a server at or after this version — a cancelled ride WITHOUT it was cancelled before the field existed, and a consumer MUST read that absence as 'initiator unknown', never guess. Surfaced on the party-only REST detail/list payloads so the rider's client can render the honest \"had to cancel\" copy from a refetch rather than inferring it from 'not my own tap' (which breaks across the rider's second device). NOT projected onto the ride_status_changed WS frame, which stays summary-only.",
+          "x-classification": "P0",
+          "examples": ["owner"]
+        },
+        "requesterName": {
+          "type": "string",
+          "description": "The requesting rider's display name (first name), shown to the OWNER on incoming ride cards (IncomingRequestSheet '{requester} wants a ride', design/app/ride-request.jsx:1312 — MYR-229). Populated server-side from the requester's identity: first name -> email local-part -> \"Rider\" fallback (never client-supplied, never derived client-side). Delivered ONLY on party-scoped surfaces — per-user WS unicast to the rider and owner connections, and the party-only REST detail/list endpoints (GET /api/ride-requests/{id}, GET /api/ride-requests) — and is NEVER included on any broadcast frame. OPTIONAL and additive on the wire: the key is omitted when the identity lookup has not resolved a name; older clients that don't know this field simply ignore it. P1 — PII (a person's name).",
+          "x-classification": "P1",
+          "examples": ["Maya"]
+        },
+        "stops": {
+          "type": "array",
+          "description": "Ordered intermediate stops between the pickup and the destination (MYR-539, CLIENT-DIRECTED: exactly ONE pickup → N ordered stops → ONE destination). OPTIONAL and additive: ABSENT or EMPTY means a plain two-endpoint trip — pickup → dropoff — which is every ride written before MYR-539 and every ride nobody has added a stop to; a consumer MUST read that as 'no stops', never as 'unknown'. The order IS the travel order: pickup → stops[0] → stops[1] → … → dropoff. The endpoints are never members of this array (a trip has exactly one of each and they stay RideRequest.pickup / RideRequest.dropoff), so the list is the middle of the trip only. Statuses inside are server-owned and advance on arrival detection (the MYR-538 waypoint events); a status advance is not a trip edit and does not bump tripVersion. Every participant edits the list collaboratively and INSTANTLY through PATCH /api/ride-requests/{id}/trip with replace semantics (RideRequestTripPatch.stops) — the rider, the owner, and every joined group member (RideRequest.members, MYR-540) — serialized by the one shared tripVersion that already versions the pickup/drop-off pair: there is a single version for the whole trip shape, not one per endpoint. P1 — every entry carries GPS coordinates (NFR-3.23).",
+          "x-classification": "P1",
+          "items": { "$ref": "#/$defs/RideStop" }
+        },
+        "groupRide": {
+          "type": "boolean",
+          "description": "Whether this ride is a GROUP RIDE — one other people may join, through the link the server mints when the owner accepts (MYR-540, CLIENT-DIRECTED). OPTIONAL and additive: ABSENT MEANS FALSE, an ordinary solo ride. That is every ride written before MYR-540 and every ride booked with the toggle off, and a consumer MUST read the absence as false, never as 'unknown' — which is what makes pre-540 rows correct on the wire without being rewritten. Set at create from RideRequestCreateRequest.groupRide; no body in this contract changes it afterwards (the trip PATCH carries trip SHAPE only). THIS FLAG ALONE SAYS NOTHING ABOUT LINKS OR PEOPLE: `groupRide: true` with no `shareUrl` and no `members` is the ordinary state of a group ride still waiting for the owner's decision — the link appears only at accept and joiners appear only as they redeem it. What it does say is what the ride WILL DO on accept, and how every surface should read the other two fields.",
+          "x-classification": "P0",
+          "examples": [true]
+        },
+        "shareUrl": {
+          "type": "string",
+          "description": "The COMPLETE signed join link for this group ride — what the requester hands out through the iOS system share sheet (MYR-540). This is the MYR-368 SIGNED-LINK IDIOM applied to a ride instead of a vehicle invite: server-minted, an Ed25519 signature over the code and the expiry, verified STATICALLY by the web landing shell against a compiled-in public key with no database and no round trip, so a forged or edited link is bounced before it can reach anything that could answer 'is this code real?'. THE URL IS INDIVISIBLE. Clients treat it as OPAQUE: share it VERBATIM as the SINGLE activity item of the share sheet — the MYR-359 one-link rule, which is what makes the rich embed card render — never parse it, never rebuild one out of parts, never render its pieces as text. (The one place a code is read out of a link is the JOINER's app receiving it as a universal link, where the platform has already matched the path; that is a link arriving, not a client dissecting one it was handed to share.) Shape, informative and NOT a licence to parse: `https://myrobotaxi.app/ride/{code}?k={keyId}.{expUnix}.{sigBase64url}`, the same `k` triple rest-api.md §7.5.6 defines (one-character key id so a rotation can serve both keys at once, expiry as unix seconds, base64url-unpadded 64-byte signature), over the canonical ASCII payload `ride:{code}:{expUnix}` — domain-separated by the `ride:` prefix so nothing signed for one link kind can ever be replayed as the other, and carrying no display names because a group link, unlike an invite, addresses nobody in particular. PRESENT ONLY ON AN ACCEPTED-OR-LATER groupRide RIDE: the link is minted AT ACCEPT, so there is nothing before it (a request the owner declines never mints one) and nothing at all on a ride that is not a group ride. It stops being emitted once it can no longer be redeemed — the code dies with the ride, at terminal status plus the server's linger. ABSENCE IS THEREFORE NEVER A STATEMENT ABOUT WHETHER THIS IS A GROUP RIDE; `groupRide` is that field and the only one. The signature proves the link came from the server, NOT that the ride is still joinable: redemption stays authoritative, and POST /api/ride-requests/join (RideRequestJoinRequest) is what decides. P1 AND BEARER, exactly as ShareInvite.shareUrl is: it CONTAINS the code, so never log it, never put it in an error envelope, and deliver it only on the party-scoped REST surfaces — never on a broadcast frame.",
+          "x-classification": "P1",
+          "examples": [
+            "https://myrobotaxi.app/ride/RBO246?k=1.1786636800.c2lnbmF0dXJlLWJ5dGVzLWdvLWhlcmU"
+          ]
+        },
+        "members": {
+          "type": "array",
+          "description": "The joiners RIDING ALONG on this group ride — everyone who redeemed the ride's shareUrl (MYR-540). THE REQUESTER IS NOT IN THIS LIST and is never duplicated into it: they are RideRequest.riderId, they are on the ride by having booked it, and the owner is not in it either (a party to the ride, not a passenger). That reading is the one that keeps every pre-MYR-540 row byte-identical — ABSENT MEANS NO JOINERS, full stop, so an old solo ride needs no `members: []` and no rewrite to be correct. Had the requester been a member, absence would have had to mean 'the requester is riding', a different claim from 'nobody joined', and every existing row would have been wrong the moment the field existed. OPTIONAL and additive; absent and empty mean the same thing, and a consumer MUST read either as 'no joiners', never as 'unknown'. RENDERING 'N RIDING': N is members.length + 1 — the joiners plus the requester — which is the count every surface prints beside the names. Order is server-defined (currently ascending join time). Membership is RIDE-SCOPED and self-expiring: it buys viewer-tier access to the ride and its vehicle for the ride's lifetime and dies with the ride, leaving no standing grant to revoke; it also carries the FULL COLLABORATION powers the client chose — a member edits the trip exactly as the requester does (RideRequestTripPatch, whose ACL is this list). NO CAP: the client's decision is that the group sorts out seats themselves, so nothing here bounds the length. Delivered on party-scoped surfaces only — the party-only REST detail/list endpoints and the per-user WS unicast — and NEVER on a broadcast frame, the same delivery rule requesterName follows. Membership changes do NOT get their own WS frame: the ride_status_changed frame stays summary-only and a client picks up a new member on the refetch it already performs. P1 — every entry carries a person's first name (see RideMember).",
+          "x-classification": "P1",
+          "items": { "$ref": "#/$defs/RideMember" }
+        }
+      }
+    }
+  }
+}
