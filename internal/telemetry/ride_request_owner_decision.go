@@ -71,7 +71,7 @@ func (h *RideRequestHandler) ServeDecline(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	h.writeJSON(w, http.StatusOK, toRideRequestWire(updated))
+	h.writeJSON(w, http.StatusOK, h.rideWire(updated))
 }
 
 // Allowed-from sets for an owner decline. rideDeclinableFrom is the

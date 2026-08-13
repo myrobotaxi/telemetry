@@ -56,7 +56,59 @@ type RideRequestHandler struct {
 	// the endpoint answering 500, the same fail-closed reading `activities`
 	// gets: a deployment error, not a runtime state.
 	bookedWindowsMax time.Duration
-	logger           *slog.Logger
+	// links signs the MYR-540 group-ride join URL (RideRequest.shareUrl). Nil
+	// omits the key from every projection — a keyless deployment emits no link
+	// rather than an unsigned one the landing shell would bounce. It is the
+	// SAME signer the MYR-368 invite links use, under a domain-separated
+	// payload prefix; see ride_link.go.
+	links *InviteLinkSigner
+	// members answers "is this caller a joined member of this ride" — the
+	// MYR-540 ACL widening. Nil keeps every party check at rider-or-owner, the
+	// fail-closed default and the pre-MYR-540 behaviour.
+	members RideMemberReader
+	// access busts a fresh member's cached vehicle set so the car they just
+	// joined a ride in appears on their very next request (MYR-540).
+	access AccessCacheInvalidator
+	// joinLimiter is the per-user attempt budget on POST /api/ride-requests/join.
+	// Its OWN instance, never shared with the invite redeem's: the two code
+	// spaces are separate, so spending one endpoint's allowance must not close
+	// the other. Always non-nil — built by the constructor.
+	joinLimiter *redeemLimiter
+	logger      *slog.Logger
+}
+
+// RideMemberReader is the membership probe the party-scoped ride surfaces widen
+// through (MYR-540). Defined at the consumer site; satisfied by the cmd-side
+// adapter over store.RideRequestRepo.
+type RideMemberReader interface {
+	// IsRideMember reports whether userID has joined rideID. An error is a
+	// lookup failure, never a denial.
+	IsRideMember(ctx context.Context, rideID, userID string) (bool, error)
+}
+
+// WithRideLinkSigner wires the group-ride link signer (MYR-540).
+func WithRideLinkSigner(signer *InviteLinkSigner) RideRequestOption {
+	return func(h *RideRequestHandler) {
+		h.links = signer
+	}
+}
+
+// WithRideMemberReader widens every party-scoped ride surface to joined group
+// members (MYR-540).
+func WithRideMemberReader(members RideMemberReader) RideRequestOption {
+	return func(h *RideRequestHandler) {
+		h.members = members
+	}
+}
+
+// rideWire projects a ride onto the wire object, minting `shareUrl` with this
+// handler's signer and reading the clock ONCE for the whole projection.
+//
+// One clock reading per response, not per field: a page of rides must not be
+// able to include one ride whose link survived the linger check and another
+// whose did not because the loop crossed a five-minute boundary mid-flight.
+func (h *RideRequestHandler) rideWire(d RideRequestData) rideRequestWire {
+	return toRideRequestWire(d, h.links, time.Now())
 }
 
 // RideRequestOption configures optional dependencies on RideRequestHandler.
@@ -82,11 +134,12 @@ func NewRideRequestHandler(
 	opts ...RideRequestOption,
 ) *RideRequestHandler {
 	h := &RideRequestHandler{
-		auth:     tokens,
-		vehicles: vehicles,
-		store:    store,
-		events:   publisher,
-		logger:   logger,
+		auth:        tokens,
+		vehicles:    vehicles,
+		store:       store,
+		events:      publisher,
+		joinLimiter: newRedeemLimiter(redeemRateLimit, redeemRateWindow),
+		logger:      logger,
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -126,11 +179,31 @@ func (h *RideRequestHandler) ServeCancel(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// CANCEL DOES NOT WIDEN TO GROUP MEMBERS (MYR-540). loadForParty now admits
+	// a joined member — because reading and editing the trip are theirs — but
+	// ENDING the ride is not: MYR-537 gave that to the requester and the owner,
+	// and a member leaving is not a cancel. The two verbs are not the same size,
+	// and there is deliberately no leave endpoint in v1 either.
+	//
+	// 403 rather than 404, and the difference is the point: this caller is a
+	// party and can see the ride perfectly well in their own app, so pretending
+	// it does not exist would read as a bug. They are simply not the one who
+	// gets to end it.
+	//
+	// This check must come BEFORE the owner fork below, which would otherwise
+	// read "not the rider" as "therefore the owner" and let a member cancel
+	// somebody else's ride under the owner's rules.
+	if userID != rec.RiderID && userID != rec.OwnerID {
+		h.writeError(w, http.StatusForbidden, wserrors.ErrCodePermissionDenied,
+			"only the person who booked this ride, or the vehicle's owner, can cancel it")
+		return
+	}
+
 	// A self-ride caller (owner riding their own car) is BOTH parties and takes
 	// the rider path — their cancel is their own, exactly as before MYR-522.
 	if userID != rec.RiderID {
 		// The owner's cancel (MYR-522). Non-parties were already 404'd by
-		// loadForParty, so this caller is the owner.
+		// loadForParty and members refused above, so this caller is the owner.
 		h.serveOwnerCancel(ctx, w, rec)
 		return
 	}
@@ -146,7 +219,7 @@ func (h *RideRequestHandler) ServeCancel(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	h.writeJSON(w, http.StatusOK, toRideRequestWire(updated))
+	h.writeJSON(w, http.StatusOK, h.rideWire(updated))
 }
 
 // serveOwnerCancel is the owner's arm of ServeCancel (MYR-522). The two
@@ -172,7 +245,7 @@ func (h *RideRequestHandler) serveOwnerCancel(ctx context.Context, w http.Respon
 	if !ok {
 		return
 	}
-	h.writeJSON(w, http.StatusOK, toRideRequestWire(updated))
+	h.writeJSON(w, http.StatusOK, h.rideWire(updated))
 }
 
 // The two cancelled_by stamps. Written once here and consumed by the push
@@ -239,7 +312,7 @@ func (h *RideRequestHandler) loadForParty(ctx context.Context, w http.ResponseWr
 		return RideRequestData{}, false
 	}
 
-	if userID != rec.RiderID && userID != rec.OwnerID {
+	if !h.isParty(ctx, rec, userID) {
 		// Non-party: return 404 rather than 403 so the server never
 		// confirms the existence of a ride the caller has no relation to.
 		h.logger.Warn("ride-request: non-party access",
@@ -251,6 +324,49 @@ func (h *RideRequestHandler) loadForParty(ctx context.Context, w http.ResponseWr
 	}
 
 	return rec, true
+}
+
+// isParty reports whether userID is a party to the ride: its rider, the
+// vehicle's owner, or — since MYR-540 — a JOINED GROUP MEMBER.
+//
+// THE MEMBER CHECK IS FREE ON EVERY ORDINARY RIDE. The two id comparisons come
+// first and short-circuit, and the membership probe is skipped entirely unless
+// the ride is a group ride, so a solo ride costs exactly what it did before.
+//
+// It reads the RECORD'S OWN member list when the record carries one, and only
+// falls back to the store probe when it does not. Every §7.8 read attaches the
+// list, so the fallback exists for the paths that hand this function a record
+// from a leaner source — and asking the record first is what keeps the common
+// case at zero queries.
+//
+// FAILS CLOSED on a lookup error: "we could not tell" collapses to "not a
+// party", which on this path means a 404. That is the safe direction and the
+// only one available — the alternative, admitting on an unreadable membership,
+// would hand a stranger somebody's pickup coordinates on a database blip.
+func (h *RideRequestHandler) isParty(ctx context.Context, rec RideRequestData, userID string) bool {
+	if userID == rec.RiderID || userID == rec.OwnerID {
+		return true
+	}
+	if !rec.GroupRide {
+		return false
+	}
+	for i := range rec.Members {
+		if rec.Members[i].UserID == userID {
+			return true
+		}
+	}
+	if h.members == nil {
+		return false
+	}
+	member, err := h.members.IsRideMember(ctx, rec.ID, userID)
+	if err != nil {
+		h.logger.Error("ride-request: membership lookup failed",
+			slog.String("ride_request_id", rec.ID),
+			slog.String("error", err.Error()),
+		)
+		return false
+	}
+	return member
 }
 
 // authUser extracts + validates the bearer token, returning the userID.
@@ -328,6 +444,6 @@ func (h *RideRequestHandler) writeRideActive(w http.ResponseWriter, existing Rid
 			Code:    wserrors.ErrCodeRideActive,
 			Message: "you already have an active ride request",
 		},
-		ActiveRideRequest: toRideRequestWire(existing),
+		ActiveRideRequest: h.rideWire(existing),
 	})
 }

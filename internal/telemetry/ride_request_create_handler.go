@@ -113,7 +113,7 @@ func (h *RideRequestHandler) ServeCreate(w http.ResponseWriter, r *http.Request)
 		CreatedAt:     created.CreatedAt,
 	})
 
-	h.writeJSON(w, http.StatusCreated, toRideRequestWire(created))
+	h.writeJSON(w, http.StatusCreated, h.rideWire(created))
 }
 
 // rejectIfRideNotGrantedToCaller is the per-grant ride gate for CREATE, split

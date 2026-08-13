@@ -109,6 +109,9 @@ type fakeAccountData struct {
 	placesDeleted int
 	placesErr     error
 
+	membershipsDeleted int
+	membershipsErr     error
+
 	tokensRevoked int
 	tokensErr     error
 
@@ -195,6 +198,17 @@ func (f *fakeAccountData) DeleteSavedPlaces(_ context.Context, id string) (int, 
 	}
 	n := f.placesDeleted
 	f.placesDeleted = 0 // idempotent: a re-run deletes nothing
+	return n, nil
+}
+
+func (f *fakeAccountData) DeleteRideMemberships(_ context.Context, id string) (int, error) {
+	f.note("delete_ride_memberships")
+	f.seenIDs = append(f.seenIDs, id)
+	if f.membershipsErr != nil {
+		return 0, f.membershipsErr
+	}
+	n := f.membershipsDeleted
+	f.membershipsDeleted = 0 // idempotent: a re-run deletes nothing
 	return n, nil
 }
 
@@ -362,6 +376,10 @@ func TestAccountDeletion_OwnerWithSharesRunsEveryStepInOrder(t *testing.T) {
 		// tombstones the ACCESS, this erases the NAME the owner typed for a
 		// person who has just deleted their account.
 		"scrub_share_labels",
+		// MYR-540. Beside the ride cancellation it completes: step 6 ends the
+		// rides this person BOOKED, this one ends the ones they merely JOINED —
+		// somebody else's live ride, whose access set the row is still in.
+		"delete_ride_memberships",
 		"delete_devices",
 		// MYR-321. Position is load-bearing in one direction only: it MUST
 		// precede delete_identity, because a saved place that outlived its
@@ -778,7 +796,7 @@ func TestAccountDeletion_ConvergedScopeRunsEveryStepOverEveryID(t *testing.T) {
 
 	// Every SQL step saw both ids. Counting per step rather than checking the
 	// set as a whole is what catches one straggler still keyed on the subject.
-	const sqlSteps = 6 // drives, shares, labels, devices, places, tokens
+	const sqlSteps = 7 // drives, shares, labels, memberships, devices, places, tokens
 	if len(data.seenIDs) != sqlSteps*2 {
 		t.Fatalf("steps ran on %d ids, want %d (every step over both)", len(data.seenIDs), sqlSteps*2)
 	}

@@ -54,6 +54,10 @@ type RideRequestCreateInput struct {
 	PassengerName  *string
 	PassengerPhone *string
 	ScheduledFor   *time.Time
+	// GroupRide (MYR-540) is the only client-supplied part of the group-ride
+	// story. Everything else — the code, the link, the members — is server-owned
+	// and comes later.
+	GroupRide bool
 }
 
 // RideRequestData is the full ride-request aggregate the store returns and
@@ -112,6 +116,37 @@ type RideRequestData struct {
 	// TripVersion is the ride's trip-shape version (MYR-541); 0 = never edited.
 	TripVersion int
 	CancelledBy *string
+
+	// GroupRide is the MYR-540 create-time flag: this is a ride other people
+	// may join. False is an ordinary solo ride, which is every ride written
+	// before MYR-540 and every one booked with the toggle off.
+	GroupRide bool
+	// JoinCode / JoinCodeExpiresAt back RideRequest.shareUrl. Present only once
+	// the OWNER HAS ACCEPTED a group ride — the code is minted at accept.
+	//
+	// SERVER-SIDE ONLY. Neither is projected onto the wire and adding one there
+	// would be a contract change, not a refactor: the code is a live bearer
+	// credential for this ride's live location, and the only thing a client ever
+	// receives is the SIGNED URL built from the pair. Never logged.
+	JoinCode          string
+	JoinCodeExpiresAt *time.Time
+	// Members are the joiners riding along (MYR-540), in join order. The
+	// REQUESTER IS NOT ONE — they are RiderID, and duplicating them here would
+	// break the contract's counting rule (the rendered total is
+	// len(Members) + 1). Empty means no joiners, never "unknown".
+	Members []RideMemberData
+}
+
+// RideMemberData is one joined member in the handler layer (MYR-540, contracts
+// $defs.RideMember). Both fields are SERVER-owned: a client joins by redeeming
+// the link and reads this shape back — there is no endpoint that writes a
+// member directly.
+//
+// FirstName is derived by the store through the same identity ladder
+// RequesterName uses and is therefore always non-empty. P1 PII — never logged.
+type RideMemberData struct {
+	UserID    string
+	FirstName string
 }
 
 // BookedWindowData is one interval in which a vehicle cannot take a new
@@ -248,6 +283,16 @@ type RideRequestStore interface {
 	// never both succeed either.
 	Create(ctx context.Context, in RideRequestCreateInput) (RideRequestData, error)
 	GetByID(ctx context.Context, id string) (RideRequestData, error)
+	// JoinByCode redeems a GROUP-RIDE join code for one account (MYR-540) and
+	// returns the full ride the caller now belongs to, with themselves already
+	// in Members. `created` reports whether this call inserted the membership
+	// row — false is the idempotent re-redeem, which answers the same 200.
+	//
+	// Refusals: an sdk.ErrNotFound-wrapping error for a code that is unknown,
+	// expired, OR belongs to a terminal ride (one sentinel, deliberately — the
+	// 404 must not be an oracle), and ErrRideJoinSelfParty when the caller is
+	// the requester or the vehicle's owner.
+	JoinByCode(ctx context.Context, code, userID string) (RideRequestData, bool, error)
 	// GetActiveInstantByRider returns the rider's single OPEN instant ride,
 	// or an sdk.ErrNotFound-wrapping error when none is open. The create
 	// handler uses it to populate the 409 `ride_active` body so the client

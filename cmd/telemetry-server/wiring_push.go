@@ -61,6 +61,7 @@ func setupPushNotifier(
 	prefsRepo *store.PushPrefsRepo,
 	activityRepo *store.LiveActivityRepo,
 	vehicleNames *store.VehicleNameRepo,
+	rideRepo *store.RideRequestRepo,
 	logger *slog.Logger,
 ) (*push.Notifier, error) {
 	pushCfg := cfg.Push()
@@ -91,7 +92,12 @@ func setupPushNotifier(
 		vehicleNames,
 		push.Config{Enabled: pushCfg.Enabled},
 		log,
-	).WithRequesterNames(vehicleNames)
+	).WithRequesterNames(vehicleNames).
+		// MYR-540: the group fan-out. Passed WITHOUT an adapter — the repo
+		// method's signature already IS push.RideMemberLister — with the same
+		// typed-nil care as the sender above, because the notifier's
+		// no-fan-out path keys off the INTERFACE being nil.
+		WithRideMembers(rideMemberLister(rideRepo))
 	if err := notifier.Subscribe(bus); err != nil {
 		return nil, fmt.Errorf("subscribe push notifier: %w", err)
 	}
@@ -216,4 +222,15 @@ func (a *pushDeviceStoreAdapter) DeleteDeviceToken(ctx context.Context, deviceTo
 		return fmt.Errorf("push: delete device: %w", err)
 	}
 	return nil
+}
+
+// rideMemberLister converts a possibly-nil *store.RideRequestRepo into a
+// push.RideMemberLister that is nil as an INTERFACE, not merely as a pointer.
+// The notifier's "no group fan-out configured" branch tests the interface, and a
+// typed nil pointer would sail past it and then panic on the first group ride.
+func rideMemberLister(repo *store.RideRequestRepo) push.RideMemberLister {
+	if repo == nil {
+		return nil
+	}
+	return repo
 }

@@ -125,6 +125,23 @@ const (
 	// the bus tolerates zero.
 	TopicRideWaypointArrived Topic = "ride.waypoint_arrived"
 
+	// TopicRideMemberJoined is the group-ride membership seam (MYR-540):
+	// published once, on the redemption that actually INSERTED a membership row,
+	// when somebody joins a ride through its shared link. The payload is
+	// RideMemberJoinedEvent. Internal-only.
+	//
+	// IT DELIBERATELY HAS NO CONSUMER IN v1, and that is the whole reason it
+	// exists rather than being added later. There is no push for a join (the
+	// client's call: the requester finds out by looking at the ride, and a
+	// notification per joiner would be a group chat's worth of banners), and
+	// there is no WS frame either — membership changes are picked up on the
+	// refetch clients already perform, which is the standing discipline. What
+	// the topic buys is that the FACT is on the bus at the one moment it is
+	// unambiguous: the first consumer to want it — a "3 riding" nudge, an
+	// analytics counter, a fraud signal on a link that spread too far — does not
+	// have to reopen the redemption path to find the seam.
+	TopicRideMemberJoined Topic = "ride.member_joined"
+
 	// TopicVehicleDeleted is published when a Vehicle row is deleted from
 	// the Prisma-owned "Vehicle" table (sourced from a Postgres
 	// LISTEN/NOTIFY channel; see internal/store/notify_listener.go). The

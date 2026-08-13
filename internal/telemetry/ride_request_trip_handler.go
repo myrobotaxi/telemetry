@@ -116,7 +116,7 @@ func (h *RideRequestHandler) ServeTripPatch(w http.ResponseWriter, r *http.Reque
 	}
 
 	h.publishTripChanged(ctx, rec, updated, edit, userID)
-	h.writeJSON(w, http.StatusOK, toRideRequestWire(updated))
+	h.writeJSON(w, http.StatusOK, h.rideWire(updated))
 }
 
 // publishTripChanged emits the edit's two events: the TripEdit-marked

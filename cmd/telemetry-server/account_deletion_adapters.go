@@ -97,20 +97,28 @@ func (a *accountDataDeleterAdapter) RevokeRefreshTokens(ctx context.Context, use
 	return a.deleter.RevokeRefreshTokens(ctx, userID)
 }
 
+// DeleteRideMemberships drops the account's group-ride memberships (MYR-540),
+// so a deleted person cannot linger in a live ride's member list — or in the
+// access set that list admits to the ride's vehicle.
+func (a *accountDataDeleterAdapter) DeleteRideMemberships(ctx context.Context, userID string) (int, error) {
+	return a.deleter.DeleteRideMemberships(ctx, userID)
+}
+
 func (a *accountDataDeleterAdapter) DeleteIdentity(ctx context.Context, scope telemetry.AccountDeletionScope, counts telemetry.AccountDeletionCounts) (telemetry.AccountIdentityOutcome, error) {
 	res, err := a.deleter.DeleteIdentity(ctx, store.DeletionScope{
 		CallerID:    scope.CallerID,
 		CanonicalID: scope.CanonicalID,
 		IDs:         scope.IDs,
 	}, store.AccountDeletionCounts{
-		VehicleCount:         counts.VehicleCount,
-		DriveCount:           counts.DriveCount,
-		RidesCancelled:       counts.RidesCancelled,
-		SharesRevoked:        counts.SharesRevoked,
-		ShareLabelsScrubbed:  counts.ShareLabelsScrubbed,
-		PushDevicesDeleted:   counts.PushDevicesDeleted,
-		SavedPlacesDeleted:   counts.SavedPlacesDeleted,
-		RefreshTokensRevoked: counts.RefreshTokensRevoked,
+		VehicleCount:           counts.VehicleCount,
+		DriveCount:             counts.DriveCount,
+		RidesCancelled:         counts.RidesCancelled,
+		SharesRevoked:          counts.SharesRevoked,
+		ShareLabelsScrubbed:    counts.ShareLabelsScrubbed,
+		PushDevicesDeleted:     counts.PushDevicesDeleted,
+		SavedPlacesDeleted:     counts.SavedPlacesDeleted,
+		RideMembershipsDeleted: counts.RideMembershipsDeleted,
+		RefreshTokensRevoked:   counts.RefreshTokensRevoked,
 	})
 	if err != nil {
 		return telemetry.AccountIdentityOutcome{}, err

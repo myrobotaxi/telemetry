@@ -182,6 +182,7 @@ func (r *RideRequestRepo) insertRideRequest(ctx context.Context, q pgxQuerier, r
 		c.pickupLat, c.pickupLng, req.Pickup.Label, req.Pickup.Address,
 		c.dropoffLat, c.dropoffLng, req.Dropoff.Label, req.Dropoff.Address,
 		string(req.Status), req.PassengerName, req.PassengerPhone, req.ScheduledFor,
+		req.GroupRide,
 	)
 	if err := row.Scan(&req.CreatedAt, &req.UpdatedAt, &requesterName, &requesterEmail, &requesterExists); err != nil {
 		if isRideActiveViolation(err) {
@@ -210,8 +211,9 @@ func (r *RideRequestRepo) GetByID(ctx context.Context, id string) (RideRequestRe
 		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.GetByID(%s): %w", id, err)
 	}
 	// The detail read serves §7.8's RideRequest object, so it carries the
-	// MYR-539 stop list — one extra statement, never a widened projection.
-	if rec, err = r.withStops(ctx, r.pool, rec); err != nil {
+	// MYR-539 stop list and the MYR-540 member list — one extra statement each,
+	// never a widened projection.
+	if rec, err = r.withGroup(ctx, r.pool, rec); err != nil {
 		r.metrics.IncQueryError("ride_request.get_by_id")
 		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.GetByID(%s): %w", id, err)
 	}

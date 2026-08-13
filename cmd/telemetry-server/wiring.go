@@ -399,12 +399,30 @@ func setupRideRequestEndpoints(deps httpRouteDeps, vehicles telemetry.VehicleSna
 		// to read it — so the composition root, which sees both, carries it
 		// across. This is the endpoint's only source for the number.
 		telemetry.WithBookedWindowsMaxRange(store.MaxBookedWindowRange),
+		// MYR-540: the group-ride link signer. Deliberately the SAME signer the
+		// MYR-368 invite links use — one key, one key id, one rotation — under a
+		// domain-separated payload prefix so neither link kind's signature can be
+		// replayed as the other's.
+		telemetry.WithRideLinkSigner(deps.inviteLinks),
+		// MYR-540: the membership probe every party-scoped ride surface widens
+		// through. The same adapter, because the question is the ride handler's
+		// and the row is the ride repo's.
+		telemetry.WithRideMemberReader(&rideRequestStoreAdapter{repo: deps.rideRepo}),
+		// MYR-540: a fresh member's access set just gained this ride's VEHICLE,
+		// so bust their cached one — the redeem path's rule, for the redeem
+		// path's reason.
+		telemetry.WithRideAccessInvalidator(deps.accessInvalidator),
 	)
 	deps.srv.HandleFunc("POST /api/ride-requests", rideHandler.ServeCreate)
 	deps.srv.HandleFunc("GET /api/ride-requests", rideHandler.ServeList)
 	deps.srv.HandleFunc("GET /api/ride-requests/{id}", rideHandler.ServeGet)
 	deps.srv.HandleFunc("POST /api/ride-requests/{id}/cancel", rideHandler.ServeCancel)
 	deps.srv.HandleFunc("PATCH /api/ride-requests/{id}/trip", rideHandler.ServeTripPatch)
+
+	// MYR-540: the group-ride join (rest-api.md §7.24). The code travels in the
+	// BODY, not the path — exactly as POST /api/invites/redeem does — so it is
+	// never in a URL, a proxy log or a referrer.
+	deps.srv.HandleFunc("POST /api/ride-requests/join", rideHandler.ServeJoin)
 
 	// MYR-270: owner-driven dispatch v2 progress endpoints (supersedes the
 	// MYR-265 /board endpoint). The owner confirms pickup (accepted→arrived) and

@@ -134,6 +134,27 @@ type fakeRideStore struct {
 		cursorID        string
 		limit           int
 	}
+
+	// Group-ride join (MYR-540). joinRec/joinErr steer JoinByCode; joinCreated
+	// is the "this call inserted the row" flag the handler publishes on, and
+	// joinCalls/joinCode record what reached the store so a test can pin the
+	// normalization without the handler echoing the code anywhere observable.
+	joinRec     RideRequestData
+	joinErr     error
+	joinCreated bool
+	joinCalls   int
+	joinCode    string
+	joinUserID  string
+}
+
+func (f *fakeRideStore) JoinByCode(_ context.Context, code, userID string) (RideRequestData, bool, error) {
+	f.joinCalls++
+	f.joinCode = code
+	f.joinUserID = userID
+	if f.joinErr != nil {
+		return RideRequestData{}, false, f.joinErr
+	}
+	return f.joinRec, f.joinCreated, nil
 }
 
 func (f *fakeRideStore) Create(_ context.Context, in RideRequestCreateInput) (RideRequestData, error) {

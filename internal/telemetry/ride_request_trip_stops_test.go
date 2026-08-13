@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/events"
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
@@ -111,7 +112,7 @@ func TestRideTripPatch_StopsWireProjection(t *testing.T) {
 // A plain two-endpoint trip OMITS the key, so every ride written before stops
 // existed serializes byte-identically.
 func TestRideRequestWire_OmitsStopsWhenThereAreNone(t *testing.T) {
-	body, err := json.Marshal(toRideRequestWire(fixtureRideData(rideUserID, rideStatusAccepted)))
+	body, err := json.Marshal(toRideRequestWire(fixtureRideData(rideUserID, rideStatusAccepted), nil, time.Now()))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}

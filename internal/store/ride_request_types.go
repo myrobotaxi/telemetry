@@ -134,4 +134,38 @@ type RideRequestRecord struct {
 	// TripVersion is the monotonic version of the ride's trip shape (MYR-541):
 	// bumped by every accepted trip edit, never by lifecycle transitions.
 	TripVersion int
+
+	// Group ride (MYR-540). GroupRide is the create-time flag; the other two
+	// exist only once the OWNER HAS ACCEPTED a group ride, because that is when
+	// the code is minted.
+	//
+	// JoinCode is P1 AND BEARER — a live credential for this ride's live
+	// location. Never log it, never put it in an error message, and never
+	// project it onto a wire shape: the only thing that crosses the HTTP
+	// boundary is the SIGNED URL built from it, on party-scoped surfaces only.
+	GroupRide         bool
+	JoinCode          string
+	JoinCodeExpiresAt *time.Time
+
+	// Members are the joiners riding along (MYR-540), in join order. The
+	// REQUESTER IS NOT ONE — they are RiderID. Like Stops they live in their own
+	// table and are attached by a second query on the reads that serve the wire
+	// RideRequest object; a lean read leaves this nil, and nothing may read that
+	// as "this ride has no members".
+	Members []RideMember
+}
+
+// RideMember is one joined member as the read path returns it — contracts
+// $defs.RideMember, and deliberately the same two fields: an identity to
+// compare against your own account and a first name to print.
+//
+// FirstName is DERIVED, never stored: the read resolves it through the same
+// three-source identity ladder RequesterName uses (Prisma "User" → the Apple
+// first-consent name → go_users, then first-name token → email local-part →
+// "Rider"), so it is always non-empty and a member who renames themselves does
+// not leave a stale copy in a ride's history. P1 PII — never logged.
+type RideMember struct {
+	UserID    string
+	FirstName string
+	JoinedAt  time.Time
 }

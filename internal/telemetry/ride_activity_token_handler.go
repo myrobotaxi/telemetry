@@ -24,12 +24,20 @@ var ErrLiveActivityRideClosed = errors.New("live activity: ride is closed to reg
 // handed a per-Activity push token by ActivityKit. These two endpoints are how
 // that token reaches the server, and how the app says the Activity is over.
 //
-// RIDER-ONLY, deliberately. The owner is a party to the ride and can read it,
-// but v1 starts no owner Activity, and an endpoint that accepted an owner's
-// token would quietly create rows the sender would then push RIDER content to —
-// including the destination label, which the owner has no business seeing on
-// their lock screen. The owner variant is an explicit MYR-172 follow-up and
-// will arrive with its own content-state.
+// PASSENGER-ONLY, deliberately — the requester, and since MYR-540 every joined
+// GROUP MEMBER. The owner is a party to the ride and can read it, but v1 starts
+// no owner Activity, and an endpoint that accepted an owner's token would
+// quietly create rows the sender would then push RIDER content to — including
+// the destination label, which the owner has no business seeing on their lock
+// screen. The owner variant is an explicit MYR-172 follow-up and will arrive
+// with its own content-state.
+//
+// A MEMBER GETS THE RIDER-FLAVOURED CARD, and needs no new machinery to get it:
+// registration is keyed (ride, user) per §7.21, so a member is simply another
+// row on the same ride, and the ETA ticker — which fans out per REGISTRATION,
+// not per rider — picks it up on its next pass. The content it renders is the
+// ride's, and a member is riding in that ride, so there is nothing on the card
+// they should not see.
 //
 // The token ROTATES. ActivityKit hands the app a replacement mid-ride and
 // expects the server to switch to it, so registration is an UPSERT on
@@ -121,7 +129,7 @@ type activityEndedResponse struct {
 // POST /api/ride-requests/{id}/activity-token.
 func (h *RideRequestHandler) ServeRegisterActivityToken(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	rec, ok := h.authRiderForActivity(w, r)
+	rec, userID, ok := h.authRiderForActivity(w, r)
 	if !ok {
 		return
 	}
@@ -151,7 +159,13 @@ func (h *RideRequestHandler) ServeRegisterActivityToken(w http.ResponseWriter, r
 		return
 	}
 
-	if err := h.activities.RegisterActivity(ctx, rec.ID, rec.RiderID, token, body.Sandbox); err != nil {
+	// KEYED ON THE CALLER, not on rec.RiderID (MYR-540). For the requester the
+	// two are the same value, which is why the old spelling was correct and is
+	// no longer: with members registering too, writing rec.RiderID would file
+	// every member's token under the REQUESTER's row — each new member silently
+	// stealing the requester's registration, and the ticker pushing the
+	// requester's card to the last member's phone.
+	if err := h.activities.RegisterActivity(ctx, rec.ID, userID, token, body.Sandbox); err != nil {
 		if errors.Is(err, ErrLiveActivityRideClosed) {
 			// The write's own guard refused. The checks above already covered
 			// every state we could SEE, so reaching here means the ride closed
@@ -288,12 +302,14 @@ const (
 // client's end and a terminal-state send race by design and both are correct.
 func (h *RideRequestHandler) ServeEndActivityToken(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	rec, ok := h.authRiderForActivity(w, r)
+	rec, userID, ok := h.authRiderForActivity(w, r)
 	if !ok {
 		return
 	}
 
-	ended, err := h.activities.EndActivity(ctx, rec.ID, rec.RiderID)
+	// The caller's own registration, for RegisterActivity's reason: a member
+	// ending their card must not end the requester's.
+	ended, err := h.activities.EndActivity(ctx, rec.ID, userID)
 	if err != nil {
 		h.logger.Error("ride-request: activity token end failed",
 			slog.String("ride_request_id", rec.ID),
@@ -307,39 +323,43 @@ func (h *RideRequestHandler) ServeEndActivityToken(w http.ResponseWriter, r *htt
 }
 
 // authRiderForActivity runs the shared front half of both endpoints:
-// authenticate, resolve the ride, and require the caller to be its RIDER.
+// authenticate, resolve the ride, and require the caller to be RIDING in it —
+// its requester, or a joined group member (MYR-540). It returns the ride AND
+// the caller's id, because the registration is keyed on the caller and the two
+// are no longer the same value.
 //
 // The 404-vs-403 split is the house rule, unchanged (rest-api.md §5.2):
 // loadForParty answers 404 for a stranger — so the endpoint never confirms that
 // a ride id exists to somebody with no relation to it — and only a genuine
-// party who is the OWNER rather than the rider reaches the 403 below.
-func (h *RideRequestHandler) authRiderForActivity(w http.ResponseWriter, r *http.Request) (RideRequestData, bool) {
+// party who is the OWNER reaches the 403 below.
+func (h *RideRequestHandler) authRiderForActivity(w http.ResponseWriter, r *http.Request) (RideRequestData, string, bool) {
 	ctx := r.Context()
 
 	userID, ok := h.authUser(w, r)
 	if !ok {
-		return RideRequestData{}, false
+		return RideRequestData{}, "", false
 	}
 
 	rec, ok := h.loadForParty(ctx, w, r, userID)
 	if !ok {
-		return RideRequestData{}, false
+		return RideRequestData{}, "", false
 	}
-	if userID != rec.RiderID {
-		// The owner is a party but Live Activities are rider-only in v1;
-		// non-parties were already 404'd by loadForParty.
+	// loadForParty admits rider, owner and member. Only the OWNER is refused
+	// here: they are a party without being a passenger, and v1 has no owner
+	// Activity for their token to belong to.
+	if userID == rec.OwnerID && userID != rec.RiderID {
 		h.writeError(w, http.StatusForbidden, wserrors.ErrCodePermissionDenied,
-			"only the rider may register a Live Activity for this ride")
-		return RideRequestData{}, false
+			"only a rider may register a Live Activity for this ride")
+		return RideRequestData{}, "", false
 	}
 
 	if h.activities == nil {
 		h.logger.Error("ride-request: live activity registry not wired")
 		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
-		return RideRequestData{}, false
+		return RideRequestData{}, "", false
 	}
 
-	return rec, true
+	return rec, userID, true
 }
 
 // decodeActivityTokenBody strictly decodes the POST body (unknown keys are a

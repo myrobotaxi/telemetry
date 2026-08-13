@@ -30,6 +30,7 @@ func (a *rideRequestStoreAdapter) Create(ctx context.Context, in telemetry.RideR
 		PassengerName:  in.PassengerName,
 		PassengerPhone: in.PassengerPhone,
 		ScheduledFor:   in.ScheduledFor,
+		GroupRide:      in.GroupRide,
 	})
 	if err != nil {
 		// Translate the one-active-ride guard rejection into the handler-layer
@@ -317,7 +318,32 @@ func fromStoreRideRequest(rec store.RideRequestRecord) telemetry.RideRequestData
 		DispatchError:         rec.DispatchError,
 		TripVersion:           rec.TripVersion,
 		CancelledBy:           rec.CancelledBy,
+		GroupRide:             rec.GroupRide,
+		JoinCode:              rec.JoinCode,
+		JoinCodeExpiresAt:     rec.JoinCodeExpiresAt,
+		Members:               fromStoreRideMembers(rec.Members),
 	}
+}
+
+// fromStoreRideMembers projects the joiner list across the boundary (MYR-540),
+// preserving join order. Nil stays nil so the wire key is omitted for a ride
+// nobody has joined.
+//
+// The store's JoinedAt is deliberately DROPPED here: $defs.RideMember is two
+// fields, the ordering it produced is already baked into the slice, and carrying
+// a timestamp no projection reads would only invite one to start reading it.
+func fromStoreRideMembers(members []store.RideMember) []telemetry.RideMemberData {
+	if len(members) == 0 {
+		return nil
+	}
+	out := make([]telemetry.RideMemberData, 0, len(members))
+	for i := range members {
+		out = append(out, telemetry.RideMemberData{
+			UserID:    members[i].UserID,
+			FirstName: members[i].FirstName,
+		})
+	}
+	return out
 }
 
 // optionalString maps the store layer's empty-string-means-absent convention
@@ -394,4 +420,36 @@ func (a *rideRequestStoreAdapter) StartFirstStop(ctx context.Context, id string)
 	}
 	out := fromStoreRideStop(*stop)
 	return &out, nil
+}
+
+// JoinByCode adapts the MYR-540 group-ride redemption, translating the store's
+// two typed refusals into the handler layer's.
+//
+// store.ErrRideJoinCodeNotFound already wraps sdk.ErrNotFound, so it passes
+// through untouched and the handler's ordinary not-found branch answers the
+// contract's indistinguishable 404 — the three dead-code cases were collapsed
+// into one sentinel by the query itself, and nothing at this boundary can
+// un-collapse them.
+//
+// The code is P1 and is deliberately absent from every wrapped message here.
+func (a *rideRequestStoreAdapter) JoinByCode(ctx context.Context, code, userID string) (telemetry.RideRequestData, bool, error) {
+	rec, created, err := a.repo.JoinRideByCode(ctx, code, userID)
+	if err != nil {
+		if errors.Is(err, store.ErrRideJoinSelfParty) {
+			return telemetry.RideRequestData{}, false, fmt.Errorf("join ride: %w", telemetry.ErrRideJoinSelfParty)
+		}
+		return telemetry.RideRequestData{}, false, fmt.Errorf("join ride: %w", err)
+	}
+	return fromStoreRideRequest(rec), created, nil
+}
+
+// IsRideMember passes the ACL probe through (MYR-540). It satisfies
+// telemetry.RideMemberReader as well as living on the store adapter: the
+// question is the ride handler's, and the row is the ride repo's.
+func (a *rideRequestStoreAdapter) IsRideMember(ctx context.Context, rideID, userID string) (bool, error) {
+	member, err := a.repo.IsRideMember(ctx, rideID, userID)
+	if err != nil {
+		return false, fmt.Errorf("is ride member: %w", err)
+	}
+	return member, nil
 }

@@ -61,6 +61,7 @@ func (r *RideRequestRepo) scanRideRequest(row pgx.Row) (RideRequestRecord, error
 		requesterName   *string
 		requesterEmail  *string
 		requesterExists bool
+		joinCode        *string
 	)
 	err := row.Scan(
 		&rec.ID, &rec.RiderID, &rec.OwnerID, &rec.VehicleID,
@@ -71,6 +72,7 @@ func (r *RideRequestRepo) scanRideRequest(row pgx.Row) (RideRequestRecord, error
 		&rec.AcceptedAt, &rec.CompletedAt, &rec.CreatedAt, &rec.UpdatedAt,
 		&dispatchStatus, &rec.DispatchedAt, &rec.DispatchError,
 		&rec.CancelledBy, &rec.TripVersion,
+		&rec.GroupRide, &joinCode, &rec.JoinCodeExpiresAt,
 		&requesterName, &requesterEmail, &requesterExists,
 	)
 	if err != nil {
@@ -92,6 +94,14 @@ func (r *RideRequestRepo) scanRideRequest(row pgx.Row) (RideRequestRecord, error
 	if dispatchStatus != nil {
 		ds := DispatchStatus(*dispatchStatus)
 		rec.DispatchStatus = &ds
+	}
+	// The join code is NULL on every solo ride and on a group ride the owner has
+	// not accepted yet (MYR-540). It lands as the empty string, which is the
+	// "no live code" sentinel every reader here already tests for — and which
+	// keeps a P1 bearer credential out of a pointer that could be logged with
+	// %+v.
+	if joinCode != nil {
+		rec.JoinCode = *joinCode
 	}
 
 	if rec.Pickup.Latitude, err = r.decryptCoord("pickup_lat_enc", pickupLatEnc); err != nil {

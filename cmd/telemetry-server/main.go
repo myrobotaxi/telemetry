@@ -616,7 +616,7 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	// lifecycle banner is skipped when the recipient already has a running
 	// Live Activity for that ride, whose island alert carries the same news.
 	notifier, err := setupPushNotifier(
-		cfg, bus, apnsClient, pushRepo, pushPrefsRepo, liveActivityRepo, vehicleNameRepo, logger)
+		cfg, bus, apnsClient, pushRepo, pushPrefsRepo, liveActivityRepo, vehicleNameRepo, rideRepo, logger)
 	if err != nil {
 		return fmt.Errorf("setting up push notifier: %w", err)
 	}
