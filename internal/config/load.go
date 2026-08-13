@@ -47,6 +47,9 @@ type fileConfig struct {
 	// autoArrivalEnabled is the MYR-538 auto-arrival kill-switch
 	// (AUTO_ARRIVAL_ENABLED). See load_dispatch.go.
 	autoArrivalEnabled bool
+	// arrivalFlashEnabled is the MYR-542 arrival light-flash kill-switch
+	// (ARRIVAL_FLASH_ENABLED). See load_dispatch.go.
+	arrivalFlashEnabled bool
 
 	// MYR-320 periodic in-service re-poll knobs (SERVICE_REPOLL_ENABLED /
 	// SERVICE_REPOLL_INTERVAL). See load_service_repoll.go.
@@ -412,5 +415,6 @@ func buildConfig(fc *fileConfig) *Config {
 		drivePrunerEnabled:         fc.drivePrunerEnabled,
 		ridePrunerEnabled:          fc.ridePrunerEnabled,
 		autoArrivalEnabled:         fc.autoArrivalEnabled,
+		arrivalFlashEnabled:        fc.arrivalFlashEnabled,
 	}
 }

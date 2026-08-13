@@ -693,6 +693,30 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 		defer func() { _ = arrivalDetector.Stop() }()
 	}
 
+	// --- Arrival light flash (MYR-542) ---
+	// Client-decided: when the car is observed at the waypoint it flashes its
+	// headlights THREE times (~1.5s apart, no horn) so the rider can pick it
+	// out at the kerb. It consumes the internal ride.waypoint_arrived seam the
+	// detector above publishes — the owner's manual "Picked up" tap does NOT
+	// publish it, which is what keeps a tap made from a kitchen table from
+	// flashing a car three miles away. Failures are logged and nothing else.
+	// No-ops entirely when ARRIVAL_FLASH_ENABLED=false.
+	//
+	// Started AFTER the detector because the detector is the sole publisher of
+	// the seam it subscribes to.
+	//
+	// Its Stop lands in step 1 of the shutdown sequence like every other
+	// unsubscribing consumer. It has a Wait and this does not call it, for a
+	// sharper version of the nav dispatcher's reason: one greeting can run for
+	// 90s against a 15s budget, and Stop cancels it at its next flash anyway.
+	arrivalFlasher, err := startArrivalFlash(ctx, cfg, bus, vehicleRepo, accountRepo, logger)
+	if err != nil {
+		return fmt.Errorf("setting up arrival light flash: %w", err)
+	}
+	if arrivalFlasher != nil {
+		defer func() { _ = arrivalFlasher.Stop() }()
+	}
+
 	// --- Fleet-config reconciliation (MYR-448) ---
 	// The one automatic fleet-config push happens in the Tesla OAuth callback,
 	// which is always BEFORE the owner pairs the virtual key — so Tesla skips
