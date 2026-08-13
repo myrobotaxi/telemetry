@@ -172,7 +172,45 @@ func statusAlert(status, vehicleName string, scheduled, byOwnerCancel bool) (ale
 // NAME and nothing else about the ride. No pickup, no dropoff, no address —
 // this lands on a locked screen, and the owner refetches over authenticated
 // REST for the places.
-func ownerStatusAlert(status string, requesterName *string) (alert, bool) {
+// riderCancelled reports whether this event is a RIDER's cancellation of a
+// ride its owner had already committed to (MYR-537): stamped "rider", and the
+// pre-check status was accepted or later. A `requested` cancel stays silent —
+// the owner never committed, and pushing every cancel of a request that was
+// never accepted would page owners for riders changing their minds in the
+// booking flow. An event with no PreviousStatus (published pre-MYR-537) reads
+// as the silent arm, the same safe default the cancelledBy absence rule uses.
+func riderCancelled(status string, cancelledBy *string, previousStatus string) bool {
+	if status != statusCancelled || cancelledBy == nil || *cancelledBy != rideCancelledByRiderStamp {
+		return false
+	}
+	switch previousStatus {
+	case statusAccepted, statusArrived, statusEnroute:
+		return true
+	}
+	return false
+}
+
+// rideCancelledByRiderStamp mirrors the handler's rideCancelledByRider.
+const rideCancelledByRiderStamp = "rider"
+
+func ownerStatusAlert(status string, requesterName *string, byRiderCancel bool) (alert, bool) {
+	if byRiderCancel {
+		// MYR-537: the rider ended a ride the owner had committed to — en
+		// route to the pickup, at the kerb, or mid-trip with themselves
+		// aboard. The car's dash nav cannot be cleared remotely (Tesla has no
+		// cancel-navigation API), so this push IS the stand-down: the owner
+		// is the only one who can stop the car going where nobody is bound.
+		if name := displayName(requesterName); name != "" {
+			return alert{
+				title: name + " cancelled the ride",
+				body:  "No need to continue — the ride has ended.",
+			}, true
+		}
+		return alert{
+			title: "Your rider cancelled the ride",
+			body:  "No need to continue — the ride has ended.",
+		}, true
+	}
 	if status != statusEnroute {
 		return alert{}, false
 	}

@@ -450,8 +450,8 @@ func TestAccountDeletion_RiderWithOpenRideCancelsThroughTheGuardAndNotifies(t *t
 		t.Fatalf("audit RidesCancelled = %d, want 2", data.identityCounts.RidesCancelled)
 	}
 	for _, from := range rides.fromPassed {
-		if fmt.Sprint(from) != fmt.Sprint(rideCancellableFrom) {
-			t.Fatalf("guarded from-set = %v, want the rider-cancel set %v", from, rideCancellableFrom)
+		if fmt.Sprint(from) != fmt.Sprint(accountDeletionCancellableFrom) {
+			t.Fatalf("guarded from-set = %v, want the deletion teardown's own set %v", from, accountDeletionCancellableFrom)
 		}
 	}
 	if len(publisher.events) != 2 {

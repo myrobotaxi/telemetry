@@ -227,12 +227,16 @@ func (h *AccountDeletionHandler) tearDownOwnedVehicles(ctx context.Context, scop
 // the same ride_status_changed event — so the affected owner is told by the
 // standard lifecycle push rather than by a silent disappearance.
 //
-// Only requested/accepted are cancellable (rideCancellableFrom, rest-api.md
-// §7.8). A ride already ENROUTE or ARRIVED is a car physically carrying this
-// person right now; cancelling it from under the owner mid-drive would be a
-// worse outcome than letting it finish, and it reaches a terminal state on its
-// own within the trip. Those rides are LEFT, and after step 10 they render to
-// the owner as a former rider exactly as completed history does.
+// Only requested/accepted are cancelled here — accountDeletionCancellableFrom,
+// DELIBERATELY NARROWER than the rider's own interactive window since MYR-537
+// widened that to every live status. The rider's mid-ride cancel is a person
+// aboard making a deliberate choice the owner is pushed about; a DELETION is
+// bookkeeping, and a ride already ENROUTE or ARRIVED is a car physically
+// carrying this person right now — cancelling it from under the owner
+// mid-drive would be a worse outcome than letting it finish, and it reaches a
+// terminal state on its own within the trip. Those rides are LEFT, and after
+// step 10 they render to the owner as a former rider exactly as completed
+// history does.
 //
 // A ride that loses the race (the owner declined or completed it between the
 // list and the write) is not an error: the ride is closed either way, which is
@@ -245,10 +249,10 @@ func (h *AccountDeletionHandler) cancelOpenRides(ctx context.Context, scope Acco
 			return cancelled, fmt.Errorf("list open rides: %w", err)
 		}
 		for _, ride := range rides {
-			if !cancellableFrom(ride.Status) {
+			if !accountDeletionCancellable(ride.Status) {
 				continue
 			}
-			updated, err := h.deps.Rides.UpdateStatusFrom(ctx, ride.ID, rideCancellableFrom, rideStatusCancelled)
+			updated, err := h.deps.Rides.UpdateStatusFrom(ctx, ride.ID, accountDeletionCancellableFrom, rideStatusCancelled)
 			switch {
 			case err == nil:
 				cancelled++
@@ -328,4 +332,14 @@ func (h *AccountDeletionHandler) invalidateSessions(scope AccountDeletionScope) 
 		h.deps.Sessions.InvalidateUser(id)
 		h.deps.Sessions.InvalidateVehicles(id)
 	}
+}
+
+// accountDeletionCancellableFrom is the deletion teardown's own allowed-from
+// set — the pre-MYR-537 pair, kept on purpose (see cancelOpenRides). It must
+// NOT track rideCancellableFrom: the two windows parted ways the day the
+// rider's grew arrived/enroute.
+var accountDeletionCancellableFrom = []string{rideStatusRequested, rideStatusAccepted}
+
+func accountDeletionCancellable(status string) bool {
+	return status == rideStatusRequested || status == rideStatusAccepted
 }

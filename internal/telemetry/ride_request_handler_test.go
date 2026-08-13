@@ -683,7 +683,10 @@ func TestRideRequestHandler_Cancel(t *testing.T) {
 		{name: "conflict from declined", caller: rideUserID, rec: fixtureRideData(rideUserID, rideStatusDeclined), wantStatus: http.StatusConflict, wantErrCode: wserrors.ErrCodeConflict},
 		{name: "conflict from completed", caller: rideUserID, rec: fixtureRideData(rideUserID, rideStatusCompleted), wantStatus: http.StatusConflict, wantErrCode: wserrors.ErrCodeConflict},
 		{name: "conflict from cancelled", caller: rideUserID, rec: fixtureRideData(rideUserID, rideStatusCancelled), wantStatus: http.StatusConflict, wantErrCode: wserrors.ErrCodeConflict},
-		{name: "conflict from enroute", caller: rideUserID, rec: fixtureRideData(rideUserID, rideStatusEnroute), wantStatus: http.StatusConflict, wantErrCode: wserrors.ErrCodeConflict},
+		// MYR-537 (client directive): the rider may cancel at ANY point of a
+		// live ride — at the kerb, and even aboard.
+		{name: "rider cancels arrived", caller: rideUserID, rec: fixtureRideData(rideUserID, rideStatusArrived), wantStatus: http.StatusOK, wantEvent: true},
+		{name: "rider cancels enroute", caller: rideUserID, rec: fixtureRideData(rideUserID, rideStatusEnroute), wantStatus: http.StatusOK, wantEvent: true},
 		// MYR-522: the owner's cancel exists now, but a REQUESTED ride keeps
 		// decline as the owner's one exit — a 409 naming that door, not a 403.
 		{name: "owner cancel of a requested ride points at decline", caller: rideOwnerID + "X", rec: fixtureRideData(rideOwnerID+"X", rideStatusRequested), wantStatus: http.StatusConflict, wantErrCode: wserrors.ErrCodeConflict},
@@ -744,7 +747,8 @@ func TestRideRequestHandler_Cancel_GuardWinsRace(t *testing.T) {
 	if store.updateCalls != 1 {
 		t.Errorf("expected exactly one guarded write attempt, got %d", store.updateCalls)
 	}
-	if len(store.updatedFrom) != 2 || store.updatedFrom[0] != rideStatusRequested || store.updatedFrom[1] != rideStatusAccepted {
+	// MYR-537: the rider's allowed-from set is every LIVE status.
+	if len(store.updatedFrom) != 4 || store.updatedFrom[0] != rideStatusRequested || store.updatedFrom[3] != rideStatusEnroute {
 		t.Errorf("guard allowed-from set: %v", store.updatedFrom)
 	}
 	if len(pub.events) != 0 {

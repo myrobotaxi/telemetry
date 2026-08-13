@@ -124,7 +124,8 @@ func TestRideRequestHandler_RiderCancelStampsRider(t *testing.T) {
 	if store.cancelledBy != rideCancelledByRider {
 		t.Errorf("cancelled_by stamp: got %q want %q", store.cancelledBy, rideCancelledByRider)
 	}
-	if len(store.updatedFrom) != 2 || store.updatedFrom[0] != rideStatusRequested || store.updatedFrom[1] != rideStatusAccepted {
+	// MYR-537: the rider's allowed-from set is every LIVE status.
+	if len(store.updatedFrom) != 4 || store.updatedFrom[0] != rideStatusRequested || store.updatedFrom[3] != rideStatusEnroute {
 		t.Errorf("rider allowed-from set unchanged: %v", store.updatedFrom)
 	}
 	var got map[string]any
@@ -156,9 +157,9 @@ func TestRideRequestHandler_SelfRideCancelTakesTheRiderPath(t *testing.T) {
 	if store.cancelledBy != rideCancelledByRider {
 		t.Errorf("self-ride must stamp rider, got %q", store.cancelledBy)
 	}
-	// The rider path also means the RIDER's legality window: a self-rider may
-	// still cancel a requested ride, exactly as before MYR-522.
-	if len(store.updatedFrom) != 2 || store.updatedFrom[0] != rideStatusRequested {
+	// The rider path also means the RIDER's legality window — since MYR-537,
+	// every live status, requested first.
+	if len(store.updatedFrom) != 4 || store.updatedFrom[0] != rideStatusRequested {
 		t.Errorf("self-ride allowed-from set: %v", store.updatedFrom)
 	}
 }

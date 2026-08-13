@@ -75,6 +75,15 @@ type RideStatusChangedEvent struct {
 	// tell a RESERVATION from an instant request (MYR-360). It is NOT projected
 	// onto the `ride_status_changed` WS frame, which stays summary-only.
 	ScheduledFor *time.Time
+	// PreviousStatus is the status the ride held when the transition was
+	// requested — the handler's pre-check read, so under a lost race it may
+	// name a status one step behind the one the guarded write actually left.
+	// Carried for the push notifier's audience fork (MYR-537: a rider cancel
+	// wakes the OWNER only once the owner had committed — accepted or later —
+	// and a requested-cancel stays silent as it always was). Best-effort by
+	// that construction; NOT projected onto the WS frame. Empty on events
+	// published before MYR-537, which reads as the silent arm.
+	PreviousStatus string
 	// CancelledBy names the party that initiated a cancellation — "rider" |
 	// "owner" (MYR-522), read off the updated row so it is nil on every other
 	// transition. Carried so the rider's push copy can tell an OWNER's cancel
