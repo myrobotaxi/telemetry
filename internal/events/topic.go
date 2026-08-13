@@ -95,6 +95,14 @@ const (
 	// one winner for the ride's whole lifetime.
 	TopicRideDue Topic = "ride.due"
 
+	// TopicRideNavUnapplied is the nav-share close-loop's failure seam
+	// (MYR-527): published once when a leg's nav push resolved `sent` but the
+	// car's own reported destination never converged on the shared target —
+	// through the verification window AND one re-share. The payload is
+	// RideNavUnappliedEvent. Internal-only — never broadcast to WS clients;
+	// its consumer is the owner's "check the dash" push.
+	TopicRideNavUnapplied Topic = "ride.nav_unapplied"
+
 	// TopicVehicleDeleted is published when a Vehicle row is deleted from
 	// the Prisma-owned "Vehicle" table (sourced from a Postgres
 	// LISTEN/NOTIFY channel; see internal/store/notify_listener.go). The

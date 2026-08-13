@@ -153,6 +153,24 @@ func (s *navSequencer) clock() time.Time {
 func (s *navSequencer) acquire(
 	ctx context.Context, vehicleID, rideID string, order legOrder, cancel context.CancelFunc,
 ) (*navHold, error) {
+	return s.acquireOrdered(ctx, vehicleID, rideID, order, cancel, false)
+}
+
+// reacquire is acquire for a RE-SHARE of a leg already delivered (MYR-527):
+// the high-water refusal admits an EQUAL order rather than only a higher one,
+// so the verifier can push the same target again. Everything the mark exists
+// to prevent still holds — a LOWER leg is refused exactly as before, and
+// re-pushing the leg the mark already names cannot walk the car's destination
+// backwards, because it IS the destination the mark says the car should hold.
+func (s *navSequencer) reacquire(
+	ctx context.Context, vehicleID, rideID string, order legOrder, cancel context.CancelFunc,
+) (*navHold, error) {
+	return s.acquireOrdered(ctx, vehicleID, rideID, order, cancel, true)
+}
+
+func (s *navSequencer) acquireOrdered(
+	ctx context.Context, vehicleID, rideID string, order legOrder, cancel context.CancelFunc, allowEqual bool,
+) (*navHold, error) {
 	s.mu.Lock()
 	s.pruneLocked()
 	slot := s.slots[vehicleID]
@@ -193,9 +211,11 @@ func (s *navSequencer) acquire(
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if slot.lastRide == rideID && slot.lastOrder >= order {
+	refused := slot.lastOrder > order || (!allowEqual && slot.lastOrder == order)
+	if slot.lastRide == rideID && refused {
 		// A later leg of THIS ride already reached the car; pushing now would
-		// walk the destination backwards.
+		// walk the destination backwards. (A re-share admits its OWN order —
+		// see reacquire — and is refused only by a strictly higher one.)
 		<-slot.gate
 		slot.refs--
 		return nil, errNavSuperseded
