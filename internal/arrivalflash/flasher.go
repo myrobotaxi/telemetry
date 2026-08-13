@@ -141,12 +141,15 @@ func (f *Flasher) Stop() error {
 // bus.Close on shutdown, never before — see internal/drain for why the pair is
 // the guarantee and neither half is one alone. Tests use it as a quiesce point.
 //
-// Nothing in the caller is obliged to wait at all: an abandoned greeting costs
-// a rider a courtesy they never knew was coming, which is the same cost as a
-// failed one. It is offered so a deploy landing at the exact moment a car
-// arrives does not cut the gesture in half — one flash, then a dead process,
-// which is the one failure mode that looks like a fault rather than like
-// nothing.
+// cmd/telemetry-server deliberately does NOT call it, and that is not an
+// oversight to be tidied up later. One greeting may run for cfg.Timeout (90 s)
+// against a 15 s end-to-end shutdown budget, so an unbounded wait here would
+// overrun the platform's kill timeout and get SIGKILLed — worse than what the
+// wiring does instead, which is Stop: cancelling the greeting's context ends it
+// at its next flash or gap, within milliseconds, and an abandoned greeting
+// costs a rider a courtesy they never knew was coming. Wait exists for tests,
+// which use it as a quiesce point, and for a future caller that has a budget to
+// spend.
 func (f *Flasher) Wait() { f.workers.Wait() }
 
 // handle is the events.Handler. It type-asserts, takes the exactly-once latch
