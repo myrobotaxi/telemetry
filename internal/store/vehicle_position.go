@@ -48,3 +48,31 @@ func (r *VehicleRepo) VehiclePosition(ctx context.Context, vehicleID string) (la
 	lat, lng = gps.resolve(r)
 	return lat, lng, nil
 }
+
+// queryVehicleNavDestination reads the car's REPORTED nav-destination
+// ciphertext pair by vehicle cuid — DestinationLocation off the car's own
+// telemetry, the MYR-527 nav-share confirmation signal.
+const queryVehicleNavDestination = `SELECT "destinationLatitudeEnc", "destinationLongitudeEnc" FROM "Vehicle" WHERE "id" = $1`
+
+// VehicleNavDestination returns the destination the CAR ITSELF reports it is
+// navigating to, decrypted, or a nil pair when it reports none. Serves the
+// MYR-527 nav-apply verifier: a share the car applied shows up here within
+// seconds (the destination fields stream at 1s with a 30s resend), so "the
+// car's reported destination converged on the shared target" is the
+// confirmation `dispatch_status = sent` never was. Same contract as
+// VehiclePosition in every other respect, including the (0, 0) caveat and the
+// gpsPairs[1] atomic-pair rule.
+func (r *VehicleRepo) VehicleNavDestination(ctx context.Context, vehicleID string) (lat, lng *float64, err error) {
+	var gps summaryGPSScan
+	if err := r.pool.QueryRow(ctx, queryVehicleNavDestination, vehicleID).Scan(gps.latDest(), gps.lngDest()); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil, fmt.Errorf("store.VehicleNavDestination(%s): %w", vehicleID, ErrVehicleNotFound)
+		}
+		return nil, nil, fmt.Errorf("store.VehicleNavDestination(%s): %w", vehicleID, err)
+	}
+	if r.encryptor == nil {
+		return nil, nil, nil
+	}
+	lat, lng = resolveGPSPair(gps.latEnc, gps.lngEnc, r.encryptor, r.logger, r.metrics, gpsPairs[1])
+	return lat, lng, nil
+}
