@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://myrobotaxi.com/schemas/ride-request.schema.json",
   "title": "RideRequestsListResponse",
-  "description": "Cursor-paginated envelope for ride-request list endpoints (P10 ride-hailing track, MYR-173). Wraps an array of RideRequest rows under `items`, newest first (ORDER BY createdAt DESC, id DESC). Mirrors the DrivesListResponse envelope shape so SDK pagination helpers are reusable across both surfaces. Serves both the rider's history/scheduled lists (ios-app design/app/shared-screens.jsx REQUESTED_RIDES / SCHEDULED_RIDES) and the owner's incoming-request feed (design/app/ride-request.jsx IncomingRequestSheet). Backed by the Go `go_ride_requests` table (telemetry/internal/store/ride_request_repo.go). The envelope is part of the wire contract: consumers MUST NOT strip it silently. Single-resource endpoints (e.g. GET /api/ride-requests/{id}, MYR-174; POST /api/ride-requests/join, MYR-540) return a bare RideRequest object from `$defs`.",
+  "description": "Cursor-paginated envelope for ride-request list endpoints (P10 ride-hailing track, MYR-173). Wraps an array of RideRequest rows under `items`, newest first (ORDER BY createdAt DESC, id DESC). Mirrors the DrivesListResponse envelope shape so SDK pagination helpers are reusable across both surfaces. Serves both the rider's history/scheduled lists (ios-app design/app/shared-screens.jsx REQUESTED_RIDES / SCHEDULED_RIDES) and the owner's incoming-request feed (design/app/ride-request.jsx IncomingRequestSheet). Backed by the Go `go_ride_requests` table (telemetry/internal/store/ride_request_repo.go). The envelope is part of the wire contract: consumers MUST NOT strip it silently. Single-resource endpoints (e.g. GET /api/ride-requests/{id}, MYR-174; POST /api/ride-requests/join, MYR-540; POST /api/ride-requests/{id}/dispatch-now, MYR-556) return a bare RideRequest object from `$defs`.",
   "type": "object",
   "additionalProperties": false,
   "required": ["items", "nextCursor", "hasMore"],
@@ -331,12 +331,12 @@
         },
         "dispatchStatus": {
           "$ref": "#/$defs/DispatchStatus",
-          "description": "Outcome of the MYR-176 nav-dispatch push (sent/failed/skipped). OPTIONAL and additive: omitted until the push resolves after an accept; older clients ignore it. Surfaced on the party-only REST detail (GET /api/ride-requests/{id}); there is no WS frame for it. Does not change the main status — 'accepted' stays 'accepted'."
+          "description": "Outcome of the MYR-176 nav-dispatch push (sent/failed/skipped). OPTIONAL and additive: omitted until the push resolves after an accept; older clients ignore it. Surfaced on the party-only REST detail (GET /api/ride-requests/{id}); there is no WS frame for it. Does not change the main status — 'accepted' stays 'accepted'. WHEN the push runs depends on the ride: an on-demand ride dispatches at ACCEPT, a scheduled one at its computed leave-time (rest-api.md §7.8, MYR-535) — or, since MYR-556, the moment the OWNER asks, through POST /api/ride-requests/{id}/dispatch-now. All three run the identical push and write these same columns; nothing about the outcome distinguishes them, and no lifecycle status moves in any of them."
         },
         "dispatchedAt": {
           "type": "string",
           "format": "date-time",
-          "description": "ISO 8601 / RFC 3339 UTC instant the nav-dispatch was attempted (MYR-176). OPTIONAL on the wire: omitted until dispatch is claimed. Also the server's exactly-once latch — a re-delivered accept never double-pushes navigation.",
+          "description": "ISO 8601 / RFC 3339 UTC instant the nav-dispatch was attempted (MYR-176). OPTIONAL on the wire: omitted until dispatch is claimed. Also the server's exactly-once latch — a re-delivered accept never double-pushes navigation, a reservation is swept at most once however many servers sweep it, and (MYR-556) a repeated POST /api/ride-requests/{id}/dispatch-now answers 409 rather than sending the car twice. FOR A SCHEDULED RIDE THIS IS THE FIELD THAT SAYS THE CAR HAS LEFT: the ride's `status` stays 'accepted' from the accept until the pickup is confirmed, so a client rendering 'reserved' versus 'on its way' reads this key, not the status. It gains a value with NO status transition and therefore no frame of its own — the server publishes a summary ride_status_changed at dispatch purely as a REFETCH SIGNAL (MYR-555), carrying the ride's unchanged status and its current tripVersion, so a client that already refetches on that frame picks the change up with nothing new to implement.",
           "x-classification": "P0",
           "examples": ["2026-06-15T16:13:06Z"]
         },
