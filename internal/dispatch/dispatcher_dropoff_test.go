@@ -16,7 +16,7 @@ func testStartedEvent() events.RideStartedEvent {
 		RideRequestID: "cride123",
 		VehicleID:     "cveh456",
 		OwnerID:       "cowner789",
-		Dropoff:       events.RidePlace{Latitude: 40.7128, Longitude: -74.0060, Label: "City Hall"},
+		Target:        events.RidePlace{Latitude: 40.7128, Longitude: -74.0060, Label: "City Hall"},
 	}
 }
 
@@ -111,7 +111,7 @@ func TestProcessDropoff_OutOfRangeIsTerminal(t *testing.T) {
 	d := newTestDispatcher(exec, st, Config{Enabled: true, MaxRetries: 2})
 
 	ev := testStartedEvent()
-	ev.Dropoff = events.RidePlace{Latitude: 91.0, Longitude: 10.0}
+	ev.Target = events.RidePlace{Latitude: 91.0, Longitude: 10.0}
 	d.processDropoff(context.Background(), ev)
 
 	if len(exec.calls) != 0 {

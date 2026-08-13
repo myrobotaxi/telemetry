@@ -177,8 +177,8 @@ func TestRideRequestHandler_Start_DropoffSeamPayload(t *testing.T) {
 	if started.RideRequestID != rideID || started.VehicleID != rideVehicle || started.OwnerID != rideRec.OwnerID {
 		t.Errorf("started ids: %+v", started)
 	}
-	if started.Dropoff.Latitude != rideRec.Dropoff.Latitude || started.Dropoff.Longitude != rideRec.Dropoff.Longitude {
-		t.Errorf("started dropoff = %+v, want the ride's dropoff %+v", started.Dropoff, rideRec.Dropoff)
+	if started.Target.Latitude != rideRec.Dropoff.Latitude || started.Target.Longitude != rideRec.Dropoff.Longitude {
+		t.Errorf("started target = %+v, want the ride's dropoff %+v", started.Target, rideRec.Dropoff)
 	}
 }
 
