@@ -133,5 +133,15 @@ func (r *RideRequestRepo) list(ctx context.Context, op, query string, args ...an
 	// Each row already carries RequesterName: scanRideRequest resolves it from
 	// the query's inline requesterIdentitySelect (MYR-229) — no separate
 	// lookup, so the list paths never issue a per-row or batched "User" query.
+	//
+	// The MYR-539 stop list is the one thing that CANNOT ride that statement —
+	// stops are rows, and joining them would multiply every ride row by its
+	// stop count. So the whole page is attached in ONE further query keyed
+	// `ride_id = ANY(...)`: two statements per page, never per row, and a page
+	// of rides with no stops pays for one empty result set.
+	if err := r.attachStops(ctx, r.pool, recs); err != nil {
+		r.metrics.IncQueryError(op)
+		return nil, err
+	}
 	return recs, nil
 }

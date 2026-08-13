@@ -85,13 +85,20 @@ const rideRequestIDRandomBytes = 16
 
 // newRideRequestID generates a cuid-shaped identifier for a new row.
 func newRideRequestID() string {
-	b := make([]byte, rideRequestIDRandomBytes)
+	return "c" + randomHex(rideRequestIDRandomBytes)
+}
+
+// randomHex returns n random bytes hex-encoded, or a timestamp-derived suffix
+// when the OS RNG is unavailable — that condition is unrecoverable, and a
+// degraded-but-unique id keeps the request usable rather than panicking
+// mid-request. Shared by the ride id and the MYR-539 stop id so both mint the
+// same shape.
+func randomHex(n int) string {
+	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
-		// OS RNG unavailable is unrecoverable; a timestamp-derived id keeps
-		// the request usable rather than panicking mid-request.
-		return fmt.Sprintf("c%x", time.Now().UnixNano())
+		return fmt.Sprintf("%x", time.Now().UnixNano())
 	}
-	return "c" + hex.EncodeToString(b)
+	return hex.EncodeToString(b)
 }
 
 // ridePlaceCipher carries the four AES-256-GCM coordinate ciphertexts from
@@ -202,6 +209,12 @@ func (r *RideRequestRepo) GetByID(ctx context.Context, id string) (RideRequestRe
 		r.metrics.IncQueryError("ride_request.get_by_id")
 		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.GetByID(%s): %w", id, err)
 	}
+	// The detail read serves §7.8's RideRequest object, so it carries the
+	// MYR-539 stop list — one extra statement, never a widened projection.
+	if rec, err = r.withStops(ctx, r.pool, rec); err != nil {
+		r.metrics.IncQueryError("ride_request.get_by_id")
+		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.GetByID(%s): %w", id, err)
+	}
 	return rec, nil
 }
 
@@ -220,6 +233,12 @@ func (r *RideRequestRepo) GetActiveInstantByRider(ctx context.Context, riderID s
 		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.GetActiveInstantByRider(%s): %w", riderID, ErrRideRequestNotFound)
 	}
 	if err != nil {
+		r.metrics.IncQueryError("ride_request.get_active_instant_by_rider")
+		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.GetActiveInstantByRider(%s): %w", riderID, err)
+	}
+	// Adopted straight into the 409 `ride_active` body as a full RideRequest,
+	// so it carries its stops like any other detail read (MYR-539).
+	if rec, err = r.withStops(ctx, r.pool, rec); err != nil {
 		r.metrics.IncQueryError("ride_request.get_active_instant_by_rider")
 		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.GetActiveInstantByRider(%s): %w", riderID, err)
 	}

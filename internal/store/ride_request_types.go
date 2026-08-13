@@ -80,6 +80,14 @@ type RideRequestRecord struct {
 	Pickup  RidePlace
 	Dropoff RidePlace
 
+	// Stops are the ordered INTERMEDIATE stops between the two endpoints
+	// (MYR-539), in travel order. Nil/empty is a plain two-endpoint trip —
+	// which is every ride written before MYR-539. They live in their own table
+	// (go_ride_stops) and are attached by a second query on the reads that
+	// serve the wire RideRequest object; a lean read leaves this nil, and
+	// nothing may read that as "this ride has no stops".
+	Stops []RideStop
+
 	Status RideRequestStatus
 
 	// Booked-for passenger ("Someone else" rides). Both nil when the rider
