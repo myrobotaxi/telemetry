@@ -37,6 +37,11 @@ type JWTAuthenticator struct {
 	// no share lookup is configured, in which case ResolveVehicleAccess
 	// fails closed and viewer is unreachable.
 	shares shareLookup
+	// rides resolves LIVE group-ride memberships (MYR-540) — the third source
+	// of vehicle access, after ownership and an accepted share. Nil means the
+	// source is unwired and membership grants nothing, the same fail-closed
+	// reading `shares` gets.
+	rides rideMembershipLookup
 	// es256 optionally verifies ES256 tokens minted by the identity module
 	// (ADR-001 §3). Nil => HS256-only (legacy behaviour, unchanged).
 	es256 ES256KeyResolver
@@ -80,6 +85,9 @@ func NewJWTAuthenticator(secret, issuer, audience string, pool *pgxpool.Pool, op
 		// the DB-backed authenticator resolves viewers out of the box —
 		// nothing has to remember to opt in.
 		shares: querier,
+		// The same querier serves the MYR-540 group-ride membership source, so
+		// a member's access resolves out of the box too.
+		rides: querier,
 	}
 	for _, opt := range opts {
 		opt(a)

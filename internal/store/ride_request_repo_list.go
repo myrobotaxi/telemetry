@@ -143,5 +143,13 @@ func (r *RideRequestRepo) list(ctx context.Context, op, query string, args ...an
 		r.metrics.IncQueryError(op)
 		return nil, err
 	}
+	// The MYR-540 member list is the second such projection, batched the same
+	// way and for the same reason. It costs NOTHING on a page with no group
+	// rides — attachMembers issues no statement at all when nothing on the page
+	// carries the flag — so the common list stays at two statements.
+	if err := r.attachMembers(ctx, r.pool, recs); err != nil {
+		r.metrics.IncQueryError(op)
+		return nil, err
+	}
 	return recs, nil
 }

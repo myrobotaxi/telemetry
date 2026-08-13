@@ -54,18 +54,19 @@ const rideRequestColumns = `id, rider_id, owner_id, vehicle_id,
 	status, passenger_name, passenger_phone,
 	scheduled_for, reschedule_proposed_for, reschedule_status,
 	accepted_at, completed_at, created_at, updated_at,
-	dispatch_status, dispatched_at, dispatch_error, cancelled_by, trip_version` + requesterIdentitySelect
+	dispatch_status, dispatched_at, dispatch_error, cancelled_by, trip_version,
+	group_ride, join_code, join_code_expires_at` + requesterIdentitySelect
 
 const queryRideRequestInsert = `INSERT INTO go_ride_requests (
 	id, rider_id, owner_id, vehicle_id,
 	pickup_lat_enc, pickup_lng_enc, pickup_label, pickup_address,
 	dropoff_lat_enc, dropoff_lng_enc, dropoff_label, dropoff_address,
-	status, passenger_name, passenger_phone, scheduled_for
+	status, passenger_name, passenger_phone, scheduled_for, group_ride
 ) VALUES (
 	$1, $2, $3, $4,
 	$5, $6, $7, $8,
 	$9, $10, $11, $12,
-	$13, $14, $15, $16
+	$13, $14, $15, $16, $17
 )
 RETURNING created_at, updated_at` + requesterIdentitySelect
 
@@ -103,12 +104,29 @@ WHERE rider_id = $1
 ORDER BY created_at DESC, id DESC
 LIMIT 1`
 
+// rideRiderScope is the RIDER LIST's membership predicate (MYR-540). "My rides"
+// means the rides I booked PLUS the group rides I joined: a member holds the
+// full rider view of a ride they are a party to, so a list that showed them only
+// their own bookings would hide the ride they are sitting in.
+//
+// Written once and shared by the un-anchored and cursor variants so the two
+// cannot answer the same question differently — a member seeing a ride on page 1
+// and not on page 2 would be worse than not seeing it at all.
+//
+// EXISTS rather than a join: a ride has at most one membership row per person,
+// so a join could not duplicate a row today, but EXISTS says the thing that is
+// actually meant ("am I on this ride") and cannot start duplicating if the key
+// ever widens. idx_go_ride_members_user serves the sub-probe.
+const rideRiderScope = `(rider_id = $1 OR EXISTS (
+		SELECT 1 FROM go_ride_members m WHERE m.ride_id = go_ride_requests.id AND m.user_id = $1
+	))`
+
 // Newest first, id as the tie-break — matches the contracts
 // RideRequestsListResponse ordering (createdAt DESC, id DESC) and the
 // idx_go_ride_requests_rider index.
 const queryRideRequestsByRider = `SELECT ` + rideRequestColumns + `
 FROM go_ride_requests
-WHERE rider_id = $1
+WHERE ` + rideRiderScope + `
 ORDER BY created_at DESC, id DESC
 LIMIT $2`
 
@@ -155,7 +173,7 @@ ORDER BY created_at ASC, id ASC`
 // to drive hasMore without a COUNT — mirrors the drives-list cursor.
 const queryRideRequestsByRiderCursor = `SELECT ` + rideRequestColumns + `
 FROM go_ride_requests
-WHERE rider_id = $1 AND (created_at, id) < ($2, $3)
+WHERE ` + rideRiderScope + ` AND (created_at, id) < ($2, $3)
 ORDER BY created_at DESC, id DESC
 LIMIT $4`
 

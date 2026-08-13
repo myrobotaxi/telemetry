@@ -37,6 +37,18 @@ WHERE vehicle_id = $1 AND accepted_by_user_id = $2
   AND status = 'accepted' AND suspended_at IS NULL
 LIMIT 1`
 
+// rideMembershipLookup is the consumer-site interface ResolveVehicleAccess uses
+// to read the MYR-540 group-ride membership source. Separate from shareLookup
+// because it is a different KIND of access — ride-scoped and self-expiring
+// rather than a standing grant — and keeping the two apart is what stops a
+// future edit granting a member a share's capabilities by accident.
+type rideMembershipLookup interface {
+	// IsRidingVehicle reports whether userID holds a LIVE group-ride membership
+	// on a ride being served by vehicleID. Errors are lookup failures, never
+	// denials: "no" is (false, nil).
+	IsRidingVehicle(ctx context.Context, userID, vehicleID string) (bool, error)
+}
+
 // shareLookup is the consumer-site interface ResolveVehicleAccess uses to read
 // an accepted share grant. Defined here so tests can swap the DB-backed
 // implementation for a stub, mirroring vehicleOwnerLookup.
@@ -85,13 +97,16 @@ func (a *JWTAuthenticator) ResolveVehicleAccess(ctx context.Context, userID, veh
 		// No share lookup configured — fail closed. The pre-MYR-184
 		// behaviour of returning RoleViewer here is exactly the hole this
 		// change exists to close.
-		return Role(""), ShareGrant{}, ErrNoVehicleAccess
+		return a.resolveRidingMember(ctx, userID, vehicleID, ErrNoVehicleAccess)
 	}
 
 	grant, err := a.shares.GetShareGrant(ctx, userID, vehicleID)
 	if err != nil {
 		if errors.Is(err, ErrNoVehicleAccess) {
-			return Role(""), ShareGrant{}, ErrNoVehicleAccess
+			// MYR-540: a share is not the only way to be a non-owner with
+			// business here. Before denying, ask whether the caller is RIDING in
+			// this car right now on a group ride they joined.
+			return a.resolveRidingMember(ctx, userID, vehicleID, ErrNoVehicleAccess)
 		}
 		return Role(""), ShareGrant{}, fmt.Errorf("auth.ResolveVehicleAccess(user=%s, vehicle=%s): %w", userID, vehicleID, err)
 	}
@@ -104,6 +119,51 @@ func (a *JWTAuthenticator) ResolveVehicleAccess(ctx context.Context, userID, veh
 		return Role(""), ShareGrant{}, ErrNoVehicleAccess
 	}
 	return RoleViewer, grant, nil
+}
+
+// resolveRidingMember is the MYR-540 GROUP-RIDE MEMBERSHIP source of viewer
+// access, consulted only after ownership and shares have both declined.
+//
+// It returns the ZERO-VALUE ShareGrant, and that is the whole tier decision: a
+// member gets the base capability every live viewer has — the catalog row, the
+// snapshot, the WebSocket subscription, all under the MYR-435 viewer mask — and
+// nothing more. In particular GrantsRides() is false, so riding along in a car
+// never becomes permission to summon it.
+//
+// WHY IT IS LAST. Ownership and an accepted share are STANDING relationships and
+// membership is a transient one, so resolving in that order means the person
+// who both owns a share on the car and happens to be riding in it keeps the
+// grant they actually hold — flags and all — instead of being downgraded to the
+// bare membership tier for the length of one ride.
+//
+// FAILS CLOSED, and unlike the share lookup above it does so by returning the
+// caller's own denial rather than a lookup error: this probe runs on a path that
+// was ALREADY going to deny, so a database blip here must not convert a denial
+// into a 500 on a request that has no access anyway. A genuine member whose
+// probe failed is denied for this request and admitted on the retry, which is
+// the same bound the 5-minute access-set cache already imposes.
+func (a *JWTAuthenticator) resolveRidingMember(
+	ctx context.Context, userID, vehicleID string, denial error,
+) (Role, ShareGrant, error) {
+	if a.rides == nil {
+		return Role(""), ShareGrant{}, denial
+	}
+	riding, err := a.rides.IsRidingVehicle(ctx, userID, vehicleID)
+	if err != nil || !riding {
+		return Role(""), ShareGrant{}, denial
+	}
+	return RoleViewer, ShareGrant{}, nil
+}
+
+// IsRidingVehicle reports whether userID is a member of a LIVE group ride being
+// served by vehicleID (MYR-540). A terminal ride matches nothing, which is how
+// membership access ends without anything having to revoke it.
+func (q *pgVehicleQuerier) IsRidingVehicle(ctx context.Context, userID, vehicleID string) (bool, error) {
+	var riding bool
+	if err := q.pool.QueryRow(ctx, queryRideMembershipOnVehicle, userID, vehicleID).Scan(&riding); err != nil {
+		return false, fmt.Errorf("pgVehicleQuerier.IsRidingVehicle(user=%s, vehicle=%s): %w", userID, vehicleID, err)
+	}
+	return riding, nil
 }
 
 // InvalidateVehicles drops the cached access set for userID so the next

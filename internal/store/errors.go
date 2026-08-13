@@ -83,6 +83,32 @@ var (
 	// does NOT wrap sdk.ErrNotFound.
 	ErrRideWindowConflict = errors.New("vehicle already booked in this window")
 
+	// ErrRideJoinCodeNotFound is returned by JoinRideByCode when the submitted
+	// group-ride join code resolves to nothing REDEEMABLE (MYR-540) — unknown,
+	// expired, or belonging to a ride that has reached a terminal status.
+	//
+	// THE THREE CASES ARE ONE SENTINEL ON PURPOSE, and the contract requires it:
+	// POST /api/ride-requests/join answers 404 with an INDISTINGUISHABLE body
+	// for all of them, so a caller enumerating the 36^6 code space never learns
+	// that a guessed code is real but spent. Collapsing them HERE rather than in
+	// the handler is what makes that hold — the query cannot report which
+	// conjunct failed, so no future handler edit can start reporting it.
+	//
+	// Wraps sdk.ErrNotFound so the handler's ordinary not-found branch sees it.
+	ErrRideJoinCodeNotFound = fmt.Errorf("ride join code %w", sdk.ErrNotFound)
+
+	// ErrRideJoinSelfParty is returned by JoinRideByCode when the caller is
+	// ALREADY A PARTY to the ride in another role — its requester, or the
+	// vehicle's owner (MYR-540). The HTTP layer maps it to 409 `conflict`.
+	//
+	// Deliberately NOT the 404 the dead-code cases get: the caller demonstrably
+	// knows this ride exists (they are on it), so there is nothing to conceal,
+	// and answering "not found" to somebody looking at the ride in their own app
+	// would read as a bug. Deliberately not a silent success either — a
+	// requester in `members` would break the contract's counting rule, where the
+	// rendered total is members.length + 1.
+	ErrRideJoinSelfParty = errors.New("already a party to this ride")
+
 	// ErrTeslaTokenNotFound is returned when no Tesla OAuth token exists
 	// for a user in the Prisma-owned Account table.
 	// Wraps sdk.ErrNotFound so callers can use errors.Is(err, sdk.ErrNotFound).

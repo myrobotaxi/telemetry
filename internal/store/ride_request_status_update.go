@@ -153,6 +153,32 @@ func (r *RideRequestRepo) UpdateStatusFromUnconflicted(ctx context.Context, id s
 	if err != nil {
 		return RideRequestRecord{}, err
 	}
+	// MYR-540: the GROUP RIDE's join code is minted HERE, inside the accept's own
+	// transaction, and nowhere else.
+	//
+	// WHY THIS IS THE RIGHT PLACE. Only the WINNING requested→accepted write
+	// reaches this line — the guard above is what makes the ride.accepted
+	// dispatch seam exactly-once, and the mint inherits that property for free.
+	// Putting it in the transaction rather than after the commit means the code
+	// and the status it depends on land together: there is no window in which a
+	// ride is accepted with no link, and a rolled-back accept cannot leave a live
+	// credential behind on a still-`requested` row.
+	//
+	// The statement's own `group_ride AND join_code IS NULL` guard is what makes
+	// it a no-op for a solo ride and for any repeat, so this call needs no
+	// condition of its own — see MintJoinCode.
+	code, expiresAt, err := r.MintJoinCode(ctx, tx, id)
+	if err != nil {
+		return RideRequestRecord{}, err
+	}
+	// An empty code means the guard refused (not a group ride, or one that
+	// somehow already had a code). Only a real mint is copied onto the record —
+	// assigning unconditionally would BLANK a code the RETURNING row above had
+	// already read back, which is the one way this could hand a client an
+	// accepted group ride with no link.
+	if code != "" {
+		rec.JoinCode, rec.JoinCodeExpiresAt = code, expiresAt
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.UpdateStatusFromUnconflicted(%s): commit: %w", id, err)
 	}
@@ -223,10 +249,10 @@ func (r *RideRequestRepo) updateStatusGuarded(
 	if err == nil {
 		// The winning write answers with the whole RideRequest object, so it
 		// carries the ride's stop list like every other §7.8 projection
-		// (MYR-539). A lifecycle transition never CHANGES the list — it is read
-		// back, on the same querier, so the response cannot disagree with the
-		// detail read a client would make next.
-		rec, err = r.withStops(ctx, q, rec)
+		// (MYR-539) and its member list (MYR-540). A lifecycle transition never
+		// CHANGES either — they are read back, on the same querier, so the
+		// response cannot disagree with the detail read a client would make next.
+		rec, err = r.withGroup(ctx, q, rec)
 		if err != nil {
 			r.metrics.IncQueryError(g.op)
 			return RideRequestRecord{}, fmt.Errorf("RideRequestRepo.%s(%s): %w", g.name, id, err)
