@@ -355,11 +355,13 @@ const (
 )
 
 // Stop-status values (mirror the contracts RideStop.status enum, MYR-539).
-// Only the two the server READS are named here: the handler asks "which stop is
-// the current leg's target", and `completed` is never a member of that answer.
+// SERVER-OWNED: this layer only ever READS them — the writes are the store's
+// lifecycle statements — and it reads them for one question, "which stop is the
+// current leg's target".
 const (
-	rideStopUpcoming = "upcoming"
-	rideStopCurrent  = "current"
+	rideStopUpcoming  = "upcoming"
+	rideStopCurrent   = "current"
+	rideStopCompleted = "completed"
 )
 
 // Ride-request list pagination bounds (rest-api.md §4.2.1, same envelope as

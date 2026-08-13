@@ -104,3 +104,48 @@ func TestNotifierTripChangedSelfRideStaysSilent(t *testing.T) {
 		t.Errorf("self-ride edit sent %d pushes, want 0", len(got))
 	}
 }
+
+// MYR-539 — a stops edit names its own part, and the copy agrees with it in
+// number. "Your stops was changed" is the kind of sentence that makes a product
+// feel unattended, so the plural is pinned here rather than left to a reader.
+func TestNotifierTripChangedNamesTheStops(t *testing.T) {
+	tests := []struct {
+		name      string
+		editor    string
+		pickup    bool
+		dropoff   bool
+		wantTitle string
+	}{
+		{name: "rider edited the stops: owner told", editor: testRiderID, wantTitle: "Sam changed the stops"},
+		{name: "owner edited the stops: rider told", editor: testOwnerID, wantTitle: "Your stops were changed"},
+		{name: "stops and drop-off together are one trip", editor: testOwnerID, dropoff: true, wantTitle: "Your trip was changed"},
+		{name: "stops and pickup together are one trip", editor: testRiderID, pickup: true, wantTitle: "Sam changed the trip"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sender := NewFakeSender()
+			n := newTestNotifier(t, sender, &fakeVehicleNamer{name: "Blue Whale"})
+
+			evt := tripChangedEvent(tt.editor, tt.pickup, tt.dropoff)
+			ev, _ := evt.Payload.(events.RideTripChangedEvent)
+			ev.StopsChanged = true
+			place := events.RidePlace{Latitude: 1, Longitude: 2, Label: "Secret Place"}
+			ev.LegTarget = &place
+			n.handleTripChanged(events.NewEvent(ev))
+			n.Wait()
+
+			sent := sender.Sent()
+			if len(sent) != 1 {
+				t.Fatalf("sent %d, want 1 (the non-editor alone)", len(sent))
+			}
+			if sent[0].Title != tt.wantTitle {
+				t.Errorf("title = %q, want %q", sent[0].Title, tt.wantTitle)
+			}
+			// The leg target is P1 and must never reach a locked screen, even
+			// though the dispatcher needs it on the same event.
+			if strings.Contains(sent[0].Title+sent[0].Body, "Secret") {
+				t.Errorf("payload leaks the place: %q / %q", sent[0].Title, sent[0].Body)
+			}
+		})
+	}
+}
