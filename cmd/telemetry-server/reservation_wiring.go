@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -54,8 +55,15 @@ const (
 )
 
 // startReservationSweeper builds the sweeper over the already-constructed
-// dispatcher (whose leg-1 record seam and nav-push machinery it reuses) and
-// runs it in its own goroutine until ctx cancels.
+// dispatcher (whose leg-1 record seam and nav-push machinery it reuses), runs
+// it in its own goroutine until ctx cancels, AND RETURNS IT.
+//
+// The return is MYR-556: the owner's `dispatch-now` endpoint runs this same
+// sweeper's claimed dispatch path synchronously, so the instance has to reach
+// the HTTP routes. Note what that does NOT change — the returned value is the
+// identical object the ticker drives, which is exactly the point: the two entry
+// points share one claim, one store seam and one set of seams, so an on-demand
+// dispatch and a scheduled one cannot both win.
 //
 // It is started AFTER the leg-1 startup reconciliation in setupNavDispatcher:
 // the reconciler must be allowed to resolve dispatches orphaned by the
@@ -72,7 +80,7 @@ func startReservationSweeper(
 	vehicleRepo *store.VehicleRepo,
 	shareRepo *store.VehicleShareRepo,
 	logger *slog.Logger,
-) {
+) *dispatch.ReservationSweeper {
 	sweeper := dispatch.NewReservationSweeper(
 		dispatcher,
 		&reservationStoreAdapter{repo: rideRepo, vehicles: vehicleRepo, shares: shareRepo},
@@ -91,6 +99,7 @@ func startReservationSweeper(
 		logger.With(slog.String("component", "reservation-sweeper")),
 	).WithActivityEnder(activities)
 	go sweeper.Run(ctx)
+	return sweeper
 }
 
 // reservationStoreAdapter adapts the ride-request repo to
@@ -144,6 +153,9 @@ func (a *reservationStoreAdapter) ListDueReservations(
 			OwnerID:       rec.OwnerID,
 			Pickup:        pickup,
 			ScheduledFor:  rec.ScheduledFor,
+			// MYR-555: threaded through so the dispatch frame states the ride's
+			// CURRENT trip version rather than the wire's zero.
+			TripVersion: rec.TripVersion,
 		})
 	}
 	return out, nil
@@ -213,4 +225,97 @@ func (a *reservationStoreAdapter) RiderMayRequestRides(ctx context.Context, ride
 
 func (a *reservationStoreAdapter) ClaimReservationDispatch(ctx context.Context, rideID string) (bool, error) {
 	return a.repo.ClaimReservationDispatch(ctx, rideID)
+}
+
+// ListLapsedDispatches projects the SECOND ceiling pass (MYR-555): reservations
+// that were dispatched and never became a ride.
+//
+// The projection is trivial because the row is — three columns, no place, no
+// rider, no decrypt. That is the point of keeping it a separate seam from the
+// due list: this pass pushes nothing anywhere, so it should not pay for the
+// pickup coordinates the due pass exists to deliver.
+func (a *reservationStoreAdapter) ListLapsedDispatches(
+	ctx context.Context,
+	lapsedBefore time.Time,
+	limit int,
+) ([]dispatch.LapsedReservation, error) {
+	recs, err := a.repo.ListLapsedDispatches(ctx, lapsedBefore, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]dispatch.LapsedReservation, 0, len(recs))
+	for i := range recs {
+		out = append(out, dispatch.LapsedReservation{
+			RideRequestID: recs[i].ID,
+			VehicleID:     recs[i].VehicleID,
+			ScheduledFor:  recs[i].ScheduledFor,
+		})
+	}
+	return out, nil
+}
+
+func (a *reservationStoreAdapter) ExpireDispatchedReservation(ctx context.Context, rideID string) (bool, error) {
+	return a.repo.ExpireDispatchedReservation(ctx, rideID)
+}
+
+// dispatchNowAdapter joins the owner's `dispatch-now` endpoint to the
+// reservation sweeper (MYR-556).
+//
+// It exists because internal/telemetry must not import internal/dispatch — the
+// same rule that put RideActivityEnder and the store adapters here — and it does
+// exactly two things: reshape the handler's ride onto the sweeper's
+// DueReservation, and translate the coarse outcome back. No decision of any kind
+// lives in it. A nil sweeper (a deployment where reservation dispatch was not
+// composed) never reaches here: the wiring passes the option only when the
+// instance exists, so the handler's own nil check answers the 500.
+type dispatchNowAdapter struct {
+	sweeper *dispatch.ReservationSweeper
+}
+
+// DispatchNow reshapes and delegates. The pickup crosses into the dispatch
+// package here already decrypted — the identical crossing ListDueReservations
+// performs above, and for the identical reason: this is the layer that can see
+// both sides.
+func (a *dispatchNowAdapter) DispatchNow(
+	ctx context.Context,
+	ride telemetry.DispatchNowRide,
+) (telemetry.DispatchNowOutcome, error) {
+	pickup := events.RidePlace{
+		Latitude:  ride.Pickup.Latitude,
+		Longitude: ride.Pickup.Longitude,
+		Label:     ride.Pickup.Label,
+	}
+	// Address flattened to "" when absent, matching the due projection and the
+	// accept path's toEventPlace, so every caller hands runClaimedLeg an
+	// identically shaped place.
+	if ride.Pickup.Address != nil {
+		pickup.Address = *ride.Pickup.Address
+	}
+
+	res, err := a.sweeper.DispatchNow(ctx, &dispatch.DueReservation{
+		RideRequestID: ride.RideRequestID,
+		VehicleID:     ride.VehicleID,
+		RiderID:       ride.RiderID,
+		OwnerID:       ride.OwnerID,
+		Pickup:        pickup,
+		ScheduledFor:  ride.ScheduledFor,
+		TripVersion:   ride.TripVersion,
+	})
+	if err != nil {
+		return telemetry.DispatchNowDispatched, err
+	}
+
+	switch res {
+	case dispatch.NowVehicleBusy:
+		return telemetry.DispatchNowVehicleBusy, nil
+	case dispatch.NowAlreadyDispatched:
+		return telemetry.DispatchNowAlreadyDispatched, nil
+	case dispatch.NowDispatched:
+		return telemetry.DispatchNowDispatched, nil
+	}
+	// Unreachable while the two enumerations stay in step. Answering
+	// "dispatched" here would tell an owner their car left on the strength of a
+	// value nobody recognised, so it fails the other way and the handler renders
+	// a 500.
+	return telemetry.DispatchNowDispatched, fmt.Errorf("dispatch-now: unknown outcome %d", res)
 }

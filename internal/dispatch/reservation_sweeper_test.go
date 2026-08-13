@@ -171,6 +171,59 @@ type fakeReservationStore struct {
 	positions map[string][2]float64
 	posErr    error
 	posCnt    int
+
+	// MYR-555 lapsed-dispatch pass. Empty is the pre-MYR-555 world — the second
+	// SELECT returns nothing — so every pre-existing test keeps its meaning
+	// without being touched.
+	lapsed     []LapsedReservation
+	lapsedErr  error
+	lapsedCnt  int
+	lastLapsed time.Time
+	// expired records the ride ids whose ceiling verdict was recorded, in
+	// order. The map is the one-winner latch: a second write for the same id
+	// answers false, exactly as the guarded UPDATE does.
+	expired    []string
+	expiredSet map[string]bool
+	expireErr  error
+}
+
+func (f *fakeReservationStore) ListLapsedDispatches(
+	_ context.Context,
+	lapsedBefore time.Time,
+	_ int,
+) ([]LapsedReservation, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lapsedCnt++
+	f.lastLapsed = lapsedBefore
+	if f.lapsedErr != nil {
+		return nil, f.lapsedErr
+	}
+	return append([]LapsedReservation(nil), f.lapsed...), nil
+}
+
+func (f *fakeReservationStore) ExpireDispatchedReservation(_ context.Context, rideID string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.expireErr != nil {
+		return false, f.expireErr
+	}
+	if f.expiredSet == nil {
+		f.expiredSet = map[string]bool{}
+	}
+	if f.expiredSet[rideID] {
+		return false, nil
+	}
+	f.expiredSet[rideID] = true
+	f.expired = append(f.expired, rideID)
+	return true, nil
+}
+
+// expiredIDs returns the ride ids resolved by the lapsed pass, in order.
+func (f *fakeReservationStore) expiredIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.expired...)
 }
 
 func (f *fakeReservationStore) ListDueReservations(

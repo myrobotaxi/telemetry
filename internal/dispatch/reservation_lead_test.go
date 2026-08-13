@@ -243,8 +243,10 @@ func TestSweep_EarlyDispatchStillPublishesDue(t *testing.T) {
 	bus.mu.Lock()
 	evts := append([]events.Event(nil), bus.published...)
 	bus.mu.Unlock()
-	if len(evts) != 1 {
-		t.Fatalf("published %d events, want 1 ride.due", len(evts))
+	// Two seams since MYR-555: `ride.due` for the pushes and the summary
+	// `ride_status_changed` frame for an app that is already open.
+	if len(evts) != 2 {
+		t.Fatalf("published %d events, want ride.due plus the dispatch frame", len(evts))
 	}
 	due, ok := evts[0].Payload.(events.RideDueEvent)
 	if !ok {

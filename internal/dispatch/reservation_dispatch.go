@@ -44,6 +44,12 @@ type sweepResult struct {
 	expired    int // failed honestly: past the lateness ceiling
 	lost       int // claim lost to a peer sweeper, or the ride moved on
 	waiting    int // inside the horizon, before the computed leave-time
+	// lapsed counts the SECOND pass (MYR-555): rows that were dispatched and
+	// never driven, resolved at the same ceiling. Counted separately from
+	// `expired` because the two arms resolve different populations through
+	// different statements, and an operator watching one climb wants to know
+	// which.
+	lapsed int
 }
 
 func (r *sweepResult) count(d sweepDecision) {
@@ -110,7 +116,13 @@ func (s *ReservationSweeper) sweepOnce(ctx context.Context) sweepResult {
 	}
 	wg.Wait()
 
-	if res.due > 0 {
+	// MYR-555's second pass: reservations the FIRST pass can never see, because
+	// its `dispatched_at IS NULL` conjunct drops a row the moment it is claimed.
+	// Runs after the dispatch phase, not before it — a live dispatch must never
+	// wait behind a backlog of rows whose ride is already hours gone.
+	res.lapsed = s.sweepLapsed(ctx, now)
+
+	if res.due > 0 || res.lapsed > 0 {
 		s.logger.Info("reservation sweep",
 			slog.Int("due", res.due),
 			slog.Int("dispatched", res.dispatched),
@@ -118,6 +130,7 @@ func (s *ReservationSweeper) sweepOnce(ctx context.Context) sweepResult {
 			slog.Int("expired", res.expired),
 			slog.Int("lost", res.lost),
 			slog.Int("waiting", res.waiting),
+			slog.Int("lapsed", res.lapsed),
 		)
 	}
 	return res

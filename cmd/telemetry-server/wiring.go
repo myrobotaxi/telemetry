@@ -19,6 +19,7 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/commands"
 	"github.com/myrobotaxi/telemetry/internal/config"
 	"github.com/myrobotaxi/telemetry/internal/cryptox"
+	"github.com/myrobotaxi/telemetry/internal/dispatch"
 	"github.com/myrobotaxi/telemetry/internal/events"
 	"github.com/myrobotaxi/telemetry/internal/geocode"
 	"github.com/myrobotaxi/telemetry/internal/mask"
@@ -206,6 +207,12 @@ type httpRouteDeps struct {
 	activityNotifier *push.ActivityNotifier
 	// shareRepo backs the MYR-184 vehicle-sharing endpoints.
 	shareRepo *store.VehicleShareRepo
+	// reservationSweeper backs the MYR-556 dispatch-now endpoint. It is the
+	// SAME instance the 30-second sweep drives, deliberately: the two entry
+	// points must share one claim and one set of seams, or an on-demand
+	// dispatch and a scheduled one could both win. Nil in a test that does not
+	// wire dispatch, which leaves the endpoint answering 500.
+	reservationSweeper *dispatch.ReservationSweeper
 	// inviteLinks signs the MYR-368 `shareUrl` on pending invite rows. Never
 	// nil in practice — resolveInviteLinkSigner refuses to boot without a
 	// key outside --dev — but the handler tolerates nil by omitting the
@@ -382,12 +389,7 @@ func setupDebugFieldsEndpoint(deps httpRouteDeps) {
 // parties (rider + owner). The vehicles reader supplies the create-time
 // vehicle access check + ownerId derivation.
 func setupRideRequestEndpoints(deps httpRouteDeps, vehicles telemetry.VehicleSnapshotReader) {
-	rideHandler := telemetry.NewRideRequestHandler(
-		deps.authenticator,
-		vehicles,
-		&rideRequestStoreAdapter{repo: deps.rideRepo},
-		deps.bus,
-		deps.logger.With(slog.String("component", "ride-request")),
+	rideOpts := []telemetry.RideRequestOption{
 		// MYR-184: a rider holding a `rides` share may request a ride on a
 		// car they do not own. This is the SEPARATE code path the read-side
 		// access-set widening does not cover.
@@ -417,6 +419,22 @@ func setupRideRequestEndpoints(deps httpRouteDeps, vehicles telemetry.VehicleSna
 		// so bust their cached one — the redeem path's rule, for the redeem
 		// path's reason.
 		telemetry.WithRideAccessInvalidator(deps.accessInvalidator),
+	}
+	// MYR-556: the dispatch-now seam, wired only when reservation dispatch was
+	// actually composed. Passing an adapter over a nil sweeper would turn a
+	// deployment gap into a nil-pointer panic on a live request, where the
+	// handler's own nil check turns it into an honest 500.
+	if deps.reservationSweeper != nil {
+		rideOpts = append(rideOpts, telemetry.WithReservationDispatcher(
+			&dispatchNowAdapter{sweeper: deps.reservationSweeper}))
+	}
+	rideHandler := telemetry.NewRideRequestHandler(
+		deps.authenticator,
+		vehicles,
+		&rideRequestStoreAdapter{repo: deps.rideRepo},
+		deps.bus,
+		deps.logger.With(slog.String("component", "ride-request")),
+		rideOpts...,
 	)
 	deps.srv.HandleFunc("POST /api/ride-requests", rideHandler.ServeCreate)
 	deps.srv.HandleFunc("GET /api/ride-requests", rideHandler.ServeList)
@@ -438,6 +456,14 @@ func setupRideRequestEndpoints(deps httpRouteDeps, vehicles telemetry.VehicleSna
 	deps.srv.HandleFunc("POST /api/ride-requests/{id}/picked-up", rideHandler.ServePickedUp)
 	deps.srv.HandleFunc("POST /api/ride-requests/{id}/start", rideHandler.ServeStart)
 	deps.srv.HandleFunc("POST /api/ride-requests/{id}/dropped-off", rideHandler.ServeDroppedOff)
+
+	// MYR-556: START EARLY (rest-api.md §7.25). A reservation's car leaves at a
+	// computed leave-time; this is the owner's manual override for when
+	// everybody is ready and only the clock is not. OWNER-only — the rider is a
+	// party and reaches a 403, a stranger a 404 — and it changes no status: it
+	// runs the reservation sweeper's own claimed dispatch path and answers the
+	// refreshed ride.
+	deps.srv.HandleFunc("POST /api/ride-requests/{id}/dispatch-now", rideHandler.ServeDispatchNow)
 
 	// MYR-172: the rider's Live Activity push token (rest-api.md §7.21).
 	// RIDER-only — the owner is a party and reaches a 403, a stranger a 404.
