@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/events"
 )
@@ -29,8 +30,19 @@ func TestTripChanged_ReshareDecisionTable(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fs := &fakeNavVerifyStore{status: tt.ev.Status}
-			d, exec, _, _ := verifyHarness(fs, &fakeBus{})
+			// Deliberately WITHOUT WithNavVerify: the verifier is its own
+			// (tested) machinery on an untracked goroutine, and wiring it here
+			// would race the executor read below. armNavVerify no-ops on nil,
+			// so the count is exactly the decision table's own shares.
+			exec := &fakeExecutor{}
+			d := New(
+				&fakeVehicleResolver{vin: "5YJ3E1EA7KF000001"},
+				&fakeTokenSource{token: "tok"},
+				exec,
+				&fakeStore{},
+				Config{Enabled: true, MaxRetries: 0, Backoff: time.Millisecond},
+				nil,
+			)
 			tt.ev.RideRequestID, tt.ev.VehicleID, tt.ev.OwnerID = "cride1", "cveh1", "cowner1"
 
 			d.processTripChanged(context.Background(), tt.ev)
