@@ -79,14 +79,14 @@ func (h *RideRequestHandler) serveUpcomingForVehicle(w http.ResponseWriter, r *h
 		return
 	}
 
-	h.writeJSON(w, http.StatusOK, buildUpcomingRidePage(page))
+	h.writeJSON(w, http.StatusOK, h.buildUpcomingRidePage(page))
 }
 
 // buildUpcomingRidePage projects the slice into the unchanged
 // RideRequestsListResponse envelope, anchoring nextCursor on the reservation
 // instant rather than createdAt — the column this view is ordered by.
-func buildUpcomingRidePage(page RideRequestListPage) rideRequestsPageResponse {
-	return buildRidePageAnchoredBy(page, func(rec RideRequestData) (anchor cursorAnchor) {
+func (h *RideRequestHandler) buildUpcomingRidePage(page RideRequestListPage) rideRequestsPageResponse {
+	return h.buildRidePageAnchoredBy(page, func(rec RideRequestData) (anchor cursorAnchor) {
 		if rec.ScheduledFor != nil {
 			return cursorAnchor{At: *rec.ScheduledFor, ID: rec.ID}
 		}

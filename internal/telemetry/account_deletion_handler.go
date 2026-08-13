@@ -136,6 +136,10 @@ func (h *AccountDeletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		// A COUNT only. The places themselves are P1 (a home address) and
 		// never reach a log line, here or anywhere else.
 		slog.Int("saved_places_deleted", result.Counts.SavedPlacesDeleted),
+		// A COUNT only (MYR-540). Which rides this person had joined is
+		// somebody else's ride, and naming them here would put a third party's
+		// ride ids in the deleted account's log line.
+		slog.Int("ride_memberships_deleted", result.Counts.RideMembershipsDeleted),
 		slog.Int("refresh_tokens_revoked", result.Counts.RefreshTokensRevoked),
 	)
 

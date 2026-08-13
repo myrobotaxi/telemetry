@@ -45,8 +45,11 @@ func (h *RideRequestHandler) ServeStart(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if userID != rec.RiderID {
-		// The owner is a party but start is rider-only; non-parties were
-		// already 404'd by loadForParty.
+		// The owner is a party but start is rider-only, and since MYR-540 so is
+		// a joined group member: "we're in, go" is one person's call, and the
+		// requester is the one whose ride it is. Same reasoning as the cancel
+		// refusal — reading and editing the trip widened, ending and starting it
+		// did not. Non-parties were already 404'd by loadForParty.
 		h.writeError(w, http.StatusForbidden, wserrors.ErrCodePermissionDenied, "only the rider may start this ride")
 		return
 	}
@@ -54,7 +57,7 @@ func (h *RideRequestHandler) ServeStart(w http.ResponseWriter, r *http.Request) 
 	// Idempotent no-op: the ride is already underway. A retried start returns
 	// the current state (200) and does NOT re-publish the dropoff dispatch seam.
 	if rec.Status == rideStatusEnroute {
-		h.writeJSON(w, http.StatusOK, toRideRequestWire(rec))
+		h.writeJSON(w, http.StatusOK, h.rideWire(rec))
 		return
 	}
 
@@ -99,7 +102,7 @@ func (h *RideRequestHandler) ServeStart(w http.ResponseWriter, r *http.Request) 
 	// exactly once per start even under a double-tap / two-device race.
 	h.publish(ctx, buildRideStartedEvent(updated, target))
 
-	h.writeJSON(w, http.StatusOK, toRideRequestWire(updated))
+	h.writeJSON(w, http.StatusOK, h.rideWire(updated))
 }
 
 // withPromotedStop reflects the promotion onto the record the response is built

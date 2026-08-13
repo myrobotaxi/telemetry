@@ -72,6 +72,33 @@ type rideRequestWire struct {
 	// TripVersion (MYR-541): omitted at 0 — the contract reads absence as 0,
 	// so never-edited rows serialize byte-identically to pre-MYR-541 ones.
 	TripVersion int `json:"tripVersion,omitempty"`
+	// GroupRide (MYR-540) — optional and additive, OMITTED when false, because
+	// the contract's rule is that ABSENT MEANS FALSE. That is what keeps every
+	// pre-MYR-540 row byte-identical without a rewrite, and it is why this is a
+	// bare bool with omitempty rather than a pointer: there is no third state.
+	GroupRide bool `json:"groupRide,omitempty"`
+	// ShareURL is the complete signed join link (MYR-540), emitted only on an
+	// accepted-or-later group ride whose code is still emittable — see
+	// rideShareURL for the four presence rules.
+	//
+	// P1 AND BEARER, exactly as ShareInvite.shareUrl is: it CONTAINS the code,
+	// so never log it, never put it in an error envelope, and deliver it only
+	// on the party-scoped REST surfaces — never on a broadcast frame.
+	ShareURL string `json:"shareUrl,omitempty"`
+	// Members are the joiners riding along (MYR-540). OMITTED when there are
+	// none, so an old solo ride needs no `members: []` to be correct; absent and
+	// empty mean the same thing. The requester is deliberately NOT in the list.
+	// P1 — every entry carries a person's first name.
+	Members []rideMemberWire `json:"members,omitempty"`
+}
+
+// rideMemberWire is the wire RideMember ($defs.RideMember, MYR-540) —
+// deliberately the smallest shape that lets a surface render the group: an
+// identity to compare against your own account, and a first name to print.
+// Both keys are REQUIRED, so neither carries omitempty.
+type rideMemberWire struct {
+	UserID    string `json:"userId"`
+	FirstName string `json:"firstName"`
 }
 
 // rideActiveErrorResponse is the 409 `ride_active` body (MYR-230). It carries
@@ -107,4 +134,10 @@ type rideRequestCreateBody struct {
 	PassengerName  *string        `json:"passengerName"`
 	PassengerPhone *string        `json:"passengerPhone"`
 	ScheduledFor   *string        `json:"scheduledFor"`
+	// GroupRide (MYR-540) is the toggle the requester set before booking. A
+	// pointer so an absent key is distinguishable from an explicit `false` at
+	// the decode boundary — both mean the same thing here, but the create body
+	// is DisallowUnknownFields-strict and a bare bool would have made an absent
+	// key indistinguishable from a client that sent one it did not mean.
+	GroupRide *bool `json:"groupRide"`
 }

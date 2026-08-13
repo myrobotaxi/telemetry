@@ -122,6 +122,22 @@ func (h *AccountDeletionHandler) run(ctx context.Context, userID string) (accoun
 	}
 	counts.RidesCancelled = cancelled
 
+	// (6b) Group-ride MEMBERSHIPS (MYR-540) — the same fact from the other side.
+	// Step 6 ends the rides this person BOOKED; this ends the rides they merely
+	// JOINED, which belong to somebody else and are still running.
+	//
+	// It is a DELETE and it has to be, because the row is not inert: while it
+	// stands, the deleted account is a name in a live ride's `members` array and
+	// — the part that matters — an entry in the access set that admits a
+	// WebSocket to that ride's vehicle. Leaving it for the FK cascade would work
+	// only in the direction that does not need help: the cascade fires when the
+	// RIDE goes, and the ride here is not going anywhere.
+	memberships, err := h.sumOverScope(ctx, scope, h.deps.Data.DeleteRideMemberships)
+	if err != nil {
+		return accountDeletionResult{}, &accountDeletionError{step: "delete_ride_memberships", cause: err}
+	}
+	counts.RideMembershipsDeleted = memberships
+
 	// (7) Push devices — the address book goes whole.
 	devices, err := h.sumOverScope(ctx, scope, h.deps.Data.DeletePushDevices)
 	if err != nil {

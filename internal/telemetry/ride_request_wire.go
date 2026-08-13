@@ -12,8 +12,18 @@ import (
 // toRideRequestWire projects the store-layer aggregate onto the wire
 // RideRequest object. Optional timestamps/pointers become omitted keys when
 // absent. All timestamps are RFC 3339 UTC.
-func toRideRequestWire(d RideRequestData) rideRequestWire {
+//
+// signer mints RideRequest.shareUrl (MYR-540) and may be nil — a deployment
+// with no signing key omits the key rather than emitting an unsigned link the
+// landing shell would bounce. `now` is passed rather than read here so the
+// shareUrl presence rules, whose last clause is a linger past the ride's end,
+// stay a pure function of their inputs and are table-testable at a fixed
+// instant.
+func toRideRequestWire(d RideRequestData, signer *InviteLinkSigner, now time.Time) rideRequestWire {
 	return rideRequestWire{
+		GroupRide:             d.GroupRide,
+		ShareURL:              rideShareURL(d, signer, now),
+		Members:               toRideMembersWire(d.Members),
 		ID:                    d.ID,
 		RiderID:               d.RiderID,
 		OwnerID:               d.OwnerID,
@@ -37,6 +47,24 @@ func toRideRequestWire(d RideRequestData) rideRequestWire {
 		TripVersion:           d.TripVersion,
 		CancelledBy:           d.CancelledBy,
 	}
+}
+
+// toRideMembersWire projects the joiner list in join order (MYR-540). A ride
+// with no joiners projects to nil — the omitted key, which the contract reads
+// as "no joiners" exactly as it reads an empty array, and which keeps every ride
+// written before group rides existed byte-identical on the wire.
+func toRideMembersWire(members []RideMemberData) []rideMemberWire {
+	if len(members) == 0 {
+		return nil
+	}
+	out := make([]rideMemberWire, 0, len(members))
+	for i := range members {
+		out = append(out, rideMemberWire{
+			UserID:    members[i].UserID,
+			FirstName: members[i].FirstName,
+		})
+	}
+	return out
 }
 
 // toRidePlaceWire projects a place; a nil/empty Address drops the key.
@@ -131,6 +159,14 @@ func validateCreateBody(body rideRequestCreateBody, now time.Time) (RideRequestC
 		VehicleID: body.VehicleID,
 		Pickup:    pickup,
 		Dropoff:   dropoff,
+	}
+
+	// groupRide (MYR-540): OPTIONAL, and an absent key is false — the contract's
+	// own reading. There is nothing to validate; the flag says only what the
+	// ride will do on accept, and no body in this contract changes it
+	// afterwards.
+	if body.GroupRide != nil {
+		in.GroupRide = *body.GroupRide
 	}
 
 	// passengerName/passengerPhone: OPTIONAL, minLength 1 when present.

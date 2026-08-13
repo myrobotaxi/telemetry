@@ -45,6 +45,7 @@ type AccountDataDeleter interface {
 	ScrubSharesReceivedLabel(ctx context.Context, userID string) (int, error)
 	DeletePushDevices(ctx context.Context, userID string) (int, error)
 	DeleteSavedPlaces(ctx context.Context, userID string) (int, error)
+	DeleteRideMemberships(ctx context.Context, userID string) (int, error)
 	RevokeRefreshTokens(ctx context.Context, userID string) (int, error)
 	DeleteIdentity(ctx context.Context, scope AccountDeletionScope, counts AccountDeletionCounts) (AccountIdentityOutcome, error)
 }
@@ -78,14 +79,18 @@ func (s AccountDeletionScope) Converged() bool {
 // AccountDeletionCounts is the P0-only audit tally, mirroring
 // store.AccountDeletionCounts field for field (the cmd adapter converts).
 type AccountDeletionCounts struct {
-	VehicleCount         int
-	DriveCount           int
-	RidesCancelled       int
-	SharesRevoked        int
-	ShareLabelsScrubbed  int
-	PushDevicesDeleted   int
-	SavedPlacesDeleted   int
-	RefreshTokensRevoked int
+	VehicleCount        int
+	DriveCount          int
+	RidesCancelled      int
+	SharesRevoked       int
+	ShareLabelsScrubbed int
+	PushDevicesDeleted  int
+	SavedPlacesDeleted  int
+	// RideMembershipsDeleted counts the GROUP-RIDE memberships the account
+	// held (MYR-540) — the rides they JOINED, as against RidesCancelled, the
+	// rides they BOOKED.
+	RideMembershipsDeleted int
+	RefreshTokensRevoked   int
 }
 
 // AccountIdentityOutcome mirrors store.AccountIdentityResult.

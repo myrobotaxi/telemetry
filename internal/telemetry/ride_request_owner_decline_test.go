@@ -391,3 +391,7 @@ func (s *racingDeclineStore) UpdateTrip(context.Context, string, RideTripEditDat
 func (s *racingDeclineStore) StartFirstStop(context.Context, string) (*RideStopData, error) {
 	return nil, nil //nolint:nilnil // "this trip has no stops" is the store seam's ordinary answer
 }
+
+func (s *racingDeclineStore) JoinByCode(context.Context, string, string) (RideRequestData, bool, error) {
+	return RideRequestData{}, false, errors.New("not used")
+}

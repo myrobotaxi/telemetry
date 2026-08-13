@@ -104,7 +104,7 @@ func (h *RideRequestHandler) ServeIncoming(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	h.writeJSON(w, http.StatusOK, buildRidePage(page))
+	h.writeJSON(w, http.StatusOK, h.buildRidePage(page))
 }
 
 // ServeAccept handles POST /api/ride-requests/{id}/accept. Owner-only;
@@ -147,7 +147,7 @@ func (h *RideRequestHandler) ServeAccept(w http.ResponseWriter, r *http.Request)
 	// a double-tap / two-device race.
 	h.publish(ctx, buildRideAcceptedEvent(updated))
 
-	h.writeJSON(w, http.StatusOK, toRideRequestWire(updated))
+	h.writeJSON(w, http.StatusOK, h.rideWire(updated))
 }
 
 // rideAcceptableFrom is the allowed-from set for an owner ACCEPT; must stay in

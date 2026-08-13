@@ -81,7 +81,7 @@ func (h *RideRequestHandler) serveActiveForVehicle(w http.ResponseWriter, r *htt
 	// The unchanged RideRequestsListResponse envelope with the unchanged
 	// (createdAt, id) anchor — buildRidePage, byte-for-byte what the default
 	// feed emits.
-	h.writeJSON(w, http.StatusOK, buildRidePage(page))
+	h.writeJSON(w, http.StatusOK, h.buildRidePage(page))
 }
 
 // parseVehicleFilter validates a vehicle-id query param on the owner feed.

@@ -63,7 +63,7 @@ func (h *RideRequestHandler) ServePickedUp(w http.ResponseWriter, r *http.Reques
 
 	// Idempotent no-op: the owner already confirmed pickup.
 	if rec.Status == rideStatusArrived {
-		h.writeJSON(w, http.StatusOK, toRideRequestWire(rec))
+		h.writeJSON(w, http.StatusOK, h.rideWire(rec))
 		return
 	}
 	// Only accepted → arrived is legal. Friendly fast-path message; the guarded
@@ -79,7 +79,7 @@ func (h *RideRequestHandler) ServePickedUp(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	h.writeJSON(w, http.StatusOK, toRideRequestWire(updated))
+	h.writeJSON(w, http.StatusOK, h.rideWire(updated))
 }
 
 // ServeDroppedOff handles POST /api/ride-requests/{id}/dropped-off. Owner-only;
@@ -98,7 +98,7 @@ func (h *RideRequestHandler) ServeDroppedOff(w http.ResponseWriter, r *http.Requ
 
 	// Idempotent no-op: the ride is already completed.
 	if rec.Status == rideStatusCompleted {
-		h.writeJSON(w, http.StatusOK, toRideRequestWire(rec))
+		h.writeJSON(w, http.StatusOK, h.rideWire(rec))
 		return
 	}
 	// Only enroute → completed is legal. Friendly fast-path message; the guarded
@@ -112,7 +112,7 @@ func (h *RideRequestHandler) ServeDroppedOff(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	h.writeJSON(w, http.StatusOK, toRideRequestWire(updated))
+	h.writeJSON(w, http.StatusOK, h.rideWire(updated))
 }
 
 // ridePickedUpFrom / rideDroppedOffFrom are the owner handshake allowed-from

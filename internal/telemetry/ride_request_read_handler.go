@@ -25,7 +25,7 @@ func (h *RideRequestHandler) ServeGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	h.writeJSON(w, http.StatusOK, toRideRequestWire(rec))
+	h.writeJSON(w, http.StatusOK, h.rideWire(rec))
 }
 
 // ServeList handles GET /api/ride-requests — the authenticated rider's own
@@ -51,7 +51,7 @@ func (h *RideRequestHandler) ServeList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.writeJSON(w, http.StatusOK, buildRidePage(page))
+	h.writeJSON(w, http.StatusOK, h.buildRidePage(page))
 }
 
 // parseListQuery validates the shared `limit` and `cursor` query params
@@ -103,8 +103,8 @@ type cursorAnchor struct {
 // nextCursor from the last item's (createdAt, id) when more pages remain —
 // the default `createdAt DESC` ordering of the rider list and the owner
 // incoming feed.
-func buildRidePage(page RideRequestListPage) rideRequestsPageResponse {
-	return buildRidePageAnchoredBy(page, func(rec RideRequestData) cursorAnchor {
+func (h *RideRequestHandler) buildRidePage(page RideRequestListPage) rideRequestsPageResponse {
+	return h.buildRidePageAnchoredBy(page, func(rec RideRequestData) cursorAnchor {
 		return cursorAnchor{At: rec.CreatedAt, ID: rec.ID}
 	})
 }
@@ -112,10 +112,10 @@ func buildRidePage(page RideRequestListPage) rideRequestsPageResponse {
 // buildRidePageAnchoredBy projects a store page into the wire envelope,
 // deriving nextCursor from the last item via `anchorOf`. Items is always a
 // non-nil slice so it marshals to `[]`, never `null`.
-func buildRidePageAnchoredBy(page RideRequestListPage, anchorOf func(RideRequestData) cursorAnchor) rideRequestsPageResponse {
+func (h *RideRequestHandler) buildRidePageAnchoredBy(page RideRequestListPage, anchorOf func(RideRequestData) cursorAnchor) rideRequestsPageResponse {
 	items := make([]rideRequestWire, 0, len(page.Items))
 	for i := range page.Items {
-		items = append(items, toRideRequestWire(page.Items[i]))
+		items = append(items, h.rideWire(page.Items[i]))
 	}
 
 	var nextCursor *string
