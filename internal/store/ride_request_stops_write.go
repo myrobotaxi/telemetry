@@ -194,6 +194,20 @@ func (r *RideRequestRepo) replaceStops(
 	// An edit that gives a ride ALREADY UNDER WAY its first stop has just moved
 	// the current leg's target; promoting the earliest upcoming stop is what
 	// makes the arrival detector watch it and the re-share aim at it.
+	//
+	// THE ONLY GAP THIS CAN BE CLOSING IS "no current stop" (MYR-550). The
+	// symmetric case — a replacement that leaves the previous current stop
+	// ABSENT — is unreachable, because planStopReplacement above has already
+	// refused it: an omitted stop whose status is Frozen() (current or
+	// completed) is ErrRideRequestConflict, so control never arrives here with
+	// a current stop deleted. That is why one idempotent promote is the whole
+	// fix and there is no "demote/re-promote" arm to go with it.
+	//
+	// The window is enroute ONLY, on purpose. A requested/accepted/arrived ride
+	// has not started, its stops are all legitimately upcoming, and promoting
+	// one early would point the MYR-538 detector at a stop while the car is
+	// still driving to the PICKUP. Promotion for that phase belongs to
+	// StartFirstStop and stays there.
 	if status == RideRequestStatusEnroute {
 		if _, err := r.promoteFirstUpcomingStop(ctx, tx, rideID); err != nil {
 			return nil, err
