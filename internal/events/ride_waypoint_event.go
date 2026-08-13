@@ -6,15 +6,43 @@ package events
 // it, edited its trip. This one reports something the CAR did, observed from
 // telemetry rather than from a request.
 
-// Waypoint labels carried on RideWaypointArrivedEvent. Only the pickup is
-// detected in v1; the drop-off is deliberately left to the owner's
-// "Dropped off" tap, because ending a ride has consequences (billing, history,
-// the Live Activity's dismissal) that a false positive cannot be walked back
-// from, whereas an early "your car is here" costs a rider a short wait.
+// Waypoint labels carried on RideWaypointArrivedEvent. Each names WHICH of a
+// ride's places the car was observed to reach.
+//
+// The drop-off is deliberately still not a lifecycle event: reaching the
+// destination publishes WaypointDestination, and NOTHING completes the ride —
+// that stays the owner's "Dropped off" tap, because ending a ride has
+// consequences (billing, history, the Live Activity's dismissal) a false
+// positive cannot be walked back from, whereas an early "your car is here"
+// costs a rider a short wait. An intermediate STOP is the opposite case: its
+// advance is reversible in practice (the next leg is re-shared, not billed) and
+// nothing at all happens without it, so it IS acted on.
 const (
 	// WaypointPickup is leg 1's endpoint — the rider's pickup place.
 	WaypointPickup = "pickup"
+	// WaypointDestination is the trip's final drop-off (MYR-539). Published for
+	// consumers that want the moment (MYR-542's flash); it advances nothing.
+	WaypointDestination = "destination"
+	// waypointStopPrefix prefixes an intermediate stop's label, which carries
+	// the stop id: "stop:crs0123…". The id is on the label rather than in a
+	// second field because the waypoint IS the identity of the place reached,
+	// and a consumer that does not know about stops treats every stop label as
+	// one unrecognized value rather than as a field it must learn.
+	waypointStopPrefix = "stop:"
 )
+
+// WaypointStop builds the label for an intermediate stop.
+func WaypointStop(stopID string) string { return waypointStopPrefix + stopID }
+
+// StopIDFromWaypoint returns the stop id a waypoint label carries, and whether
+// the label named a stop at all. The pickup and the destination answer false —
+// they are the ride's own endpoints, not members of the stop list.
+func StopIDFromWaypoint(waypoint string) (string, bool) {
+	if len(waypoint) <= len(waypointStopPrefix) || waypoint[:len(waypointStopPrefix)] != waypointStopPrefix {
+		return "", false
+	}
+	return waypoint[len(waypointStopPrefix):], true
+}
 
 // RideWaypointArrivedEvent announces that a vehicle carrying out a ride has
 // been OBSERVED to reach one of that ride's waypoints: it is parked inside the
@@ -42,7 +70,9 @@ type RideWaypointArrivedEvent struct {
 	VehicleID     string
 	RiderID       string
 	OwnerID       string
-	// Waypoint is the leg endpoint the car reached — WaypointPickup in v1.
+	// Waypoint is the leg endpoint the car reached: WaypointPickup,
+	// WaypointStop(id) for an intermediate stop, or WaypointDestination
+	// (MYR-539). Consumers MUST tolerate a label they do not recognize.
 	Waypoint string
 }
 

@@ -41,9 +41,11 @@ type Writer interface {
 // proves the row held it.
 const statusAccepted = "accepted"
 
-// Detector watches decoded telemetry frames and advances a ride to `arrived`
-// when its car is observed parked at the pickup. See the package doc for the
-// rule and for why it is tuned to fire late rather than early.
+// Detector watches decoded telemetry frames and reports that a ride's car has
+// reached one of that ride's waypoints — advancing the ride to `arrived` when
+// that waypoint is the PICKUP, and publishing the observation alone for a stop
+// or the destination (MYR-539). See the package doc for the rule and for why it
+// is tuned to fire late rather than early.
 type Detector struct {
 	bus        events.Bus
 	cfg        Config
@@ -51,9 +53,10 @@ type Detector struct {
 	writer     Writer
 	logger     *slog.Logger
 
-	// tracks holds per-ride dwell state, keyed by ride-request id. A plain map
-	// with no mutex: the bus delivers serially per subscription, so this and
-	// the cache are only ever touched from the handler goroutine.
+	// tracks holds per-WAYPOINT dwell state, keyed by Candidate.trackKey (ride
+	// + waypoint). A plain map with no mutex: the bus delivers serially per
+	// subscription, so this and the cache are only ever touched from the
+	// handler goroutine.
 	tracks map[string]*track
 
 	// now is the clock used for candidate-cache ageing ONLY. The dwell is
@@ -150,15 +153,16 @@ func (d *Detector) handleFrame(evt events.Event) {
 		return
 	}
 
-	tr := d.tracks[cand.RideRequestID]
+	key := cand.trackKey()
+	tr := d.tracks[key]
 	if tr == nil {
 		tr = &track{}
-		d.tracks[cand.RideRequestID] = tr
+		d.tracks[key] = tr
 	}
 	if tr.latched {
 		return
 	}
-	if !tr.observe(fix, cand.PickupLatitude, cand.PickupLongitude, d.cfg) {
+	if !tr.observe(fix, cand.TargetLatitude, cand.TargetLongitude, d.cfg) {
 		return
 	}
 
@@ -172,8 +176,11 @@ func (d *Detector) handleFrame(evt events.Event) {
 	}
 }
 
-// pruneTracks drops dwell state for rides that have left the candidate set —
-// advanced (by this detector or by the owner), cancelled, or aged out.
+// pruneTracks drops dwell state for (ride, waypoint) pairs that have left the
+// candidate set — advanced (by this detector, by the leg advance, or by the
+// owner), cancelled, or aged out. A ride whose CURRENT stop moved on leaves its
+// old waypoint behind here and starts a fresh track for the new one, which is
+// exactly how one ride comes to detect several arrivals in sequence.
 //
 // Only ever called with a FRESHLY READ snapshot. Pruning against a stale or
 // empty one would discard a latch while the ride was still live, and the next
@@ -185,11 +192,11 @@ func (d *Detector) pruneTracks(byVIN map[string]Candidate) {
 	}
 	live := make(map[string]struct{}, len(byVIN))
 	for _, c := range byVIN {
-		live[c.RideRequestID] = struct{}{}
+		live[c.trackKey()] = struct{}{}
 	}
-	for rideID := range d.tracks {
-		if _, ok := live[rideID]; !ok {
-			delete(d.tracks, rideID)
+	for key := range d.tracks {
+		if _, ok := live[key]; !ok {
+			delete(d.tracks, key)
 		}
 	}
 }
@@ -210,10 +217,35 @@ const (
 	outcomeUnavailable
 )
 
-// advance runs the guarded transition and, on a win, publishes both events.
+// advance resolves one completed dwell. What that MEANS depends on the
+// waypoint, and the asymmetry is the whole MYR-538 argument carried forward:
+//
+//   - PICKUP: run the guarded accepted → arrived transition and publish both
+//     events. The status write is what a false positive could not be walked
+//     back from, so it keeps every one of its guards.
+//   - STOP / DESTINATION (MYR-539): publish the waypoint event and write NO
+//     status. A stop's advance is the leg-advance consumer's business (it moves
+//     stop statuses and re-points the dash, both reversible in practice), and
+//     the DESTINATION deliberately completes nothing at all — dropped-off stays
+//     the owner's tap, because ending a ride has consequences a wrong guess
+//     cannot undo. The event exists there only so MYR-542 can flash the lights.
 func (d *Detector) advance(cand Candidate, fix Fix) outcome {
 	ctx, cancel := context.WithTimeout(d.ctx, d.cfg.Timeout)
 	defer cancel()
+
+	if !cand.isPickup() {
+		d.logger.Info("auto-arrival: car reached a ride waypoint",
+			slog.String("ride_id", cand.RideRequestID),
+			slog.String("vehicle_id", cand.VehicleID),
+			slog.String("vin", redactVIN(cand.VIN)),
+			slog.String("waypoint", cand.Waypoint),
+			slog.Duration("dwell", d.cfg.Dwell),
+			slog.Float64("radius_meters", d.cfg.RadiusMeters),
+			slog.Float64("car_miles_to_arrival", milesOrMissing(fix.MilesToArrival)),
+		)
+		d.publishWaypoint(ctx, cand)
+		return outcomeAdvanced
+	}
 
 	updated, err := d.writer.MarkArrived(ctx, cand.RideRequestID)
 	switch {
@@ -243,14 +275,20 @@ func (d *Detector) advance(cand Candidate, fix Fix) outcome {
 	)
 
 	d.publish(ctx, events.NewEvent(withPreviousStatus(updated)))
+	d.publishWaypoint(ctx, cand)
+	return outcomeAdvanced
+}
+
+// publishWaypoint emits the "the car itself is here" seam for whichever place
+// the candidate was watching.
+func (d *Detector) publishWaypoint(ctx context.Context, cand Candidate) {
 	d.publish(ctx, events.NewEvent(events.RideWaypointArrivedEvent{
 		RideRequestID: cand.RideRequestID,
 		VehicleID:     cand.VehicleID,
 		RiderID:       cand.RiderID,
 		OwnerID:       cand.OwnerID,
-		Waypoint:      events.WaypointPickup,
+		Waypoint:      cand.Waypoint,
 	}))
-	return outcomeAdvanced
 }
 
 // withPreviousStatus stamps the from-status onto the status event. Split out so

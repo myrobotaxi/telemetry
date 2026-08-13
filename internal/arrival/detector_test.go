@@ -147,8 +147,9 @@ func testCandidate() Candidate {
 		RiderID:         "cusr_rider",
 		OwnerID:         "cusr_owner",
 		VIN:             testVIN,
-		PickupLatitude:  pickupLat,
-		PickupLongitude: pickupLng,
+		Waypoint:        events.WaypointPickup,
+		TargetLatitude:  pickupLat,
+		TargetLongitude: pickupLng,
 	}
 }
 
