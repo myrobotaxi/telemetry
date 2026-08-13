@@ -63,7 +63,10 @@ func (b *Broadcaster) handleRideStatusChanged(_ context.Context, event events.Ev
 		Status:           payload.Status,
 		RequesterName:    payload.RequesterName,
 		RescheduleStatus: payload.RescheduleStatus,
-		Timestamp:        payload.UpdatedAt.UTC().Format(time.RFC3339),
+		// MYR-541: the trip-shape version — a client holding a lower one
+		// refetches the record; the frame itself never carries places.
+		TripVersion: payload.TripVersion,
+		Timestamp:   payload.UpdatedAt.UTC().Format(time.RFC3339),
 	})
 	if err != nil {
 		b.logger.Error("broadcaster.handleRideStatusChanged: marshal failed",

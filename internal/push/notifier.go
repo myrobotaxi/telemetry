@@ -178,6 +178,7 @@ func (n *Notifier) Subscribe(bus events.Bus) error {
 		{events.TopicRideStatusChanged, n.handleStatusChanged},
 		{events.TopicRideDue, n.handleDue},
 		{events.TopicRideNavUnapplied, n.handleNavUnapplied},
+		{events.TopicRideTripChanged, n.handleTripChanged},
 	}
 
 	for _, reg := range registrations {
@@ -299,6 +300,13 @@ func (n *Notifier) handleStatusChanged(evt events.Event) {
 	// Cheap checks before spending a worker slot: most transitions are silent
 	// for both parties. Which transitions speak does not depend on scheduling
 	// or on either name, so the probes can pass empty values.
+	// MYR-541: a TRIP-EDIT publish re-carries the ride's unchanged status for
+	// the WS frame's sake; re-firing the status copy for it would tell a rider
+	// "Your ride is confirmed" every time somebody moved the drop-off. The
+	// trip-changed seam carries this event's own copy.
+	if ev.TripEdit {
+		return
+	}
 	scheduled := ev.ScheduledFor != nil
 	byOwnerCancel := ownerCancelled(ev.Status, ev.CancelledBy)
 	byRiderCancel := riderCancelled(ev.Status, ev.CancelledBy, ev.PreviousStatus)
@@ -409,6 +417,40 @@ func (n *Notifier) handleNavUnapplied(evt events.Event) {
 			topic:    string(evt.Topic),
 			category: CategoryRideLifecycle,
 		}, navUnappliedAlert(n.vehicleName(ctx, ev.VehicleID)))
+	})
+}
+
+// handleTripChanged tells the OTHER participants a trip edit landed
+// (MYR-541). The editor hears nothing (their own thumb); everyone else on the
+// ride does — today the other principal, and every group member when MYR-540's
+// membership lands. Copy forks on WHO edited, and per the payload policy it
+// names the edited PART, never the place.
+func (n *Notifier) handleTripChanged(evt events.Event) {
+	ev, ok := evt.Payload.(events.RideTripChangedEvent)
+	if !ok {
+		n.logUnexpectedPayload(evt)
+		return
+	}
+	n.async(func(ctx context.Context) {
+		part := tripEditedPart(ev.NewPickup != nil, ev.NewDropoff != nil)
+		if ev.EditorUserID != ev.RiderID && ev.RiderID != ev.OwnerID {
+			// The owner edited: tell the rider.
+			n.fanOut(ctx, delivery{
+				userID:   ev.RiderID,
+				rideID:   ev.RideRequestID,
+				topic:    string(evt.Topic),
+				category: CategoryRideLifecycle,
+			}, riderTripChangedAlert(part))
+		}
+		if ev.EditorUserID != ev.OwnerID && ev.RiderID != ev.OwnerID {
+			// The rider edited: tell the owner.
+			n.fanOut(ctx, delivery{
+				userID:   ev.OwnerID,
+				rideID:   ev.RideRequestID,
+				topic:    string(evt.Topic),
+				category: CategoryRideLifecycle,
+			}, ownerTripChangedAlert(ev.RequesterName, part))
+		}
 	})
 }
 

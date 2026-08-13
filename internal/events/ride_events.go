@@ -75,6 +75,16 @@ type RideStatusChangedEvent struct {
 	// tell a RESERVATION from an instant request (MYR-360). It is NOT projected
 	// onto the `ride_status_changed` WS frame, which stays summary-only.
 	ScheduledFor *time.Time
+	// TripVersion is the ride's trip-shape version after this event (MYR-541),
+	// projected onto the WS frame so a client holding a lower version
+	// refetches the record. 0 for pre-MYR-541 publishers and never-edited rows.
+	TripVersion int
+	// TripEdit marks an event published for a TRIP-SHAPE change rather than a
+	// lifecycle transition (MYR-541): Status is the ride's UNCHANGED current
+	// status, carried so the WS frame keeps its required field, and the push
+	// notifier must NOT re-fire the status copy for it — the trip-changed
+	// seam carries its own. False for every pre-MYR-541 publisher.
+	TripEdit bool
 	// PreviousStatus is the status the ride held when the transition was
 	// requested — the handler's pre-check read, so under a lost race it may
 	// name a status one step behind the one the guarded write actually left.
@@ -201,3 +211,38 @@ type RideNavUnappliedEvent struct {
 
 // EventTopic returns TopicRideNavUnapplied.
 func (RideNavUnappliedEvent) EventTopic() Topic { return TopicRideNavUnapplied }
+
+// RideTripChangedEvent is the trip-edit seam (MYR-541): published once per
+// accepted PATCH of the ride's pickup/drop-off, alongside a TripEdit-marked
+// RideStatusChangedEvent (which carries the WS refetch signal). Consumers:
+// the DISPATCHER (re-shares the car's nav when the edited endpoint is the
+// current leg's target, then verifies per MYR-527) and the PUSH NOTIFIER
+// (tells the other participants). Carries the edited PLACES because the
+// dispatcher needs the coordinate to share — exactly as RideAcceptedEvent
+// does — and is internal-only, never broadcast to WS clients.
+type RideTripChangedEvent struct {
+	BasePayload
+	RideRequestID string
+	VehicleID     string
+	RiderID       string
+	OwnerID       string
+	// EditorUserID is who made the edit; the notifier excludes them from the
+	// fan-out and forks the copy on which party they are.
+	EditorUserID string
+	// Status is the ride's (unchanged) lifecycle status at edit time — what
+	// the dispatcher's re-share decision reads.
+	Status string
+	// PickupDispatched: leg-1 resolved `sent` (the pickup nav is on the car),
+	// so an edited pickup must be re-shared.
+	PickupDispatched bool
+	// NewPickup / NewDropoff are the edited endpoints; nil = not edited.
+	// P1 coordinates — never logged, never pushed, never on a WS frame.
+	NewPickup  *RidePlace
+	NewDropoff *RidePlace
+	// RequesterName, as on RideStatusChangedEvent (P1, never logged).
+	RequesterName *string
+	UpdatedAt     time.Time
+}
+
+// EventTopic returns TopicRideTripChanged.
+func (RideTripChangedEvent) EventTopic() Topic { return TopicRideTripChanged }

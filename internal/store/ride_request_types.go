@@ -123,4 +123,7 @@ type RideRequestRecord struct {
 	// cancelled before migration 0037: absence means "initiator unknown",
 	// and consumers must not guess.
 	CancelledBy *string
+	// TripVersion is the monotonic version of the ride's trip shape (MYR-541):
+	// bumped by every accepted trip edit, never by lifecycle transitions.
+	TripVersion int
 }

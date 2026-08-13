@@ -380,3 +380,8 @@ func sameStatusSet(got, want []string) bool {
 	}
 	return true
 }
+
+// UpdateTrip satisfies the seam; the racing suite never edits trips.
+func (s *racingDeclineStore) UpdateTrip(context.Context, string, RideTripEditData, []string) (RideRequestData, error) {
+	return RideRequestData{}, ErrRideStatusConflict
+}

@@ -404,6 +404,7 @@ func setupRideRequestEndpoints(deps httpRouteDeps, vehicles telemetry.VehicleSna
 	deps.srv.HandleFunc("GET /api/ride-requests", rideHandler.ServeList)
 	deps.srv.HandleFunc("GET /api/ride-requests/{id}", rideHandler.ServeGet)
 	deps.srv.HandleFunc("POST /api/ride-requests/{id}/cancel", rideHandler.ServeCancel)
+	deps.srv.HandleFunc("PATCH /api/ride-requests/{id}/trip", rideHandler.ServeTripPatch)
 
 	// MYR-270: owner-driven dispatch v2 progress endpoints (supersedes the
 	// MYR-265 /board endpoint). The owner confirms pickup (accepted→arrived) and

@@ -270,6 +270,37 @@ func navUnappliedAlert(vehicleName string) alert {
 	}
 }
 
+// tripEditedPart names what moved, for the MYR-541 copy: "pickup",
+// "drop-off", or "trip" when one edit moved both.
+func tripEditedPart(pickup, dropoff bool) string {
+	switch {
+	case pickup && dropoff:
+		return "trip"
+	case pickup:
+		return "pickup"
+	default:
+		return "drop-off"
+	}
+}
+
+// riderTripChangedAlert is the RIDER's copy when the OWNER edits the trip
+// (MYR-541). The edited PART is named, the place never is (P1 on a locked
+// screen); the client refetches for the rest.
+func riderTripChangedAlert(part string) alert {
+	return alert{
+		title: "Your " + part + " was changed",
+		body:  bodySeeDetails,
+	}
+}
+
+// ownerTripChangedAlert is the OWNER's copy when the RIDER edits the trip.
+func ownerTripChangedAlert(requesterName *string, part string) alert {
+	if name := displayName(requesterName); name != "" {
+		return alert{title: name + " changed the " + part, body: bodySeeDetails}
+	}
+	return alert{title: "Your rider changed the " + part, body: bodySeeDetails}
+}
+
 // Shared bodies.
 const (
 	bodyReviewRequest = "Open MyRoboTaxi to accept or decline."
