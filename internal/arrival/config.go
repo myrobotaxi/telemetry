@@ -22,6 +22,14 @@ type Config struct {
 	// StoppedSpeedMPH is the speed at or below which the car counts as
 	// stopped.
 	StoppedSpeedMPH float64
+	// StillnessMeters is how far two consecutive fixes may be apart and still
+	// count as the car not having moved, when the frames themselves report
+	// neither speed nor gear (MYR-563).
+	StillnessMeters float64
+	// MaxStillnessGap is the longest interval that positional stillness may be
+	// inferred across. Beyond it two identical fixes prove nothing about the
+	// time between them.
+	MaxStillnessGap time.Duration
 	// CandidateTTL is how long one candidate snapshot is served before it is
 	// refreshed from the database.
 	CandidateTTL time.Duration
@@ -59,6 +67,21 @@ const (
 	// dwell restart at random. Well under walking pace, so nothing that is
 	// actually moving qualifies.
 	defaultStoppedSpeedMPH = 1.0
+	// defaultStillnessMeters — 15 m, and the number is DERIVED rather than
+	// picked. The speed rung already calls 1 mph stopped; 1 mph sustained across
+	// the shortest interval this rung will accept a pair of fixes over (the
+	// ~25 s MYR-394 poll cadence) is 11 m. Fifteen sits just above that, so the
+	// positional rung and the speed rung agree about the same car rather than
+	// contradicting each other, and it comfortably absorbs the few metres a
+	// stationary vehicle's GPS fix wanders between reads. Anything that is
+	// actually driving covers far more: even walking pace clears 33 m per cycle.
+	defaultStillnessMeters = 15.0
+	// defaultMaxStillnessGap — 90 s, three REST poll cycles. It tolerates two
+	// missed ones (an asleep car answering 408, a Tesla hiccup, a redeploy)
+	// while refusing to reason across a window long enough for a car to have
+	// left and returned. Past it the run restarts from the later fix, so an
+	// outage DELAYS an arrival rather than fabricating one.
+	defaultMaxStillnessGap = 90 * time.Second
 	// defaultCandidateTTL — 15 s. It bounds two things: how long after a ride
 	// becomes dispatched before the detector can see it (irrelevant — the car
 	// has a drive ahead of it), and how long a MYR-541 trip edit can leave the
@@ -89,6 +112,8 @@ func DefaultConfig() Config {
 		RadiusMeters:    defaultRadiusMeters,
 		Dwell:           defaultDwell,
 		StoppedSpeedMPH: defaultStoppedSpeedMPH,
+		StillnessMeters: defaultStillnessMeters,
+		MaxStillnessGap: defaultMaxStillnessGap,
 		CandidateTTL:    defaultCandidateTTL,
 		CandidateLimit:  defaultCandidateLimit,
 		Timeout:         defaultTimeout,
@@ -106,6 +131,12 @@ func (c Config) withDefaults() Config {
 	}
 	if c.StoppedSpeedMPH <= 0 {
 		c.StoppedSpeedMPH = d.StoppedSpeedMPH
+	}
+	if c.StillnessMeters <= 0 {
+		c.StillnessMeters = d.StillnessMeters
+	}
+	if c.MaxStillnessGap <= 0 {
+		c.MaxStillnessGap = d.MaxStillnessGap
 	}
 	if c.CandidateTTL <= 0 {
 		c.CandidateTTL = d.CandidateTTL
