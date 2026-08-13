@@ -87,6 +87,25 @@ func applyDispatchEnvOverrides(fc *fileConfig) error {
 	}
 	fc.autoArrivalEnabled = autoArrival
 
+	// ARRIVAL_FLASH_ENABLED is the MYR-542 arrival-greeting kill-switch: three
+	// headlight flashes when the car is observed at a waypoint. It sits after
+	// AUTO_ARRIVAL_ENABLED because it is strictly downstream of it — the flash
+	// consumes the `ride.waypoint_arrived` seam only auto-arrival publishes, so
+	// turning auto-arrival off silences the flash too, while this switch stops
+	// ONLY the flash and leaves the lifecycle write alone.
+	//
+	// Having its own switch matters precisely because of that asymmetry. This
+	// is the one feature in the file that reaches out and MOVES A PHYSICAL CAR
+	// on nobody's request; if it ever misfires — a wrong pickup coordinate, a
+	// car flashing at 3am outside somebody's bedroom — the operator must be
+	// able to stop the lights without also giving up the arrival detection that
+	// is working fine. Same fail-fast parse as its neighbours.
+	arrivalFlash, err := parseKillSwitchEnv("ARRIVAL_FLASH_ENABLED")
+	if err != nil {
+		return err
+	}
+	fc.arrivalFlashEnabled = arrivalFlash
+
 	return nil
 }
 

@@ -40,6 +40,8 @@ type Config struct {
 	ridePrunerEnabled bool
 	// autoArrivalEnabled is the MYR-538 auto-arrival kill-switch.
 	autoArrivalEnabled bool
+	// arrivalFlashEnabled is the MYR-542 arrival light-flash kill-switch.
+	arrivalFlashEnabled bool
 }
 
 // MonitoringConfig holds observability probe settings.
@@ -356,6 +358,21 @@ func (c *Config) RidePrunerEnabled() bool { return c.ridePrunerEnabled }
 // needs a way to stop it that does not wait for a deploy. Defaults to true; set
 // AUTO_ARRIVAL_ENABLED=false to disable.
 func (c *Config) AutoArrivalEnabled() bool { return c.autoArrivalEnabled }
+
+// ArrivalFlashEnabled is the MYR-542 arrival-greeting kill-switch: three
+// headlight flashes when a ride's car is observed at a waypoint (the
+// client-decided greeting — lights only, no horn). When false the flasher is
+// not constructed at all: no subscription to `ride.waypoint_arrived`, no Tesla
+// command, and an arrival is exactly what MYR-538 alone makes it.
+//
+// Separate from AutoArrivalEnabled even though the flash cannot fire without
+// it, because the two failures are stopped by different people for different
+// reasons. Auto-arrival misfiring writes a ride's status; this one makes a
+// PHYSICAL CAR do something in the street on nobody's request, and an operator
+// silencing headlights at 3am must not have to give up arrival detection to do
+// it. Defaults to true; set ARRIVAL_FLASH_ENABLED=false to disable without a
+// deploy.
+func (c *Config) ArrivalFlashEnabled() bool { return c.arrivalFlashEnabled }
 
 // ServiceRepollEnabled is the MYR-320 in-service re-poll kill-switch. False
 // leaves the ServiceStatusMonitor reading on connectivity / ServiceMode EDGES
