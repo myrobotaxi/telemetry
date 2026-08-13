@@ -93,3 +93,61 @@ func TestQueryRideRequestClaimDispatch_StaysUnguarded(t *testing.T) {
 			"instant-dispatch behaviour; use queryRideRequestClaimReservationDispatch")
 	}
 }
+
+// TestQueryRideRequestListLapsed_MatchesTheIndexPredicate keeps the MYR-555
+// second pass and migration 0041's partial index in lockstep, for the same
+// reason the due query is pinned against 0016: if a conjunct stops matching,
+// Postgres falls back to a sequential scan of the whole ride table on every
+// tick, silently and with no log line to find it by.
+func TestQueryRideRequestListLapsed_MatchesTheIndexPredicate(t *testing.T) {
+	for _, conjunct := range []string{
+		"scheduled_for IS NOT NULL",
+		"status = 'accepted'",
+		"dispatched_at IS NOT NULL",
+		"COALESCE(dispatch_error, '') <> 'reservation_expired'",
+	} {
+		if !strings.Contains(queryRideRequestListLapsedDispatches, conjunct) {
+			t.Errorf("the lapsed query dropped %q — it must match "+
+				"idx_go_ride_requests_reservation_lapsed's predicate exactly", conjunct)
+		}
+	}
+}
+
+// TestQueryRideRequestExpireDispatched_IsItsOwnLatch pins the property that
+// makes the lapsed pass self-terminating. `dispatched_at` is already stamped on
+// every row in this set, so ClaimReservationDispatch can never win here and the
+// one-winner guarantee has to live in this statement. Drop the dispatch_error
+// conjunct and the sweeper re-ends the rider's Live Activity every 30 seconds
+// for the life of the row.
+func TestQueryRideRequestExpireDispatched_IsItsOwnLatch(t *testing.T) {
+	if !strings.Contains(queryRideRequestExpireDispatchedReservation,
+		"COALESCE(dispatch_error, '') <> 'reservation_expired'") {
+		t.Error("the lapse verdict is no longer one-winner: its predicate must exclude " +
+			"rows that already carry it")
+	}
+	// Scoped to `accepted` (MYR-461): a ride the parties rescued into `arrived`
+	// must be out of reach, or its rider's card is tombstoned mid-ride.
+	if !strings.Contains(queryRideRequestExpireDispatchedReservation, "status = 'accepted'") {
+		t.Error("the lapse verdict is no longer scoped to `accepted` — it could land on a " +
+			"ride that is genuinely happening")
+	}
+	// The ride row itself is never touched: expiry is a verdict on the
+	// DISPATCH, and rest-api.md §7.8 promises the parties may still proceed.
+	if strings.Contains(queryRideRequestExpireDispatchedReservation, "SET\n\tstatus") ||
+		strings.Contains(queryRideRequestExpireDispatchedReservation, "status =\n") {
+		t.Error("the lapse verdict writes the ride's status, want the row left at `accepted`")
+	}
+}
+
+// TestLapsedPredicateIsTheDueQuerysComplement states the relationship in one
+// assertion: the first pass sees only UNCLAIMED reservations, the second only
+// CLAIMED ones. Between them no accepted reservation can fall through — which
+// is precisely what happened before MYR-555 (prod c92b2c86).
+func TestLapsedPredicateIsTheDueQuerysComplement(t *testing.T) {
+	if !strings.Contains(queryRideRequestListDue, "d.dispatched_at IS NULL") {
+		t.Fatal("the due query no longer filters on an unclaimed latch")
+	}
+	if !strings.Contains(lapsedDispatchPredicate, "dispatched_at IS NOT NULL") {
+		t.Fatal("the lapsed predicate no longer filters on a claimed latch")
+	}
+}
