@@ -93,3 +93,42 @@ func TestNotifierRiderAndUnstampedCancelsStaySilent(t *testing.T) {
 		}
 	}
 }
+
+// MYR-548 — the owner's cancel reaches EVERY passenger, not just the one who
+// booked. A member is a rider; "the car is not coming" is the single push a
+// group most needs, and it is the one nobody can recover from by looking at the
+// app later, because by then they are standing on a kerb.
+//
+// This is the arm PR #401's fan-out could most plausibly have dropped: the
+// member send is nested inside the rider branch, so anything that suppressed
+// the requester's copy would take the whole group with it silently. It does
+// not — and this pins that it stays that way.
+func TestNotifierOwnerCancelReachesTheWholeGroup(t *testing.T) {
+	sender := NewFakeSender()
+	members := &fakeRideMembers{ids: []string{testMemberID, testMemberIDB}}
+	n := newGroupNotifier(t, sender, members)
+
+	n.handleStatusChanged(cancelledStatusEvent("owner", nil))
+	n.Wait()
+
+	got := tokensOf(sender.Sent())
+	if len(got) != 3 {
+		t.Fatalf("reached %d devices, want 3 (requester + two members): %+v", len(got), got)
+	}
+	// The same words for everybody aboard — a member's options on a cancelled
+	// ride are a passenger's, which is the requester's copy exactly.
+	for _, token := range []string{riderDevice, memberDevice, memberDeviceB} {
+		title, ok := got[token]
+		if !ok {
+			t.Errorf("device %q was not notified of the cancellation", token)
+			continue
+		}
+		if title != "Blue Whale had to cancel your ride" {
+			t.Errorf("device %q title = %q", token, title)
+		}
+	}
+	// The OWNER is not told about their own thumb.
+	if _, ok := got[ownerDevice]; ok {
+		t.Error("the cancelling owner must not be notified of their own cancel")
+	}
+}
