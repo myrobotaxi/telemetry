@@ -161,6 +161,11 @@ func TestMigration0040_MembersCascadeWithTheirRide(t *testing.T) {
 
 // seedGroupRide inserts a minimal accepted GROUP ride. The coordinate columns
 // take the literal 'enc' the other migration tests use — nothing here decrypts.
+//
+// Each ride gets its OWN vehicle, derived from the ride id: an accepted ride
+// with no scheduled_for is an ACTIVE INSTANT ride, and migration 0013's
+// uq_go_ride_requests_active_instant_vehicle admits only one of those per
+// vehicle — across every test sharing this pool, not just within one test.
 func seedGroupRide(ctx context.Context, t *testing.T, rideID, riderID string) {
 	t.Helper()
 	if _, err := testPool.Exec(ctx,
@@ -168,7 +173,7 @@ func seedGroupRide(ctx context.Context, t *testing.T, rideID, riderID string) {
 			id, rider_id, owner_id, vehicle_id,
 			pickup_lat_enc, pickup_lng_enc, pickup_label,
 			dropoff_lat_enc, dropoff_lng_enc, dropoff_label, status, group_ride
-		) VALUES ($1, $2, 'cowner0540', 'cveh0540',
+		) VALUES ($1, $2, 'cowner0540', 'cveh0540' || $1,
 			'enc', 'enc', 'Home', 'enc', 'enc', 'Work', 'accepted', TRUE)`,
 		rideID, riderID); err != nil {
 		t.Fatalf("seed group ride %s: %v", rideID, err)

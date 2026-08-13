@@ -246,6 +246,10 @@ func TestAccountDeleter_DeleteIdentity_WritesTheAuditRow(t *testing.T) {
 		// Never the labels: they are P1 and this row is P0-only.
 		"shareLabelsScrubbed":  true,
 		"refreshTokensRevoked": true, "hadPrismaUser": true,
+		// MYR-540. A COUNT of the departing person's group-ride membership
+		// rows removed (step 6b) — never the rides, never the other members.
+		// P0-only, per CG-DL-5, exactly like every other count here.
+		"rideMembershipsDeleted": true,
 	}
 	for k, v := range got {
 		if !allowed[k] {
