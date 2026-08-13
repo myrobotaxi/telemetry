@@ -283,6 +283,11 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 		// MYR-184 / MYR-91 viewer merge: shared vehicles are appended as
 		// `role: "viewer"` rows carrying their sharePermission.
 		telemetry.WithSharedVehicles(&sharedVehicleListerAdapter{repo: deps.vehicleRepo}),
+		// MYR-540 member merge: the vehicles of live group rides the caller
+		// joined, viewer rows with the zero grant, deduplicated after the two
+		// halves above — so the catalog names the same cars the WS access
+		// set's membership leg admits.
+		telemetry.WithMemberVehicles(&memberVehicleListerAdapter{repo: deps.vehicleRepo}),
 	)
 	deps.srv.HandleFunc("GET /api/vehicles", vehiclesListHandler.ServeHTTP)
 

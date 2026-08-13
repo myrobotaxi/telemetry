@@ -279,3 +279,27 @@ func translateShareError(err error) error {
 		return err
 	}
 }
+
+// memberVehicleListerAdapter binds the MYR-540 group-ride member catalog read
+// to telemetry.RideMemberVehicleLister.
+type memberVehicleListerAdapter struct {
+	repo *store.VehicleRepo
+}
+
+// ListMemberVehiclesByUser returns the vehicles of live group rides the caller
+// has joined. The store rows arrive in the shared-summary shape (the query
+// reuses that projection with a literal FALSE capability — membership conveys
+// the zero grant); only the catalog row survives the boundary, exactly because
+// there is no capability to carry.
+func (a *memberVehicleListerAdapter) ListMemberVehiclesByUser(ctx context.Context, userID string) ([]telemetry.VehicleCatalogRow, error) {
+	rows, err := a.repo.ListMemberVehicleSummaries(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	shared := toSharedVehicleRows(rows)
+	out := make([]telemetry.VehicleCatalogRow, 0, len(shared))
+	for i := range shared {
+		out = append(out, shared[i].VehicleCatalogRow)
+	}
+	return out, nil
+}
