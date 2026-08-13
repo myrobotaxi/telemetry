@@ -37,8 +37,9 @@ const defaultArrivalCandidateLimit = 100
 // decrypted coordinate of the place the distance test measures against.
 //
 // Since MYR-539 the waypoint is not always the pickup. A ride under way
-// (`enroute`) is watched too, against its CURRENT stop — or, when the trip has
-// no stops left ahead of it, against the final destination.
+// (`enroute`) is watched too, against its CURRENT stop — failing that (MYR-550)
+// the earliest UPCOMING one — or, when the trip has no stops left ahead of it,
+// against the final destination.
 //
 // Deliberately NOT a RideRequestRecord, for the ListActiveRidePollTargets
 // reason plus one more: this projection is refreshed every ~15s for as long as
@@ -115,6 +116,22 @@ const arrivalCandidatePredicate = `(
 // snapshot of the row — a Go-side choice would read the stop list separately
 // and could label a place it did not fetch.
 //
+// IT FALLS BACK TO THE EARLIEST UPCOMING STOP (MYR-550), which makes this
+// expression the exact twin of the handler's currentLegTarget: current stop,
+// else earliest upcoming, else the destination. When the "a ride under way has
+// exactly one current stop" invariant holds the fallback selects nothing and
+// the row is byte-identical to what it was — its whole job is the case where
+// the invariant DOESN'T hold, which is reachable and already acknowledged
+// elsewhere in this package: StartFirstStop's promotion runs outside the
+// Start's own transaction and is allowed to fail without failing the Start
+// (a rider aboard must not be stranded for it), and queryRideStopComplete's
+// guard admits an 'upcoming' stop for the same reason. Before this fallback a
+// lost promotion cost the whole trip: the detector watched the DESTINATION,
+// so no stop ever published ride.waypoint_arrived, nothing advanced the leg
+// and MYR-542 never flashed. Now the detector watches the place the
+// dispatcher actually sent the car to, and the first arrival there completes
+// the stop and re-syncs the statuses.
+//
 // Rows with an empty VIN are excluded exactly as ListActiveRidePollTargets
 // excludes them: the MYR-257 provisioning INSERT can seed a placeholder row
 // before Tesla has supplied a VIN, and a frame can never be keyed by one.
@@ -138,8 +155,8 @@ JOIN "Vehicle" v ON v."id" = r.vehicle_id
 LEFT JOIN LATERAL (
 	SELECT st.id, st.lat_enc, st.lng_enc
 	FROM go_ride_stops st
-	WHERE st.ride_id = r.id AND st.status = 'current'
-	ORDER BY st.position
+	WHERE st.ride_id = r.id AND st.status IN ('current', 'upcoming')
+	ORDER BY (st.status <> 'current'), st.position
 	LIMIT 1
 ) s ON TRUE
 WHERE ` + arrivalCandidatePredicate + `
