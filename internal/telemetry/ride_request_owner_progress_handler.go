@@ -85,6 +85,41 @@ func (h *RideRequestHandler) ServePickedUp(w http.ResponseWriter, r *http.Reques
 // ServeDroppedOff handles POST /api/ride-requests/{id}/dropped-off. Owner-only;
 // legal only from enroute → completed (409 otherwise). Idempotent: an already
 // `completed` ride is a 200 no-op that re-returns the current record.
+//
+// ENDING EARLY IS LEGITIMATE, AND IT WRITES NOTHING TO THE STOP LIST (MYR-547).
+//
+// An owner may tap "Dropped off" while the trip still has stops the car never
+// reached — the passenger asked to get out here, the plan changed, the last two
+// stops are not happening. The server does not refuse that and does not need to
+// ask: the guard is `enroute → completed` and nothing about a stop is part of
+// it. (The CONFIRM belongs on the client, which knows it is showing "stop 2 of
+// 4"; that half is iOS's.)
+//
+// What the completion deliberately does NOT do is rewrite the stops it is
+// leaving behind, and the reason is that neither available value would be true:
+//
+//   - `completed` means "the vehicle arrived here and the stop is behind the
+//     car". Stamping it on a stop the car never drove to FABRICATES AN ARRIVAL.
+//     It is also lossy in the one direction that matters — it erases where the
+//     ride actually ended, which is the whole subject of an early completion,
+//     and it is the record a rider disputing a trip would be shown.
+//   - demoting the in-progress stop from `current` to `upcoming` throws away the
+//     same fact for a cosmetic gain, and `upcoming` ("the vehicle has not
+//     started this leg yet") is a second falsehood about a leg it had started.
+//
+// So the rows stay exactly as the last observed arrival left them, and the
+// READING is qualified instead: on a TERMINAL ride the stop statuses are a
+// historical record of how far the car got — `completed` is a stop the car
+// reached, and anything else is a stop it did not. `current`/`upcoming` are
+// live claims only while the ride is live, which is how every consumer already
+// reads them, because every consumer of leg progress gates on the ride's own
+// status first (the arrival detector watches `enroute` rides only; the position
+// poller stops on any terminal transition). No consumer is asked to change; the
+// contract now says out loud what they already do.
+//
+// There is deliberately no fourth stop status for "skipped". A new enum member
+// is a contract change for every SDK, to record something the pair
+// (ride.status, stop.status) already expresses exactly.
 func (h *RideRequestHandler) ServeDroppedOff(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userID, ok := h.authUser(w, r)

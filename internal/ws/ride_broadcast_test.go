@@ -262,3 +262,76 @@ func TestRideBroadcaster_StatusChanged_CarriesRequesterName(t *testing.T) {
 		})
 	}
 }
+
+// TestRideBroadcaster_OwnerCancel_ReachesTheRiderWithTheRefetchSignal is the
+// WS half of the MYR-548 pin.
+//
+// The frame is what the rider's LIVE surface converges on — the push is the
+// backup for a phone that is not looking. Two things have to be true of it and
+// only one of them was: it must reach the RIDER's unicast (it did), and it must
+// carry the ride's CURRENT `tripVersion` (it did not — every lifecycle publisher
+// left the field at zero, so a cancel of a ride edited even once arrived
+// claiming version 0 against the version the client held, and a consumer that
+// reads the signal as monotonic refetched nothing).
+//
+// Both halves are asserted here, plus the negative that makes the unicast worth
+// having: a third party watching the same car hears nothing about somebody
+// else's cancelled ride.
+func TestRideBroadcaster_OwnerCancel_ReachesTheRiderWithTheRefetchSignal(t *testing.T) {
+	hub := NewHub(slog.Default(), NoopHubMetrics{})
+	t.Cleanup(hub.Stop)
+	rider := testClient(hub, "clrider")
+	owner := testClient(hub, "clowner")
+	stranger := testClient(hub, "clstranger")
+
+	b := newRideBroadcaster(hub)
+	by := "owner"
+	b.handleRideStatusChanged(context.Background(), events.NewEvent(events.RideStatusChangedEvent{
+		RideRequestID: "crr548", VehicleID: "clveh", RiderID: "clrider", OwnerID: "clowner",
+		Status: "cancelled", CancelledBy: &by, TripVersion: 5,
+		UpdatedAt: time.Date(2026, 8, 13, 13, 31, 0, 0, time.UTC),
+	}))
+
+	for _, c := range []*Client{rider, owner} {
+		m := drainOne(t, c)
+		if m.Type != msgTypeRideStatusChanged {
+			t.Fatalf("type: got %q", m.Type)
+		}
+		var p rideStatusChangedPayload
+		if err := json.Unmarshal(m.Payload, &p); err != nil {
+			t.Fatalf("payload: %v", err)
+		}
+		if p.Status != "cancelled" {
+			t.Errorf("status: got %q want cancelled", p.Status)
+		}
+		if p.TripVersion != 5 {
+			t.Errorf("tripVersion: got %d want 5 — the refetch signal must not regress on a cancel", p.TripVersion)
+		}
+		// The frame stays SUMMARY-ONLY: who cancelled is on the record the
+		// refetch fetches, not on a fan-out frame.
+		if contains(m.Payload, "cancelledBy") {
+			t.Errorf("the summary frame must not carry cancelledBy: %s", m.Payload)
+		}
+	}
+	assertNoFrame(t, stranger)
+}
+
+// A never-edited ride still omits the key entirely, so pre-MYR-541 frames stay
+// byte-identical. Absence reads as 0 by contract; the defect was emitting
+// absence for a ride that was demonstrably past 0.
+func TestRideBroadcaster_StatusChanged_OmitsTripVersionWhenNeverEdited(t *testing.T) {
+	hub := NewHub(slog.Default(), NoopHubMetrics{})
+	t.Cleanup(hub.Stop)
+	rider := testClient(hub, "clrider")
+
+	b := newRideBroadcaster(hub)
+	b.handleRideStatusChanged(context.Background(), events.NewEvent(events.RideStatusChangedEvent{
+		RideRequestID: "crr549", VehicleID: "clveh", RiderID: "clrider", OwnerID: "clowner",
+		Status: "cancelled", TripVersion: 0, UpdatedAt: time.Now().UTC(),
+	}))
+
+	m := drainOne(t, rider)
+	if contains(m.Payload, "tripVersion") {
+		t.Errorf("a never-edited ride must omit tripVersion: %s", m.Payload)
+	}
+}

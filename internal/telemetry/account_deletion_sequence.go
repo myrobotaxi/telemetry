@@ -279,7 +279,11 @@ func (h *AccountDeletionHandler) publishRideCancelled(ctx context.Context, updat
 		RequesterName:    updated.RequesterName,
 		RescheduleStatus: updated.RescheduleStatus,
 		ScheduledFor:     updated.ScheduledFor,
-		UpdatedAt:        updated.UpdatedAt,
+		// MYR-548: the frame's refetch signal, carried on every lifecycle
+		// publish. See mutateStatusWith for why a transition that does not BUMP
+		// the version must still carry it.
+		TripVersion: updated.TripVersion,
+		UpdatedAt:   updated.UpdatedAt,
 	}
 	if err := h.deps.Events.Publish(ctx, events.NewEvent(payload)); err != nil {
 		// Non-fatal: the ride IS cancelled and the owner's next read shows it.

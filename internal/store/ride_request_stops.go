@@ -34,6 +34,15 @@ import (
 // advances on arrival detection (the MYR-538 waypoint events), never on a
 // client tap, and an advance is a lifecycle transition — it does NOT bump
 // trip_version, because the trip's SHAPE did not change.
+//
+// THE VALUES ARE LIVE CLAIMS WHILE THE RIDE IS LIVE, AND A RECORD ONCE IT IS
+// NOT (MYR-547). A ride can end — completed early, or cancelled — with stops
+// still `current` or `upcoming`, and NOTHING rewrites them at that moment.
+// `completed` therefore always means the same thing on a terminal ride as on a
+// live one ("the car reached this"), and anything else means "it did not". The
+// alternative, stamping the remainder `completed` at ride end, would fabricate
+// arrivals the car never made and erase where the ride actually stopped — which
+// is the single most useful fact about an early end. See ServeDroppedOff.
 type RideStopStatus string
 
 const (
