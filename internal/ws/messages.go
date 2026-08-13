@@ -144,7 +144,11 @@ type rideStatusChangedPayload struct {
 	// omitted when the rider has no identity row. P1 PII — never logged.
 	RequesterName    *string `json:"requesterName,omitempty"`
 	RescheduleStatus *string `json:"rescheduleStatus,omitempty"`
-	Timestamp        string  `json:"timestamp"`
+	// TripVersion is the ride's trip-shape version (MYR-541); omitted at 0 so
+	// pre-edit frames are byte-identical to pre-MYR-541 ones. Contract:
+	// absence reads as 0.
+	TripVersion int    `json:"tripVersion,omitempty"`
+	Timestamp   string `json:"timestamp"`
 }
 
 // subscribePayload is the client-to-server request to (re)assert

@@ -172,6 +172,11 @@ func (d *Dispatcher) Subscribe(bus events.Bus) (events.Subscription, error) {
 	if _, err := bus.Subscribe(events.TopicRideStarted, d.handleStarted); err != nil {
 		return events.Subscription{}, fmt.Errorf("dispatch.Subscribe(started): %w", err)
 	}
+	// MYR-541: an edited endpoint that is the current leg's target re-shares
+	// (and re-verifies, MYR-527) through the same pool.
+	if _, err := bus.Subscribe(events.TopicRideTripChanged, d.handleTripChanged); err != nil {
+		return events.Subscription{}, fmt.Errorf("dispatch.Subscribe(trip_changed): %w", err)
+	}
 	return sub, nil
 }
 

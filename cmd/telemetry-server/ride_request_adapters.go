@@ -290,6 +290,7 @@ func fromStoreRideRequest(rec store.RideRequestRecord) telemetry.RideRequestData
 		DispatchStatus:        dispatchStatus,
 		DispatchedAt:          rec.DispatchedAt,
 		DispatchError:         rec.DispatchError,
+		TripVersion:           rec.TripVersion,
 		CancelledBy:           rec.CancelledBy,
 	}
 }
@@ -310,4 +311,32 @@ func fromStorePage(page store.RideRequestListPage) telemetry.RideRequestListPage
 		items = append(items, fromStoreRideRequest(page.Items[i]))
 	}
 	return telemetry.RideRequestListPage{Items: items, HasMore: page.HasMore}
+}
+
+// UpdateTrip adapts the MYR-541 guarded trip write, mapping the store types.
+func (a *rideRequestStoreAdapter) UpdateTrip(
+	ctx context.Context,
+	id string,
+	edit telemetry.RideTripEditData,
+	from []string,
+) (telemetry.RideRequestData, error) {
+	storeEdit := store.RideTripEdit{ExpectVersion: edit.ExpectVersion}
+	if edit.Pickup != nil {
+		p := toStorePlace(*edit.Pickup)
+		storeEdit.Pickup = &p
+	}
+	if edit.Dropoff != nil {
+		p := toStorePlace(*edit.Dropoff)
+		storeEdit.Dropoff = &p
+	}
+	rec, err := a.repo.UpdateTrip(ctx, id, storeEdit, from)
+	if err != nil {
+		// The guard refusal maps to the handler-layer conflict sentinel, the
+		// same translation every guarded transition write gets.
+		if errors.Is(err, store.ErrRideRequestConflict) {
+			return telemetry.RideRequestData{}, fmt.Errorf("update trip: %w", telemetry.ErrRideStatusConflict)
+		}
+		return telemetry.RideRequestData{}, fmt.Errorf("update trip: %w", err)
+	}
+	return fromStoreRideRequest(rec), nil
 }

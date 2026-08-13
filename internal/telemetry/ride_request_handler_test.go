@@ -28,6 +28,9 @@ type fakeRideStore struct {
 	getRec RideRequestData
 	getErr error
 
+	// MYR-541: the last trip edit handed to UpdateTrip.
+	tripEdit *RideTripEditData
+
 	// Active-instant guard (MYR-230). activeErr short-circuits; otherwise a
 	// zero-value activeRec (empty ID) is reported as "no open instant ride"
 	// (sdk.ErrNotFound) so create falls through, and a populated activeRec
@@ -207,6 +210,30 @@ func (f *fakeRideStore) UpdateStatusFrom(_ context.Context, id string, from []st
 // write: the same guarded transition with to fixed to "cancelled", recording
 // the party stamp the way the single UPDATE writes cancelled_by. The returned
 // record carries the stamp so handler tests can assert the wire projection.
+// UpdateTrip mirrors the store's guarded trip write (MYR-541): refuses
+// outside the window or on a stale version, else applies the edit and bumps
+// the version on the returned record.
+func (f *fakeRideStore) UpdateTrip(_ context.Context, _ string, edit RideTripEditData, from []string) (RideRequestData, error) {
+	f.updateCalls++
+	f.updatedFrom = from
+	f.tripEdit = &edit
+	rec := f.getRec
+	if f.updated.ID != "" {
+		rec = f.updated
+	}
+	if !rideStatusIn(rec.Status, from) || edit.ExpectVersion != rec.TripVersion {
+		return RideRequestData{}, ErrRideStatusConflict
+	}
+	if edit.Pickup != nil {
+		rec.Pickup = *edit.Pickup
+	}
+	if edit.Dropoff != nil {
+		rec.Dropoff = *edit.Dropoff
+	}
+	rec.TripVersion++
+	return rec, nil
+}
+
 func (f *fakeRideStore) UpdateStatusFromCancelled(ctx context.Context, id string, from []string, by string) (RideRequestData, error) {
 	f.cancelledBy = by
 	rec, err := f.UpdateStatusFrom(ctx, id, from, "cancelled")
@@ -381,6 +408,7 @@ func rideMux(h *RideRequestHandler) *http.ServeMux {
 	mux.HandleFunc("GET /api/ride-requests", h.ServeList)
 	mux.HandleFunc("GET /api/ride-requests/{id}", h.ServeGet)
 	mux.HandleFunc("POST /api/ride-requests/{id}/cancel", h.ServeCancel)
+	mux.HandleFunc("PATCH /api/ride-requests/{id}/trip", h.ServeTripPatch)
 	mux.HandleFunc("POST /api/ride-requests/{id}/picked-up", h.ServePickedUp)
 	mux.HandleFunc("POST /api/ride-requests/{id}/start", h.ServeStart)
 	mux.HandleFunc("POST /api/ride-requests/{id}/dropped-off", h.ServeDroppedOff)

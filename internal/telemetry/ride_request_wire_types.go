@@ -48,6 +48,9 @@ type rideRequestWire struct {
 	// ride and on rides cancelled before the field existed (absence =
 	// initiator unknown, consumers must not guess).
 	CancelledBy *string `json:"cancelledBy,omitempty"`
+	// TripVersion (MYR-541): omitted at 0 — the contract reads absence as 0,
+	// so never-edited rows serialize byte-identically to pre-MYR-541 ones.
+	TripVersion int `json:"tripVersion,omitempty"`
 }
 
 // rideActiveErrorResponse is the 409 `ride_active` body (MYR-230). It carries

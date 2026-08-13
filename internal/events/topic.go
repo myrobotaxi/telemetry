@@ -103,6 +103,13 @@ const (
 	// its consumer is the owner's "check the dash" push.
 	TopicRideNavUnapplied Topic = "ride.nav_unapplied"
 
+	// TopicRideTripChanged is the trip-edit seam (MYR-541): published once
+	// per accepted pickup/drop-off PATCH. The payload is RideTripChangedEvent.
+	// Internal-only — its consumers are the dispatcher's nav re-share and the
+	// participants' pushes; the WS refetch signal travels on the TripEdit-
+	// marked ride_status_changed frame instead.
+	TopicRideTripChanged Topic = "ride.trip_changed"
+
 	// TopicVehicleDeleted is published when a Vehicle row is deleted from
 	// the Prisma-owned "Vehicle" table (sourced from a Postgres
 	// LISTEN/NOTIFY channel; see internal/store/notify_listener.go). The

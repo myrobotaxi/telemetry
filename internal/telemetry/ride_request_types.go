@@ -87,6 +87,8 @@ type RideRequestData struct {
 	// and a consumer must not guess. Surfaced on the party-only detail
 	// payload so the rider's client can render the honest "had to cancel"
 	// copy from a refetch rather than inferring it from "not my own tap".
+	// TripVersion is the ride's trip-shape version (MYR-541); 0 = never edited.
+	TripVersion int
 	CancelledBy *string
 }
 
@@ -234,6 +236,10 @@ type RideRequestStore interface {
 	// allowed-from set is what expresses each party's different legality
 	// window. Miss outcomes are UpdateStatusFrom's.
 	UpdateStatusFromCancelled(ctx context.Context, id string, from []string, by string) (RideRequestData, error)
+	// UpdateTrip is the guarded, versioned trip-shape write (MYR-541): the
+	// status window, the version match and the place writes ride one UPDATE.
+	// A guard refusal surfaces as the store's conflict error.
+	UpdateTrip(ctx context.Context, id string, edit RideTripEditData, from []string) (RideRequestData, error)
 	// UpdateStatusFromDispatched is UpdateStatusFrom plus the MYR-376
 	// RESERVATION DORMANCY precondition, carried in the SAME guarded UPDATE:
 	// the row must also satisfy `scheduled_for IS NULL OR dispatch_status =
