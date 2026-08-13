@@ -119,7 +119,7 @@ func TestOwnerStatusAlertSelectsOnlyEnroute(t *testing.T) {
 
 	for _, status := range all {
 		t.Run(status, func(t *testing.T) {
-			a, ok := ownerStatusAlert(status, nil)
+			a, ok := ownerStatusAlert(status, nil, false)
 			want := status == statusEnroute
 			if ok != want {
 				t.Fatalf("ownerStatusAlert(%q) notifies = %v, want %v", status, ok, want)
@@ -152,7 +152,7 @@ func TestOwnerStatusAlertNamesOnlyTheFirstName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			a, ok := ownerStatusAlert(statusEnroute, tt.requester)
+			a, ok := ownerStatusAlert(statusEnroute, tt.requester, false)
 			if !ok {
 				t.Fatal("ownerStatusAlert(enroute) produced no alert")
 			}

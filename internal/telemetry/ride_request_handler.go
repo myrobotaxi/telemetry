@@ -98,7 +98,11 @@ func NewRideRequestHandler(
 // MYR-522 (client decision, 2026-08-12: "add ability for owner to cancel ride
 // from their end as well"):
 //
-//   - The RIDER may cancel from requested/accepted — unchanged since MYR-174.
+//   - The RIDER may cancel from ANY live status — requested, accepted,
+//     arrived, even enroute with themselves aboard (MYR-537, client directive
+//     2026-08-12: "Allow rider to cancel ride at anytime even after it's
+//     started"). A mid-ride cancel cannot clear the car's dash nav (Tesla has
+//     no cancel-navigation API), so the owner's push is the stand-down.
 //   - The OWNER may cancel from accepted/arrived. A `requested` ride keeps the
 //     existing DECLINE as the owner's one exit (two owner verbs for one moment
 //     would be two copies of one decision), and once the rider is aboard
@@ -179,8 +183,9 @@ const (
 )
 
 // rideCancellableFrom is the allowed-from set for a rider cancel; must stay
-// in lockstep with cancellableFrom and the rest-api.md §7.8 matrix.
-var rideCancellableFrom = []string{rideStatusRequested, rideStatusAccepted}
+// in lockstep with cancellableFrom and the rest-api.md §7.8 matrix. Every
+// LIVE status since MYR-537 — the rider's ride is theirs to end at any point.
+var rideCancellableFrom = []string{rideStatusRequested, rideStatusAccepted, rideStatusArrived, rideStatusEnroute}
 
 // rideOwnerCancellableFrom is the allowed-from set for an OWNER cancel
 // (MYR-522); must stay in lockstep with ownerCancellableFrom and the
@@ -195,7 +200,11 @@ var rideOwnerCancellableFrom = []string{rideStatusAccepted, rideStatusArrived}
 // status. Legal only from requested/accepted; enroute/arrived (ride in
 // progress) and the terminal states (declined/completed/cancelled) are not.
 func cancellableFrom(status string) bool {
-	return status == rideStatusRequested || status == rideStatusAccepted
+	switch status {
+	case rideStatusRequested, rideStatusAccepted, rideStatusArrived, rideStatusEnroute:
+		return true
+	}
+	return false
 }
 
 // ownerCancellableFrom reports whether an OWNER cancel is legal from the

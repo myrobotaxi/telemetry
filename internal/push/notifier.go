@@ -301,8 +301,9 @@ func (n *Notifier) handleStatusChanged(evt events.Event) {
 	// or on either name, so the probes can pass empty values.
 	scheduled := ev.ScheduledFor != nil
 	byOwnerCancel := ownerCancelled(ev.Status, ev.CancelledBy)
+	byRiderCancel := riderCancelled(ev.Status, ev.CancelledBy, ev.PreviousStatus)
 	_, notifyRider := statusAlert(ev.Status, "", scheduled, byOwnerCancel)
-	_, notifyOwner := ownerStatusAlert(ev.Status, nil)
+	_, notifyOwner := ownerStatusAlert(ev.Status, nil, byRiderCancel)
 
 	// An owner riding their own car is both parties, and this platform makes
 	// that the COMMON case, not an edge one. "You started the ride" delivered
@@ -336,7 +337,7 @@ func (n *Notifier) handleStatusChanged(evt events.Event) {
 			}, a)
 		}
 		if notifyOwner {
-			a, _ := ownerStatusAlert(ev.Status, ev.RequesterName)
+			a, _ := ownerStatusAlert(ev.Status, ev.RequesterName, byRiderCancel)
 			n.fanOut(ctx, delivery{
 				userID:   ev.OwnerID,
 				rideID:   ev.RideRequestID,

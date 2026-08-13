@@ -113,6 +113,9 @@ func (h *RideRequestHandler) mutateStatusWith(
 		// Carried so the rider's push copy can tell a reservation from an
 		// instant request (MYR-360); not projected onto the WS frame.
 		ScheduledFor: updated.ScheduledFor,
+		// The pre-check read's status — the "from" this caller believed it was
+		// transitioning out of (MYR-537; see the event field's race caveat).
+		PreviousStatus: rec.Status,
 		// Nil on every transition but a cancel — read off the UPDATED row, so
 		// the initiator the push notifier sees is the one the guarded write
 		// stamped (MYR-522).
