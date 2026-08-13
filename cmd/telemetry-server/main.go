@@ -673,6 +673,26 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	}
 	defer ridePoller.Stop()
 
+	// --- Auto-arrival (MYR-538) ---
+	// Client: "If car reaches destination you shouldn't require owner to mark
+	// as arrived we should be able to figure it out." The detector watches
+	// decoded telemetry frames and advances a ride accepted -> arrived once its
+	// car has been parked inside the pickup's radius for the dwell window,
+	// through the SAME dormancy-guarded write the owner's "Picked up" tap uses
+	// — first-writer-wins, and the tap stays. No-ops entirely when
+	// AUTO_ARRIVAL_ENABLED=false.
+	//
+	// Started AFTER the position poller: for a car that does not stream, the
+	// poller's REST backfill frames are the only frames the detector will ever
+	// see.
+	arrivalDetector, err := startAutoArrivalDetector(ctx, cfg, bus, rideRepo, logger)
+	if err != nil {
+		return fmt.Errorf("setting up auto-arrival detector: %w", err)
+	}
+	if arrivalDetector != nil {
+		defer func() { _ = arrivalDetector.Stop() }()
+	}
+
 	// --- Fleet-config reconciliation (MYR-448) ---
 	// The one automatic fleet-config push happens in the Tesla OAuth callback,
 	// which is always BEFORE the owner pairs the virtual key — so Tesla skips

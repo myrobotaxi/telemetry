@@ -67,6 +67,26 @@ func applyDispatchEnvOverrides(fc *fileConfig) error {
 	}
 	fc.ridePrunerEnabled = ridePruner
 
+	// AUTO_ARRIVAL_ENABLED is the MYR-538 auto-arrival kill-switch. It belongs
+	// beside the dispatch switches rather than the pruner ones because it gates
+	// the same pipeline from the other end: RESERVATION_DISPATCH_ENABLED decides
+	// whether a car is ever SENT to a pickup, this one whether the server may
+	// notice it ARRIVED. False leaves the owner's "Picked up" tap as the only
+	// writer of accepted → arrived, which is exactly the pre-MYR-538 behaviour
+	// — nothing accumulates while it is off and nothing replays when it comes
+	// back on.
+	//
+	// Same fail-fast parse as its neighbours, and here the argument is at its
+	// sharpest: this is the only switch in the file that gates a feature which
+	// writes a ride's lifecycle WITHOUT a person asking. An operator who typed
+	// `AUTO_ARRIVAL_ENABLED=off` to stop it firing wrongly must not be left
+	// believing they had.
+	autoArrival, err := parseKillSwitchEnv("AUTO_ARRIVAL_ENABLED")
+	if err != nil {
+		return err
+	}
+	fc.autoArrivalEnabled = autoArrival
+
 	return nil
 }
 

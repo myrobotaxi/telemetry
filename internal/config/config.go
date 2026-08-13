@@ -38,6 +38,8 @@ type Config struct {
 	drivePrunerEnabled bool
 	// ridePrunerEnabled is the MYR-447 ride-retention sweep kill-switch.
 	ridePrunerEnabled bool
+	// autoArrivalEnabled is the MYR-538 auto-arrival kill-switch.
+	autoArrivalEnabled bool
 }
 
 // MonitoringConfig holds observability probe settings.
@@ -338,6 +340,22 @@ func (c *Config) DrivePrunerEnabled() bool { return c.drivePrunerEnabled }
 // compile-time constants (store.RideRetentionDays, store.RidePassengerScrubDays)
 // per CG-DL-4.
 func (c *Config) RidePrunerEnabled() bool { return c.ridePrunerEnabled }
+
+// AutoArrivalEnabled is the MYR-538 auto-arrival kill-switch. When false the
+// detector is not constructed at all: no telemetry subscription, no candidate
+// reads, and a ride reaches `arrived` only when its owner taps "Picked up" —
+// exactly the pre-MYR-538 behaviour, which is why the switch is safe to throw
+// at any moment, including mid-ride. Nothing is deferred or queued by turning
+// it off, and nothing is replayed by turning it back on; the detector's state
+// is entirely in memory and is rebuilt from live frames within one dwell.
+//
+// It exists because this is the one feature in the ride pipeline that writes a
+// lifecycle transition WITHOUT a person asking for it. If it ever starts firing
+// wrongly in the field — a bad pickup coordinate, a car parking habitually
+// across the street — the owner-facing damage is immediate and the operator
+// needs a way to stop it that does not wait for a deploy. Defaults to true; set
+// AUTO_ARRIVAL_ENABLED=false to disable.
+func (c *Config) AutoArrivalEnabled() bool { return c.autoArrivalEnabled }
 
 // ServiceRepollEnabled is the MYR-320 in-service re-poll kill-switch. False
 // leaves the ServiceStatusMonitor reading on connectivity / ServiceMode EDGES
