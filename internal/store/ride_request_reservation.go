@@ -42,6 +42,21 @@ type DueReservation struct {
 	VehicleID    string
 	Pickup       RidePlace
 	ScheduledFor time.Time
+	// TripVersion is the ride's CURRENT trip-shape version (MYR-555). One plain
+	// integer on the row — no decrypt, no subselect — carried so the dispatch's
+	// `ride_status_changed` frame can state the version instead of a zero
+	// (MYR-548's carry rule).
+	TripVersion int
+}
+
+// LapsedReservation is the LAPSED-dispatch projection (see
+// rideRequestLapsedColumns): the ride, its car, and the instant the ceiling is
+// measured from. Nothing on this path is pushed anywhere, so it carries no
+// place, no rider and no cryptography at all — three columns is the whole row.
+type LapsedReservation struct {
+	ID           string
+	VehicleID    string
+	ScheduledFor time.Time
 }
 
 // ListDueReservations returns the accepted, still-unclaimed reservations whose
@@ -110,7 +125,7 @@ func (r *RideRequestRepo) scanDueReservation(row pgx.Row) (DueReservation, error
 	err := row.Scan(
 		&rec.ID, &rec.RiderID, &rec.OwnerID, &rec.VehicleID,
 		&pickupLatEnc, &pickupLngEnc, &rec.Pickup.Label, &rec.Pickup.Address,
-		&rec.ScheduledFor,
+		&rec.ScheduledFor, &rec.TripVersion,
 	)
 	if err != nil {
 		return DueReservation{}, fmt.Errorf("scan due reservation: %w", err)
@@ -169,4 +184,81 @@ func (r *RideRequestRepo) VehicleHasActiveInstantRide(ctx context.Context, vehic
 		return false, fmt.Errorf("RideRequestRepo.VehicleHasActiveInstantRide(%s): %w", vehicleID, err)
 	}
 	return busy, nil
+}
+
+// ListLapsedDispatches returns the accepted reservations that WERE dispatched
+// and never became a ride: `dispatched_at` set, status still `accepted`,
+// `scheduled_for` at or before lapsedBefore, and the ceiling verdict not yet
+// recorded. Oldest first. See queryRideRequestListLapsedDispatches for why each
+// conjunct is load-bearing.
+//
+// lapsedBefore is `now - MaxLateness`, derived from the SWEEPER's clock exactly
+// as ListDueReservations' bounds are, so one clock governs both passes of a
+// tick and the boundary is exactly testable.
+//
+// Returns an empty (non-nil) slice when nothing has lapsed; that is the steady
+// state, not an error.
+func (r *RideRequestRepo) ListLapsedDispatches(
+	ctx context.Context,
+	lapsedBefore time.Time,
+	limit int,
+) ([]LapsedReservation, error) {
+	if limit <= 0 {
+		limit = defaultDueReservationLimit
+	}
+	const op = "ride_request.list_lapsed_dispatches"
+	start := time.Now()
+	rows, err := r.pool.Query(ctx, queryRideRequestListLapsedDispatches, lapsedBefore, limit)
+	if err != nil {
+		r.metrics.ObserveQueryDuration(op, time.Since(start).Seconds())
+		r.metrics.IncQueryError(op)
+		return nil, fmt.Errorf("RideRequestRepo.ListLapsedDispatches: query: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]LapsedReservation, 0)
+	for rows.Next() {
+		var rec LapsedReservation
+		if scanErr := rows.Scan(&rec.ID, &rec.VehicleID, &rec.ScheduledFor); scanErr != nil {
+			r.metrics.ObserveQueryDuration(op, time.Since(start).Seconds())
+			r.metrics.IncQueryError(op)
+			return nil, fmt.Errorf("RideRequestRepo.ListLapsedDispatches: scan: %w", scanErr)
+		}
+		out = append(out, rec)
+	}
+	r.metrics.ObserveQueryDuration(op, time.Since(start).Seconds())
+	if err := rows.Err(); err != nil {
+		r.metrics.IncQueryError(op)
+		return nil, fmt.Errorf("RideRequestRepo.ListLapsedDispatches: rows: %w", err)
+	}
+	return out, nil
+}
+
+// ExpireDispatchedReservation records the lateness-ceiling verdict on a
+// reservation whose pickup nav was ALREADY dispatched: `failed` /
+// `reservation_expired`, with the ride row left at `accepted` exactly as the
+// never-dispatched arm leaves it.
+//
+// It is its own one-winner latch, because the usual one cannot serve: every row
+// in this set already has `dispatched_at` stamped, so ClaimReservationDispatch
+// can never win here. The guarantee lives in the statement's own predicate —
+// see queryRideRequestExpireDispatchedReservation.
+//
+// Returns expired=true when THIS call recorded the verdict. false means the row
+// already carried it, or moved out of `accepted` since the list — both ordinary
+// outcomes, never an error.
+func (r *RideRequestRepo) ExpireDispatchedReservation(ctx context.Context, id string) (bool, error) {
+	const op = "ride_request.expire_dispatched_reservation"
+	start := time.Now()
+	var expiredID string
+	err := r.pool.QueryRow(ctx, queryRideRequestExpireDispatchedReservation, id).Scan(&expiredID)
+	r.metrics.ObserveQueryDuration(op, time.Since(start).Seconds())
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		r.metrics.IncQueryError(op)
+		return false, fmt.Errorf("RideRequestRepo.ExpireDispatchedReservation(%s): %w", id, err)
+	}
+	return true, nil
 }

@@ -308,7 +308,15 @@ func (n *Notifier) handleStatusChanged(evt events.Event) {
 	// the WS frame's sake; re-firing the status copy for it would tell a rider
 	// "Your ride is confirmed" every time somebody moved the drop-off. The
 	// trip-changed seam carries this event's own copy.
-	if ev.TripEdit {
+	// MYR-555: a DISPATCH publish does the same thing for the same reason. The
+	// reservation sweeper (and the owner's dispatch-now tap) re-carries the
+	// ride's unchanged `accepted` status so the WS broadcaster can hand clients
+	// a refetch signal; firing the status copy for it would deliver "Your ride
+	// is confirmed" a second time, hours after the accept and beside the
+	// `ride.due` push that IS this moment's news. The two markers are checked
+	// together because they are one rule — this event is a frame, not a
+	// transition — and each seam carries its own copy.
+	if ev.TripEdit || ev.DispatchEdit {
 		return
 	}
 	scheduled := ev.ScheduledFor != nil

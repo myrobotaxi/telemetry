@@ -22,9 +22,17 @@ package store
 // Passenger name/phone (P1) and the requester identity (P1 PII) are outside
 // this projection entirely: a background dispatch loop has no business
 // decrypting or holding them.
+//
+// `trip_version` joined the projection in MYR-555. It is a plain integer on the
+// row — no decrypt, no subselect, no join — and it is what lets the dispatch's
+// `ride_status_changed` frame carry the ride's CURRENT version rather than a
+// zero (MYR-548's carry rule: every publisher carries it, only a trip edit
+// bumps it). Threaded through the projection rather than re-read at publish
+// time so the value on the frame is the one the dispatch decision was made
+// from.
 const rideRequestDueColumns = `d.id, d.rider_id, d.owner_id, d.vehicle_id,
 	d.pickup_lat_enc, d.pickup_lng_enc, d.pickup_label, d.pickup_address,
-	d.scheduled_for`
+	d.scheduled_for, d.trip_version`
 
 // queryRideRequestListDue selects reservations whose pickup nav push is DUE.
 // The static conjuncts are the whole contract of scheduled dispatch:
@@ -164,3 +172,89 @@ const queryRideRequestVehicleBusy = `SELECT EXISTS (
 	WHERE r.vehicle_id = $1
 	  AND ` + activeInstantRidePredicate + `
 )`
+
+// rideRequestLapsedColumns is the LAPSED-dispatch projection (MYR-555) and is
+// leaner than the due one by design: nothing on this path is pushed anywhere,
+// so there is no pickup to decrypt, no owner token to resolve and no rider to
+// address. Three columns, no cryptography, no correlated subselects — a row
+// here becomes one guarded UPDATE and one log line.
+// Unaliased, unlike the due projection, so lapsedDispatchPredicate below reads
+// identically in the SELECT and in the UPDATE that resolves what it finds.
+const rideRequestLapsedColumns = `id, vehicle_id, scheduled_for`
+
+// lapsedDispatchPredicate is the set of reservations that were DISPATCHED and
+// never became a ride. It is stated once and shared by the query and by
+// migration 0041's partial index, so the planner's implication check has an
+// exact match to work with and the two can never drift.
+//
+//	scheduled_for IS NOT NULL — a reservation. An instant ride's dispatch has no
+//	                            ceiling to miss; its accept IS its due instant.
+//	status = 'accepted'       — the ride never became one. The moment the
+//	                            parties proceed manually (accepted → arrived) or
+//	                            anybody cancels, the row leaves this set on its
+//	                            own and there is nothing left to expire.
+//	dispatched_at IS NOT NULL — the leg-1 latch IS claimed. This is the exact
+//	                            complement of the due query's conjunct, and it is
+//	                            why these rows were invisible to the ceiling
+//	                            until now: the due sweep drops a reservation the
+//	                            instant it is claimed, so a reservation that
+//	                            dispatched and was never driven had no path to
+//	                            any resolution at all.
+//	dispatch_error <> expired — the verdict has not been recorded yet. This is
+//	                            what makes the set SELF-DRAINING and what makes
+//	                            the resolving statement a one-winner latch: the
+//	                            write stamps the very column this predicate
+//	                            excludes on.
+const lapsedDispatchPredicate = `scheduled_for IS NOT NULL
+  AND status = 'accepted'
+  AND dispatched_at IS NOT NULL
+  AND COALESCE(dispatch_error, '') <> 'reservation_expired'`
+
+// queryRideRequestListLapsedDispatches selects reservations whose pickup nav
+// was dispatched and whose ride never happened, past the lateness ceiling.
+//
+// $1 is `now - MaxLateness`, derived from the SWEEPER's clock exactly as the due
+// query's bounds are, so one clock governs both passes and the boundary is
+// exactly testable. Oldest first with id as the deterministic tie-break, $2
+// caps one pass — a backlog drains over subsequent ticks, and since the
+// deadline is anchored on scheduled_for nothing is lost by waiting.
+//
+// Answered by idx_go_ride_requests_reservation_lapsed (migration 0041), whose
+// predicate is lapsedDispatchPredicate character-for-character and whose
+// indexed column is scheduled_for — serving the range conjunct and the ORDER BY
+// from one scan, with no sort.
+const queryRideRequestListLapsedDispatches = `SELECT ` + rideRequestLapsedColumns + `
+FROM go_ride_requests
+WHERE ` + lapsedDispatchPredicate + `
+  AND scheduled_for <= $1
+ORDER BY scheduled_for ASC, id ASC
+LIMIT $2`
+
+// queryRideRequestExpireDispatchedReservation records the ceiling verdict on
+// ONE lapsed dispatch, and is the one-winner latch for that resolution.
+//
+// THE USUAL LATCH IS UNAVAILABLE HERE. queryRideRequestClaimReservationDispatch
+// wins on `dispatched_at IS NULL`, and every row this statement touches has it
+// set — that is the definition of the set. So the guarantee moves into the
+// predicate: `COALESCE(dispatch_error, ”) <> 'reservation_expired'` means the
+// SECOND caller matches no row, whether it is a peer sweeper, a redelivery or
+// simply the next 30s tick. Without it the Live Activity end would re-fire
+// forever.
+//
+// It writes the SAME pair the never-dispatched arm writes — `failed` /
+// `reservation_expired` — deliberately, because three separate consumers
+// (the §7.21 registration guard, the ETA ticker's exclusion predicate, and the
+// retention sweep) key on exactly that pair to decide whether a reservation is
+// still live. A parallel marker for the second cause would leave all three
+// reading "still live" on a ride that is hours gone.
+//
+// `status = 'accepted'` keeps the verdict PROVISIONAL in the MYR-461 sense: a
+// ride the parties rescued into `arrived` is out of the set before this can
+// reach it, and stays out.
+const queryRideRequestExpireDispatchedReservation = `UPDATE go_ride_requests SET
+	dispatch_status = 'failed',
+	dispatch_error  = 'reservation_expired',
+	updated_at = NOW()
+WHERE id = $1
+  AND ` + lapsedDispatchPredicate + `
+RETURNING id`

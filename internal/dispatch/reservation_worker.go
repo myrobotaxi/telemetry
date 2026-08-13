@@ -1,29 +1,18 @@
-// The per-reservation decision (MYR-179): expiry, the vehicle-busy hold, the
-// just-in-time claim, the push, and the `ride.due` seam. Runs inside a worker
-// holding one of the sweeper's slots, under an OverallTimeout-bounded context.
+// The per-reservation decision (MYR-179): the lateness ceiling, the leave-time
+// gate, the hold probes, and the hand-off to the claimed dispatch path. Runs
+// inside a worker holding one of the sweeper's slots, under an
+// OverallTimeout-bounded context.
+//
+// The ceiling's own policy lives in reservation_lapse.go and the claim and its
+// two seams in reservation_seam.go; this file is the ORDER those are asked in,
+// which is the whole safety argument.
 
 package dispatch
 
 import (
 	"context"
 	"log/slog"
-	"time"
-
-	"github.com/myrobotaxi/telemetry/internal/events"
 )
-
-// codeReservationExpired is recorded in dispatch_error when a reservation came
-// due but was still unclaimed past its lateness ceiling (scheduledFor +
-// MaxLateness), so it was failed WITHOUT a push. The two ways to get here are
-// a vehicle that stayed on another ride for the whole window and a gap in
-// dispatch itself (downtime, or the reservation kill-switch); the outcome is
-// the same either way, so the code is one generalised value rather than a
-// per-cause family. The distinguishing detail rides the log line, not the
-// column.
-//
-// It is an opaque outcome code, not a credential, and joins the dispatch-local
-// code set documented in rest-api.md §7.8.
-const codeReservationExpired = "reservation_expired"
 
 // handleDue decides one due reservation. The ORDER of the steps is the whole
 // safety argument:
@@ -105,32 +94,27 @@ func (s *ReservationSweeper) handleDue(ctx context.Context, r *DueReservation) s
 		return decisionHeld
 	}
 
-	claimed, err := s.store.ClaimReservationDispatch(ctx, r.RideRequestID)
-	if err != nil {
+	// The claim and everything after it is claimAndDispatch (MYR-556), shared
+	// verbatim with the owner's dispatch-now endpoint — see reservation_seam.go
+	// for why the sequence has exactly one implementation.
+	outcome, err := s.claimAndDispatch(ctx, r, now)
+	switch {
+	case err != nil:
 		s.logger.Error("reservation sweep: claim failed",
 			slog.String("ride_id", r.RideRequestID),
 			slog.String("vehicle_id", r.VehicleID),
 			slog.String("error", err.Error()),
 		)
 		return decisionHeld
-	}
-	if !claimed {
+	case outcome == outcomeLost:
 		// A peer sweeper won it, or the ride was cancelled/advanced between
 		// the SELECT and the claim (the claim re-checks status). Either way it
 		// is not ours to dispatch: exactly-once holds, nothing to do, and
 		// nothing to log — this is an ordinary outcome, not a fault.
 		return decisionLost
+	default:
+		return decisionDispatched
 	}
-
-	leg := s.dispatcher.pickupLeg(r.RideRequestID, r.VehicleID, r.OwnerID, r.Pickup)
-	if s.dispatcher.runClaimedLeg(ctx, leg) == OutcomeSent {
-		// `ride.due` is published only once the car actually took the pickup.
-		// The topic's contract is "your car is on the way", so a kill-switched
-		// (`skipped`) or failed push must not emit it — the latch admits one
-		// winner, so a false event could never be corrected by a later one.
-		s.publishDue(ctx, r, now)
-	}
-	return decisionDispatched
 }
 
 // holdIfVehicleBlocked answers, from ONE vehicle read, both "is this car in
@@ -306,83 +290,4 @@ func (s *ReservationSweeper) holdIfRiderNotGranted(ctx context.Context, r *DueRe
 		return true
 	}
 	return false
-}
-
-// pastDeadline reports whether a due reservation has passed its lateness
-// ceiling. The deadline is anchored on scheduledFor (not on first
-// observation), so it is a property of the reservation itself: a restart
-// mid-hold resumes the same deadline rather than resetting it, and downtime
-// cannot buy a stale reservation a fresh window.
-//
-// now is read INSIDE the worker rather than at pass start, so a candidate that
-// waited behind the sweeper's worker budget is judged on when it is actually
-// about to be pushed.
-func (s *ReservationSweeper) pastDeadline(r *DueReservation, now time.Time) bool {
-	return now.After(r.ScheduledFor.Add(s.cfg.MaxLateness))
-}
-
-// expire resolves a reservation that is past its lateness ceiling. It claims
-// the latch and records an honest `failed` / reservation_expired WITHOUT
-// pushing nav — whatever the vehicle happens to be doing.
-//
-// Claiming here is deliberate and is the point: it converts an invisible
-// "forever pending" row into a resolved, alertable outcome that surfaces on
-// the existing dispatchStatus surface, and it stops the sweeper from
-// re-evaluating the row every 30s forever. No `ride.due` is published — the
-// reservation never actually dispatched, and the seam's future consumer is a
-// "your car is on the way" notification that would be false here.
-//
-// The claim re-validates status too, so a reservation the rider cancelled is
-// left alone rather than stamped with a dispatch failure it never had.
-func (s *ReservationSweeper) expire(ctx context.Context, r *DueReservation) sweepDecision {
-	claimed, err := s.store.ClaimReservationDispatch(ctx, r.RideRequestID)
-	if err != nil {
-		s.logger.Error("reservation sweep: claim for expiry failed",
-			slog.String("ride_id", r.RideRequestID),
-			slog.String("error", err.Error()),
-		)
-		return decisionHeld
-	}
-	if !claimed {
-		return decisionLost
-	}
-
-	code := codeReservationExpired
-	leg := s.dispatcher.pickupLeg(r.RideRequestID, r.VehicleID, r.OwnerID, r.Pickup)
-	s.dispatcher.record(ctx, leg, "", OutcomeFailed, &code, "")
-	s.logger.Warn("reservation sweep: past the lateness ceiling, failing reservation",
-		slog.String("ride_id", r.RideRequestID),
-		slog.String("vehicle_id", r.VehicleID),
-		slog.Time("scheduled_for", r.ScheduledFor),
-		slog.Duration("max_lateness", s.cfg.MaxLateness),
-	)
-	// MYR-172: the ride row stays `accepted`, so this failure is invisible on
-	// the event bus. Tell the rider's Live Activity directly, or it counts down
-	// to a pickup that will never happen.
-	s.endActivities(ctx, r.RideRequestID)
-	return decisionExpired
-}
-
-// publishDue emits the `ride.due` seam for a reservation whose pickup push
-// reached the car. Fire-and-forget and drop-safe: a nil bus or a publish
-// failure is logged and the dispatch stands — the nav push is the contract,
-// the event is only a notification hook.
-func (s *ReservationSweeper) publishDue(ctx context.Context, r *DueReservation, dueAt time.Time) {
-	if s.bus == nil {
-		return
-	}
-	evt := events.NewEvent(events.RideDueEvent{
-		RideRequestID: r.RideRequestID,
-		VehicleID:     r.VehicleID,
-		RiderID:       r.RiderID,
-		OwnerID:       r.OwnerID,
-		ScheduledFor:  r.ScheduledFor,
-		DueAt:         dueAt,
-	})
-	if err := s.bus.Publish(ctx, evt); err != nil {
-		s.logger.Warn("reservation sweep: publish ride.due failed",
-			slog.String("ride_id", r.RideRequestID),
-			slog.String("error", err.Error()),
-		)
-	}
 }

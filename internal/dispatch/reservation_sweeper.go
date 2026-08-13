@@ -52,6 +52,13 @@ type DueReservation struct {
 	OwnerID       string
 	Pickup        events.RidePlace
 	ScheduledFor  time.Time
+	// TripVersion is the ride's CURRENT trip-shape version, threaded through
+	// the due projection so the MYR-555 dispatch frame can carry it (MYR-548's
+	// carry rule: every publisher carries the version, nobody but a trip edit
+	// bumps it). Threaded rather than re-read: the sweeper already has the row
+	// in hand, and a second read at publish time could disagree with the one
+	// the dispatch decision was made from.
+	TripVersion int
 }
 
 // VehicleDispatchState is the one-read answer to the two vehicle-level
@@ -80,6 +87,27 @@ type ReservationStore interface {
 	// (= now - MaxLateness) and must be resolved regardless. Oldest first,
 	// capped at limit.
 	ListDueReservations(ctx context.Context, dueBefore, expiredBefore time.Time, limit int) ([]DueReservation, error)
+	// ListLapsedDispatches returns accepted reservations that WERE dispatched
+	// and never became a ride: `dispatched_at` set, status still `accepted`,
+	// `scheduled_for` at or before lapsedBefore (= now - MaxLateness), and the
+	// ceiling verdict not yet recorded. Oldest first, capped at limit.
+	//
+	// It is a SECOND statement rather than an arm of the due query on purpose
+	// (MYR-555). The due query's `dispatched_at IS NULL` conjunct is what makes
+	// that sweep self-terminating and what puts it on migration 0016's partial
+	// index; ORing a dispatched arm onto it would cost both, and would let
+	// lapsed rows crowd live dispatch candidates out of its anti-starvation
+	// LIMIT window. See sweepLapsed.
+	ListLapsedDispatches(ctx context.Context, lapsedBefore time.Time, limit int) ([]LapsedReservation, error)
+	// ExpireDispatchedReservation records the lateness-ceiling verdict on a
+	// reservation whose pickup nav was already dispatched: `failed` /
+	// `reservation_expired`, with the ride row left at `accepted`.
+	//
+	// It carries the ONE-WINNER guarantee itself, because the usual latch
+	// cannot: `dispatched_at` is already stamped on every row in this set, so
+	// the claim can never win. false means the row already carried the verdict
+	// or moved on — an ordinary outcome, never an error.
+	ExpireDispatchedReservation(ctx context.Context, rideID string) (bool, error)
 	// VehicleHasActiveInstantRide reports whether the vehicle is mid-ride on
 	// an active INSTANT ride (the MYR-266 per-vehicle busy predicate).
 	VehicleHasActiveInstantRide(ctx context.Context, vehicleID string) (bool, error)

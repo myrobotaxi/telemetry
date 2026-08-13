@@ -144,6 +144,9 @@ func (a *reservationStoreAdapter) ListDueReservations(
 			OwnerID:       rec.OwnerID,
 			Pickup:        pickup,
 			ScheduledFor:  rec.ScheduledFor,
+			// MYR-555: threaded through so the dispatch frame states the ride's
+			// CURRENT trip version rather than the wire's zero.
+			TripVersion: rec.TripVersion,
 		})
 	}
 	return out, nil
@@ -213,4 +216,35 @@ func (a *reservationStoreAdapter) RiderMayRequestRides(ctx context.Context, ride
 
 func (a *reservationStoreAdapter) ClaimReservationDispatch(ctx context.Context, rideID string) (bool, error) {
 	return a.repo.ClaimReservationDispatch(ctx, rideID)
+}
+
+// ListLapsedDispatches projects the SECOND ceiling pass (MYR-555): reservations
+// that were dispatched and never became a ride.
+//
+// The projection is trivial because the row is — three columns, no place, no
+// rider, no decrypt. That is the point of keeping it a separate seam from the
+// due list: this pass pushes nothing anywhere, so it should not pay for the
+// pickup coordinates the due pass exists to deliver.
+func (a *reservationStoreAdapter) ListLapsedDispatches(
+	ctx context.Context,
+	lapsedBefore time.Time,
+	limit int,
+) ([]dispatch.LapsedReservation, error) {
+	recs, err := a.repo.ListLapsedDispatches(ctx, lapsedBefore, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]dispatch.LapsedReservation, 0, len(recs))
+	for i := range recs {
+		out = append(out, dispatch.LapsedReservation{
+			RideRequestID: recs[i].ID,
+			VehicleID:     recs[i].VehicleID,
+			ScheduledFor:  recs[i].ScheduledFor,
+		})
+	}
+	return out, nil
+}
+
+func (a *reservationStoreAdapter) ExpireDispatchedReservation(ctx context.Context, rideID string) (bool, error) {
+	return a.repo.ExpireDispatchedReservation(ctx, rideID)
 }

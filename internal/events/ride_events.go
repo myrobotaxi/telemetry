@@ -94,6 +94,28 @@ type RideStatusChangedEvent struct {
 	// notifier must NOT re-fire the status copy for it — the trip-changed
 	// seam carries its own. False for every pre-MYR-541 publisher.
 	TripEdit bool
+	// DispatchEdit marks an event published because the ride's DISPATCH state
+	// changed rather than its status (MYR-555): the reservation sweeper — or
+	// the owner's dispatch-now tap — just claimed the leg-1 latch and the car
+	// took the pickup, so `dispatchedAt` moved on a row whose `status` did not.
+	//
+	// It exists because reservation dispatch was INVISIBLE TO AN OPEN APP. The
+	// sweeper mutated the dispatch columns and published `ride.due`, a push-only
+	// topic with no WS consumer, so a client already looking at the ride learned
+	// nothing until it happened to refetch — prod c92b2c86, dispatched correctly
+	// at 21:40:24Z and never surfaced on the phone. This frame is the refetch
+	// signal that closes the hole.
+	//
+	// Status is the ride's UNCHANGED status (`accepted`, guaranteed by the
+	// claim's own SQL predicate), carried so the WS frame keeps its required
+	// field — exactly TripEdit's shape, for exactly TripEdit's reason. And like
+	// TripEdit it makes the push notifier stand down: `ride.due` already tells
+	// both parties the car is on its way, and re-firing the status copy would
+	// mean "Your ride is confirmed" a second time, hours after the accept.
+	//
+	// NOT PROJECTED ONTO THE WS FRAME — a publisher-to-consumer marker only, so
+	// this fix needs no wire-schema change at all.
+	DispatchEdit bool
 	// PreviousStatus is the status the ride held when the transition was
 	// requested — the handler's pre-check read, so under a lost race it may
 	// name a status one step behind the one the guarded write actually left.
