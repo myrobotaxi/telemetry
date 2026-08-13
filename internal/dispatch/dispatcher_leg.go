@@ -186,7 +186,15 @@ func (d *Dispatcher) runClaimedLeg(ctx context.Context, leg dispatchLeg) Outcome
 	}
 
 	outcome, ecode, detail := d.executeWithRetry(legCtx, vin, token, leg.coord)
-	return d.recordSequenced(ctx, leg, hold, vin, outcome, ecode, detail)
+	resolved := d.recordSequenced(ctx, leg, hold, vin, outcome, ecode, detail)
+	if resolved == OutcomeSent {
+		// MYR-527: `sent` only says Tesla accepted the share. The close-loop
+		// watches the CAR's own reported destination converge on the target,
+		// re-shares once if it never does, and raises the owner's "check the
+		// dash" push if it still never does. No-op when unwired.
+		d.armNavVerify(leg)
+	}
+	return resolved
 }
 
 // recordSequenced persists a sequenced leg's outcome, reclassifying a failure

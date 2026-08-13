@@ -177,6 +177,7 @@ func (n *Notifier) Subscribe(bus events.Bus) error {
 		{events.TopicRideRequestCreated, n.handleCreated},
 		{events.TopicRideStatusChanged, n.handleStatusChanged},
 		{events.TopicRideDue, n.handleDue},
+		{events.TopicRideNavUnapplied, n.handleNavUnapplied},
 	}
 
 	for _, reg := range registrations {
@@ -387,6 +388,26 @@ func (n *Notifier) handleDue(evt events.Event) {
 				// so an owner banner has no card to defer to.
 			}, ownerDueAlert(n.requesterFirstName(ctx, ev.RiderID)))
 		}
+	})
+}
+
+// handleNavUnapplied tells the OWNER their car may not have the route
+// (MYR-527). The rider deliberately hears nothing: the alert's action —
+// touch the dash — is only the owner's to take, and the rider's surface is
+// already showing the honest wrong numbers the fix would correct.
+func (n *Notifier) handleNavUnapplied(evt events.Event) {
+	ev, ok := evt.Payload.(events.RideNavUnappliedEvent)
+	if !ok {
+		n.logUnexpectedPayload(evt)
+		return
+	}
+	n.async(func(ctx context.Context) {
+		n.fanOut(ctx, delivery{
+			userID:   ev.OwnerID,
+			rideID:   ev.RideRequestID,
+			topic:    string(evt.Topic),
+			category: CategoryRideLifecycle,
+		}, navUnappliedAlert(n.vehicleName(ctx, ev.VehicleID)))
 	})
 }
 

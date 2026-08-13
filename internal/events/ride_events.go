@@ -142,7 +142,8 @@ func (RideStartedEvent) EventTopic() Topic { return TopicRideStarted }
 // intended consumer is a rider push notification, not a Tesla command — a
 // future consumer that needs the pickup refetches the ride.
 //
-// No subscriber exists yet; the publish is fire-and-forget and drop-safe.
+// Consumed by the push notifier, which fans out to BOTH parties (MYR-186 the
+// rider, MYR-535 the owner). The publish is fire-and-forget and drop-safe.
 // Internal-only — never broadcast to WS clients.
 type RideDueEvent struct {
 	BasePayload
@@ -166,3 +167,28 @@ type RideDueEvent struct {
 
 // EventTopic returns TopicRideDue.
 func (RideDueEvent) EventTopic() Topic { return TopicRideDue }
+
+// RideNavUnappliedEvent is the nav-share close-loop's failure report
+// (MYR-527): a leg's `navigation_request` was accepted by Tesla (`sent`) but
+// the car's own telemetry never reported the shared destination — through the
+// verification window and one re-share. First live casualty 2026-08-12: a
+// rider aboard a 3-hour trip whose dash still navigated to the pickup, with
+// the app faithfully rendering the wrong nav ("4 min away").
+//
+// SUMMARY-ONLY like RideDueEvent: ids and a leg label, no places — the
+// consumer is the owner's "check the dash" push, and the payload policy keeps
+// P1 places off that path entirely. Internal-only — never broadcast to WS
+// clients. Fire-and-forget and drop-safe: a bus failure is logged and the
+// dispatch outcome stands.
+type RideNavUnappliedEvent struct {
+	BasePayload
+	RideRequestID string
+	VehicleID     string
+	OwnerID       string
+	// Leg is "pickup" or "dropoff" — the audit label of the leg that never
+	// took, for the log line and any future per-leg copy fork.
+	Leg string
+}
+
+// EventTopic returns TopicRideNavUnapplied.
+func (RideNavUnappliedEvent) EventTopic() Topic { return TopicRideNavUnapplied }

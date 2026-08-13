@@ -120,6 +120,8 @@ type Dispatcher struct {
 	// nav orders this dispatcher's pushes per vehicle so the two legs of one
 	// ride can never land on the car out of order (MYR-526).
 	nav *navSequencer
+	// verify is the optional nav-apply close-loop (MYR-527). Nil = off.
+	verify *navVerify
 	// workers counts the in-flight dispatch goroutines. Not a sync.WaitGroup —
 	// see Wait, and internal/drain for the argument (MYR-410).
 	workers drain.Group
