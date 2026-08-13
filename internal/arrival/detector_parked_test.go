@@ -41,10 +41,10 @@ import (
 // byte-for-byte the field set addDriveStateFields produces from Tesla's
 // vehicle_data for a stationary vehicle, and it is the ONLY frame this server
 // can receive while a car sits at a waypoint.
-func (h *harness) feedParkedREST(vin string, sec int, meters float64) {
+func (h *harness) feedParkedREST(sec int, meters float64) {
 	lat, lng := offsetNorth(meters)
 	h.bus.handler(events.NewEvent(events.VehicleTelemetryEvent{
-		VIN:       vin,
+		VIN:       testVIN,
 		CreatedAt: h.clock.Add(time.Duration(sec) * time.Second),
 		Fields: map[string]events.TelemetryValue{
 			string(telemetry.FieldLocation): {
@@ -98,7 +98,7 @@ func TestDetectorReachesAStopAddedMidLegFromParkedRESTFrames(t *testing.T) {
 	// and the ~25s REST poll takes over. Five cycles, two minutes, 12 m from
 	// the pin and not moving.
 	for _, sec := range []int{60, 85, 110, 135, 160} {
-		h.feedParkedREST(testVIN, sec, 12)
+		h.feedParkedREST(sec, 12)
 	}
 
 	got := h.waypointsPublished()
@@ -132,8 +132,8 @@ func TestDetectorRecoversARideAlreadyStuckAtItsStop(t *testing.T) {
 
 	// The car has been sitting here for ten minutes already; these are simply
 	// the next two poll cycles.
-	h.feedParkedREST(testVIN, 0, 9)
-	h.feedParkedREST(testVIN, 25, 9)
+	h.feedParkedREST(0, 9)
+	h.feedParkedREST(25, 9)
 
 	got := h.waypointsPublished()
 	if len(got) != 1 {
@@ -156,7 +156,7 @@ func TestDetectorDoesNotArriveOnRESTFixesThatKeepMoving(t *testing.T) {
 	// Crawling across a car park inside the radius: 40 m per cycle, which is
 	// ~3.6 mph — well above the 1 mph the speed rule calls stopped.
 	for i, meters := range []float64{70, 30, 10, 45, 75} {
-		h.feedParkedREST(testVIN, i*25, meters)
+		h.feedParkedREST(i*25, meters)
 	}
 
 	if got := h.waypointsPublished(); len(got) != 0 {
@@ -171,7 +171,7 @@ func TestDetectorNeedsMoreThanOneParkedRESTFix(t *testing.T) {
 	h := newHarness(t, Config{Dwell: 20 * time.Second})
 	h.store.set([]Candidate{stopCandidate("crs821")}, nil)
 
-	h.feedParkedREST(testVIN, 0, 9)
+	h.feedParkedREST(0, 9)
 
 	if got := h.waypointsPublished(); len(got) != 0 {
 		t.Fatalf("published %v on a single fix, want none", got)
@@ -186,8 +186,8 @@ func TestDetectorRefusesToInferStillnessAcrossALongGap(t *testing.T) {
 	h := newHarness(t, Config{Dwell: 20 * time.Second})
 	h.store.set([]Candidate{stopCandidate("crs821")}, nil)
 
-	h.feedParkedREST(testVIN, 0, 9)
-	h.feedParkedREST(testVIN, 900, 9) // fifteen minutes later
+	h.feedParkedREST(0, 9)
+	h.feedParkedREST(900, 9) // fifteen minutes later
 
 	if got := h.waypointsPublished(); len(got) != 0 {
 		t.Fatalf("published %v across a 15-minute gap, want none", got)
@@ -195,8 +195,44 @@ func TestDetectorRefusesToInferStillnessAcrossALongGap(t *testing.T) {
 
 	// …but the ordinary cadence resuming from there does arrive, so a gap
 	// delays detection rather than poisoning it.
-	h.feedParkedREST(testVIN, 925, 9)
+	h.feedParkedREST(925, 9)
 	if got := h.waypointsPublished(); len(got) != 1 {
 		t.Fatalf("published %v after the cadence resumed, want 1", got)
+	}
+}
+
+// A trip edit re-points the CAR within seconds, so the detector must not spend
+// the rest of a TTL measuring against the target the trip no longer has. The
+// edit itself performs no read — it marks the snapshot dirty and the next frame
+// pays for it — so this also pins that one edit costs one refresh.
+func TestDetectorRebuildsTheCandidateSetOnATripEdit(t *testing.T) {
+	h := newHarness(t, Config{Dwell: 20 * time.Second, CandidateTTL: time.Hour})
+	h.store.set([]Candidate{stopCandidate("crs01")}, nil)
+
+	h.feedParkedREST(0, 9)
+	if got := h.store.callCount(); got != 1 {
+		t.Fatalf("store reads = %d, want 1 for the first frame", got)
+	}
+
+	// The rider edits the trip: the stop the car is driving to is now a
+	// different one. Inside the TTL, so nothing but the edit can cause a re-read.
+	h.store.set([]Candidate{stopCandidate("crs02")}, nil)
+	h.bus.editTrip()
+	if got := h.store.callCount(); got != 1 {
+		t.Fatalf("store reads = %d immediately after the edit, want 1 — the edit "+
+			"must schedule a refresh, not perform one", got)
+	}
+
+	h.feedParkedREST(25, 9)
+	if got := h.store.callCount(); got != 2 {
+		t.Fatalf("store reads = %d after the next frame, want 2", got)
+	}
+
+	// And the arrival that follows names the stop the edit installed, not the
+	// one the snapshot held.
+	h.feedParkedREST(50, 9)
+	got := h.waypointsPublished()
+	if len(got) != 1 || got[0] != events.WaypointStop("crs02") {
+		t.Fatalf("published %v, want one arrival at the edited stop", got)
 	}
 }

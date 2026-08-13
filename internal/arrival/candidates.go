@@ -3,6 +3,7 @@ package arrival
 import (
 	"context"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/events"
@@ -81,7 +82,25 @@ type candidateCache struct {
 	// failing records that the last refresh attempt returned an error, so the
 	// log line for the next success can say the outage ended.
 	failing bool
+	// fingerprint is the composition of the last snapshot installed, so a
+	// rebuild is logged only when the set actually changed (MYR-563).
+	fingerprint string
+
+	// dirty is set from ANOTHER goroutine — the trip-edit subscription — to
+	// force the next frame to re-read. It is the one piece of this struct not
+	// owned by the frame handler, which is exactly why it is an atomic flag and
+	// not a field: the snapshot map itself stays single-goroutine, so no lock
+	// is introduced onto the per-frame path.
+	dirty atomic.Bool
 }
+
+// invalidate marks the snapshot stale so the next frame re-derives it. Called
+// from the trip-edit seam (MYR-563): a mid-leg edit re-points the CAR
+// immediately, and the detector measuring against the previous target until the
+// TTL happens to lapse is a window in which the two disagree about where the
+// ride is going. Cheap by design — it schedules a read, it does not perform one,
+// so a burst of edits costs one refresh rather than one each.
+func (c *candidateCache) invalidate() { c.dirty.Store(true) }
 
 // ensure returns the VIN-keyed candidate snapshot, refreshing it first when the
 // current one has aged past the TTL. The second return reports whether THIS
@@ -98,7 +117,13 @@ type candidateCache struct {
 // an auto-arrival into a wrong one. The owner's manual tap is unaffected by any
 // of this, which is what makes the degradation cheap.
 func (c *candidateCache) ensure(ctx context.Context, now time.Time) (map[string]Candidate, bool) {
-	if c.byVIN != nil && now.Sub(c.fetchedAt) < c.cfg.CandidateTTL {
+	// A trip edit forces the read regardless of age, and the flag is cleared by
+	// the attempt rather than by its success: a failed refresh falls through to
+	// the ordinary staleness rules below, which already know what to do, and
+	// leaving it set would pin the detector to a read-every-frame loop for as
+	// long as the database stayed down.
+	forced := c.dirty.Swap(false)
+	if !forced && c.byVIN != nil && now.Sub(c.fetchedAt) < c.cfg.CandidateTTL {
 		return c.byVIN, false
 	}
 
@@ -117,6 +142,13 @@ func (c *candidateCache) ensure(ctx context.Context, now time.Time) (map[string]
 	}
 	c.byVIN = indexByVIN(cands, c.logger)
 	c.fetchedAt = now
+	if fp := candidateSetFingerprint(c.byVIN); fp != c.fingerprint {
+		c.fingerprint = fp
+		c.logger.Info("auto-arrival: candidate set rebuilt",
+			slog.Int("candidates", len(c.byVIN)),
+			slog.Bool("forced_by_trip_edit", forced),
+			slog.String("watching", fp))
+	}
 	return c.byVIN, true
 }
 
