@@ -110,6 +110,21 @@ const (
 	// marked ride_status_changed frame instead.
 	TopicRideTripChanged Topic = "ride.trip_changed"
 
+	// TopicRideWaypointArrived is the car-reached-a-waypoint seam (MYR-538):
+	// published once per (ride, waypoint) when the AUTO-ARRIVAL detector
+	// observes a dispatched car parked inside the arrival radius of the ride's
+	// pickup for the dwell window. The payload is RideWaypointArrivedEvent.
+	// Internal-only — never broadcast to WS clients.
+	//
+	// Distinct from the accepted → arrived transition that fires alongside it,
+	// and the distinction is the reason the topic exists. The STATUS says "this
+	// ride has been picked up", and the owner's manual tap can say that from
+	// anywhere. THIS says "the car is physically at the kerb, and telemetry is
+	// how we know" — the only sound trigger for a consumer that acts on the car
+	// itself. MYR-542's light flash is the first; there is no subscriber yet and
+	// the bus tolerates zero.
+	TopicRideWaypointArrived Topic = "ride.waypoint_arrived"
+
 	// TopicVehicleDeleted is published when a Vehicle row is deleted from
 	// the Prisma-owned "Vehicle" table (sourced from a Postgres
 	// LISTEN/NOTIFY channel; see internal/store/notify_listener.go). The

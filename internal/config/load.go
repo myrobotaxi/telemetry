@@ -44,6 +44,9 @@ type fileConfig struct {
 	// ridePrunerEnabled is the MYR-447 ride-retention sweep kill-switch
 	// (RIDE_RETENTION_PRUNER_ENABLED). See load_dispatch.go.
 	ridePrunerEnabled bool
+	// autoArrivalEnabled is the MYR-538 auto-arrival kill-switch
+	// (AUTO_ARRIVAL_ENABLED). See load_dispatch.go.
+	autoArrivalEnabled bool
 
 	// MYR-320 periodic in-service re-poll knobs (SERVICE_REPOLL_ENABLED /
 	// SERVICE_REPOLL_INTERVAL). See load_service_repoll.go.
@@ -318,6 +321,23 @@ func parseOriginList(raw string) []string {
 	return out
 }
 
+// buildIdentityConfig projects the loaded identity values onto the immutable
+// IdentityConfig. Extracted from buildConfig for the same reason
+// buildPushConfig was — that function is one long struct literal against a
+// hard length cap, and a nested block that only touches `fc.Identity` plus the
+// three identity secrets is the natural piece to lift out.
+func buildIdentityConfig(fc *fileConfig) IdentityConfig {
+	return IdentityConfig{
+		ES256PrivateKeyPEM:     fc.es256PrivateKeyPEM,
+		AppleClientID:          fc.appleClientID,
+		BootstrapEmailToCUID:   fc.appleBootstrap,
+		AccessTokenTTL:         fc.Identity.AccessTokenTTL.Dur(),
+		RefreshTokenTTL:        fc.Identity.RefreshTokenTTL.Dur(),
+		AuthRateLimitPerMinute: fc.Identity.AuthRateLimitPerMinute,
+		AuthRateLimitBurst:     fc.Identity.AuthRateLimitBurst,
+	}
+}
+
 // buildConfig converts the intermediate fileConfig into an immutable Config.
 func buildConfig(fc *fileConfig) *Config {
 	return &Config{
@@ -363,15 +383,7 @@ func buildConfig(fc *fileConfig) *Config {
 			TokenIssuer:   fc.Auth.TokenIssuer,
 			TokenAudience: fc.Auth.TokenAudience,
 		},
-		identity: IdentityConfig{
-			ES256PrivateKeyPEM:     fc.es256PrivateKeyPEM,
-			AppleClientID:          fc.appleClientID,
-			BootstrapEmailToCUID:   fc.appleBootstrap,
-			AccessTokenTTL:         fc.Identity.AccessTokenTTL.Dur(),
-			RefreshTokenTTL:        fc.Identity.RefreshTokenTTL.Dur(),
-			AuthRateLimitPerMinute: fc.Identity.AuthRateLimitPerMinute,
-			AuthRateLimitBurst:     fc.Identity.AuthRateLimitBurst,
-		},
+		identity: buildIdentityConfig(fc),
 		proxy: ProxyConfig{
 			URL:                    fc.Proxy.URL,
 			FleetTelemetryHostname: fc.Proxy.FleetTelemetryHostname,
@@ -399,5 +411,6 @@ func buildConfig(fc *fileConfig) *Config {
 		ridePollInterval:           fc.ridePollInterval,
 		drivePrunerEnabled:         fc.drivePrunerEnabled,
 		ridePrunerEnabled:          fc.ridePrunerEnabled,
+		autoArrivalEnabled:         fc.autoArrivalEnabled,
 	}
 }
