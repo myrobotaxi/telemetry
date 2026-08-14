@@ -102,6 +102,17 @@ func (p ShareInvitePatch) HasChange() bool {
 	return p.AllowRides != nil || p.Suspended != nil
 }
 
+// ShareLeaveOutcome is what a rider's leave found (MYR-469).
+type ShareLeaveOutcome int
+
+const (
+	// ShareLeaveDone — the caller no longer holds an accepted grant on the
+	// vehicle, whether this call removed one or there was nothing to remove.
+	ShareLeaveDone ShareLeaveOutcome = iota
+	// ShareLeaveRefusedLiveRide — a live ride holds the grant in place.
+	ShareLeaveRefusedLiveRide
+)
+
 // ShareInviteStore is the owner-side dependency: mint, list, revoke, resend.
 // Defined at the consumer site per the dependency rule; the adapter in
 // cmd/telemetry-server binds store.VehicleShareRepo to it.
@@ -119,6 +130,11 @@ type ShareInviteStore interface {
 	RevokeInvite(ctx context.Context, inviteID, ownerUserID string) (RevokedGrant, error)
 	// ResendInvite re-mints the code and resets the expiry on a pending row.
 	ResendInvite(ctx context.Context, inviteID, ownerUserID string) (ShareInviteRow, error)
+	// LeaveVehicleShares tombstones every accepted grant the CALLER redeemed
+	// on this vehicle (MYR-469 — the rider-side mirror of RevokeInvite).
+	// Idempotent; refused (without writing) while the caller has a live ride
+	// on the car, because the ride's telemetry access rides the grant.
+	LeaveVehicleShares(ctx context.Context, vehicleID, viewerUserID string) (ShareLeaveOutcome, error)
 	// PatchInvite applies an owner edit to one ACCEPTED grant and returns
 	// the row as it now stands (MYR-369). The returned user id is the
 	// grantee whose access set changed, for cache invalidation — always

@@ -58,6 +58,11 @@ func setupVehicleSharingEndpoints(deps httpRouteDeps, vehicles telemetry.Vehicle
 	// coexist under /api/invites/{inviteId}.
 	deps.srv.HandleFunc("PATCH /api/invites/{inviteId}", inviteHandler.ServePatch)
 	deps.srv.HandleFunc("POST /api/invites/{inviteId}/resend", inviteHandler.ServeResend)
+	// MYR-469 — the RIDER's own way out of a share, keyed on the vehicle
+	// because a vehicle id is the only identity the viewer holds. Lives on the
+	// same handler as the owner routes so the tombstone, the cache bust and
+	// the MYR-373 socket teardown are one implementation.
+	deps.srv.HandleFunc("DELETE /api/vehicles/{vehicleId}/share", inviteHandler.ServeLeave)
 
 	redeemHandler := telemetry.NewShareRedeemHandler(
 		deps.authenticator,
