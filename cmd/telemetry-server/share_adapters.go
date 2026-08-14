@@ -100,6 +100,18 @@ func (a *shareInviteAdapter) ResendInvite(ctx context.Context, inviteID, ownerUs
 // OwnerFirstName resolves the calling owner's first name for the `from` half of
 // a signed share link (MYR-368). Same repository method the redeem side uses:
 // one ladder, one policy, no second definition of "first name" to drift.
+// LeaveVehicleShares — MYR-469, the rider-side mirror of RevokeInvite.
+func (a *shareInviteAdapter) LeaveVehicleShares(ctx context.Context, vehicleID, viewerUserID string) (telemetry.ShareLeaveOutcome, error) {
+	result, err := a.repo.LeaveVehicleShares(ctx, vehicleID, viewerUserID)
+	if err != nil {
+		return telemetry.ShareLeaveDone, err
+	}
+	if result == store.ShareLeaveRefusedLiveRide {
+		return telemetry.ShareLeaveRefusedLiveRide, nil
+	}
+	return telemetry.ShareLeaveDone, nil
+}
+
 func (a *shareInviteAdapter) OwnerFirstName(ctx context.Context, ownerUserID string) (string, error) {
 	name, err := a.repo.OwnerFirstName(ctx, ownerUserID)
 	if err != nil {

@@ -58,6 +58,12 @@ type fakeShareInviteStore struct {
 	// omitted-name canonical form.
 	ownerName    string
 	ownerNameErr error
+
+	// MYR-469 — leave capture.
+	leaveOutcome ShareLeaveOutcome
+	leaveErr     error
+	leftAs       struct{ vehicleID, viewerID string }
+	leaveCalled  bool
 }
 
 func (f *fakeShareInviteStore) CreateInvite(_ context.Context, in ShareInviteCreateInput) (ShareInviteRow, error) {
@@ -92,6 +98,12 @@ func (f *fakeShareInviteStore) PatchInvite(_ context.Context, inviteID, ownerID 
 		return ShareInviteRow{}, "", f.patchErr
 	}
 	return f.patched, f.patchee, nil
+}
+
+func (f *fakeShareInviteStore) LeaveVehicleShares(_ context.Context, vehicleID, viewerUserID string) (ShareLeaveOutcome, error) {
+	f.leaveCalled = true
+	f.leftAs = struct{ vehicleID, viewerID string }{vehicleID, viewerUserID}
+	return f.leaveOutcome, f.leaveErr
 }
 
 func (f *fakeShareInviteStore) OwnerFirstName(_ context.Context, _ string) (string, error) {
@@ -184,6 +196,7 @@ func newShareInviteMux(t *testing.T, caller string, store ShareInviteStore, owne
 	mux.HandleFunc("DELETE /api/invites/{inviteId}", h.ServeRevoke)
 	mux.HandleFunc("POST /api/invites/{inviteId}/resend", h.ServeResend)
 	mux.HandleFunc("PATCH /api/invites/{inviteId}", h.ServePatch)
+	mux.HandleFunc("DELETE /api/vehicles/{vehicleId}/share", h.ServeLeave)
 	return mux
 }
 
@@ -1043,5 +1056,71 @@ func TestShareInvitePendingRowOmitsTheFlags(t *testing.T) {
 	// normalized on the way out rather than emitted.
 	if pending["permission"] != "live" {
 		t.Errorf("pending permission = %v, want live — the retired tier is never emitted", pending["permission"])
+	}
+}
+
+// MARK MYR-469 — the rider's own way out of a share.
+
+// TestServeLeaveTombstonesAndTearsDownAccess is the happy path: 204, the store
+// asked with the CALLER's id and the path's vehicle, and the same cache bust
+// the owner's revoke performs — a leave is a revoke the viewer wrote
+// themselves.
+func TestServeLeaveTombstonesAndTearsDownAccess(t *testing.T) {
+	store := &fakeShareInviteStore{leaveOutcome: ShareLeaveDone}
+	invalidator := &fakeAccessInvalidator{}
+	mux := newShareInviteMux(t, "viewer-1", store, "owner-1", invalidator)
+
+	rec := doShareRequest(t, mux, http.MethodDelete, "/api/vehicles/veh-9/share", "")
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204: %s", rec.Code, rec.Body.String())
+	}
+	if !store.leaveCalled {
+		t.Fatal("the store was never asked to leave")
+	}
+	if store.leftAs.vehicleID != "veh-9" || store.leftAs.viewerID != "viewer-1" {
+		t.Errorf("left as %+v, want the path's vehicle and the CALLER's id", store.leftAs)
+	}
+	if len(invalidator.busted) != 1 || invalidator.busted[0] != "viewer-1" {
+		t.Errorf("invalidated = %v, want exactly the caller's access set", invalidator.busted)
+	}
+}
+
+// TestServeLeaveRefusedWhileARideIsLive — the one refusal: 409, nothing torn
+// down, because the ride's telemetry access rides the grant and a mid-ride
+// leave is the MYR-449 dark stream self-inflicted.
+func TestServeLeaveRefusedWhileARideIsLive(t *testing.T) {
+	store := &fakeShareInviteStore{leaveOutcome: ShareLeaveRefusedLiveRide}
+	invalidator := &fakeAccessInvalidator{}
+	mux := newShareInviteMux(t, "viewer-1", store, "owner-1", invalidator)
+
+	rec := doShareRequest(t, mux, http.MethodDelete, "/api/vehicles/veh-9/share", "")
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	if len(invalidator.busted) != 0 {
+		t.Errorf("a refused leave must tear nothing down, invalidated %v", invalidator.busted)
+	}
+}
+
+// TestServeLeaveIsInformationFree — a store error is a 500; and the DONE
+// outcome is a 204 whether anything was tombstoned or not, so a vehicle the
+// caller never had cannot be told apart from one they already left.
+func TestServeLeaveIsInformationFree(t *testing.T) {
+	store := &fakeShareInviteStore{leaveErr: context.DeadlineExceeded}
+	mux := newShareInviteMux(t, "viewer-1", store, "owner-1", &fakeAccessInvalidator{})
+	rec := doShareRequest(t, mux, http.MethodDelete, "/api/vehicles/veh-9/share", "")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 on a store failure", rec.Code)
+	}
+
+	// Nothing to leave is the same 204 as a real leave — asserted by the
+	// outcome alone, since the fake carries no rows to count.
+	store2 := &fakeShareInviteStore{leaveOutcome: ShareLeaveDone}
+	mux2 := newShareInviteMux(t, "viewer-1", store2, "owner-1", &fakeAccessInvalidator{})
+	rec2 := doShareRequest(t, mux2, http.MethodDelete, "/api/vehicles/veh-9/share", "")
+	if rec2.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want the idempotent 204", rec2.Code)
 	}
 }

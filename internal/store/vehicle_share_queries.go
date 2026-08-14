@@ -99,6 +99,38 @@ SET status = 'revoked', revoked_at = NOW()
 WHERE id = $1 AND owner_user_id = $2 AND status <> 'revoked'
 RETURNING COALESCE(accepted_by_user_id, ''), vehicle_id`
 
+// MYR-469 — the RIDER's own way out of a share. Tombstones every ACCEPTED
+// grant the caller redeemed on this vehicle — the same tombstone the owner's
+// revoke writes (status → revoked, revoked_at stamped; never a hard delete,
+// for the same audit reason) — and refuses ATOMICALLY while the caller has a
+// live ride on the car: the ride's telemetry access rides the grant, so a
+// leave mid-ride is the MYR-449 dark stream self-inflicted. The NOT EXISTS is
+// inside the statement so a ride created between a check and the write cannot
+// slip through the gap.
+const queryLeaveVehicleShares = `
+UPDATE go_vehicle_shares
+SET status = 'revoked', revoked_at = NOW()
+WHERE vehicle_id = $1 AND accepted_by_user_id = $2 AND status = 'accepted'
+  AND NOT EXISTS (
+    SELECT 1 FROM go_ride_requests r
+    WHERE r.vehicle_id = $1 AND r.rider_id = $2
+      AND r.status IN ('requested', 'accepted', 'arrived', 'enroute'))`
+
+// queryViewerLeaveRefused disambiguates a zero-row leave: it answers a row
+// exactly when an accepted grant EXISTS and a live ride held it in place —
+// i.e. the guard fired. BOTH conditions, deliberately: a caller with a live
+// ride and no grant at all (an owner self-riding a never-shared car) has
+// nothing to leave, and answering 409 there would be a refusal about a share
+// they do not hold. No row → nothing to leave → idempotent success.
+const queryViewerLeaveRefused = `
+SELECT 1 FROM go_vehicle_shares s
+WHERE s.vehicle_id = $1 AND s.accepted_by_user_id = $2 AND s.status = 'accepted'
+  AND EXISTS (
+    SELECT 1 FROM go_ride_requests r
+    WHERE r.vehicle_id = $1 AND r.rider_id = $2
+      AND r.status IN ('requested', 'accepted', 'arrived', 'enroute'))
+LIMIT 1`
+
 // queryShareExistsForOwner probes whether a row exists AND belongs to the
 // caller. Used only to disambiguate a zero-row conditional update.
 const queryShareExistsForOwner = `

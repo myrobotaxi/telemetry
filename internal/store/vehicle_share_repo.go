@@ -251,6 +251,43 @@ func (r *VehicleShareRepo) RevokeInvite(ctx context.Context, inviteID, ownerUser
 	}
 }
 
+// ShareLeaveResult is what a rider's leave found (MYR-469).
+type ShareLeaveResult int
+
+const (
+	// ShareLeaveDone — at least one accepted grant was tombstoned (or there
+	// was nothing to leave; both are the caller's desired end state).
+	ShareLeaveDone ShareLeaveResult = iota
+	// ShareLeaveRefusedLiveRide — the caller has a live ride on this vehicle,
+	// so the grant stays until the ride ends or is cancelled.
+	ShareLeaveRefusedLiveRide
+)
+
+// LeaveVehicleShares tombstones every accepted grant viewerUserID redeemed on
+// vehicleID (MYR-469 — the rider-side mirror of RevokeInvite). Idempotent: a
+// vehicle the caller never had, or already left, is ShareLeaveDone with zero
+// rows — deliberately indistinguishable, so the endpoint cannot be used to
+// probe which vehicles exist.
+func (r *VehicleShareRepo) LeaveVehicleShares(ctx context.Context, vehicleID, viewerUserID string) (ShareLeaveResult, error) {
+	tag, err := r.pool.Exec(ctx, queryLeaveVehicleShares, vehicleID, viewerUserID)
+	if err != nil {
+		return ShareLeaveDone, fmt.Errorf("store.LeaveVehicleShares(vehicle=%s): %w", vehicleID, err)
+	}
+	if tag.RowsAffected() > 0 {
+		return ShareLeaveDone, nil
+	}
+	// Zero rows: nothing accepted (ordinary, idempotent) — or the guard held.
+	var one int
+	switch err := r.pool.QueryRow(ctx, queryViewerLeaveRefused, vehicleID, viewerUserID).Scan(&one); {
+	case err == nil:
+		return ShareLeaveRefusedLiveRide, nil
+	case errors.Is(err, pgx.ErrNoRows):
+		return ShareLeaveDone, nil
+	default:
+		return ShareLeaveDone, fmt.Errorf("store.LeaveVehicleShares(vehicle=%s): probe: %w", vehicleID, err)
+	}
+}
+
 // scanShare reads one full row in the shareColumns order. rowScanner (declared
 // in vehicle_repo_scan.go) is the shared pgx.Row / pgx.Rows surface, so this
 // serves both the single-row RETURNING path and the list iteration.
