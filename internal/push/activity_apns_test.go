@@ -95,10 +95,10 @@ func TestActivityRequestHeaders(t *testing.T) {
 	}
 }
 
-// TestActivityTickUsesConservingPriority pins MYR-194 decision 3: lifecycle
-// events take priority over ETA ticks. A tick that shipped at priority 10 would
-// spend the same per-Activity budget as an arrival, and Apple would start
-// dropping the arrivals.
+// TestActivityTickUsesConservingPriority pins the header MAPPING for the
+// retreat path: no production caller sets LowPriority since MYR-573, and this
+// is what keeps the one-line retreat honest — if the flag comes back, it must
+// still render apns-priority 5.
 func TestActivityTickUsesConservingPriority(t *testing.T) {
 	n := testActivityNotification()
 	n.LowPriority = true

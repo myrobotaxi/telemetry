@@ -361,7 +361,7 @@ func TestArrivingAlertRidesPriorityTen(t *testing.T) {
 
 	ticker := NewActivityTicker(n, store, TickerConfig{Enabled: true}, discardLogger())
 	ticker.RunPass(t.Context())
-	// The alert is spent; the next pass is an ordinary conserving refresh.
+	// The alert is spent; the next pass is an ordinary refresh.
 	ticker.RunPass(t.Context())
 
 	sent := sender.Sent()
@@ -374,18 +374,15 @@ func TestArrivingAlertRidesPriorityTen(t *testing.T) {
 	if got := sent[0].priority(); got != priorityImmediate {
 		t.Errorf("alerting tick priority = %s, want %s", got, priorityImmediate)
 	}
-	// LowPriority is still SET on it — the override lives in priority(), so a
-	// future reader can see that the ticker did ask for conserving and was
-	// overruled rather than that the flag was quietly dropped.
-	if !sent[0].LowPriority {
-		t.Error("the alerting tick cleared LowPriority; the override belongs in priority(), " +
-			"so the caller's intent stays visible")
-	}
 	if sent[1].Alert != nil {
 		t.Fatalf("second pass alerted again: %+v", *sent[1].Alert)
 	}
-	if got := sent[1].priority(); got != priorityConserving {
-		t.Errorf("routine tick priority = %s, want %s", got, priorityConserving)
+	// MYR-573 — the routine tick rides immediate priority too: a conserving
+	// tick is deferred indefinitely by a locked phone, which was the client's
+	// "card only updates when I open the app". The retreat mapping (LowPriority
+	// → 5) is pinned separately in TestActivityTickUsesConservingPriority.
+	if got := sent[1].priority(); got != priorityImmediate {
+		t.Errorf("routine tick priority = %s, want %s (MYR-573)", got, priorityImmediate)
 	}
 }
 

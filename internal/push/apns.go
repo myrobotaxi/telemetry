@@ -235,10 +235,11 @@ const (
 	// priorityImmediate (10) delivers now. Alerts and ride-lifecycle Activity
 	// updates use it: they are the user-visible events.
 	priorityImmediate = "10"
-	// priorityConserving (5) lets APNs coalesce and defer. The ETA ticker uses
-	// it, per MYR-194's "lifecycle events take priority over ETA ticks" — it is
-	// also the header Apple's throttling budget is kindest to, which matters
-	// for a push that fires every 60–90s for the length of a ride.
+	// priorityConserving (5) lets APNs coalesce and defer — and on a locked
+	// phone, defer means "not until the screen wakes", which is why the ETA
+	// ticker STOPPED using it (MYR-573; it rode this header per MYR-194 and
+	// the card visibly never moved between lifecycle alerts). Kept for the
+	// retreat path — see ActivityNotification.LowPriority.
 	priorityConserving = "5"
 )
 

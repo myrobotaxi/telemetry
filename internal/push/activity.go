@@ -71,7 +71,7 @@ type ActivityContentState struct {
 	// silently on a screen the server cannot repaint ("4 min" stays "4 min" for
 	// an hour), whereas an instant stays true no matter how late it is read —
 	// the phone subtracts `now` itself and counts down without our help. It is
-	// also what lets the ~60–90s cadence look continuous.
+	// also what lets the tick cadence (24–36s since MYR-573) look continuous.
 	//
 	// Absent means we genuinely do not know: the car reports no navigation
 	// route. There is no server-side route solver in this service, so the
@@ -191,9 +191,12 @@ func truncateLabel(s string) string {
 // MYR-194's honesty policy: ActivityKit renders its own "as of X min ago"
 // treatment once stale-date passes, so a phone that stopped receiving pushes
 // says so instead of presenting a three-hour-old ETA as current. Three minutes
-// is a little over two missed ticks at the 60–90s cadence — long enough that
-// one dropped push does not flap the display, short enough that a rider is
-// never confidently misinformed.
+// is several missed ticks at the 24–36s cadence (MYR-573; it was "a little
+// over two" at the old 60–90s one, and it deliberately did NOT shrink with the
+// cadence — a shorter window would flap the display on a brief APNs hiccup,
+// and the honesty it buys is already bought) — long enough that a dropped push
+// does not flap the display, short enough that a rider is never confidently
+// misinformed.
 const StaleAfter = 3 * time.Minute
 
 // ActivityNotification is one addressed Live Activity update.
@@ -212,9 +215,15 @@ type ActivityNotification struct {
 	// DismissalDate, set only on an end event, is when iOS removes the Activity
 	// from the lock screen. Nil on an end event means "dismiss immediately".
 	DismissalDate *time.Time
-	// LowPriority sends at apns-priority 5 instead of 10. Set for ETA ticks;
-	// left false for ride-lifecycle transitions, per MYR-194. Ignored when
-	// Alert is set — see priority().
+	// LowPriority sends at apns-priority 5 instead of 10. ⚠️ NO PRODUCTION
+	// CALLER SETS IT SINCE MYR-573: the ETA ticker rode it per MYR-194
+	// decision 3, and field evidence reversed that — priority-5 Activity
+	// updates are deferred indefinitely on a locked phone, so the card only
+	// ever moved on lifecycle alerts. Kept as the deliberate retreat shape
+	// (one line in the ticker re-enables it if Apple ever throttles the
+	// immediate budget), and pinned by TestActivityTickUsesConservingPriority
+	// so the header mapping cannot rot. Ignored when Alert is set — see
+	// priority().
 	LowPriority bool
 	// Alert, when set, adds an `aps.alert` dictionary that makes iOS expand the
 	// Dynamic Island for ~3s (MYR-398). Nil on all but the six phase changes;
@@ -237,14 +246,12 @@ func (n ActivityNotification) StaleDate() time.Time {
 
 // priority renders the apns-priority header for this update.
 //
-// AN ALERTING UPDATE IS ALWAYS IMMEDIATE, whatever the caller asked for. The
-// conserving priority exists so a periodic ETA refresh does not compete with
-// "your car is here" for Apple's per-Activity budget (MYR-194 decision 3) — and
-// a push whose entire purpose is to open the island for three seconds is not a
-// refresh that can afford to be dropped or coalesced. The combination is not
-// hypothetical: Arriving is a threshold the TICKER evaluates, so the one alert
-// in the design that does not ride a lifecycle transition originates on exactly
-// the path that sets LowPriority.
+// AN ALERTING UPDATE IS ALWAYS IMMEDIATE, whatever the caller asked for — a
+// push whose entire purpose is to open the island for three seconds is not a
+// refresh that can afford to be dropped or coalesced. (Historical note: until
+// MYR-573 the ETA ticker set LowPriority, so this promotion was load-bearing on
+// every Arriving alert; today no production caller sets the flag and the guard
+// is defence for the retreat path.)
 func (n ActivityNotification) priority() string {
 	if n.LowPriority && n.Alert == nil {
 		return priorityConserving
