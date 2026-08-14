@@ -37,10 +37,9 @@ package push
 // every banner still buzzes the phone when it lands.
 //
 // NOT ON ACTIVITYKIT PUSHES. An Activity update already addresses exactly one
-// card through its own update token, so it has nothing to collapse against, and
-// the ETA ticker's `priorityConserving` updates are already coalesced by APNs on
-// Apple's terms. buildActivityMessage therefore leaves the field empty and the
-// header is omitted — see newRequest.
+// card through its own update token, so it has nothing to collapse against.
+// buildActivityMessage therefore leaves the field empty and the header is
+// omitted — see newRequest.
 
 // maxCollapseIDBytes is Apple's documented cap on the `apns-collapse-id` header
 // value. A longer value is rejected (400 BadCollapseId), so the id is truncated

@@ -40,19 +40,23 @@ func newTestTicker(t *testing.T, legs int, prefs PrefStore) (*ActivityTicker, *F
 func TestTickerCadenceLandsInTheSpecifiedWindow(t *testing.T) {
 	cfg := TickerConfig{}.withDefaults()
 
+	// MYR-573 — 24–36s, superseding MYR-194's 60–90s window: with ticks
+	// finally DELIVERED (immediate priority under the frequent-updates
+	// budget), the cadence is what the rider sees, and once a minute reads as
+	// a stalled card beside the in-app surface.
 	const (
-		wantMin = 60 * time.Second
-		wantMax = 90 * time.Second
+		wantMin = 24 * time.Second
+		wantMax = 36 * time.Second
 	)
 	// The jittered range is a closed-form property of the two constants; assert
 	// it directly so a future edit to either is caught even if the sampling
 	// below happens to miss the edges.
 	spread := time.Duration(float64(cfg.Interval) * cfg.JitterFraction)
 	if lo := cfg.Interval - spread; lo < wantMin {
-		t.Errorf("minimum cadence = %s, want >= %s (MYR-194)", lo, wantMin)
+		t.Errorf("minimum cadence = %s, want >= %s (MYR-573)", lo, wantMin)
 	}
 	if hi := cfg.Interval + spread; hi > wantMax {
-		t.Errorf("maximum cadence = %s, want <= %s (MYR-194)", hi, wantMax)
+		t.Errorf("maximum cadence = %s, want <= %s (MYR-573)", hi, wantMax)
 	}
 
 	for range 2000 {
@@ -78,8 +82,8 @@ func TestJitterDurationDegradesSafely(t *testing.T) {
 // decisions rather than arbitrary numbers.
 func TestTickerDefaults(t *testing.T) {
 	cfg := TickerConfig{}.withDefaults()
-	if cfg.Interval != 75*time.Second {
-		t.Errorf("Interval = %s, want 75s (midpoint of the MYR-194 window)", cfg.Interval)
+	if cfg.Interval != 30*time.Second {
+		t.Errorf("Interval = %s, want 30s (MYR-573's delivered cadence)", cfg.Interval)
 	}
 	if cfg.JitterFraction != 0.20 {
 		t.Errorf("JitterFraction = %v, want 0.20", cfg.JitterFraction)
@@ -92,8 +96,16 @@ func TestTickerDefaults(t *testing.T) {
 	}
 }
 
-// TestTickerPassSendsConservingPriorityUpdates is the ordinary pass.
-func TestTickerPassSendsConservingPriorityUpdates(t *testing.T) {
+// TestTickerPassSendsImmediatePriorityUpdates is the ordinary pass.
+//
+// ⚠️ THE PRIORITY ASSERTION INVERTED WITH MYR-573, and the history matters
+// enough to keep here: this test used to REQUIRE LowPriority, pinning MYR-194
+// decision 3 — and the field showed priority-5 Activity updates deferred
+// indefinitely on a locked phone, so the pinned behaviour WAS the client's
+// "card only updates when I open the app". A tick that does not arrive is not
+// a tick. Immediate priority is budgeted by the widget extension's
+// `NSSupportsLiveActivitiesFrequentUpdates` declaration (MYR-573's iOS half).
+func TestTickerPassSendsImmediatePriorityUpdates(t *testing.T) {
 	ticker, sender, _ := newTestTicker(t, 3, nil)
 
 	ticker.RunPass(context.Background())
@@ -103,8 +115,8 @@ func TestTickerPassSendsConservingPriorityUpdates(t *testing.T) {
 		t.Fatalf("sent %d updates, want one per active leg (3)", len(sent))
 	}
 	for i, s := range sent {
-		if !s.LowPriority {
-			t.Errorf("update %d sent at immediate priority; ETA ticks must not compete with lifecycle events for Apple's budget", i)
+		if s.LowPriority {
+			t.Errorf("update %d sent at conserving priority; a deferred tick never reaches a locked phone (MYR-573)", i)
 		}
 		if s.Event != ActivityEventUpdate {
 			t.Errorf("update %d event = %q, want update — a tick never ends an Activity", i, s.Event)

@@ -12,8 +12,8 @@ import (
 // A Live Activity's ETA is the one thing on it that goes wrong by SITTING
 // STILL: the status only changes when something happens, but "arrives at 4:12"
 // stops being true the moment traffic does. So while a leg is active the server
-// re-pushes the current content-state every 60–90s whether or not anything
-// happened.
+// re-pushes the current content-state every 24–36s (MYR-573; 60–90s before it)
+// whether or not anything happened.
 //
 // Shape follows the MYR-320 in-service re-poll — startup pass, then a jittered
 // interval, a bounded LIST, a per-pass cap and a kill-switch — because that is
@@ -89,13 +89,16 @@ type TickerConfig struct {
 }
 
 const (
-	// defaultTickInterval sits at the MIDPOINT of MYR-194's 60–90s window so
-	// that the default jitter lands the actual cadence inside the window at
-	// both extremes: 75s ± 20% is 60s to 90s exactly.
-	defaultTickInterval = 75 * time.Second
-	// defaultTickJitter is 20% — chosen with the interval above to make the
-	// jittered range coincide with the specified window, and incidentally to
-	// de-synchronise replicas so they do not push Apple in a burst.
+	// defaultTickInterval is 30s (MYR-573), superseding MYR-194's 60–90s
+	// window: with ticks now delivered at immediate priority under the
+	// frequent-updates budget, the cadence is finally what the rider SEES,
+	// and a once-a-minute ETA reads as a stalled card next to the in-app
+	// surface. 30s ± 20% jitter is 24–36s — twice a minute, well inside the
+	// budget `NSSupportsLiveActivitiesFrequentUpdates` is designed for, and
+	// trivial DB load (one indexed LIST per pass).
+	defaultTickInterval = 30 * time.Second
+	// defaultTickJitter is 20% — spreads the cadence and de-synchronises
+	// replicas so they do not push Apple in a burst.
 	defaultTickJitter = 0.20
 	// defaultTickStartupDelay lets pools warm and subscriptions settle before
 	// the first pass, without making a deploy drop a whole tick for every ride
@@ -246,7 +249,7 @@ func (t *ActivityTicker) refreshActiveLegs(ctx context.Context) {
 	pushed := make([]ActivityKey, 0, len(legs))
 	// Indexed rather than ranged by value: ActivityLeg grew a progress anchor
 	// with MYR-398 and gocritic now flags the per-iteration copy, which runs
-	// once per live Activity on every 60-90s pass.
+	// once per live Activity on every tick pass.
 	for i := range legs {
 		leg := &legs[i]
 		if !t.notifier.allowed(ctx, leg.UserID, leg.RideRequestID) {
@@ -285,11 +288,21 @@ func (t *ActivityTicker) refreshActiveLegs(ctx context.Context) {
 		// unseen", the first is the one to choose. Contract: §7.21.4.
 		phase := alertPhaseFor(leg.RideContext, now)
 		alert := alertFor(phase, leg.AlertedPhase)
-		// LowPriority: an ETA tick rides apns-priority 5 so it never competes
-		// with a lifecycle transition for Apple's per-Activity budget
-		// (MYR-194 decision 3). An alerting tick is promoted back to 10 by
-		// ActivityNotification.priority — the flag is a statement about a
-		// routine refresh, and this push is not one.
+		// ⚠️ AN ETA TICK RIDES apns-priority 10 NOW (MYR-573), REVERSING
+		// MYR-194 DECISION 3, AND THE REVERSAL IS FIELD-MEASURED. Priority 5
+		// asks APNs and the DEVICE to deliver "at an opportune moment", and on
+		// a locked, stationary phone that moment never comes: in production the
+		// card moved ONLY on the priority-10 lifecycle alerts, and the client
+		// reported it twice ("not updating fast enough", then "not updating
+		// unless they open the app" — the app's own foreground refresh was
+		// doing all the visible work). A conserving tick that is never
+		// delivered conserves nothing; it just isn't the feature. The budget
+		// objection the old priority answered is answered properly by the
+		// widget extension declaring `NSSupportsLiveActivitiesFrequentUpdates`
+		// (MYR-573's iOS half), which is the mechanism Apple provides for
+		// exactly this cadence. LowPriority stays in the type as the deliberate
+		// retreat shape — if Apple ever throttles, the fallback is one line
+		// here, not a re-implementation.
 		// A tick has no retry semantics — the next pass is the retry — so the
 		// two failure outcomes are treated alike here and only `delivered`
 		// stamps the row.
@@ -299,7 +312,6 @@ func (t *ActivityTicker) refreshActiveLegs(ctx context.Context) {
 			Event:         ActivityEventUpdate,
 			ContentState:  state,
 			Timestamp:     now,
-			LowPriority:   true,
 			Alert:         alert,
 		}) == sendDelivered {
 			pushed = append(pushed, ActivityKey{RideRequestID: leg.RideRequestID, UserID: leg.UserID})
