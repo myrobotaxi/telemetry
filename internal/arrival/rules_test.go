@@ -170,7 +170,7 @@ func TestTrackObserveRadiusAndDwell(t *testing.T) {
 					Latitude:  lat,
 					Longitude: lng,
 					Speed:     &speed,
-				}, pickupLat, pickupLng, cfg)
+				}, pickupLat, pickupLng, cfg).dwellMet
 				if got && fired == -1 {
 					fired = i
 				}
@@ -215,8 +215,8 @@ func TestTrackObserveIgnoresMilesToArrival(t *testing.T) {
 			second := first
 			second.At = t0.Add(cfg.Dwell)
 			tr.observe(first, pickupLat, pickupLng, cfg)
-			if got := tr.observe(second, pickupLat, pickupLng, cfg); got != tt.want {
-				t.Errorf("observe() = %v, want %v", got, tt.want)
+			if got := tr.observe(second, pickupLat, pickupLng, cfg).dwellMet; got != tt.want {
+				t.Errorf("observe().dwellMet = %v, want %v", got, tt.want)
 			}
 		})
 	}

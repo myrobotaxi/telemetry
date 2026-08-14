@@ -63,8 +63,10 @@ type Detector struct {
 	// measured off frame timestamps (see Fix.At), never off this.
 	now func() time.Time
 
-	sub    events.Subscription
-	subbed bool
+	// subs are the detector's two subscriptions: the telemetry frames it
+	// decides on, and the trip-edit seam that tells it the decision's premises
+	// changed.
+	subs   []events.Subscription
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -95,12 +97,26 @@ func (d *Detector) setNow(fn func() time.Time) { d.now = fn }
 func (d *Detector) Start(ctx context.Context) error {
 	d.ctx, d.cancel = context.WithCancel(ctx)
 
-	sub, err := d.bus.Subscribe(events.TopicVehicleTelemetry, d.handleFrame)
-	if err != nil {
-		d.cancel()
-		return fmt.Errorf("arrival.Detector.Start: %w", err)
+	seams := []struct {
+		topic   events.Topic
+		handler events.Handler
+	}{
+		{events.TopicVehicleTelemetry, d.handleFrame},
+		{events.TopicRideTripChanged, d.handleTripChanged},
 	}
-	d.sub, d.subbed = sub, true
+	for _, s := range seams {
+		sub, err := d.bus.Subscribe(s.topic, s.handler)
+		if err != nil {
+			d.cancel()
+			// Detach whatever DID attach, so a half-started detector cannot be
+			// left holding a live subscription. Its own failure is discarded:
+			// the caller is already being told why Start failed, and a second
+			// error would only bury the first.
+			_ = d.unsubscribeAll()
+			return fmt.Errorf("arrival.Detector.Start(%s): %w", s.topic, err)
+		}
+		d.subs = append(d.subs, sub)
+	}
 	d.logger.Info("auto-arrival detector started",
 		slog.Float64("radius_meters", d.cfg.RadiusMeters),
 		slog.Duration("dwell", d.cfg.Dwell),
@@ -115,14 +131,46 @@ func (d *Detector) Stop() error {
 	if d.cancel != nil {
 		d.cancel()
 	}
-	if !d.subbed {
-		return nil
+	return d.unsubscribeAll()
+}
+
+// unsubscribeAll drops every subscription, reporting the FIRST failure while
+// still detaching the rest: a half-unsubscribed detector would keep receiving
+// frames into a cancelled context.
+func (d *Detector) unsubscribeAll() error {
+	subs := d.subs
+	d.subs = nil
+	var firstErr error
+	for _, sub := range subs {
+		if err := d.bus.Unsubscribe(sub); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("arrival.Detector.Stop: %w", err)
+		}
 	}
-	d.subbed = false
-	if err := d.bus.Unsubscribe(d.sub); err != nil {
-		return fmt.Errorf("arrival.Detector.Stop: %w", err)
+	return firstErr
+}
+
+// handleTripChanged forces the candidate set to be re-derived on the next
+// frame, and it is the direct answer to the shape MYR-563 was reported in: a
+// stop added MID-LEG re-points the car within seconds, so the detector must not
+// spend the rest of a TTL measuring the car against the place the trip no longer
+// ends at.
+//
+// It does NO work of its own — no read, no map touch, one atomic store — which
+// is what keeps the snapshot single-goroutine. The bus delivers this seam on a
+// different goroutine from the frames, and a handler here that touched the
+// cache directly would be racing the frame path for the sake of saving 15
+// seconds.
+//
+// The correctness of detection never depended on this: the set is re-derived
+// from CURRENT ride and stop state every TTL regardless, and a fresh process
+// holds no snapshot at all, which together are why a ride already stuck at its
+// stop recovers on the first fixes after a deploy with nobody editing anything.
+// This narrows the window; it is not what closes it.
+func (d *Detector) handleTripChanged(evt events.Event) {
+	if _, ok := evt.Payload.(events.RideTripChangedEvent); !ok {
+		return
 	}
-	return nil
+	d.candidates.invalidate()
 }
 
 // handleFrame is the per-frame path, and it is deliberately cheap: two map
@@ -134,11 +182,13 @@ func (d *Detector) handleFrame(evt events.Event) {
 	if !ok || te.VIN == "" {
 		return
 	}
-	// Frames are accepted from BOTH sources. A REST backfill frame (MYR-394,
-	// published while a ride is live for a car that is not streaming) carries
-	// the same position and speed, and for a car that never streams it is the
-	// only way this feature can work at all. The dwell being measured on frame
-	// timestamps is what makes the two cadences interchangeable.
+	// Frames are accepted from BOTH sources, and for a car that has PARKED the
+	// REST backfill (MYR-394) is not a fallback but the only source there is —
+	// Tesla stops streaming at the shift to P, which is the exact moment this
+	// detector exists to notice. Such a frame carries a location and nothing
+	// else (no speed, no gear), which is why the stillness ladder has a
+	// positional rung; see Fix.stillSinceGiven. The dwell being measured on
+	// frame timestamps is what makes the two cadences interchangeable.
 	fix, ok := fixFrom(te)
 	if !ok {
 		return
@@ -158,20 +208,30 @@ func (d *Detector) handleFrame(evt events.Event) {
 	if tr == nil {
 		tr = &track{}
 		d.tracks[key] = tr
+		d.noteVerdict(cand, tr, verdictArmed, observation{})
 	}
 	if tr.latched {
 		return
 	}
-	if !tr.observe(fix, cand.TargetLatitude, cand.TargetLongitude, d.cfg) {
+	obs := tr.observe(fix, cand.TargetLatitude, cand.TargetLongitude, d.cfg)
+	if !obs.dwellMet {
+		d.noteVerdict(cand, tr, obs.verdict(), obs)
 		return
 	}
+	d.noteVerdict(cand, tr, verdictDwellSatisfied, obs)
 
 	// Latch BEFORE the write, release only if the write could not be attempted
 	// to a conclusion. A refusal keeps the latch: the ride is somebody else's
 	// now, and retrying it on each of the next twenty frames would be a
 	// pointless UPDATE storm against a row that will keep refusing.
 	tr.latched = true
-	if d.advance(cand, fix) == outcomeUnavailable {
+	switch d.advance(cand, fix) {
+	case outcomeAdvanced:
+		d.noteVerdict(cand, tr, verdictPublished, obs)
+	case outcomeRefused:
+		d.noteVerdict(cand, tr, verdictSuppressedRefused, obs)
+	case outcomeUnavailable:
+		d.noteVerdict(cand, tr, verdictSuppressedUnavailable, obs)
 		tr.latched = false
 	}
 }

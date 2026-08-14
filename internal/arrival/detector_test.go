@@ -81,11 +81,34 @@ func (w *fakeWriter) writes() []string {
 	return append([]string(nil), w.ids...)
 }
 
-// recordingBus captures published events without a real fan-out.
+// recordingBus captures published events without a real fan-out. It keeps the
+// handlers PER TOPIC: the detector subscribes to two seams (frames, and the
+// trip-edit invalidation), and a double that kept only the last one would
+// silently deliver telemetry to the wrong handler.
 type recordingBus struct {
 	mu        sync.Mutex
 	published []events.Event
-	handler   events.Handler
+	handlers  map[events.Topic]events.Handler
+}
+
+// handler is the telemetry frame path — what feed drives.
+func (b *recordingBus) handler(evt events.Event) {
+	b.dispatch(events.TopicVehicleTelemetry, evt)
+}
+
+// editTrip drives the trip-edit seam, as the handler bus would.
+func (b *recordingBus) editTrip() {
+	b.dispatch(events.TopicRideTripChanged,
+		events.NewEvent(events.RideTripChangedEvent{RideRequestID: testRideID}))
+}
+
+func (b *recordingBus) dispatch(topic events.Topic, evt events.Event) {
+	b.mu.Lock()
+	h := b.handlers[topic]
+	b.mu.Unlock()
+	if h != nil {
+		h(evt)
+	}
 }
 
 func (b *recordingBus) Publish(_ context.Context, evt events.Event) error {
@@ -96,8 +119,13 @@ func (b *recordingBus) Publish(_ context.Context, evt events.Event) error {
 }
 
 func (b *recordingBus) Subscribe(topic events.Topic, h events.Handler) (events.Subscription, error) {
-	b.handler = h
-	return events.Subscription{ID: "sub", Topic: topic}, nil
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.handlers == nil {
+		b.handlers = make(map[events.Topic]events.Handler, 2)
+	}
+	b.handlers[topic] = h
+	return events.Subscription{ID: "sub:" + string(topic), Topic: topic}, nil
 }
 
 func (b *recordingBus) Unsubscribe(events.Subscription) error { return nil }
