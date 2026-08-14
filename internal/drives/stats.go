@@ -123,10 +123,26 @@ func calculateStats(drive *activeDrive) events.DriveStats {
 		}
 	}
 
-	// FSD share, clamped to [0,100]. FSD miles ⊆ total odometer miles, so a
-	// correct measurement is always ≤100%; the clamp guards against residual
-	// counter/sampling skew that previously produced >100% (e.g. 176%) when
-	// FSD (odometer-accurate) was divided by the undercounting GPS distance.
+	// MYR-473 — FSD miles ⊆ driven miles BY DEFINITION, so the clamp belongs
+	// on the OPERAND, not only on the ratio. MYR-157 clamped the percentage
+	// and left the mileage free, which is exactly the frame a tester filed:
+	// "FULL SELF-DRIVING 100% · 5.0 mi · Driven autonomously" on a 4.6 mi
+	// drive — three numbers that cannot all be true, with the clamp hiding the
+	// inconsistency in the one place it was applied. The two counters sample
+	// on independent cadences (FieldFSDMiles and the odometer are separate
+	// emissions, ~15s apart at the boundary — the same skew
+	// TestDetector_FSDMilesAcrossCadenceMismatch documents), so the FSD delta
+	// can legitimately measure a few tenths past the odometer delta; the
+	// honest report is the smaller of the two. A drive with NO measured
+	// distance may claim no FSD distance either — the same reasoning at zero.
+	if fsdMiles > distance {
+		fsdMiles = distance
+	}
+
+	// FSD share, clamped to [0,100]. With the operand clamped above the ratio
+	// cannot exceed 100 any more; the clamp stays as defence in depth (it is
+	// one comparison, and the invariant it states is the display's whole
+	// contract).
 	var fsdPercentage float64
 	if distance > 0 && fsdMiles > 0 {
 		fsdPercentage = (fsdMiles / distance) * 100.0

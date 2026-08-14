@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -619,10 +620,17 @@ func TestDetector_StatsAccuracy(t *testing.T) {
 		t.Errorf("EnergyDelta: got %f, want %f", stats.EnergyDelta, expectedEnergy)
 	}
 
-	// Verify FSD miles.
-	expectedFSD := 110.0 - 100.0
-	if stats.FSDMiles != expectedFSD {
-		t.Errorf("FSDMiles: got %f, want %f", stats.FSDMiles, expectedFSD)
+	// Verify FSD miles. The counter delta is 10.0 (110 − 100), but this
+	// fixture has no odometer baseline, so distance is the GPS haversine sum
+	// (~9.0 mi) — and MYR-473 clamps FSD miles to the driven distance, because
+	// a drive cannot be MORE than 100% autonomous. The pre-473 expectation
+	// (10.0 FSD mi on a ~9.0 mi drive) was exactly the inconsistent triple the
+	// field report photographed.
+	if stats.FSDMiles != stats.Distance {
+		t.Errorf("FSDMiles: got %f, want clamped to the driven distance %f", stats.FSDMiles, stats.Distance)
+	}
+	if stats.FSDPercentage != 100.0 {
+		t.Errorf("FSDPercentage: got %f, want exactly 100 with the operand clamped", stats.FSDPercentage)
 	}
 
 	// Verify route points were collected.
@@ -1719,5 +1727,89 @@ func TestCalculateStats_FSDPercentageFromOdometer(t *testing.T) {
 	}
 	if stats.FSDPercentage != 50.0 {
 		t.Errorf("FSDPercentage: got %f, want 50", stats.FSDPercentage)
+	}
+}
+
+// TestCalculateStats_FSDMilesClampedToDrivenDistance pins MYR-473: FSD miles
+// are a subset of driven miles BY DEFINITION, so the mileage is clamped to the
+// distance — not only the percentage, which is how the field frame "100% ·
+// 5.0 mi autonomous on a 4.6 mi drive" shipped: MYR-157's ratio clamp hid the
+// inconsistency in the one place it was applied while the operand printed
+// free. The two counters sample on independent cadences, so the FSD delta can
+// legitimately measure a few tenths past the odometer delta at the
+// boundaries; the honest report is the smaller number, and the triple
+// (distance, FSD miles, percentage) is then consistent by construction.
+func TestCalculateStats_FSDMilesClampedToDrivenDistance(t *testing.T) {
+	start := time.Date(2026, 8, 8, 1, 35, 0, 0, time.UTC)
+	drive := &activeDrive{
+		startedAt:           start,
+		lastTimestamp:       start.Add(15 * time.Minute),
+		odometerBaselineSet: true,
+		startOdometer:       12000.0,
+		lastOdometer:        12004.6,
+		fsdBaselineSet:      true,
+		startFSDMiles:       500.0,
+		lastFSDMiles:        505.0, // 5.0 measured — 0.4 past the odometer delta
+	}
+
+	stats := calculateStats(drive)
+
+	if math.Abs(stats.Distance-4.6) > 1e-9 {
+		t.Fatalf("Distance: got %f, want 4.6", stats.Distance)
+	}
+	if math.Abs(stats.FSDMiles-4.6) > 1e-9 {
+		t.Errorf("FSDMiles: got %f, want 4.6 (clamped to the driven distance)", stats.FSDMiles)
+	}
+	if math.Abs(stats.FSDPercentage-100.0) > 1e-9 {
+		t.Errorf("FSDPercentage: got %f, want exactly 100 with the operand clamped", stats.FSDPercentage)
+	}
+}
+
+// TestCalculateStats_FSDMilesZeroWhenNoDistanceMeasured — the same rule at
+// zero: a drive with no measured distance may claim no autonomous distance
+// either. Before MYR-473 this printed "0.0 mi total, 5.0 mi FSD".
+func TestCalculateStats_FSDMilesZeroWhenNoDistanceMeasured(t *testing.T) {
+	start := time.Date(2026, 8, 8, 1, 35, 0, 0, time.UTC)
+	drive := &activeDrive{
+		startedAt:      start,
+		lastTimestamp:  start.Add(5 * time.Minute),
+		fsdBaselineSet: true,
+		startFSDMiles:  500.0,
+		lastFSDMiles:   505.0,
+	}
+
+	stats := calculateStats(drive)
+
+	if stats.FSDMiles != 0 {
+		t.Errorf("FSDMiles: got %f, want 0 on a drive with no measured distance", stats.FSDMiles)
+	}
+	if stats.FSDPercentage != 0 {
+		t.Errorf("FSDPercentage: got %f, want 0", stats.FSDPercentage)
+	}
+}
+
+// TestCalculateStats_FSDMilesWithinDistanceUntouched — the negative that keeps
+// the clamp a clamp: an ordinary measurement inside the driven distance is
+// reported exactly as measured.
+func TestCalculateStats_FSDMilesWithinDistanceUntouched(t *testing.T) {
+	start := time.Date(2026, 8, 8, 1, 35, 0, 0, time.UTC)
+	drive := &activeDrive{
+		startedAt:           start,
+		lastTimestamp:       start.Add(15 * time.Minute),
+		odometerBaselineSet: true,
+		startOdometer:       12000.0,
+		lastOdometer:        12004.6,
+		fsdBaselineSet:      true,
+		startFSDMiles:       500.0,
+		lastFSDMiles:        503.0,
+	}
+
+	stats := calculateStats(drive)
+
+	if math.Abs(stats.FSDMiles-3.0) > 1e-9 {
+		t.Errorf("FSDMiles: got %f, want 3.0 untouched", stats.FSDMiles)
+	}
+	if math.Abs(stats.FSDPercentage-(3.0/4.6*100.0)) > 1e-9 {
+		t.Errorf("FSDPercentage: got %f, want %f", stats.FSDPercentage, 3.0/4.6*100.0)
 	}
 }
