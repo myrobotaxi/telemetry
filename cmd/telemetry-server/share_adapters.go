@@ -227,6 +227,7 @@ func toSharedVehicleRows(rows []store.SharedVehicleSummary) []telemetry.SharedVe
 				// /snapshot; a rider never fetches one, so this row is where a
 				// shared car gets to say it is a Plaid rather than an "UltraRed".
 				TrimLabel: row.TrimLabel,
+				Trim:      row.Trim,
 				// MYR-515: viewers see the position too — the same value the
 				// viewer mask already retains on the streaming path for these
 				// very cars, which is what makes the picker's per-row pickup

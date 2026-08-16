@@ -172,6 +172,7 @@ func (r *VehicleRepo) scanSharedVehicleSummaryRow(row rowScanner) (SharedVehicle
 		&v.ServiceExpectedEndAt,
 		&v.RideShareEnabled,
 		&v.TrimLabel,
+		&v.Trim,
 	}, ss.dests()...)
 	// `allow_rides` is selected AFTER the setup block, so it is appended last —
 	// the scan order is the SELECT order, not the struct order.

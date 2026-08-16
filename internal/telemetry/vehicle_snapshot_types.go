@@ -495,16 +495,20 @@ func setupStateWire(s *SetupState) any {
 // and so one request cannot straddle two readings of the time.
 func buildSnapshotResponse(row VehicleSnapshotRow, now time.Time) vehicleSnapshotResponse {
 	return vehicleSnapshotResponse{
-		VehicleID:            row.ID,
-		Name:                 row.Name,
-		Model:                row.Model,
-		Year:                 row.Year,
-		Color:                row.Color,
-		LicensePlate:         row.LicensePlate,
-		VIN:                  row.VIN,
-		SoftwareVersion:      row.SoftwareVersion,
-		Trim:                 row.Trim,
-		TrimLabel:            row.TrimLabel,
+		VehicleID:       row.ID,
+		Name:            row.Name,
+		Model:           row.Model,
+		Year:            row.Year,
+		Color:           row.Color,
+		LicensePlate:    row.LicensePlate,
+		VIN:             row.VIN,
+		SoftwareVersion: row.SoftwareVersion,
+		Trim:            row.Trim,
+		// MYR-578: the SAME resolver the catalog runs, over the same inputs —
+		// Tesla's display-safe label, else the badge, else the VIN drive-unit —
+		// so the detail sheet and the picker cannot name one car two ways. The
+		// raw badge above stays raw (owner-snapshot-only, MYR-279's field).
+		TrimLabel:            resolvedTrimLabel(row.Model, row.Year, row.TrimLabel, row.Trim, row.VIN),
 		FSDVersion:           row.FSDVersion,
 		Status:               row.Status,
 		Speed:                row.Speed,

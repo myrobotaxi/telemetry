@@ -92,6 +92,11 @@ type VehicleSummary struct {
 	// the Prisma-owned "Vehicle" row whose "not read yet" spelling is `''`.
 	TrimLabel *string
 
+	// Trim is the RAW BADGE CODE ("p100d"), carried since MYR-578 as the second
+	// rung of the trim resolver's ladder — NEVER emitted raw on this surface.
+	// The handler resolves label → badge → VIN drive-unit and emits the answer.
+	Trim *string
+
 	// Latitude / Longitude are the car's freshest known position (MYR-515),
 	// decrypted from the `latitudeEnc` / `longitudeEnc` shadows — the SAME
 	// ciphertext pair and the SAME resolveGPSPair helper the wide snapshot read
@@ -226,6 +231,7 @@ func (r *VehicleRepo) scanVehicleSummaryRow(row rowScanner) (VehicleSummary, err
 		&v.ServiceExpectedEndAt,
 		&v.RideShareEnabled,
 		&v.TrimLabel,
+		&v.Trim,
 	}, ss.dests()...)
 	if err := row.Scan(dests...); err != nil {
 		return VehicleSummary{}, fmt.Errorf("scan vehicle summary: %w", err)
