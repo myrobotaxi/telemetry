@@ -69,7 +69,16 @@ type VehicleCatalogRow struct {
 	// Nil means Tesla has not told us the trim yet, and that is NOT the empty
 	// string: a descriptor built from it must drop the fragment entirely rather
 	// than render a stray separator.
+	//
+	// MYR-578: no longer emitted verbatim — `newVehicleSummary` resolves the
+	// wire value through `internal/trim` (label → badge → VIN drive-unit), so a
+	// junk stored label ("Base2024") or an absent one no longer decides what a
+	// car is called when the badge or the VIN knows better.
 	TrimLabel *string
+
+	// Trim is the RAW BADGE CODE ("p100d"), MYR-578's second resolver rung.
+	// NEVER emitted on this surface — input only.
+	Trim *string
 
 	// Latitude / Longitude are the car's freshest known position (MYR-515),
 	// already decrypted by the store from the SAME `latitudeEnc`/`longitudeEnc`

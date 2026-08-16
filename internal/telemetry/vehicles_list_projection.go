@@ -14,6 +14,7 @@ package telemetry
 // redeem response), so they cannot emit different rows for the same vehicle.
 
 import (
+	"github.com/myrobotaxi/telemetry/internal/trim"
 	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/auth"
@@ -52,10 +53,13 @@ func newVehicleSummary(v *VehicleCatalogRow, role auth.Role, grant auth.ShareGra
 		// it, because a rider who cannot see that a shared car is paused finds
 		// out from a 409 instead.
 		RideShareEnabled: v.RideShareEnabled,
-		// MYR-507: emitted verbatim on BOTH roles, from the same column
-		// /snapshot reads. Identity, not telemetry and not privacy-bearing —
-		// see the mask allow-list for why a viewer sees it.
-		TrimLabel: v.TrimLabel,
+		// MYR-507/578: RESOLVED, on BOTH roles — Tesla's own display-safe
+		// label first, else the badge code, else the VIN's drive-unit digit
+		// (`internal/trim`). The snapshot runs the identical resolver over the
+		// identical inputs, so the two surfaces still cannot name one car two
+		// different ways. Identity, not telemetry — see the mask allow-list
+		// for why a viewer sees it.
+		TrimLabel: resolvedTrimLabel(v.Model, v.Year, v.TrimLabel, v.Trim, v.VIN),
 		// MYR-515: resolved here so the atomic-pair rule and the (0,0)
 		// sentinel collapse are applied exactly once per surface, in the same
 		// place the MYR-316 window resolves its precedence.
@@ -86,4 +90,22 @@ func lastFourOfVIN(vin string) string {
 		return vin
 	}
 	return vin[len(vin)-4:]
+}
+
+// resolvedTrimLabel adapts internal/trim.Resolve's string answer to the wire's
+// nullable pointer: "" — no honest trim — is an explicit JSON null, never an
+// empty fragment in a descriptor.
+func resolvedTrimLabel(model string, year int, storedLabel, badge *string, vin string) *string {
+	label := trim.Resolve(model, year, derefTrim(storedLabel), derefTrim(badge), vin)
+	if label == "" {
+		return nil
+	}
+	return &label
+}
+
+func derefTrim(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }

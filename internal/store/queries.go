@@ -119,14 +119,17 @@ const rideShareEnabledExpr = `COALESCE(gcs.ride_share_enabled, TRUE) AS "rideSha
 // "Vehicle" row as NOT NULL and uses `”` for the same idea — the two spellings
 // are a consequence of which table each value lives on, not of a disagreement.
 //
-// It selects `trim_label`, NOT `trim`. `trim` is the RAW BADGE CODE ("p74d")
-// and is explicitly not display-safe (see internal/telemetry/fields.go); only
-// the label may reach a consumer.
+// MYR-578: it selects `trim` — the RAW BADGE CODE ("p100d") — ALONGSIDE the
+// label now, and the reason is precedence, not display: the badge is the
+// second rung of `internal/trim.Resolve`'s ladder, consulted only when Tesla's
+// own label is absent or junk ("Base2024"). The badge itself still never
+// reaches a consumer raw on this surface — the handler emits the RESOLVED
+// label and nothing else.
 //
 // Costs nothing: the go_vehicle_control_state join is already there for the
 // MYR-316 service window and the MYR-342 switch, so this rides an existing
-// probe of the vehicle_id PRIMARY KEY and adds one short text column.
-const catalogTrimLabelExpr = `gcs.trim_label`
+// probe of the vehicle_id PRIMARY KEY and adds two short text columns.
+const catalogTrimLabelExpr = `gcs.trim_label, gcs.trim`
 
 const queryVehiclesByUser = `SELECT ` + vehicleSelectColumns + `
 FROM "Vehicle"

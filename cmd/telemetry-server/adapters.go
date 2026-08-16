@@ -224,9 +224,11 @@ func (a *vehicleListerAdapter) ListByUser(ctx context.Context, userID string) ([
 			ServiceExpectedEndAt: v.ServiceExpectedEndAt,
 			// MYR-342: emitted raw — no precedence, no status gate.
 			RideShareEnabled: v.RideShareEnabled,
-			// MYR-507: the display-safe trim, carried straight through — the
-			// same column /snapshot reads, so neither surface can rename a car.
+			// MYR-507/578: the stored label plus the raw badge — the handler
+			// resolves the wire label from them (and the VIN), so the catalog
+			// and the snapshot still name one car one way.
 			TrimLabel: v.TrimLabel,
+			Trim:      v.Trim,
 			// MYR-515: the decrypted position pair; the handler applies the
 			// (0,0) sentinel collapse and builds the wire object.
 			Latitude:  v.Latitude,
