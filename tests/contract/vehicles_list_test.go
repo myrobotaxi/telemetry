@@ -198,6 +198,29 @@ func TestContract_GETVehicles(t *testing.T) {
 					t.Errorf("year = %v, want 2024 — a zero year is the MYR-507 bug", got)
 				}
 
+				// MYR-581: `ownerFirstName` is OPTIONAL in the schema
+				// (absence = a pre-v0.37.0 server, read exactly like
+				// null), but THIS server always emits the key. The
+				// seeded owner is a bare `"User"` row with no name on
+				// any of the three identity rungs — the ordinary state
+				// of an account Apple was never asked to name — so the
+				// honest answer is an explicit null.
+				//
+				// Asserting null and not merely presence is the guard
+				// that matters here, and it is the same guard the
+				// nameless-owner GATE rests on: the two come from ONE
+				// SQL expression, so a null on this row is also the
+				// reason this car's ride requests answer 409. A
+				// derivation that fabricated a name here would silently
+				// make an unofferable car look offerable.
+				owner, ok := row["ownerFirstName"]
+				if !ok {
+					t.Errorf("missing `ownerFirstName` in items[0]; row keys: %v", keysOf(row))
+				} else if owner != nil {
+					t.Errorf("ownerFirstName = %v, want null (the seeded owner has no name "+
+						"on any identity rung)", owner)
+				}
+
 				// Cross-check against the canonical schema so any
 				// future field rename / type change surfaces here.
 				// The file's root is the LIST ENVELOPE (VehicleListResponse);
