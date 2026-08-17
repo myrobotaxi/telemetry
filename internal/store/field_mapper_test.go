@@ -92,15 +92,15 @@ func TestMapTelemetryToUpdate(t *testing.T) {
 		{
 			name: "all supported fields",
 			fields: map[string]events.TelemetryValue{
-				string(telemetry.FieldSpeed):           {FloatVal: &speed},
-				string(telemetry.FieldHeading):         {FloatVal: &heading},
-				string(telemetry.FieldSOC):             {FloatVal: &soc},
-				string(telemetry.FieldEstBatteryRange): {FloatVal: &estRange},
-				string(telemetry.FieldInsideTemp):      {FloatVal: &insideTemp},
-				string(telemetry.FieldOutsideTemp):     {FloatVal: &outsideTemp},
-				string(telemetry.FieldOdometer):        {FloatVal: &odometer},
-				string(telemetry.FieldGear):            {StringVal: &gear},
-				string(telemetry.FieldLocation):        {LocationVal: &events.Location{Latitude: 33.0975, Longitude: -96.8214}},
+				string(telemetry.FieldSpeed):       {FloatVal: &speed},
+				string(telemetry.FieldHeading):     {FloatVal: &heading},
+				string(telemetry.FieldSOC):         {FloatVal: &soc},
+				string(telemetry.FieldRatedRange):  {FloatVal: &estRange}, // MYR-532: rated feeds estimatedRange
+				string(telemetry.FieldInsideTemp):  {FloatVal: &insideTemp},
+				string(telemetry.FieldOutsideTemp): {FloatVal: &outsideTemp},
+				string(telemetry.FieldOdometer):    {FloatVal: &odometer},
+				string(telemetry.FieldGear):        {StringVal: &gear},
+				string(telemetry.FieldLocation):    {LocationVal: &events.Location{Latitude: 33.0975, Longitude: -96.8214}},
 			},
 			check: func(t *testing.T, u *VehicleUpdate) {
 				if u == nil {
