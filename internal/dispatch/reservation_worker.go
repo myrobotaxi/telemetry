@@ -117,8 +117,10 @@ func (s *ReservationSweeper) handleDue(ctx context.Context, r *DueReservation) s
 	}
 }
 
-// holdIfVehicleBlocked answers, from ONE vehicle read, both "is this car in
-// for service?" (MYR-372) and "does its owner still accept rides?" (MYR-342).
+// holdIfVehicleBlocked answers, from ONE vehicle read, three questions: "is this
+// car in for service?" (MYR-372), "does its owner still accept rides?" (MYR-342)
+// and "does its owner have a name we can show a rider?" (MYR-581, whose arm is in
+// reservation_owner_name.go).
 //
 // WHAT THE SERVICE ARM CATCHES. The accept gate asks "can this car be
 // dispatched right now?" and, for a reservation, correctly declines to answer —
@@ -239,27 +241,9 @@ func (s *ReservationSweeper) holdIfVehicleBlocked(ctx context.Context, r *DueRes
 		)
 		return true
 	}
-	// THE NAMELESS-OWNER ARM (MYR-581) — the third and last enforcement layer,
-	// and the only one that runs outside a request. See the file header's note
-	// on monotonicity for why this layer is a BACKSTOP rather than a live gate:
-	// namelessness only ever resolves FORWARD, so the population it catches is
-	// reservations accepted BEFORE the create gate existed.
-	//
-	// HOLDS RATHER THAN EXPIRES, beside the pause arm and BEFORE the claim, and
-	// the mirror is exact: an owner who sets their name inside the lateness
-	// window gets the dispatch they meant to allow, exactly as an owner who
-	// un-pauses does; one who never does lets the reservation resolve honestly
-	// as `reservation_expired` at scheduledFor + MaxLateness, with no new
-	// resolution path and no new wire status.
-	//
-	// The NAME IS NEVER LOGGED and never read here — the store hands this layer
-	// a boolean, so there is no P1 value in the sweep at all.
-	if !state.OwnerNamed {
-		s.logger.Info("reservation sweep: vehicle owner has no display name, holding",
-			slog.String("ride_id", r.RideRequestID),
-			slog.String("vehicle_id", r.VehicleID),
-			slog.Time("scheduled_for", r.ScheduledFor),
-		)
+	// MYR-581's arm rides this same read (one statement, three facts) and lives in
+	// reservation_owner_name.go — a BACKSTOP, not a live gate; see it for why.
+	if s.holdIfOwnerNameless(r, state) {
 		return true
 	}
 	return false
