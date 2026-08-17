@@ -286,6 +286,20 @@ func (h *RideRequestHandler) rejectIfVehicleUnavailable(ctx context.Context, w h
 		return true
 	}
 
+	// MYR-581 nameless-owner BACKSTOP. Applies to SCHEDULED accepts too, like the
+	// pause above it, and rides the SAME `row` read rather than adding one.
+	//
+	// Unlike the pause this layer catches no race, and the file it lives in says
+	// so plainly: namelessness only ever resolves forward (nothing in this server
+	// can un-name an account), so what reaches here is a request created BEFORE
+	// the create gate existed — a finite, shrinking population. It stays because
+	// the check is free on a read the gate was already doing, and because
+	// accepting such a request would produce a ride the owner's own accept toast
+	// cannot describe.
+	if rejectIfOwnerNameless(w, h.logger, "ride-request accept", row, rec.OwnerID) {
+		return true
+	}
+
 	// MYR-369 ride-capability backstop. Applies to SCHEDULED accepts too, for
 	// the same reason as the pause above and more sharply: a suspension or a
 	// withdrawn ride capability has no horizon at all, so a reservation

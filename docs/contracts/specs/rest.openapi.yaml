@@ -1250,6 +1250,43 @@ components:
             windshield. Not streamed; refreshes on the next list fetch.
           example: Plaid
           x-classification: P0
+        ownerFirstName:
+          type: string
+          nullable: true
+          description: |
+            OPTIONAL (MYR-581, contracts v0.37.0). The FIRST NAME of the person
+            who OWNS this vehicle, resolved by the platform's THREE-SOURCE
+            identity ladder — Prisma `"User".name`, then the Apple
+            first-consent name in `go_identity_apple`, then `go_users` — and
+            reduced to its first whitespace-separated token. The SAME
+            resolution and the SAME reduction behind
+            `RideRequest.requesterName` and
+            `RedeemShareInviteResponse.ownerFirstName`.
+            FIRST NAMES ONLY is the P1 counterparty policy, and the LADDER
+            rather than the one table is not pedantry: the Go server's user
+            provisioning uses ON CONFLICT DO NOTHING, so a pre-existing row can
+            carry a NULL name that the Apple identity still resolves — a
+            one-table lookup calls a perfectly named owner nameless.
+            On the catalog for the same consumer `trimLabel` is: a VIEWER never
+            fetches a /snapshot, so this row is the only surface on which a
+            rider meets the person whose car they were granted. With no name to
+            render the client fell back to the make, which is how an incoming
+            ride card came to read "Tesla wants a ride" about a human being
+            (MYR-532 item 4).
+            NULL IS NOT THE EMPTY STRING — it means this owner has no resolvable
+            name in any identity source, the ordinary state for an Apple-native
+            account Apple was never asked to name, and a possessive descriptor
+            MUST drop the whole fragment rather than render "'s Model X". An
+            ABSENT key means a server predating v0.37.0 and reads exactly like
+            null. RBAC: BOTH roles — the owner's own row naming them is a
+            non-disclosure, and the platform already hands a viewer this same
+            first name in the redeem response and the signed share link.
+            P1: never logged, never outside the vehicle's party, never streamed.
+            THE SAME LADDER decides whether the car is offerable for rides at
+            all (§7.8 `409 vehicle_unavailable`), so a null here is a car whose
+            ride requests are refused.
+          example: Amruth
+          x-classification: P1
         location:
           type: object
           nullable: true

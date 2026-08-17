@@ -140,10 +140,16 @@ type fakeReservationStore struct {
 	// control-state row to enabled).
 	paused map[string]bool
 
-	// stateErr/stateCnt cover the SINGLE vehicle read that serves both the
-	// service arm and the pause arm (MYR-372 collapsed the two probes into
-	// one). An unreadable vehicle is therefore one condition, not two — which
-	// is exactly what production now sees.
+	// MYR-581 nameless owner. A vehicle ABSENT from the map has a NAMED owner —
+	// the opt-in direction, for the same reason as `paused` above, and for one
+	// more: unlike a pause, namelessness cannot be un-set in production, so
+	// "named" is not merely the common default but the ABSORBING state.
+	nameless map[string]bool
+
+	// stateErr/stateCnt cover the SINGLE vehicle read that serves the service
+	// arm, the pause arm and the owner-name arm (MYR-372 collapsed the first two
+	// probes into one; MYR-581 joined them). An unreadable vehicle is therefore
+	// one condition, not three — which is exactly what production now sees.
 	stateErr error
 	stateCnt int
 
@@ -261,8 +267,14 @@ func (f *fakeReservationStore) VehicleHasActiveInstantRide(_ context.Context, ve
 	return f.busy[vehicleID], nil
 }
 
-// VehicleDispatchState serves both the MYR-372 service arm and the MYR-342
-// pause arm from one call, as production does.
+// VehicleDispatchState serves the MYR-372 service arm, the MYR-342 pause arm and
+// the MYR-581 nameless-owner arm from one call, as production does.
+//
+// The owner-name arm is keyed on `nameless` — an OPT-IN map, so the zero-value
+// fake answers "this owner has a name" and every pre-existing test keeps
+// describing the world it meant to describe. The inverse (opt-in `named`) would
+// have silently held every reservation in the file, which is exactly the kind of
+// fake default that makes a new gate look like a broken sweeper.
 //
 // Deliberately NOT recorded in latch.callOrder, matching the grant probe:
 // callOrder pins the busy→claim adjacency, and the other probes assert their
@@ -280,6 +292,7 @@ func (f *fakeReservationStore) VehicleDispatchState(
 	return VehicleDispatchState{
 		InService:        f.inService[vehicleID],
 		RideShareEnabled: !f.paused[vehicleID],
+		OwnerNamed:       !f.nameless[vehicleID],
 	}, nil
 }
 

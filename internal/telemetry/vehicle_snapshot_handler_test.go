@@ -44,8 +44,14 @@ func (s *stubVehicleSnapshotReader) GetByID(_ context.Context, _ string) (Vehicl
 // COALESCE(gcs.ride_share_enabled, TRUE) makes a car with no control-state row
 // enabled — so the zero row was never a state the server sees. This helper is
 // the honest stand-in.
+//
+// MYR-581 added the SECOND field whose zero value lies, for the same structural
+// reason: `OwnerNamed` false reads as "this car's owner has no name at all", so a
+// bare zero row would quietly turn every accept/create test into a test of the
+// nameless-owner gate. Both are spelled out here so "a car a rider may actually
+// request" has exactly one definition in the test suite.
 func availableSnapshotRow() VehicleSnapshotRow {
-	return VehicleSnapshotRow{RideShareEnabled: true}
+	return VehicleSnapshotRow{RideShareEnabled: true, OwnerNamed: true}
 }
 
 // fixtureSnapshotRowID is the canonical vehicleId used by every
@@ -69,7 +75,12 @@ func fixtureSnapshotRow(ownerID string) VehicleSnapshotRow {
 		// because for THIS field the Go default points the wrong way — a false
 		// here means PAUSED, and every ride test would silently start asserting
 		// against a withdrawn vehicle.
-		RideShareEnabled:   true,
+		RideShareEnabled: true,
+		// MYR-581: and the fixture's owner HAS a name, for the same
+		// zero-value-points-the-wrong-way reason. A false here means the store
+		// found no name on any of the three identity rungs, which would refuse
+		// every ride request in the suite.
+		OwnerNamed:         true,
 		UserID:             ownerID,
 		VIN:                "5YJ3E1EA1PF000001",
 		Name:               "Stumpy",

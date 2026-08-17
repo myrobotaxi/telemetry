@@ -130,6 +130,13 @@ func snapshotRowFromVehicle(v store.Vehicle) telemetry.VehicleSnapshotRow {
 		// true, so the value is always the store's, never a Go default.
 		RideShareEnabled: v.RideShareEnabled,
 
+		// MYR-581 nameless-owner gate — a derived boolean, not a column, and the
+		// same "zero value is a meaningful and wrong answer" caveat applies: false
+		// reads as NAMELESS. The source is GetByID, which resolves the ladder in
+		// SQL, so the value is always the store's. The NAME itself is deliberately
+		// not carried here — the gates need one bit and the snapshot emits neither.
+		OwnerNamed: v.OwnerNamed,
+
 		// MYR-491 fleet-config setup schedule — raw, from the second side-table
 		// join on this read. Mapped through the same helper the two catalog
 		// adapters use so all three surfaces feed the derivation identically.

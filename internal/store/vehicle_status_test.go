@@ -9,12 +9,13 @@ import (
 )
 
 // TestVehicleRepo_GetDispatchState exercises the MYR-372 one-read vehicle probe
-// against a real Postgres. It backs the reservation sweeper, so four things
+// against a real Postgres. It backs the reservation sweeper, so five things
 // matter: it reports the status FAITHFULLY (noticing a car that entered service
 // after the accept is the sweeper's whole job), it carries the ride-share
-// flag's absent-means-enabled rule across the LEFT JOIN, both facts come from
-// ONE statement, and a vehicle it cannot find is an ERROR rather than a
-// fabricated pair the sweeper would happily dispatch against.
+// flag's absent-means-enabled rule across the LEFT JOIN, it answers the MYR-581
+// owner-named question off the same row, every fact comes from ONE statement,
+// and a vehicle it cannot find is an ERROR rather than a fabricated state the
+// sweeper would happily dispatch against.
 func TestVehicleRepo_GetDispatchState(t *testing.T) {
 	// The join reaches the Go-owned side table, which TestMain's Prisma-only
 	// createSchema does not create. Idempotent.
@@ -43,12 +44,12 @@ func TestVehicleRepo_GetDispatchState(t *testing.T) {
 			{vehicle: inSvc, want: store.VehicleStatusInService},
 		}
 		for _, tt := range tests {
-			got, _, err := repo.GetDispatchState(ctx, tt.vehicle)
+			got, err := repo.GetDispatchState(ctx, tt.vehicle)
 			if err != nil {
 				t.Fatalf("GetDispatchState(%s): %v", tt.vehicle, err)
 			}
-			if got != tt.want {
-				t.Errorf("GetDispatchState(%s) status = %q, want %q", tt.vehicle, got, tt.want)
+			if got.Status != tt.want {
+				t.Errorf("GetDispatchState(%s) status = %q, want %q", tt.vehicle, got.Status, tt.want)
 			}
 		}
 	})
@@ -66,12 +67,63 @@ func TestVehicleRepo_GetDispatchState(t *testing.T) {
 			t.Fatalf("precondition: expected no control-state row yet, got %d", rows)
 		}
 
-		_, enabled, err := repo.GetDispatchState(ctx, parked)
+		got, err := repo.GetDispatchState(ctx, parked)
 		if err != nil {
 			t.Fatalf("GetDispatchState: %v", err)
 		}
-		if !enabled {
+		if !got.RideShareEnabled {
 			t.Error("a car nobody has ever touched must read as ride-share ENABLED")
+		}
+	})
+
+	// MYR-581: the owner-named arm, on the same statement. The seed creates a
+	// "Vehicle" row whose "userId" has NO row in any of the three identity
+	// sources, which is precisely the fail-closed case — an owner nobody can look
+	// up must read NAMELESS, so the sweeper holds rather than dispatching a ride
+	// nobody could describe.
+	t.Run("an owner with no identity row anywhere reads as NAMELESS", func(t *testing.T) {
+		got, err := repo.GetDispatchState(ctx, inSvc)
+		if err != nil {
+			t.Fatalf("GetDispatchState: %v", err)
+		}
+		if got.OwnerNamed {
+			t.Error("an owner with no identity row must read as nameless (fail closed)")
+		}
+	})
+
+	t.Run("a name on any rung of the ladder makes the owner NAMED", func(t *testing.T) {
+		// go_users is the LOWEST rung, so proving it alone flips the gate proves
+		// the COALESCE reaches past the two rungs above it — the exact defect a
+		// `"User"."name"`-only lookup had.
+		if _, err := testPool.Exec(ctx,
+			`INSERT INTO go_users (id, name) VALUES ($1, $2)
+			 ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name`, ownerID, "Ada Lovelace"); err != nil {
+			t.Fatalf("seed go_users name: %v", err)
+		}
+		got, err := repo.GetDispatchState(ctx, inSvc)
+		if err != nil {
+			t.Fatalf("GetDispatchState: %v", err)
+		}
+		if !got.OwnerNamed {
+			t.Error("a name on the go_users rung must satisfy the gate")
+		}
+
+		// Whitespace-only is NOT a name: TRIM/NULLIF must collapse it to NULL at
+		// every rung, or the gate would say "named" while the catalog emitted
+		// null — the one disagreement the shared ladder exists to prevent.
+		if _, err := testPool.Exec(ctx,
+			`UPDATE go_users SET name = '   ' WHERE id = $1`, ownerID); err != nil {
+			t.Fatalf("blank go_users name: %v", err)
+		}
+		got, err = repo.GetDispatchState(ctx, inSvc)
+		if err != nil {
+			t.Fatalf("GetDispatchState: %v", err)
+		}
+		if got.OwnerNamed {
+			t.Error("a whitespace-only name must not satisfy the gate")
+		}
+		if _, err := testPool.Exec(ctx, `DELETE FROM go_users WHERE id = $1`, ownerID); err != nil {
+			t.Fatalf("clean go_users: %v", err)
 		}
 	})
 
@@ -80,15 +132,15 @@ func TestVehicleRepo_GetDispatchState(t *testing.T) {
 			t.Fatalf("SetRideShareEnabled(false): %v", err)
 		}
 
-		status, enabled, err := repo.GetDispatchState(ctx, parked)
+		got, err := repo.GetDispatchState(ctx, parked)
 		if err != nil {
 			t.Fatalf("GetDispatchState: %v", err)
 		}
-		if enabled {
+		if got.RideShareEnabled {
 			t.Error("the owner's pause did not survive the join")
 		}
-		if status != store.VehicleStatusParked {
-			t.Errorf("status = %q, want %q — pausing must not disturb the vehicle row", status, store.VehicleStatusParked)
+		if got.Status != store.VehicleStatusParked {
+			t.Errorf("status = %q, want %q — pausing must not disturb the vehicle row", got.Status, store.VehicleStatusParked)
 		}
 	})
 
@@ -101,23 +153,22 @@ func TestVehicleRepo_GetDispatchState(t *testing.T) {
 			t.Fatalf("flip status: %v", err)
 		}
 
-		got, _, err := repo.GetDispatchState(ctx, parked)
+		got, err := repo.GetDispatchState(ctx, parked)
 		if err != nil {
 			t.Fatalf("GetDispatchState after flip: %v", err)
 		}
-		if got != store.VehicleStatusInService {
-			t.Errorf("status after flip = %q, want %q", got, store.VehicleStatusInService)
+		if got.Status != store.VehicleStatusInService {
+			t.Errorf("status after flip = %q, want %q", got.Status, store.VehicleStatusInService)
 		}
 	})
 
 	t.Run("an unknown vehicle is ErrVehicleNotFound, never a status", func(t *testing.T) {
-		got, enabled, err := repo.GetDispatchState(ctx, "veh_does_not_exist")
+		got, err := repo.GetDispatchState(ctx, "veh_does_not_exist")
 		if !errors.Is(err, store.ErrVehicleNotFound) {
 			t.Fatalf("GetDispatchState(unknown) error = %v, want ErrVehicleNotFound", err)
 		}
-		if got != "" || enabled {
-			t.Errorf("GetDispatchState(unknown) returned (%q, %v); absence must never be dressed as a value",
-				got, enabled)
+		if got != (store.DispatchState{}) {
+			t.Errorf("GetDispatchState(unknown) returned %+v; absence must never be dressed as a value", got)
 		}
 	})
 }
