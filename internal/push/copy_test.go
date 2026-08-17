@@ -119,7 +119,7 @@ func TestOwnerStatusAlertSelectsOnlyEnroute(t *testing.T) {
 
 	for _, status := range all {
 		t.Run(status, func(t *testing.T) {
-			a, ok := ownerStatusAlert(status, nil, false)
+			a, ok := ownerStatusAlert(status, nil, riderCancelNone)
 			want := status == statusEnroute
 			if ok != want {
 				t.Fatalf("ownerStatusAlert(%q) notifies = %v, want %v", status, ok, want)
@@ -129,6 +129,79 @@ func TestOwnerStatusAlertSelectsOnlyEnroute(t *testing.T) {
 			}
 			if a.title == "" || a.body == "" {
 				t.Errorf("ownerStatusAlert(%q) = %+v, want both a title and a body", status, a)
+			}
+		})
+	}
+}
+
+// TestRiderCancelledClassifiesTheFrom is the MYR-585 classification table, kept
+// separate from the notifier's audience test because it is the piece that
+// decides WHICH SENTENCE goes out, and getting it wrong puts a stand-down
+// ("no need to continue") on the phone of an owner who never set off.
+func TestRiderCancelledClassifiesTheFrom(t *testing.T) {
+	rider, owner := rideCancelledByRiderStamp, cancelledByOwner
+
+	tests := []struct {
+		name        string
+		status      string
+		cancelledBy *string
+		previous    string
+		want        riderCancelKind
+	}{
+		{name: "requested → the withdrawn request", status: statusCancelled, cancelledBy: &rider, previous: statusRequested, want: riderCancelRequest},
+		{name: "accepted → committed", status: statusCancelled, cancelledBy: &rider, previous: statusAccepted, want: riderCancelCommitted},
+		{name: "arrived → committed", status: statusCancelled, cancelledBy: &rider, previous: statusArrived, want: riderCancelCommitted},
+		{name: "enroute → committed", status: statusCancelled, cancelledBy: &rider, previous: statusEnroute, want: riderCancelCommitted},
+		{name: "no previous status is unclassifiable", status: statusCancelled, cancelledBy: &rider, previous: "", want: riderCancelNone},
+		{name: "a terminal previous status is unclassifiable", status: statusCancelled, cancelledBy: &rider, previous: statusCompleted, want: riderCancelNone},
+		{name: "an OWNER stamp is not this fork", status: statusCancelled, cancelledBy: &owner, previous: statusAccepted, want: riderCancelNone},
+		{name: "an unstamped legacy cancel", status: statusCancelled, cancelledBy: nil, previous: statusAccepted, want: riderCancelNone},
+		{name: "a non-cancel transition", status: statusAccepted, cancelledBy: &rider, previous: statusRequested, want: riderCancelNone},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := riderCancelled(tt.status, tt.cancelledBy, tt.previous); got != tt.want {
+				t.Errorf("riderCancelled(%q, %v, %q) = %v, want %v", tt.status, tt.cancelledBy, tt.previous, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestOwnerStatusAlertCancelForkOutranksTheStatus pins that both cancel kinds
+// produce copy regardless of the status string they arrive with — the fork is
+// keyed on the CLASSIFICATION, not on a second reading of the transition, so
+// the two cannot disagree.
+func TestOwnerStatusAlertCancelForkOutranksTheStatus(t *testing.T) {
+	name := "Sam"
+
+	tests := []struct {
+		name      string
+		kind      riderCancelKind
+		requester *string
+		wantTitle string
+	}{
+		{name: "withdrawn request, named", kind: riderCancelRequest, requester: &name, wantTitle: "Sam cancelled their ride request"},
+		{name: "withdrawn request, nameless", kind: riderCancelRequest, requester: nil, wantTitle: "Your rider cancelled their ride request"},
+		{name: "committed ride, named", kind: riderCancelCommitted, requester: &name, wantTitle: "Sam cancelled the ride"},
+		{name: "committed ride, nameless", kind: riderCancelCommitted, requester: nil, wantTitle: "Your rider cancelled the ride"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a, ok := ownerStatusAlert(statusCancelled, tt.requester, tt.kind)
+			if !ok {
+				t.Fatal("produced no alert")
+			}
+			if a.title != tt.wantTitle {
+				t.Errorf("title = %q, want %q", a.title, tt.wantTitle)
+			}
+			if a.body == "" {
+				t.Error("body is empty")
+			}
+			// Payload policy: nothing but a first name may travel.
+			if strings.Contains(a.title+" "+a.body, "@") {
+				t.Errorf("copy %q %q leaked an address-shaped value", a.title, a.body)
 			}
 		})
 	}
@@ -152,7 +225,7 @@ func TestOwnerStatusAlertNamesOnlyTheFirstName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			a, ok := ownerStatusAlert(statusEnroute, tt.requester, false)
+			a, ok := ownerStatusAlert(statusEnroute, tt.requester, riderCancelNone)
 			if !ok {
 				t.Fatal("ownerStatusAlert(enroute) produced no alert")
 			}
