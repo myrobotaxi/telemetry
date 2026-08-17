@@ -352,6 +352,7 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 	setupSavedPlacesEndpoints(deps)
 	setupVehicleSharingEndpoints(deps, snapshotAdapter)
 	setupAccountDeletionEndpoint(deps)
+	setupProfileNameEndpoint(deps)
 	setupDebugFieldsEndpoint(deps)
 }
 
