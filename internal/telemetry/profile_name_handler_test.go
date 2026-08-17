@@ -104,6 +104,18 @@ func TestProfileName_Refusals(t *testing.T) {
 	}
 }
 
+// TestProfileName_NoMatchedRowIs404 — and note what "no matched row" now MEANS.
+//
+// It used to mean "no Prisma `User` row", which was the ORDINARY state of every
+// Apple-native account, so this 404 was the answer the endpoint gave to exactly
+// the nameless population it exists to serve (see
+// internal/store/user_profile_name_test.go for the fix and its arms). The store
+// now writes every identity rung the account has, so `updated == false` means the
+// authenticated id has no row on ANY rung — an orphaned token.
+//
+// The HANDLER's contract is unchanged, which is the point of asserting it here:
+// the seam is one boolean wide, so the storage redesign moved underneath this
+// handler without touching it.
 func TestProfileName_NoMatchedRowIs404(t *testing.T) {
 	store := &fakeProfileNameStore{updated: false}
 	w := patchName(t, store, `{"name":"James"}`)
@@ -117,5 +129,29 @@ func TestProfileName_NoMatchedRowIs404(t *testing.T) {
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil || envelope.Error.Code != "not_found" {
 		t.Fatalf("error code = %s, want not_found", w.Body.String())
+	}
+}
+
+// TestProfileName_AnyMatchedRungIs200 is the counter-assertion to the 404 above,
+// and it is the handler-level statement of MYR-581's item-4 fix: the handler must
+// treat "the store named the account on at least one rung" as success, WITHOUT
+// caring which rung. An Apple-native account matches no Prisma `"User"` row and
+// must still get its 200 and its echo.
+//
+// The store's own arms — which rungs exist, which get written, and that a stale
+// higher rung cannot go on winning — are in
+// internal/store/user_profile_name_test.go, because they need a real Postgres.
+func TestProfileName_AnyMatchedRungIs200(t *testing.T) {
+	store := &fakeProfileNameStore{updated: true}
+	w := patchName(t, store, `{"name":"James"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 — an Apple-native account has no User row and must still be renameable: %s",
+			w.Code, w.Body.String())
+	}
+	var resp struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp.Name != "James" {
+		t.Fatalf("echo = %s, want the committed name", w.Body.String())
 	}
 }

@@ -643,6 +643,120 @@ func TestSweep_EnabledVehicleStillDispatches(t *testing.T) {
 	}
 }
 
+// --- MYR-581: the owner's display name ------------------------------------
+
+// TestSweep_NamelessOwnerIsHeldNotClaimed is the third and last enforcement layer
+// of the nameless-owner gate, and the only one that runs outside a request.
+//
+// WHAT IT CATCHES is narrower than its two siblings above, and the test says so
+// rather than borrowing their argument: namelessness only ever resolves FORWARD
+// (nothing in the server can un-name an account, and the profile writer refuses
+// the empty string), so this layer is a BACKSTOP FOR PRE-DEPLOY ROWS — a
+// reservation accepted before the create gate existed. It is not a race guard.
+//
+// HELD, NOT EXPIRED, which is the arm that would be easy to get wrong: an owner
+// who sets their name inside the lateness window must still get the dispatch they
+// meant to allow, exactly as an owner who un-pauses does. One who never does lets
+// the row resolve at scheduledFor + MaxLateness as `reservation_expired`, with no
+// new resolution path — so this test asserts NO claim and NO push, never an
+// outcome record.
+func TestSweep_NamelessOwnerIsHeldNotClaimed(t *testing.T) {
+	r := testReservation()
+	latch := newLatchStore()
+	resStore := &fakeReservationStore{
+		due:      []DueReservation{r},
+		busy:     map[string]bool{},
+		nameless: map[string]bool{r.VehicleID: true},
+	}
+	s, exec := newSweeperHarness(t, latch, resStore, &fakeBus{}, func() time.Time { return testSweepNow }, true)
+
+	s.sweepOnce(context.Background())
+
+	if got := latch.order(); len(got) != 1 || !strings.HasPrefix(got[0], "busy:") {
+		t.Fatalf("a nameless owner's car must be probed and then HELD — no claim, no record. call order = %v", got)
+	}
+	if len(exec.calls()) != 0 {
+		t.Errorf("a nameless owner's car must receive no nav push, got %d", len(exec.calls()))
+	}
+	if _, _, recorded := latch.snapshot(); len(recorded) != 0 {
+		t.Errorf("holding must record NO outcome — the lateness ceiling resolves it. got %v", recorded)
+	}
+}
+
+// TestSweep_NamelessCheckedBeforeTheClaim pins the ORDER against the same safety
+// argument every other probe in the sweeper rests on: the claim is irreversible,
+// so a reservation claimed and then not pushed is burnt permanently. Every
+// question must be answered BEFORE it.
+func TestSweep_NamelessCheckedBeforeTheClaim(t *testing.T) {
+	r := testReservation()
+	latch := newLatchStore()
+	resStore := &fakeReservationStore{
+		due:      []DueReservation{r},
+		busy:     map[string]bool{},
+		nameless: map[string]bool{r.VehicleID: true},
+	}
+	s, _ := newSweeperHarness(t, latch, resStore, &fakeBus{}, func() time.Time { return testSweepNow }, true)
+
+	s.sweepOnce(context.Background())
+
+	if resStore.stateCount() == 0 {
+		t.Fatal("the owner-name arm must be probed at all")
+	}
+	for _, call := range latch.order() {
+		if strings.HasPrefix(call, "claim:") {
+			t.Fatalf("the claim ran despite a nameless owner: %v", latch.order())
+		}
+	}
+}
+
+// TestSweep_NamedOwnerStillDispatches is the counter-assertion: the new arm must
+// not become a blanket hold. It is the arm that would have caught the fake's
+// default pointing the wrong way — an opt-in `nameless` map is what keeps every
+// other test in this file describing the world it meant to.
+func TestSweep_NamedOwnerStillDispatches(t *testing.T) {
+	r := testReservation()
+	latch := newLatchStore()
+	resStore := &fakeReservationStore{due: []DueReservation{r}, busy: map[string]bool{}}
+	s, exec := newSweeperHarness(t, latch, resStore, &fakeBus{}, func() time.Time { return testSweepNow }, true)
+
+	s.sweepOnce(context.Background())
+
+	if len(exec.calls()) != 1 {
+		t.Fatalf("a named owner's car must still be dispatched, got %d pushes", len(exec.calls()))
+	}
+}
+
+// TestSweep_NamelessOwnerDispatchesOnceNamed is the monotonicity arm, and it is
+// the one that justifies HOLD over EXPIRE. The first sweep holds; the owner then
+// sets a name (`PATCH /api/users/me`); the next sweep dispatches the very same
+// reservation. Nothing was burnt in between.
+func TestSweep_NamelessOwnerDispatchesOnceNamed(t *testing.T) {
+	r := testReservation()
+	latch := newLatchStore()
+	resStore := &fakeReservationStore{
+		due:      []DueReservation{r},
+		busy:     map[string]bool{},
+		nameless: map[string]bool{r.VehicleID: true},
+	}
+	s, exec := newSweeperHarness(t, latch, resStore, &fakeBus{}, func() time.Time { return testSweepNow }, true)
+
+	s.sweepOnce(context.Background())
+	if len(exec.calls()) != 0 {
+		t.Fatalf("first sweep must hold, got %d pushes", len(exec.calls()))
+	}
+
+	// The owner names themselves. In production this is a single PATCH; here it is
+	// the fake's one knob moving in the only direction it can move in reality.
+	resStore.mu.Lock()
+	resStore.nameless[r.VehicleID] = false
+	resStore.mu.Unlock()
+
+	s.sweepOnce(context.Background())
+	if len(exec.calls()) != 1 {
+		t.Fatalf("the SAME reservation must dispatch once its owner has a name, got %d pushes", len(exec.calls()))
+	}
+}
+
 // --- MYR-369: the rider's per-grant ride capability -----------------------
 
 // TestSweep_UngrantedRiderIsHeldNotClaimed is the third and last enforcement
