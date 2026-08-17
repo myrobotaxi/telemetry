@@ -597,8 +597,10 @@ func TestDecoder_DecodePayload_ChargeAtomicGroup4Field(t *testing.T) {
 	dec := NewDecoder()
 
 	payload := makePayload([]*tpb.Datum{
-		makeDatum(tpb.Field_Soc, stringVal("68.2")),            // chargeLevel
-		makeDatum(tpb.Field_EstBatteryRange, stringVal("172")), // estimatedRange
+		makeDatum(tpb.Field_Soc, stringVal("68.2")), // chargeLevel
+		// MYR-532 — the group's range member sources from RATED range now (the
+		// dash's own figure); EstBatteryRange decodes to its own unconsumed name.
+		makeDatum(tpb.Field_RatedRange, stringVal("172")),                                                                          // estimatedRange
 		makeDatum(tpb.Field_DetailedChargeState, detailedChargeStateVal(tpb.DetailedChargeStateValue_DetailedChargeStateCharging)), // chargeState (MYR-42: sources from proto 179)
 		makeDatum(tpb.Field_TimeToFullCharge, &tpb.Value{Value: &tpb.Value_DoubleValue{DoubleValue: 1.0667}}),                      // timeToFull
 	})
@@ -834,7 +836,7 @@ func TestDecoder_DecodePayload_FullPayload(t *testing.T) {
 		makeDatum(tpb.Field_GpsHeading, stringVal("245")),
 		makeDatum(tpb.Field_Gear, shiftStateVal(tpb.ShiftState_ShiftStateD)),
 		makeDatum(tpb.Field_Soc, stringVal("78.5")),
-		makeDatum(tpb.Field_EstBatteryRange, stringVal("210.3")),
+		makeDatum(tpb.Field_RatedRange, stringVal("210.3")), // MYR-532: rated feeds estimatedRange
 		makeDatum(tpb.Field_Odometer, doubleVal(12345.6)),
 		makeDatum(tpb.Field_InsideTemp, stringVal("22.1")),
 		makeDatum(tpb.Field_OutsideTemp, stringVal("28.4")),

@@ -13,12 +13,19 @@ type FieldName string
 // detector, WebSocket broadcast, store) reference these constants, not
 // Tesla's proto enum names.
 const (
-	FieldSpeed                FieldName = "speed"
-	FieldLocation             FieldName = "location"
-	FieldHeading              FieldName = "heading"
-	FieldGear                 FieldName = "gear"
-	FieldSOC                  FieldName = "soc"
-	FieldEstBatteryRange      FieldName = "estimatedRange"
+	FieldSpeed    FieldName = "speed"
+	FieldLocation FieldName = "location"
+	FieldHeading  FieldName = "heading"
+	FieldGear     FieldName = "gear"
+	FieldSOC      FieldName = "soc"
+	// MYR-532 item 2 — the wire's `estimatedRange` sources from Tesla's
+	// RATED range now, the figure the dash and the Tesla app themselves show.
+	// The consumption-based EstBatteryRange routinely reads a few miles lower
+	// (the client's "app 46 vs dash 52"), and an app number the car itself
+	// disagrees with reads as a bug whatever its epistemics. The estimate is
+	// still streamed under its own internal name below, unconsumed, so
+	// switching back is a two-line change.
+	FieldEstBatteryRange      FieldName = "estBatteryRange"
 	FieldChargeState          FieldName = "chargeState"
 	FieldTimeToFull           FieldName = "timeToFull"
 	FieldOdometer             FieldName = "odometer"
@@ -37,13 +44,16 @@ const (
 	FieldFSDMiles             FieldName = "fsdMilesSinceReset"
 	FieldBatteryLevel         FieldName = "batteryLevel"
 	FieldIdealBatteryRange    FieldName = "idealBatteryRange"
-	FieldRatedRange           FieldName = "ratedRange"
-	FieldEnergyRemaining      FieldName = "energyRemaining"
-	FieldPackVoltage          FieldName = "packVoltage"
-	FieldPackCurrent          FieldName = "packCurrent"
-	FieldVehicleName          FieldName = "vehicleName"
-	FieldCarType              FieldName = "carType"
-	FieldVersion              FieldName = "version"
+	// MYR-532 — RatedRange FEEDS the wire's `estimatedRange` (see above); its
+	// internal name IS the wire field, so every downstream fold (store column,
+	// WS delta pass-through, snapshot) picks it up with no second mapping.
+	FieldRatedRange      FieldName = "estimatedRange"
+	FieldEnergyRemaining FieldName = "energyRemaining"
+	FieldPackVoltage     FieldName = "packVoltage"
+	FieldPackCurrent     FieldName = "packCurrent"
+	FieldVehicleName     FieldName = "vehicleName"
+	FieldCarType         FieldName = "carType"
+	FieldVersion         FieldName = "version"
 	// FieldTrim (MYR-279) is an INTERNAL-only field name (no Tesla proto / no
 	// fieldMap entry): Tesla does NOT stream the trim badge, so it is sourced
 	// ONLY from REST vehicle_data.vehicle_config.trim_badging by the MYR-260
