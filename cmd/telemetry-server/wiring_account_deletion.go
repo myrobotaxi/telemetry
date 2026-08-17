@@ -47,4 +47,14 @@ func setupAccountDeletionEndpoint(deps httpRouteDeps) {
 		slog.Bool("session_invalidation", deps.sessionInvalidator != nil),
 		slog.Bool("tesla_grant_revocation", deletionDeps.TeslaLink != nil),
 	)
+
+	// MYR-581 — the sibling write on the same resource: the caller edits their
+	// OWN display name. Mounted here so the /api/users/me verbs live together.
+	nameHandler := telemetry.NewProfileNameHandler(
+		deps.authenticator,
+		store.NewProfileNameRepo(deps.pool),
+		deps.logger.With(slog.String("component", "profile-name")),
+	)
+	deps.srv.HandleFunc("PATCH /api/users/me", nameHandler.ServePatch)
+	logger.Info("profile name endpoint enabled (PATCH /api/users/me)")
 }
