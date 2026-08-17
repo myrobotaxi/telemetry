@@ -64,7 +64,7 @@
 -- backfilled rows carry the `"User"."updatedAt"` they were inferred from rather
 -- than the moment the backfill ran.
 --
--- CLASSIFICATION: P0 in full (docs/contracts/data-classification.md §1.18). An
+-- CLASSIFICATION: P0 in full (docs/contracts/data-classification.md §1.20). An
 -- opaque cuid and a timestamp — the same tier as go_removed_vehicles. The NAME
 -- is P1 and is nowhere in this table; that is the point of splitting the fact
 -- from the value, and it is what lets the offerability gate read confirmation
