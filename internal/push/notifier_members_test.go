@@ -173,6 +173,51 @@ func TestNotifierUnwiredMembersIsPreMYR540Behaviour(t *testing.T) {
 	}
 }
 
+// TestNotifierDeclineReachesTheWholeGroup is the MYR-585 audit's verification
+// arm for DECLINE, the sibling of the owner-cancel group test. Both are
+// "the car is not coming", and both must reach everybody who was going to be in
+// it — a member who hears nothing about a decline waits for a car that was
+// never dispatched. The plumbing is shared (the member send is nested inside the
+// rider branch), so this pins the precedent rather than adding a scheme.
+func TestNotifierDeclineReachesTheWholeGroup(t *testing.T) {
+	scheduled := time.Date(2026, 8, 20, 17, 30, 0, 0, time.UTC)
+
+	tests := []struct {
+		name      string
+		event     events.Event
+		wantTitle string
+	}{
+		{name: "instant decline", event: statusEvent("declined"), wantTitle: "Blue Whale can't take this ride"},
+		{name: "reservation decline", event: scheduledStatusEvent("declined", scheduled), wantTitle: "Blue Whale can't make your scheduled ride"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sender := NewFakeSender()
+			n := newGroupNotifier(t, sender, &fakeRideMembers{ids: []string{testMemberID, testMemberIDB}})
+
+			n.handleStatusChanged(tt.event)
+			n.Wait()
+
+			got := tokensOf(sender.Sent())
+			for _, token := range []string{riderDevice, memberDevice, memberDeviceB} {
+				title, ok := got[token]
+				if !ok {
+					t.Errorf("device %q was not told the ride was declined: %+v", token, got)
+					continue
+				}
+				if title != tt.wantTitle {
+					t.Errorf("device %q title = %q, want %q", token, title, tt.wantTitle)
+				}
+			}
+			// The DECLINING owner is not told about their own thumb.
+			if _, ok := got[ownerDevice]; ok {
+				t.Error("the declining owner must not be notified of their own decline")
+			}
+		})
+	}
+}
+
 // TestNotifierMemberFanOutExcludesTheStandingParties pins the belt-and-braces
 // de-duplication. The join endpoint already 409s the requester and the owner, so
 // this should never fire — but "should never" is not what a fan-out should rest
