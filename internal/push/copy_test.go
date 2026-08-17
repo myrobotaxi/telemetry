@@ -172,6 +172,13 @@ func TestRiderCancelledClassifiesTheFrom(t *testing.T) {
 // produce copy regardless of the status string they arrive with — the fork is
 // keyed on the CLASSIFICATION, not on a second reading of the transition, so
 // the two cannot disagree.
+//
+// This OVERLAPS TestNotifierRiderCancelWakesTheOwner on the title/body
+// assertions, deliberately, and the two should not be collapsed: that one
+// drives the whole notifier and answers "did the right PHONE ring?", this one
+// calls the copy function directly and answers "is the right SENTENCE
+// produced?". Only this one can reach a kind the notifier would never build,
+// which is what keeps the enum honest if the classifier ever changes.
 func TestOwnerStatusAlertCancelForkOutranksTheStatus(t *testing.T) {
 	name := "Sam"
 
