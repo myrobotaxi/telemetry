@@ -1254,8 +1254,16 @@ components:
           type: string
           nullable: true
           description: |
-            OPTIONAL (MYR-581, contracts v0.37.0). The FIRST NAME of the person
-            who OWNS this vehicle, resolved by the platform's THREE-SOURCE
+            OPTIONAL (MYR-581, contracts v0.37.0; confirmation-gated by
+            MYR-583). The CONFIRMED display FIRST NAME of the person
+            who OWNS this vehicle. TWO CONDITIONS, BOTH REQUIRED: the owner must
+            have CONFIRMED a name through PATCH /api/users/me (§7.26), AND that
+            name must resolve on the ladder below. A name nobody confirmed
+            resolves `null`, exactly like no name at all — two of the three
+            rungs are filled by machinery the person never saw (Apple's
+            first-consent payload; whatever the legacy web onboarding wrote,
+            including a `Tesla User` placeholder), so a resolvable name is not
+            evidence of consent. Resolved by the platform's THREE-SOURCE
             identity ladder — Prisma `"User".name`, then the Apple
             first-consent name in `go_identity_apple`, then `go_users` — and
             reduced to its first whitespace-separated token. The SAME

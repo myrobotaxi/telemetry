@@ -195,6 +195,18 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		last_login_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);
 
+	-- go_profile_name_confirmations: the MYR-583 record that an account has
+	-- CONFIRMED its display name (migration 0042). Not a rung of the ladder — it
+	-- holds no name — but a PRECONDITION of the ladder mattering: the catalog's
+	-- ownerFirstName, the share listing's acceptedByName and the ride-offerability
+	-- gate all read it before they will publish or accept a name, because two of
+	-- the three rungs are machine-written and a resolvable name is not evidence of
+	-- consent. Both columns are provisioned; only row PRESENCE is ever read.
+	CREATE TABLE go_profile_name_confirmations (
+		user_id      TEXT PRIMARY KEY,
+		confirmed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+
 	CREATE TABLE "Vehicle" (
 		"id"               TEXT PRIMARY KEY,
 		"userId"           TEXT NOT NULL,
@@ -738,6 +750,13 @@ func cleanTables(t *testing.T, pool *pgxpool.Pool) {
 	if _, err := pool.Exec(ctx, `DELETE FROM go_identity_apple`); err != nil {
 		t.Fatalf("clean go_identity_apple: %v", err)
 	}
+	// MYR-583: the confirmation records. Left behind, a previous test's
+	// confirmation would make the NEXT test's owner look confirmed — which shows
+	// up as a name appearing on a row that should read null, or as a car being
+	// offerable when the arm meant to prove it is not.
+	if _, err := pool.Exec(ctx, `DELETE FROM go_profile_name_confirmations`); err != nil {
+		t.Fatalf("clean go_profile_name_confirmations: %v", err)
+	}
 }
 
 // seedUser inserts a minimal User row so the JWTAuthenticator's FR-10.1
@@ -793,6 +812,25 @@ func (h *seedHelpers) setGoUserName(ctx context.Context, t *testing.T, userID, n
 		`INSERT INTO go_users ("id", "name") VALUES ($1, $2)
 		 ON CONFLICT ("id") DO UPDATE SET "name" = EXCLUDED."name"`, userID, name); err != nil {
 		t.Fatalf("setGoUserName(%s): %v", userID, err)
+	}
+}
+
+// confirmName records that the account CONFIRMED its display name (MYR-583) —
+// the Go-owned `go_profile_name_confirmations` row that `PATCH /api/users/me`
+// writes in the same transaction as the name.
+//
+// SEPARATE FROM THE THREE RUNG SEEDERS, and deliberately so: since MYR-583 a name
+// on a rung is NOT enough to be shown to a counterparty or to make a car
+// offerable, because the Apple rung is a first-consent payload nobody approved and
+// the `"User"` rung may hold a legacy web placeholder. A test that wants a name the
+// platform will actually PUBLISH seeds a rung AND calls this. A test that wants the
+// legacy state — a resolvable name nobody confirmed — seeds a rung and does not.
+func (h *seedHelpers) confirmName(ctx context.Context, t *testing.T, userID string) {
+	t.Helper()
+	if _, err := h.pool.Exec(ctx,
+		`INSERT INTO go_profile_name_confirmations (user_id, confirmed_at) VALUES ($1, NOW())
+		 ON CONFLICT (user_id) DO UPDATE SET confirmed_at = NOW()`, userID); err != nil {
+		t.Fatalf("confirmName(%s): %v", userID, err)
 	}
 }
 

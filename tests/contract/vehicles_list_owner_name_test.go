@@ -21,6 +21,14 @@ import (
 // and every §7.0 and §7.1 request answered `500`. A unit test could not have seen
 // it, and neither could a reader of the SQL.
 //
+// SINCE MYR-583 EVERY NAMED ARM ALSO CONFIRMS. A name on a rung is no longer
+// enough to be published to a counterparty: the owner must have confirmed it
+// through §7.26, because the Apple rung is a first-consent payload nobody approved
+// and the `"User"` rung may hold a legacy web placeholder. The ladder arms
+// therefore call `confirmName` alongside the rung they are about — the confirmation
+// is a precondition of the ladder mattering, not one of the rungs — and a new final
+// arm pins the unconfirmed case, which is the one the client's ruling is about.
+//
 // The arms are ordered by PRECEDENCE, and each proves a different claim.
 
 func TestContract_GETVehicles_OwnerFirstNameLadder(t *testing.T) {
@@ -47,6 +55,7 @@ func TestContract_GETVehicles_OwnerFirstNameLadder(t *testing.T) {
 			name: "the Prisma User rung resolves, reduced to a first name",
 			seedIdentity: func(t *testing.T, h *seedHelpers) {
 				h.setUserName(ctx, t, ownerID, "Amruth Kelkar")
+				h.confirmName(ctx, t, ownerID)
 			},
 			want: "Amruth",
 		},
@@ -58,6 +67,7 @@ func TestContract_GETVehicles_OwnerFirstNameLadder(t *testing.T) {
 			name: "the APPLE rung resolves when the User row has a NULL name",
 			seedIdentity: func(t *testing.T, h *seedHelpers) {
 				h.seedAppleBinding(ctx, t, "sub_ladder_1", ownerID, "James Guan")
+				h.confirmName(ctx, t, ownerID)
 			},
 			want: "James",
 		},
@@ -67,6 +77,7 @@ func TestContract_GETVehicles_OwnerFirstNameLadder(t *testing.T) {
 			name: "the go_users rung resolves when both rungs above are empty",
 			seedIdentity: func(t *testing.T, h *seedHelpers) {
 				h.setGoUserName(ctx, t, ownerID, "Nabil Rahman")
+				h.confirmName(ctx, t, ownerID)
 			},
 			want: "Nabil",
 		},
@@ -79,6 +90,7 @@ func TestContract_GETVehicles_OwnerFirstNameLadder(t *testing.T) {
 				h.setUserName(ctx, t, ownerID, "Top Rung")
 				h.seedAppleBinding(ctx, t, "sub_ladder_2", ownerID, "Middle Rung")
 				h.setGoUserName(ctx, t, ownerID, "Bottom Rung")
+				h.confirmName(ctx, t, ownerID)
 			},
 			want: "Top",
 		},
@@ -87,6 +99,7 @@ func TestContract_GETVehicles_OwnerFirstNameLadder(t *testing.T) {
 			seedIdentity: func(t *testing.T, h *seedHelpers) {
 				h.seedAppleBinding(ctx, t, "sub_ladder_3", ownerID, "Middle Rung")
 				h.setGoUserName(ctx, t, ownerID, "Bottom Rung")
+				h.confirmName(ctx, t, ownerID)
 			},
 			want: "Middle",
 		},
@@ -99,6 +112,21 @@ func TestContract_GETVehicles_OwnerFirstNameLadder(t *testing.T) {
 			name: "a whitespace-only name on the top rung falls through to null",
 			seedIdentity: func(t *testing.T, h *seedHelpers) {
 				h.setUserName(ctx, t, ownerID, "   ")
+				h.confirmName(ctx, t, ownerID)
+			},
+			want: nil,
+		},
+		{
+			// THE MYR-583 ARM, and the one the client's ruling is about: a name
+			// the ladder resolves perfectly well and its owner never confirmed.
+			// It must read exactly like no name at all, so the client renders
+			// "Setting Up" and the car refuses ride requests. Note this arm
+			// seeds the TOP rung — the one a legacy web account carries — and
+			// asserts the strongest rung on the ladder loses to an absent
+			// confirmation.
+			name: "a resolvable name NOBODY CONFIRMED reads as null (MYR-583)",
+			seedIdentity: func(t *testing.T, h *seedHelpers) {
+				h.setUserName(ctx, t, ownerID, "Amruth Kelkar")
 			},
 			want: nil,
 		},
