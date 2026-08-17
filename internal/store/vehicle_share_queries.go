@@ -266,19 +266,34 @@ WHERE code = $1 AND status = 'accepted' AND accepted_by_user_id = $2
 // Apple first-consent name, then go_users. All READ-ONLY.
 //
 // Only the FIRST NAME reaches the redeemer (P1 policy: first names only, same
-// as the push payloads and RideRequest.requesterName) — the trimming happens in
-// Go so the ladder stays one statement.
+// as the push payloads and RideRequest.requesterName) — the reduction to a first
+// name happens in Go so the ladder stays one statement.
+//
+// MYR-581 added `TRIM` to every rung, and it FIXED A LATENT PRECEDENCE BUG rather
+// than tidying anything. `NULLIF(x, ”)` alone treats a whitespace-only name as a
+// PRESENT value, so a top rung holding "   " won the COALESCE outright and the
+// rungs below it were never consulted — the Go-side reduction then collapsed it to
+// "" and the caller fell through to the EMAIL local-part, skipping a perfectly
+// good real name one rung down. With TRIM, whitespace-only is NULL at every rung
+// and the ladder falls through as intended.
+//
+// It also makes this expression agree character-for-character with
+// `ownerNameLadderExpr` (owner_name.go). The two cannot yet be ONE constant — this
+// one keys on `$1` and that one on `"Vehicle"."userId"`, and the statements that
+// embed them are `const`, so a key-parameterized helper would have to make them
+// all `var` — but they must at least AGREE, because both answer "what is this
+// person called?" for the same P1 policy.
 const queryOwnerFirstNameSources = `
 SELECT
 	COALESCE(
-		NULLIF((SELECT u."name" FROM "User" u WHERE u."id" = $1), ''),
-		NULLIF((SELECT a."name" FROM go_identity_apple a WHERE a.user_id = $1 ORDER BY a.last_login_at DESC LIMIT 1), ''),
-		NULLIF((SELECT g."name" FROM go_users g WHERE g.id = $1), '')
+		NULLIF(TRIM((SELECT u."name" FROM "User" u WHERE u."id" = $1)), ''),
+		NULLIF(TRIM((SELECT a."name" FROM go_identity_apple a WHERE a.user_id = $1 ORDER BY a.last_login_at DESC LIMIT 1)), ''),
+		NULLIF(TRIM((SELECT g."name" FROM go_users g WHERE g.id = $1)), '')
 	) AS owner_name,
 	COALESCE(
-		NULLIF((SELECT u."email" FROM "User" u WHERE u."id" = $1), ''),
-		NULLIF((SELECT a."email" FROM go_identity_apple a WHERE a.user_id = $1 ORDER BY a.last_login_at DESC LIMIT 1), ''),
-		NULLIF((SELECT g."email" FROM go_users g WHERE g.id = $1), '')
+		NULLIF(TRIM((SELECT u."email" FROM "User" u WHERE u."id" = $1)), ''),
+		NULLIF(TRIM((SELECT a."email" FROM go_identity_apple a WHERE a.user_id = $1 ORDER BY a.last_login_at DESC LIMIT 1)), ''),
+		NULLIF(TRIM((SELECT g."email" FROM go_users g WHERE g.id = $1)), '')
 	) AS owner_email`
 
 // queryRevokeSharesForVehicle tombstones every live grant on a vehicle. Called

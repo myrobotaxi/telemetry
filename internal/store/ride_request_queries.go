@@ -17,8 +17,18 @@ package store
 // the name and owners saw a placeholder). Precedence mirrors
 // identity.GetUserProfile: Prisma "User" first (legacy/web riders), then the
 // Apple first-consent name in go_identity_apple (the real name for Apple-native
-// riders), then go_users. NULLIF drops empty strings so COALESCE falls through
-// to the next non-empty source.
+// riders), then go_users. `NULLIF(TRIM(...), ”)` drops empty AND whitespace-only
+// strings so COALESCE falls through to the next REAL source.
+//
+// THE `TRIM` IS THE MYR-581 UNIFICATION, and it fixed a latent precedence bug
+// here rather than tidying anything: `NULLIF(x, ”)` alone treats "   " as a
+// PRESENT value, so a top rung holding whitespace won the COALESCE outright and
+// the rungs below it were never consulted — the Go-side reduction then collapsed
+// it to "" and the fallback chain fell through to the email local-part, skipping a
+// perfectly good real name one rung down. All of the platform's name ladders now
+// spell this identically; owner_name.go holds the canonical one and the note on
+// why they cannot yet be a single constant (each keys on a different column, and
+// the statements embedding them are `const`).
 //
 // All three are READ-ONLY here (CG-DL-9): these SELECT name/email, never write.
 // Every column is nullable, so name/email scan into pointers.
@@ -29,14 +39,14 @@ package store
 // fails the surrounding ride operation.
 const requesterIdentitySelect = `,
 	COALESCE(
-		NULLIF((SELECT u."name" FROM "User" u WHERE u."id" = rider_id), ''),
-		NULLIF((SELECT a."name" FROM go_identity_apple a WHERE a.user_id = rider_id ORDER BY a.last_login_at DESC LIMIT 1), ''),
-		NULLIF((SELECT g."name" FROM go_users g WHERE g.id = rider_id), '')
+		NULLIF(TRIM((SELECT u."name" FROM "User" u WHERE u."id" = rider_id)), ''),
+		NULLIF(TRIM((SELECT a."name" FROM go_identity_apple a WHERE a.user_id = rider_id ORDER BY a.last_login_at DESC LIMIT 1)), ''),
+		NULLIF(TRIM((SELECT g."name" FROM go_users g WHERE g.id = rider_id)), '')
 	) AS requester_name,
 	COALESCE(
-		NULLIF((SELECT u."email" FROM "User" u WHERE u."id" = rider_id), ''),
-		NULLIF((SELECT a."email" FROM go_identity_apple a WHERE a.user_id = rider_id ORDER BY a.last_login_at DESC LIMIT 1), ''),
-		NULLIF((SELECT g."email" FROM go_users g WHERE g.id = rider_id), '')
+		NULLIF(TRIM((SELECT u."email" FROM "User" u WHERE u."id" = rider_id)), ''),
+		NULLIF(TRIM((SELECT a."email" FROM go_identity_apple a WHERE a.user_id = rider_id ORDER BY a.last_login_at DESC LIMIT 1)), ''),
+		NULLIF(TRIM((SELECT g."email" FROM go_users g WHERE g.id = rider_id)), '')
 	) AS requester_email,
 	(
 		EXISTS (SELECT 1 FROM "User" u WHERE u."id" = rider_id)

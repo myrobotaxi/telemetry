@@ -1,6 +1,9 @@
 package store
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // The PURE half of MYR-581's owner-name resolution: the first-token reduction and
 // the nullable collapse. No database — the ladder itself is SQL and is exercised
@@ -86,41 +89,67 @@ func TestOwnerFirstNameToken(t *testing.T) {
 // Two copies that happened to agree today would satisfy every behavioural test in
 // the repository and drift on the next edit.
 func TestOwnerNameLadderSharesOneDefinition(t *testing.T) {
-	if !containsSub(catalogOwnerNameExpr, ownerNameLadderExpr) {
+	if !strings.Contains(catalogOwnerNameExpr, ownerNameLadderExpr) {
 		t.Error("catalogOwnerNameExpr no longer derives from ownerNameLadderExpr — " +
 			"the wire value and the offerability gate can now disagree")
 	}
-	if !containsSub(ownerNamedPredicate, ownerNameLadderExpr) {
+	if !strings.Contains(ownerNamedPredicate, ownerNameLadderExpr) {
 		t.Error("ownerNamedPredicate no longer derives from ownerNameLadderExpr — " +
 			"the offerability gate and the wire value can now disagree")
 	}
 	// The gate must be a boolean projection, never the name: the P1 value must not
 	// be reachable from the enforcement path.
-	if !containsSub(ownerNamedPredicate, "IS NOT NULL") {
+	if !strings.Contains(ownerNamedPredicate, "IS NOT NULL") {
 		t.Error("ownerNamedPredicate must project a BOOLEAN — the enforcement path never handles the name")
 	}
 	// Every rung must TRIM. Without it a whitespace-only name reads as NULL to the
 	// reducer above but NOT NULL to the gate.
-	if got := countSub(ownerNameLadderExpr, "NULLIF(TRIM("); got != 3 {
+	if got := strings.Count(ownerNameLadderExpr, "NULLIF(TRIM("); got != 3 {
 		t.Errorf("ladder has %d TRIM-guarded rungs, want 3 — an untrimmed rung lets the gate and the wire disagree", got)
 	}
 }
 
-func ptr(s string) *string { return &s }
-
-// containsSub / countSub keep this file free of a strings import solely for two
-// assertions, matching the no-frills style of the other pure store tests.
-func containsSub(haystack, needle string) bool { return countSub(haystack, needle) > 0 }
-
-func countSub(haystack, needle string) int {
-	if needle == "" {
-		return 0
+// TestEveryNameLadderTrimsEveryRung is the CROSS-LADDER invariant, and it is the
+// one assertion in this file that spans files.
+//
+// The platform resolves "what is this person called?" through four sibling SQL
+// ladders — this package's `ownerNameLadderExpr` (the vehicle catalog + the
+// offerability gate), `acceptedByNameExpr` (the share listing),
+// `requesterIdentitySelect` (the ride surfaces) and `queryOwnerFirstNameSources`
+// (the redeem screen and the push copy). They cannot yet be ONE constant: each
+// keys its subselects on a different column, and the statements that embed them
+// are `const`, so a key-parameterized helper would force them all to `var`.
+//
+// What they CAN be is identical in spelling, and this test is what holds that.
+// Until MYR-581 the two older ladders omitted `TRIM`, which is not cosmetic: a top
+// rung holding "   " won its COALESCE outright, so the rungs below were never
+// consulted and a real name one rung down was skipped in favour of an email
+// local-part. A new ladder added without `TRIM`, or an old one that loses it,
+// reintroduces exactly that.
+func TestEveryNameLadderTrimsEveryRung(t *testing.T) {
+	ladders := map[string]string{
+		"ownerNameLadderExpr":        ownerNameLadderExpr,
+		"acceptedByNameExpr":         acceptedByNameExpr,
+		"requesterIdentitySelect":    requesterIdentitySelect,
+		"queryOwnerFirstNameSources": queryOwnerFirstNameSources,
 	}
-	n := 0
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if haystack[i:i+len(needle)] == needle {
-			n++
-		}
+	for name, sql := range ladders {
+		t.Run(name, func(t *testing.T) {
+			// Every rung that reads a name or an email must be TRIM-guarded, so the
+			// count of guarded rungs must equal the count of NULLIFs outright — a
+			// bare `NULLIF(` anywhere is an untrimmed rung.
+			guarded := strings.Count(sql, "NULLIF(TRIM(")
+			total := strings.Count(sql, "NULLIF(")
+			if guarded != total {
+				t.Errorf("%s has %d NULLIF rungs but only %d are TRIM-guarded — "+
+					"an untrimmed rung lets a whitespace-only name win the COALESCE and "+
+					"hide a real name below it", name, total, guarded)
+			}
+			if total == 0 {
+				t.Errorf("%s has no NULLIF rungs at all — this test is no longer looking at a ladder", name)
+			}
+		})
 	}
-	return n
 }
+
+func ptr(s string) *string { return &s }
