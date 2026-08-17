@@ -85,14 +85,23 @@ const LegacyWebPlaceholderName = "Tesla User"
 // second would affect everyone who used the endpoint on its first day.
 var ConfirmationWindowStart = time.Date(2026, 8, 17, 7, 0, 0, 0, time.UTC)
 
-// queryPlaceholderIDs finds the accounts still carrying the placeholder, taking a
-// row lock so the audit row and the scrub cannot straddle a concurrent write.
+// queryPlaceholderIDs finds the accounts still carrying the placeholder.
 //
 // It selects the ID ONLY. The name is known already — it is the literal in the
 // predicate — so there is nothing to read back, and a scrub that never holds a
 // name value cannot log one.
 const queryPlaceholderIDs = `
-SELECT "id" FROM "User" WHERE TRIM("name") = $1 ORDER BY "id" FOR UPDATE`
+SELECT "id" FROM "User" WHERE TRIM("name") = $1 ORDER BY "id"`
+
+// queryPlaceholderIDsForUpdate is the same read with a ROW LOCK, so the audit row
+// and the scrub cannot straddle a concurrent write to the same account.
+//
+// TWO SPELLINGS BECAUSE A REHEARSAL MUST TOUCH NOTHING. A `-dry-run` is going to
+// rewind, so taking row locks on live `"User"` rows to answer a question it will
+// then discard is a side effect the flag promises not to have — brief (they end
+// with the rollback) but real, and on a table the sibling app writes. The real run
+// takes the lock; the rehearsal does not.
+const queryPlaceholderIDsForUpdate = queryPlaceholderIDs + ` FOR UPDATE`
 
 // queryScrubPlaceholder clears the placeholder for the ids already audited.
 //
@@ -233,10 +242,13 @@ func (r *Runner) Run(ctx context.Context) (Result, error) {
 }
 
 // scrub clears the legacy placeholder, writing one audit row per account first.
-// On a dry run it stops after counting the ids — the row locks the SELECT took are
-// held only until the caller's rollback, which is immediate on that path.
+// On a dry run it counts the ids WITHOUT locking them and stops there.
 func (r *Runner) scrub(ctx context.Context, tx pgx.Tx) (int, error) {
-	rows, err := tx.Query(ctx, queryPlaceholderIDs, LegacyWebPlaceholderName)
+	query := queryPlaceholderIDsForUpdate
+	if r.dryRun {
+		query = queryPlaceholderIDs
+	}
+	rows, err := tx.Query(ctx, query, LegacyWebPlaceholderName)
 	if err != nil {
 		return 0, fmt.Errorf("nameconfirmbackfill: select placeholder ids: %w", err)
 	}

@@ -80,6 +80,13 @@ const (
 	exitFatal = 2
 )
 
+// Pool bounds for a binary whose whole run is one transaction. Typed int32 to
+// match pgxpool directly, so there is no bounds-checked conversion to justify.
+const (
+	poolMaxConns int32 = 2
+	poolMinConns int32 = 1
+)
+
 func main() {
 	os.Exit(run())
 }
@@ -138,9 +145,7 @@ func openPool(ctx context.Context) (*pgxpool.Pool, error) {
 		return nil, errors.New("DATABASE_URL is required")
 	}
 	cfg := config.DatabaseConfig{
-		URL:      url,
-		MaxConns: 2,
-		MinConns: 1,
+		URL: url,
 		DisablePreparedStatements: strings.Contains(url, ":6543") ||
 			os.Getenv("DATABASE_DISABLE_PREPARED_STATEMENTS") == "true",
 	}
@@ -148,6 +153,12 @@ func openPool(ctx context.Context) (*pgxpool.Pool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse DATABASE_URL: %w", err)
 	}
+	// The bounds are APPLIED here rather than carried on the config struct, so
+	// they cannot read as intent while doing nothing. A one-off binary that opens
+	// ONE transaction has no use for pgx's default pool (GOMAXPROCS connections)
+	// against a production database the server is also connected to.
+	poolCfg.MaxConns = poolMaxConns
+	poolCfg.MinConns = poolMinConns
 	if cfg.DisablePreparedStatements {
 		poolCfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	}
