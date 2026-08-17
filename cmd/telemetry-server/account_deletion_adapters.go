@@ -93,6 +93,12 @@ func (a *accountDataDeleterAdapter) DeleteSavedPlaces(ctx context.Context, userI
 	return a.deleter.DeleteSavedPlaces(ctx, userID)
 }
 
+// DeleteProfileNameConfirmation drops the account's display-name confirmation
+// row (MYR-583), so no record that this person approved a name outlives the name.
+func (a *accountDataDeleterAdapter) DeleteProfileNameConfirmation(ctx context.Context, userID string) (int, error) {
+	return a.deleter.DeleteProfileNameConfirmation(ctx, userID)
+}
+
 func (a *accountDataDeleterAdapter) RevokeRefreshTokens(ctx context.Context, userID string) (int, error) {
 	return a.deleter.RevokeRefreshTokens(ctx, userID)
 }
@@ -119,6 +125,8 @@ func (a *accountDataDeleterAdapter) DeleteIdentity(ctx context.Context, scope te
 		SavedPlacesDeleted:     counts.SavedPlacesDeleted,
 		RideMembershipsDeleted: counts.RideMembershipsDeleted,
 		RefreshTokensRevoked:   counts.RefreshTokensRevoked,
+
+		ProfileNameConfirmationsDeleted: counts.ProfileNameConfirmationsDeleted,
 	})
 	if err != nil {
 		return telemetry.AccountIdentityOutcome{}, err

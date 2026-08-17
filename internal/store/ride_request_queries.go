@@ -30,6 +30,30 @@ package store
 // why they cannot yet be a single constant (each keys on a different column, and
 // the statements embedding them are `const`).
 //
+// ── MYR-583: THIS LADDER IS DELIBERATELY *NOT* CONFIRMATION-GATED ────────────
+//
+// MYR-583 made an unconfirmed name read as ABSENT on the two surfaces that name a
+// person to a counterparty ahead of time — `VehicleSummary.ownerFirstName` and
+// `ShareInvite.acceptedByName` — and to the offerability gate. `requesterName`
+// keeps resolving an unconfirmed name, on purpose, for two reasons:
+//
+//   - THERE IS NO UNCONFIRMED POPULATION HERE GOING FORWARD. A rider on a build
+//     carrying the mandatory name prompt has already confirmed on-device before
+//     they can create a ride at all, so gating this ladder would change nothing
+//     for anybody the feature is about.
+//   - FOR THE LEGACY POPULATION IT WOULD *REMOVE* INFORMATION THE OWNER ALREADY
+//     RELIES ON. This field is on a card the owner reads while deciding whether to
+//     let a stranger into their car, and it has carried a name there since MYR-229.
+//     Blanking it would replace "James is requesting a ride" with the make-name
+//     fallback — reintroducing MYR-532 item 4's "Tesla wants a ride" on the exact
+//     surface that report came from — in service of a consent nicety about whose
+//     spelling the owner has no opinion. Withholding a name from a decision-maker
+//     mid-decision is a worse outcome than showing one its subject never typed.
+//
+// The asymmetry is therefore about DIRECTION, not about tiers: MYR-583 governs
+// what the platform PUBLISHES about a person before they have approved it, and
+// declines to strip a fact the receiving party is already acting on.
+//
 // All three are READ-ONLY here (CG-DL-9): these SELECT name/email, never write.
 // Every column is nullable, so name/email scan into pointers.
 // requester_exists (EXISTS across all three tables) distinguishes a deleted

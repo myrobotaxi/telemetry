@@ -91,7 +91,10 @@ func TestVehicleRepo_GetDispatchState(t *testing.T) {
 		}
 	})
 
-	t.Run("a name on any rung of the ladder makes the owner NAMED", func(t *testing.T) {
+	// MYR-583 CHANGED THIS ARM'S ANSWER, which is the whole of the issue: a name
+	// on a rung is no longer enough, the OWNER MUST HAVE CONFIRMED IT. Before the
+	// confirmation gate, seeding the go_users name alone flipped this to NAMED.
+	t.Run("a CONFIRMED name on any rung makes the owner NAMED", func(t *testing.T) {
 		// go_users is the LOWEST rung, so proving it alone flips the gate proves
 		// the COALESCE reaches past the two rungs above it — the exact defect a
 		// `"User"."name"`-only lookup had.
@@ -100,17 +103,32 @@ func TestVehicleRepo_GetDispatchState(t *testing.T) {
 			 ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name`, ownerID, "Ada Lovelace"); err != nil {
 			t.Fatalf("seed go_users name: %v", err)
 		}
+
+		// UNCONFIRMED FIRST. This is the state every legacy account is in, and the
+		// state the client ruled must read as "Setting Up": a perfectly resolvable
+		// name that nobody approved.
 		got, err := repo.GetDispatchState(ctx, inSvc)
 		if err != nil {
 			t.Fatalf("GetDispatchState: %v", err)
 		}
+		if got.OwnerNamed {
+			t.Error("an UNCONFIRMED name must not satisfy the gate (MYR-583)")
+		}
+
+		seedNameConfirmation(t, ownerID)
+		got, err = repo.GetDispatchState(ctx, inSvc)
+		if err != nil {
+			t.Fatalf("GetDispatchState: %v", err)
+		}
 		if !got.OwnerNamed {
-			t.Error("a name on the go_users rung must satisfy the gate")
+			t.Error("a CONFIRMED name on the go_users rung must satisfy the gate")
 		}
 
 		// Whitespace-only is NOT a name: TRIM/NULLIF must collapse it to NULL at
 		// every rung, or the gate would say "named" while the catalog emitted
-		// null — the one disagreement the shared ladder exists to prevent.
+		// null — the one disagreement the shared ladder exists to prevent. Note
+		// the confirmation row is still in place, so this arm proves the two
+		// conditions are a CONJUNCTION rather than either one alone.
 		if _, err := testPool.Exec(ctx,
 			`UPDATE go_users SET name = '   ' WHERE id = $1`, ownerID); err != nil {
 			t.Fatalf("blank go_users name: %v", err)
@@ -120,11 +138,12 @@ func TestVehicleRepo_GetDispatchState(t *testing.T) {
 			t.Fatalf("GetDispatchState: %v", err)
 		}
 		if got.OwnerNamed {
-			t.Error("a whitespace-only name must not satisfy the gate")
+			t.Error("a whitespace-only name must not satisfy the gate, confirmed or not")
 		}
 		if _, err := testPool.Exec(ctx, `DELETE FROM go_users WHERE id = $1`, ownerID); err != nil {
 			t.Fatalf("clean go_users: %v", err)
 		}
+		cleanNameConfirmations(t, ownerID)
 	})
 
 	t.Run("a pause is visible on the same read as the status", func(t *testing.T) {

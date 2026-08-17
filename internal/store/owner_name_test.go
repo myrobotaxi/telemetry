@@ -109,6 +109,64 @@ func TestOwnerNameLadderSharesOneDefinition(t *testing.T) {
 	}
 }
 
+// TestConfirmationGateIsSharedAndScoped is MYR-583's structural assertion, and it
+// exists for the same reason the one above it does: the correctness argument is
+// that the emit and the gate acquire the confirmation conjunction from ONE place,
+// and two copies that agree today would pass every behavioural test and drift on
+// the next edit.
+//
+// It also pins the two DELIBERATE EXEMPTIONS. Both are decisions with reasons
+// (see ride_request_queries.go and vehicle_share_queries.go), and a decision with
+// a reason is exactly the kind of thing a later "consistency" refactor removes
+// without reading it. If either exemption is revisited, this test is where the
+// revisit must be stated out loud.
+func TestConfirmationGateIsSharedAndScoped(t *testing.T) {
+	gated := map[string]struct{ sql, probe string }{
+		"ownerNameLadderExpr": {ownerNameLadderExpr, ownerNameConfirmedExpr},
+		"acceptedByNameExpr":  {acceptedByNameExpr, acceptedByNameConfirmedExpr},
+	}
+	for name, g := range gated {
+		t.Run(name+" carries the confirmation probe", func(t *testing.T) {
+			if !strings.Contains(g.sql, g.probe) {
+				t.Errorf("%s no longer requires a confirmation — an unconfirmed name would be "+
+					"published to a counterparty again (MYR-583)", name)
+			}
+		})
+	}
+
+	// The pair the wire and the gate share: both must reach the confirmation
+	// through the ladder, not around it.
+	for name, sql := range map[string]string{
+		"catalogOwnerNameExpr": catalogOwnerNameExpr,
+		"ownerNamedPredicate":  ownerNamedPredicate,
+	} {
+		t.Run(name+" inherits the gate from the shared ladder", func(t *testing.T) {
+			if !strings.Contains(sql, ownerNameConfirmedExpr) {
+				t.Errorf("%s no longer carries the confirmation conjunction — the emit and the "+
+					"offerability gate can now disagree about whether an owner is named", name)
+			}
+		})
+	}
+
+	// The UNGATED ladders, asserted as such. `requesterName` keeps naming a rider
+	// to the owner deciding whether to admit them (removing it would reintroduce
+	// "Tesla wants a ride" on the very card the report came from), and the redeem
+	// ladder falls through to an EMAIL LOCAL-PART, so gating it would disclose
+	// MORE about the owner rather than less.
+	for name, sql := range map[string]string{
+		"requesterIdentitySelect":    requesterIdentitySelect,
+		"queryOwnerFirstNameSources": queryOwnerFirstNameSources,
+	} {
+		t.Run(name+" is deliberately NOT gated", func(t *testing.T) {
+			if strings.Contains(sql, "go_profile_name_confirmations") {
+				t.Errorf("%s acquired a confirmation gate. That may be right, but it is a "+
+					"CONTRACT CHANGE with a documented reason against it — update "+
+					"rest-api.md and this test together, or revert", name)
+			}
+		})
+	}
+}
+
 // TestEveryNameLadderTrimsEveryRung is the CROSS-LADDER invariant, and it is the
 // one assertion in this file that spans files.
 //

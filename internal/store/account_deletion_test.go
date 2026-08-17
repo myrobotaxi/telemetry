@@ -250,6 +250,12 @@ func TestAccountDeleter_DeleteIdentity_WritesTheAuditRow(t *testing.T) {
 		// rows removed (step 6b) — never the rides, never the other members.
 		// P0-only, per CG-DL-5, exactly like every other count here.
 		"rideMembershipsDeleted": true,
+		// MYR-583. A COUNT of the display-name confirmation rows removed
+		// (step 8b) — 0 or 1, since that table is keyed by user id. The row it
+		// counts holds an opaque cuid and a timestamp and never held the NAME
+		// it confirms, so unlike its neighbours here there is nothing P1 this
+		// count could have leaked even by accident.
+		"profileNameConfirmationsDeleted": true,
 	}
 	for k, v := range got {
 		if !allowed[k] {

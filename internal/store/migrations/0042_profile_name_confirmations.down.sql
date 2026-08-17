@@ -1,0 +1,27 @@
+-- 0042_profile_name_confirmations.down.sql
+--
+-- Reverts MYR-583: drops the Go-owned go_profile_name_confirmations table.
+--
+-- REVERTING FAILS OPEN, and that is worth stating plainly rather than
+-- discovering. The readers gated on this table (the catalog's ownerFirstName,
+-- the share listing's acceptedByName, and the ride-request offerability gate)
+-- are compiled against it, so a server carrying MYR-583 against a database
+-- without this table fails those reads outright with `relation
+-- "go_profile_name_confirmations" does not exist` — there is no degraded mode.
+-- Roll the SERVER back first, then this migration. In that order the platform
+-- returns exactly to MYR-581 behaviour: an unconfirmed ladder name shows again
+-- and a car with one is offerable again.
+--
+-- It is destructive in one direction that cannot be undone by re-applying the
+-- up-migration: every confirmation on the platform is discarded, and the
+-- operator binary cmd/backfill-name-confirmations can only re-infer the subset
+-- whose `"User"."updatedAt"` still falls inside its heuristic window. Everyone
+-- else would have to confirm again through the client's name prompt — a sheet,
+-- not a data loss, but a sheet shown to people who already answered it.
+--
+-- Schema rollback only; no sibling-owned data is touched. In particular this
+-- does NOT restore the 'Tesla User' placeholder the MYR-583 scrub cleared: that
+-- ran as a separate operator step against a sibling-owned column, and nothing
+-- here reaches it.
+
+DROP TABLE IF EXISTS go_profile_name_confirmations;

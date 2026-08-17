@@ -340,11 +340,11 @@ func accountDeletionCancellable(status string) bool {
 	return status == rideStatusRequested || status == rideStatusAccepted
 }
 
-// runPersonalEffects runs the three steps whose rows belong to THIS ACCOUNT
-// ALONE and that no other person has a claim on: the APNs address book, the
-// saved places, and the refresh-token family. Split out of run (MYR-540 pushed
-// it past the 80-line cap) rather than inlined, because they share one argument
-// and it is worth stating once.
+// runPersonalEffects runs the steps whose rows belong to THIS ACCOUNT ALONE and
+// that no other person has a claim on: the APNs address book, the saved places,
+// the display-name confirmation (MYR-583) and the refresh-token family. Split out
+// of run (MYR-540 pushed it past the 80-line cap) rather than inlined, because
+// they share one argument and it is worth stating once.
 //
 // All three run BEFORE the identity delete, and their order among themselves is
 // unconstrained — nothing later in the sequence reads any of them, and no
@@ -377,6 +377,24 @@ func (h *AccountDeletionHandler) runPersonalEffects(
 		return &accountDeletionError{step: "delete_saved_places", cause: err}
 	}
 	counts.SavedPlacesDeleted = places
+
+	// (8b) The display-name confirmation row (MYR-583) — the record that this
+	// person approved the name the platform showed other people. A personal
+	// effect like the two above it: keyed on the person alone, read by nothing
+	// later in the sequence, and claimed by no counterparty.
+	//
+	// It is a separate step from the identity delete on purpose, even though it is
+	// a consent record about a name. It names no identity rung and authenticates
+	// nothing, so putting it in step 10's transaction would grow the one
+	// transaction that must stay small and lock-ordered for a row that no other
+	// step depends on. Left behind, it would be a standing assertion that a person
+	// who no longer exists approved a name that no longer exists — P0, so not a
+	// leak, but exactly the kind of orphan §1.4.2 exists to forbid.
+	confirmations, err := h.sumOverScope(ctx, scope, h.deps.Data.DeleteProfileNameConfirmation)
+	if err != nil {
+		return &accountDeletionError{step: "delete_profile_name_confirmation", cause: err}
+	}
+	counts.ProfileNameConfirmationsDeleted = confirmations
 
 	// (9) Refresh tokens — revoked so no stored session can mint a new access
 	// token. The CURRENT access token deliberately keeps working until step 11,

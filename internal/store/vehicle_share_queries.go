@@ -277,8 +277,18 @@ WHERE code = $1 AND status = 'accepted' AND accepted_by_user_id = $2
 // good real name one rung down. With TRIM, whitespace-only is NULL at every rung
 // and the ladder falls through as intended.
 //
+// MYR-583 LEFT THIS LADDER UNGATED BY CONFIRMATION, and the reason is the FALLBACK
+// two lines down rather than any argument about consent. Every other reader of a
+// display name renders nothing when the ladder resolves to nothing; this one falls
+// through to the EMAIL LOCAL-PART (see vehicle_name.go). So gating it would not
+// turn an unconfirmed name into an honest absence — it would turn "Amruth" into
+// "amruth.kelkar", disclosing MORE about the owner to the person redeeming their
+// invite than the unconfirmed first name did. A gate that makes the leak larger is
+// not the gate the ruling asked for. If this surface is revisited, the fallback
+// has to be revisited with it.
+//
 // It also makes this expression agree character-for-character with
-// `ownerNameLadderExpr` (owner_name.go). The two cannot yet be ONE constant — this
+// `ownerNameResolvedExpr` (owner_name.go). The two cannot yet be ONE constant — this
 // one keys on `$1` and that one on `"Vehicle"."userId"`, and the statements that
 // embed them are `const`, so a key-parameterized helper would have to make them
 // all `var` — but they must at least AGREE, because both answer "what is this
