@@ -229,6 +229,10 @@ func (a *vehicleListerAdapter) ListByUser(ctx context.Context, userID string) ([
 			// and the snapshot still name one car one way.
 			TrimLabel: v.TrimLabel,
 			Trim:      v.Trim,
+			// MYR-581: the owner's first name, already resolved AND already
+			// reduced to its first token by the store — this boundary carries a
+			// display-ready value, never a full name.
+			OwnerFirstName: v.OwnerFirstName,
 			// MYR-515: the decrypted position pair; the handler applies the
 			// (0,0) sentinel collapse and builds the wire object.
 			Latitude:  v.Latitude,

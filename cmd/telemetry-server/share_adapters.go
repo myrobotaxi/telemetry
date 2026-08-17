@@ -228,6 +228,12 @@ func toSharedVehicleRows(rows []store.SharedVehicleSummary) []telemetry.SharedVe
 				// shared car gets to say it is a Plaid rather than an "UltraRed".
 				TrimLabel: row.TrimLabel,
 				Trim:      row.Trim,
+				// MYR-581: viewers see the owner's first name, and this is the
+				// role the field was added for — the whole report was a rider
+				// being shown "Tesla" where a person's name belonged. Owners get
+				// it too (their own row names them), so all three §7.0 producers
+				// share one projection.
+				OwnerFirstName: row.OwnerFirstName,
 				// MYR-515: viewers see the position too — the same value the
 				// viewer mask already retains on the streaming path for these
 				// very cars, which is what makes the picker's per-row pickup

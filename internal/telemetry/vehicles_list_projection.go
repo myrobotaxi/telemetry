@@ -60,6 +60,13 @@ func newVehicleSummary(v *VehicleCatalogRow, role auth.Role, grant auth.ShareGra
 		// different ways. Identity, not telemetry — see the mask allow-list
 		// for why a viewer sees it.
 		TrimLabel: resolvedTrimLabel(v.Model, v.Year, v.TrimLabel, v.Trim, v.VIN),
+		// MYR-581: carried verbatim on BOTH roles. The ladder ran in the store
+		// (three identity sources, one statement per catalog read) and the
+		// first-token reduction ran there too, reusing MYR-229's `firstNameToken`
+		// rather than re-implementing it — so this surface, the ride card's
+		// `requesterName` and the redeem screen's `ownerFirstName` all shorten a
+		// name the same way, and there is no second rule to drift.
+		OwnerFirstName: v.OwnerFirstName,
 		// MYR-515: resolved here so the atomic-pair rule and the (0,0)
 		// sentinel collapse are applied exactly once per surface, in the same
 		// place the MYR-316 window resolves its precedence.

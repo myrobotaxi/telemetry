@@ -177,8 +177,9 @@ func (a *reservationStoreAdapter) VehiclePosition(
 	return a.vehicles.VehiclePosition(ctx, vehicleID)
 }
 
-// VehicleDispatchState answers the MYR-372 service re-check and the MYR-342
-// pause check together, from the repo's single joined read.
+// VehicleDispatchState answers the MYR-372 service re-check, the MYR-342 pause
+// check and the MYR-581 nameless-owner check together, from the repo's single
+// joined read.
 //
 // This adapter method is the WHOLE POINT of putting the status question here
 // rather than in internal/dispatch: it hands the raw status to
@@ -202,13 +203,17 @@ func (a *reservationStoreAdapter) VehicleDispatchState(
 	ctx context.Context,
 	vehicleID string,
 ) (dispatch.VehicleDispatchState, error) {
-	status, rideShareEnabled, err := a.vehicles.GetDispatchState(ctx, vehicleID)
+	state, err := a.vehicles.GetDispatchState(ctx, vehicleID)
 	if err != nil {
 		return dispatch.VehicleDispatchState{}, err
 	}
 	return dispatch.VehicleDispatchState{
-		InService:        telemetry.VehicleStatusIsInService(string(status)),
-		RideShareEnabled: rideShareEnabled,
+		InService:        telemetry.VehicleStatusIsInService(string(state.Status)),
+		RideShareEnabled: state.RideShareEnabled,
+		// MYR-581: carried across verbatim. Unlike the status arm there is no
+		// vocabulary to translate — the store already answers the question as a
+		// boolean, because the enforcement path must never hold the P1 name.
+		OwnerNamed: state.OwnerNamed,
 	}, nil
 }
 

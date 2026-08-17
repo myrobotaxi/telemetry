@@ -239,6 +239,29 @@ func (s *ReservationSweeper) holdIfVehicleBlocked(ctx context.Context, r *DueRes
 		)
 		return true
 	}
+	// THE NAMELESS-OWNER ARM (MYR-581) — the third and last enforcement layer,
+	// and the only one that runs outside a request. See the file header's note
+	// on monotonicity for why this layer is a BACKSTOP rather than a live gate:
+	// namelessness only ever resolves FORWARD, so the population it catches is
+	// reservations accepted BEFORE the create gate existed.
+	//
+	// HOLDS RATHER THAN EXPIRES, beside the pause arm and BEFORE the claim, and
+	// the mirror is exact: an owner who sets their name inside the lateness
+	// window gets the dispatch they meant to allow, exactly as an owner who
+	// un-pauses does; one who never does lets the reservation resolve honestly
+	// as `reservation_expired` at scheduledFor + MaxLateness, with no new
+	// resolution path and no new wire status.
+	//
+	// The NAME IS NEVER LOGGED and never read here — the store hands this layer
+	// a boolean, so there is no P1 value in the sweep at all.
+	if !state.OwnerNamed {
+		s.logger.Info("reservation sweep: vehicle owner has no display name, holding",
+			slog.String("ride_id", r.RideRequestID),
+			slog.String("vehicle_id", r.VehicleID),
+			slog.Time("scheduled_for", r.ScheduledFor),
+		)
+		return true
+	}
 	return false
 }
 
