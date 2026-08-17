@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
 )
@@ -32,9 +33,14 @@ import (
 // The 200 echoes the COMMITTED name (trimmed), so the client adopts the
 // server's normalization rather than its own submission.
 
-// maxProfileNameLength bounds the stored name. Generous — it is a display
-// name, not a form field — while still refusing paste accidents.
+// maxProfileNameLength bounds the stored name, in RUNES — a byte cap would
+// give a CJK speaker a third of the budget a Latin one gets. Generous — it is
+// a display name, not a form field — while still refusing paste accidents.
 const maxProfileNameLength = 60
+
+// maxProfileNameBodyBytes caps the request body well above any legal payload:
+// a 60-rune name is at most 240 bytes of JSON-escaped UTF-8 plus the envelope.
+const maxProfileNameBodyBytes = 4 << 10
 
 // profileNameStore is the storage seam (interface at the consumer, per
 // project convention). The production conformer is `store.ProfileNameRepo`.
@@ -48,6 +54,8 @@ type ProfileNameHandler struct {
 	logger *slog.Logger
 }
 
+// NewProfileNameHandler requires non-nil auth and store; only the logger may
+// be nil (it falls back to slog.Default).
 func NewProfileNameHandler(auth tokenValidator, store profileNameStore, logger *slog.Logger) *ProfileNameHandler {
 	if logger == nil {
 		logger = slog.Default()
@@ -77,8 +85,11 @@ func (h *ProfileNameHandler) ServePatch(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxProfileNameBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
 	var body profileNameRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := dec.Decode(&body); err != nil {
 		h.writeError(w, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest, "invalid JSON body")
 		return
 	}
@@ -97,7 +108,7 @@ func (h *ProfileNameHandler) ServePatch(w http.ResponseWriter, r *http.Request) 
 	if !updated {
 		// Self-scoped WHERE matched nothing: the authenticated account has no
 		// User row, which is an account-lifecycle anomaly, not a client error.
-		h.writeError(w, http.StatusNotFound, wserrors.ErrCodeInvalidRequest, "account not found")
+		h.writeError(w, http.StatusNotFound, wserrors.ErrCodeNotFound, "account not found")
 		return
 	}
 
@@ -115,7 +126,7 @@ func normalizeProfileName(raw string) (name, refusal string) {
 	if name == "" {
 		return "", "name must not be empty"
 	}
-	if len(name) > maxProfileNameLength {
+	if utf8.RuneCountInString(name) > maxProfileNameLength {
 		return "", "name is too long"
 	}
 	for _, r := range name {

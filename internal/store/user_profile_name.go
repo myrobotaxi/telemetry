@@ -22,6 +22,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -48,12 +49,13 @@ func NewProfileNameRepo(pool *pgxpool.Pool) *ProfileNameRepo {
 // UpdateUserName sets the caller's display name.
 //
 // The HANDLER owns validation (trim, non-empty, length cap) — this writer only
-// refuses the empty string as a second net, because an empty name is not a
-// rename, it is a deletion this endpoint does not offer. Returns updated=false
-// (nil error) when no row matched.
+// refuses the empty string as a second net, LOUDLY: an empty name is not a
+// rename, it is a deletion this endpoint does not offer, so a caller that
+// skipped validation gets an error rather than a false "not found". Returns
+// updated=false (nil error) when no row matched.
 func (r *ProfileNameRepo) UpdateUserName(ctx context.Context, userID, name string) (bool, error) {
 	if name == "" {
-		return false, nil
+		return false, errors.New("ProfileNameRepo.UpdateUserName: empty name is not a rename")
 	}
 	tag, err := r.pool.Exec(ctx, queryUpdateUserName, name, userID)
 	if err != nil {
