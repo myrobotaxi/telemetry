@@ -82,6 +82,15 @@ type AccountDeletionCounts struct {
 	// and the audit row is P0-only (CG-DL-5), so what is recorded is that two
 	// rows went, never where they pointed.
 	SavedPlacesDeleted int `json:"savedPlacesDeleted"`
+	// ProfileNameConfirmationsDeleted is the number of display-name confirmation
+	// rows removed — 0 or 1 (MYR-583), since the table's primary key is the user
+	// id. A COUNT, and there is nothing else it could be: the row holds an
+	// opaque cuid and a timestamp and never held the name (CG-DL-5 satisfied by
+	// the table's shape, not just by this field). Recorded because the audit row
+	// is how a deletion is shown to have reached every table that named the
+	// person, and "did we take the consent record too" is a question the trail
+	// must answer.
+	ProfileNameConfirmationsDeleted int `json:"profileNameConfirmationsDeleted"`
 	// RideMembershipsDeleted is the number of GROUP-RIDE memberships the user
 	// held that were deleted (MYR-540) — the rides they JOINED, as opposed to
 	// RidesCancelled, which counts the rides they BOOKED. A count, never a ride
@@ -151,6 +160,28 @@ func (a *AccountDeleter) DeletePushDevices(ctx context.Context, userID string) (
 // belong to this person alone and that nobody else has a claim on.
 func (a *AccountDeleter) DeleteSavedPlaces(ctx context.Context, userID string) (int, error) {
 	return a.execCount(ctx, "DeleteSavedPlaces", queryDeleteSavedPlacesForUser, userID)
+}
+
+// DeleteProfileNameConfirmation removes the person's display-name confirmation
+// row (MYR-583), so the record that they approved a name does not outlive the
+// account the name belonged to. Returns the number of rows deleted (0 or 1).
+// Idempotent.
+//
+// Ordering note: it runs immediately after the saved places, among the personal
+// effects, and its position there is unconstrained for the same reasons — the row
+// is keyed only by user_id, nothing later in the sequence reads it, and no
+// teardown, cascade or event depends on it. It belongs in that group rather than
+// beside the identity delete because it is not identity: it names no rung and
+// authenticates nothing.
+//
+// A REAL DELETE, not a tombstone, and the argument is shorter than the saved
+// places' because the row is P0: what makes it go is not its sensitivity but the
+// fact that it would otherwise be a standing assertion about a person who no
+// longer exists, keyed by a cuid nothing resolves. It is also the ONLY delete this
+// feature has — confirmation is monotonic everywhere else (see
+// profile_name_confirmation.go).
+func (a *AccountDeleter) DeleteProfileNameConfirmation(ctx context.Context, userID string) (int, error) {
+	return a.execCount(ctx, "DeleteProfileNameConfirmation", queryDeleteProfileNameConfirmationForUser, userID)
 }
 
 // DeleteRideMemberships removes every group-ride membership the user holds

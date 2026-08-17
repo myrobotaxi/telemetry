@@ -109,6 +109,10 @@ type fakeAccountData struct {
 	placesDeleted int
 	placesErr     error
 
+	// MYR-583: the display-name confirmation row, step 8b.
+	confirmationsDeleted int
+	confirmationsErr     error
+
 	membershipsDeleted int
 	membershipsErr     error
 
@@ -198,6 +202,17 @@ func (f *fakeAccountData) DeleteSavedPlaces(_ context.Context, id string) (int, 
 	}
 	n := f.placesDeleted
 	f.placesDeleted = 0 // idempotent: a re-run deletes nothing
+	return n, nil
+}
+
+func (f *fakeAccountData) DeleteProfileNameConfirmation(_ context.Context, id string) (int, error) {
+	f.note("delete_profile_name_confirmation")
+	f.seenIDs = append(f.seenIDs, id)
+	if f.confirmationsErr != nil {
+		return 0, f.confirmationsErr
+	}
+	n := f.confirmationsDeleted
+	f.confirmationsDeleted = 0 // idempotent: a re-run deletes nothing
 	return n, nil
 }
 
@@ -348,6 +363,8 @@ func TestAccountDeletion_OwnerWithSharesRunsEveryStepInOrder(t *testing.T) {
 		placesDeleted:       2,
 		tokensRevoked:       3,
 		order:               &order,
+
+		confirmationsDeleted: 1,
 	}
 	sessions := &fakeSessionInvalidator{}
 
@@ -386,6 +403,11 @@ func TestAccountDeletion_OwnerWithSharesRunsEveryStepInOrder(t *testing.T) {
 		// owner would be encrypted GPS of where a deleted person lives, keyed
 		// by a cuid nothing can resolve.
 		"delete_saved_places",
+		// MYR-583, step 8b. Beside the saved places for the same reason: a
+		// personal effect keyed on the person alone. It MUST precede
+		// delete_identity, so that no record of a person having approved a
+		// display name outlives the account the name belonged to.
+		"delete_profile_name_confirmation",
 		"revoke_tokens",
 		"delete_identity",
 	}
@@ -398,6 +420,7 @@ func TestAccountDeletion_OwnerWithSharesRunsEveryStepInOrder(t *testing.T) {
 	if got.VehicleCount != 2 || got.DriveCount != 7 || got.SharesRevoked != 2 ||
 		got.ShareLabelsScrubbed != 2 ||
 		got.PushDevicesDeleted != 1 || got.SavedPlacesDeleted != 2 ||
+		got.ProfileNameConfirmationsDeleted != 1 ||
 		got.RefreshTokensRevoked != 3 {
 		t.Fatalf("audit counts = %+v", got)
 	}
@@ -796,7 +819,7 @@ func TestAccountDeletion_ConvergedScopeRunsEveryStepOverEveryID(t *testing.T) {
 
 	// Every SQL step saw both ids. Counting per step rather than checking the
 	// set as a whole is what catches one straggler still keyed on the subject.
-	const sqlSteps = 7 // drives, shares, labels, memberships, devices, places, tokens
+	const sqlSteps = 8 // drives, shares, labels, memberships, devices, places, name confirmation, tokens
 	if len(data.seenIDs) != sqlSteps*2 {
 		t.Fatalf("steps ran on %d ids, want %d (every step over both)", len(data.seenIDs), sqlSteps*2)
 	}

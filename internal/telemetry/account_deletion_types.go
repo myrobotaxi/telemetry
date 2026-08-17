@@ -45,6 +45,7 @@ type AccountDataDeleter interface {
 	ScrubSharesReceivedLabel(ctx context.Context, userID string) (int, error)
 	DeletePushDevices(ctx context.Context, userID string) (int, error)
 	DeleteSavedPlaces(ctx context.Context, userID string) (int, error)
+	DeleteProfileNameConfirmation(ctx context.Context, userID string) (int, error)
 	DeleteRideMemberships(ctx context.Context, userID string) (int, error)
 	RevokeRefreshTokens(ctx context.Context, userID string) (int, error)
 	DeleteIdentity(ctx context.Context, scope AccountDeletionScope, counts AccountDeletionCounts) (AccountIdentityOutcome, error)
@@ -86,6 +87,9 @@ type AccountDeletionCounts struct {
 	ShareLabelsScrubbed int
 	PushDevicesDeleted  int
 	SavedPlacesDeleted  int
+	// ProfileNameConfirmationsDeleted counts the display-name confirmation rows
+	// removed (MYR-583) — 0 or 1, since the table is keyed by user id.
+	ProfileNameConfirmationsDeleted int
 	// RideMembershipsDeleted counts the GROUP-RIDE memberships the account
 	// held (MYR-540) — the rides they JOINED, as against RidesCancelled, the
 	// rides they BOOKED.
