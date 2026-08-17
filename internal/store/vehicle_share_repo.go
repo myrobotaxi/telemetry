@@ -293,14 +293,21 @@ func (r *VehicleShareRepo) LeaveVehicleShares(ctx context.Context, vehicleID, vi
 // serves both the single-row RETURNING path and the list iteration.
 func scanShare(row rowScanner) (VehicleShare, error) {
 	var s VehicleShare
+	// The ladder's RAW answer (a full display name, or NULL). Reduced to a first
+	// name below rather than scanned straight onto the struct, so the only value
+	// that ever leaves this repository is the first-names-only one — the same
+	// discipline the vehicle catalog's owner name keeps.
+	var acceptedByName *string
 	err := row.Scan(
 		&s.ID, &s.VehicleID, &s.OwnerUserID, &s.Label, &s.Permission,
 		&s.AllowRides, &s.SuspendedAt,
 		&s.Code, &s.Status, &s.CreatedAt, &s.ExpiresAt, &s.AcceptedAt,
 		&s.AcceptedByUserID, &s.RevokedAt,
+		&acceptedByName,
 	)
 	if err != nil {
 		return VehicleShare{}, fmt.Errorf("scan vehicle share: %w", err)
 	}
+	s.AcceptedByName = ownerFirstNameToken(acceptedByName)
 	return s, nil
 }

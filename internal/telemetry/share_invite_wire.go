@@ -51,6 +51,22 @@ type shareInviteWire struct {
 	CreatedAt  string `json:"createdAt"`
 	ExpiresAt  string `json:"expiresAt,omitempty"`
 	AcceptedAt string `json:"acceptedAt,omitempty"`
+	// AcceptedByName is who actually holds this grant (MYR-581, contracts
+	// v0.37.0) — the first name of the redeeming account, resolved by the
+	// platform's three-source identity ladder.
+	//
+	// OPTIONAL AND NULLABLE, and unlike the four conditional keys above it is
+	// NOT omitted on the row type it does not apply to: a pointer with
+	// `omitempty` so an unresolved name is simply absent. Two situations produce
+	// absence — a pending row (nobody has accepted) and an accepted row whose
+	// account has no name — and they are deliberately indistinguishable here,
+	// because `status` already separates them and a second sentinel would be a
+	// state with no copy.
+	//
+	// It is the sibling of `label` and the correction to it: `label` is the
+	// owner's own memo about who they meant to invite, typed before redemption
+	// and never resolved against an account. P1, never logged.
+	AcceptedByName *string `json:"acceptedByName,omitempty"`
 }
 
 // shareInviteListResponse is the GET envelope. The key is `invites`, NOT the
@@ -108,6 +124,11 @@ func toShareInviteWire(row *ShareInviteRow, link inviteLinkCtx) shareInviteWire 
 	if row.AcceptedAt != nil {
 		out.AcceptedAt = row.AcceptedAt.UTC().Format(time.RFC3339)
 	}
+	// MYR-581: carried verbatim, with NO status branch. The store already
+	// resolved it off `accepted_by_user_id`, which is NULL on a pending row, so a
+	// pending invite arrives here nil by construction rather than by a guard
+	// somebody has to remember — the same reason `code` suppression is in SQL.
+	out.AcceptedByName = row.AcceptedByName
 	return out
 }
 
@@ -155,6 +176,14 @@ func toShareInviteMasked(row *ShareInviteRow, role auth.Role, link inviteLinkCtx
 	}
 	if wire.AcceptedAt != "" {
 		fields["acceptedAt"] = wire.AcceptedAt
+	}
+	// MYR-581. Added only when resolved, so absence stays absence rather than
+	// becoming a null the client has to re-interpret — and note the mask is what
+	// makes the key reachable at all: `acceptedByName` is in `inviteOwnerFields`,
+	// and without that entry this assignment would be silently dropped, which
+	// would look like "the name never resolves" with nothing to point at.
+	if wire.AcceptedByName != nil {
+		fields["acceptedByName"] = *wire.AcceptedByName
 	}
 	projected, _ := mask.Apply(fields, mask.For(mask.ResourceInvite, role))
 	return projected

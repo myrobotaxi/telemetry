@@ -78,6 +78,22 @@ type ShareInviteRow struct {
 	CreatedAt  time.Time
 	ExpiresAt  time.Time
 	AcceptedAt *time.Time
+	// AcceptedByName is the FIRST NAME of the account that redeemed this invite
+	// (MYR-581) — the name the shared user themselves entered at signup, resolved
+	// by the platform's three-source identity ladder and reduced to its first
+	// token by the store before it crosses this boundary.
+	//
+	// It is the one field on this shape that names a person OTHER than the
+	// caller, and it is the reason the shape needed it: `Label` above is the
+	// owner's own memo, typed before anybody redeemed anything and never resolved
+	// against an account, so an owner's Share tab could show who they MEANT to
+	// invite and never who actually holds the grant.
+	//
+	// P1 — never logged, like `Label` and `Code`.
+	//
+	// nil on a pending row and on an accepted row whose account has no resolvable
+	// name. `status` already tells those two apart.
+	AcceptedByName *string
 }
 
 // ShareGrantRow is what a redemption granted, per vehicle — the FLAGS it wrote,

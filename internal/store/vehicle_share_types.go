@@ -136,6 +136,23 @@ type VehicleShare struct {
 	AcceptedAt       *time.Time
 	AcceptedByUserID string
 	RevokedAt        *time.Time
+	// AcceptedByName is the FIRST NAME of the account that redeemed this invite
+	// (MYR-581), resolved inline by the three-source identity ladder and already
+	// reduced to its first token — the full name never reaches a caller.
+	//
+	// P1 — never logged, exactly like Label and Code beside it.
+	//
+	// nil on a PENDING row (nobody has accepted it, so there is nobody to name)
+	// and nil on an ACCEPTED row whose account has no resolvable name in any
+	// identity source. Those two are deliberately the SAME value: `status` already
+	// distinguishes them, and inventing a second sentinel for "accepted but
+	// nameless" would give a consumer a state to render that has no copy.
+	//
+	// DISTINCT FROM Label, which is the OWNER'S memo about who they meant to
+	// invite. That one is typed before any redemption and is never resolved
+	// against an account, so a forwarded code makes it wrong; this one is who
+	// actually holds the grant.
+	AcceptedByName *string
 }
 
 // ShareGrant is the slim projection the redeem path returns: what the redeemer

@@ -63,7 +63,7 @@
         },
         "label": {
           "type": "string",
-          "description": "OWNER-TYPED display name for the recipient — what the owner calls this person ('Mira Chen', 'Mom', 'Roommate'), captured in the send-invite sheet and echoed on the invite/viewer row (ios-app design/app/screens.jsx InvitesScreen row name, jsx:1301,1325). NOT AN EMAIL ADDRESS and not an identity: this contract is code-based, there is no email infrastructure, and the label is never matched against, resolved to, or validated as any account — it is a free-form owner-side memo for their own list. It is therefore NOT overwritten at redemption: after a rider accepts, the row keeps the label the owner typed, not the redeemer's account name. P1 — a person's name, log-redacted.",
+          "description": "OWNER-TYPED display name for the recipient — what the owner calls this person ('Mira Chen', 'Mom', 'Roommate'), captured in the send-invite sheet and echoed on the invite/viewer row (ios-app design/app/screens.jsx InvitesScreen row name, jsx:1301,1325). NOT AN EMAIL ADDRESS and not an identity: this contract is code-based, there is no email infrastructure, and the label is never matched against, resolved to, or validated as any account — it is a free-form owner-side memo for their own list. It is therefore NOT overwritten at redemption: after a rider accepts, the row keeps the label the owner typed, not the redeemer's account name. As of MYR-581 the redeemer's ACTUAL name arrives beside it as `acceptedByName` on accepted rows — this field is unchanged in every respect, but it is no longer the only thing an owner has to go on, and a consumer SHOULD prefer `acceptedByName` where present. P1 — a person's name, log-redacted.",
           "x-classification": "P1",
           "examples": ["Mira Chen"]
         },
@@ -124,9 +124,15 @@
         "acceptedAt": {
           "type": "string",
           "format": "date-time",
-          "description": "ISO 8601 / RFC 3339 UTC instant a rider redeemed the code and this row became a live viewer grant. OPTIONAL on the wire: the key is OMITTED while `status` is 'pending', and is never cleared afterwards. The redeeming account is deliberately NOT on this object — the redeemer's user id lives server-side in `go_vehicle_shares.accepted_by_user_id` (go_users id space) and is not part of the owner-facing wire shape; the owner identifies the person by the `label` they typed.",
+          "description": "ISO 8601 / RFC 3339 UTC instant a rider redeemed the code and this row became a live viewer grant. OPTIONAL on the wire: the key is OMITTED while `status` is 'pending', and is never cleared afterwards. The redeeming account's IDENTIFIER is deliberately NOT on this object — the redeemer's user id lives server-side in `go_vehicle_shares.accepted_by_user_id` (go_users id space) and is not part of the owner-facing wire shape. Since MYR-581 the redeemer's NAME is: see `acceptedByName`, which is the resolved projection of that same id and supersedes this field's former instruction to identify the person by the `label`.",
           "x-classification": "P0",
           "examples": ["2026-07-30T09:12:44Z"]
+        },
+        "acceptedByName": {
+          "type": "string",
+          "description": "The FIRST NAME of the account that REDEEMED this invite (MYR-581, contracts v0.37.0) — the name the shared user themselves entered at signup, resolved by the platform's three-source identity ladder (Prisma \"User\".name → the Apple first-consent name in go_identity_apple → go_users) and reduced to its first whitespace-separated token, the same resolution and the same reduction behind `RideRequest.requesterName`, `RedeemShareInviteResponse.ownerFirstName` and `VehicleSummary.ownerFirstName`. THIS IS THE CORRECTION TO `label`, NOT A DUPLICATE OF IT: `label` is the owner's own memo about who they MEANT to invite, typed in the send-invite sheet before anybody redeemed anything and never resolved against an account — so a code forwarded to somebody else leaves an accepted row labelled with the wrong person's name, and until this field the owner's Share tab had no way to say who actually holds the grant. An owner deciding whether to revoke or suspend needs the second, not the first. Consumers SHOULD render this in preference to `label` on accepted rows, and fall back to `label` when it is absent. OPTIONAL: the key is OMITTED both while `status` is 'pending' (nobody has accepted, so there is nobody to name) and on an accepted row whose account has no resolvable name in any identity source. Those two are deliberately INDISTINGUISHABLE — `status` already separates them, and a second sentinel would be a state with no copy. FIRST NAMES ONLY, the P1 counterparty policy: this is a grantee's name delivered to the owner, and it gets exactly the treatment the owner's name gets when it is delivered to the grantee. P1 — never logged. OWNER-ONLY BY CONSTRUCTION: the viewer role has no entry in the Invite mask resource at all, and a viewer must never be able to enumerate the other people an owner has shared with.",
+          "x-classification": "P1",
+          "examples": ["Mira"]
         }
       }
     },

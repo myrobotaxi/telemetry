@@ -253,7 +253,10 @@ func toSharedVehicleRows(rows []store.SharedVehicleSummary) []telemetry.SharedVe
 }
 
 // toShareInviteRow drops the two server-only columns (accepted_by_user_id,
-// revoked_at) that the owner-facing wire shape deliberately never carries.
+// revoked_at) that the owner-facing wire shape deliberately never carries — and
+// since MYR-581 carries the resolved NAME of that same accepting account, which
+// is the point: the owner may know who holds their grant, not the opaque id of
+// the account that holds it.
 func toShareInviteRow(row *store.VehicleShare) telemetry.ShareInviteRow {
 	return telemetry.ShareInviteRow{
 		ID:         row.ID,
@@ -273,6 +276,11 @@ func toShareInviteRow(row *store.VehicleShare) telemetry.ShareInviteRow {
 		CreatedAt:  row.CreatedAt,
 		ExpiresAt:  row.ExpiresAt,
 		AcceptedAt: row.AcceptedAt,
+		// MYR-581: WHO ACTUALLY HOLDS THE GRANT, already reduced to a first name
+		// by the store. It crosses this boundary where `AcceptedByUserID` does
+		// NOT — the id stays server-side (see this function's doc), and the name
+		// is the owner-facing projection of it.
+		AcceptedByName: row.AcceptedByName,
 	}
 }
 

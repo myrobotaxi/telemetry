@@ -816,6 +816,25 @@ var inviteOwnerFields = []string{
 	"createdAt",
 	"expiresAt",
 	"acceptedAt",
+	// acceptedByName (MYR-581) is the first name of the account that REDEEMED
+	// this invite. P1 — a person's name — and, like `label`, owner-only by
+	// construction: the viewer role has no entry in this resource at all.
+	//
+	// It is the CORRECTION to `label`, not a duplicate of it. `label` is the
+	// owner's own memo about who they meant to invite, typed before anybody
+	// redeemed anything and never resolved against an account, so a forwarded
+	// code makes it flatly wrong; this is who actually holds the grant. An owner
+	// deciding whether to revoke or suspend needs the second, not the first.
+	//
+	// FIRST NAMES ONLY, narrowed upstream in the store — a mask can drop a value
+	// but cannot shorten one, so the reduction has to happen before the map is
+	// built. Same policy in the same direction as the owner's own first name
+	// going to a redeemer.
+	//
+	// Listed here rather than folded into `label` for the reason `shareUrl` is
+	// listed separately from `code`: the mask is a flat allow-list of wire names,
+	// and an entry missing here is a field silently dropped from the response.
+	"acceptedByName",
 }
 
 // setFromFields converts a slice of field names into a set keyed by
