@@ -11,6 +11,15 @@
 // ONCE, as `ownerNameLadderExpr`, and both the wire value and the predicate are
 // spelled as derivations of it.
 //
+// SINCE MYR-583, RESOLVING A NAME IS NOT ENOUGH — THE OWNER MUST HAVE CONFIRMED
+// IT. The client ruled that an unconfirmed name does not count, and the ladder's
+// two machine-filled rungs are why: Apple's first-consent payload and the legacy
+// web placeholder were never approved by the person they name. So the shared
+// expression is now `confirmed AND resolved` (profile_name_confirmation.go owns
+// the confirmation half), and BOTH consumers inherit it from the same place. The
+// invariant below is unchanged in form: the wire value is non-null exactly when
+// the gate says "named".
+//
 // THE THREE-SOURCE LADDER is the platform's, not a new one: Prisma "User" first
 // (legacy/web owners), then the Apple first-consent name in go_identity_apple
 // (the real name for an Apple-native owner), then go_users. It is
@@ -44,16 +53,47 @@
 
 package store
 
-// ownerNameLadderExpr is the ladder itself, keyed on the vehicle row's owner. It
-// is a bare expression (no alias) so both consumers below can wrap it; it
+// ownerNameResolvedExpr is the ladder itself, keyed on the vehicle row's owner. It
+// is a bare expression (no alias) so the consumers below can wrap it; it
 // references `"Vehicle"."userId"` fully qualified, which is valid in every
 // statement that selects it (the owner catalog, the shared catalog, the member
 // catalog and the snapshot read all have `"Vehicle"` in scope).
-const ownerNameLadderExpr = `COALESCE(
+//
+// It answers "what could we resolve this owner to?" and NOTHING reads it
+// directly — every consumer goes through `ownerNameLadderExpr` below, which adds
+// the MYR-583 confirmation conjunction. Splitting the two is what keeps the
+// resolution rungs readable while making the gate impossible to forget: there is
+// no unconfirmed spelling of the ladder for a future statement to reach for.
+const ownerNameResolvedExpr = `COALESCE(
 		NULLIF(TRIM((SELECT u."name" FROM "User" u WHERE u."id" = "Vehicle"."userId")), ''),
 		NULLIF(TRIM((SELECT a."name" FROM go_identity_apple a WHERE a.user_id = "Vehicle"."userId" ORDER BY a.last_login_at DESC LIMIT 1)), ''),
 		NULLIF(TRIM((SELECT g."name" FROM go_users g WHERE g.id = "Vehicle"."userId")), '')
 	)`
+
+// ownerNameLadderExpr is what both consumers derive from: the resolved ladder
+// AND (MYR-583) the owner's own confirmation of it.
+//
+// WHY THE CONJUNCTION GOES HERE AND NOWHERE ELSE. The client ruled that a name
+// nobody confirmed does not count ("Any names not entered/confirmed should be in
+// Setting Up… even cars with names but not confirmed show that label"), and the
+// ladder's two machine-filled rungs are exactly the population that ruling is
+// about: Apple's first-consent payload and the legacy web placeholder were never
+// approved by the person they name. Applying the conjunction INSIDE the one
+// shared expression means the wire value and the offerability gate acquire it
+// together — the file's founding invariant, unchanged in form: the emit is
+// non-null exactly when the gate is true.
+//
+// CASE WHEN … THEN … (with no ELSE, so an unconfirmed owner is NULL) rather than
+// an `AND` on the predicate, because the shared thing has to be the NAME
+// EXPRESSION, not the boolean: `ownerNamedPredicate` is defined as "the ladder IS
+// NOT NULL", and collapsing to NULL is what makes one edit move both surfaces.
+// An unconfirmed owner is therefore indistinguishable from an unnameable one at
+// every consumer, which is precisely the ruling.
+//
+// COST: one extra primary-key EXISTS probe per row, on a single-digit-row
+// catalog, and it SHORT-CIRCUITS the three rung probes for an unconfirmed owner —
+// so the common nameless case gets cheaper, not dearer.
+const ownerNameLadderExpr = `CASE WHEN ` + ownerNameConfirmedExpr + ` THEN ` + ownerNameResolvedExpr + ` END`
 
 // catalogOwnerNameExpr carries the owner's display name onto the three catalog
 // reads. The FULL name, deliberately: the first-token reduction happens in Go
@@ -67,7 +107,11 @@ const ownerNameLadderExpr = `COALESCE(
 const catalogOwnerNameExpr = ownerNameLadderExpr + ` AS "ownerName"`
 
 // ownerNamedPredicate is the GATE, derived from the same ladder: does this car's
-// owner have a name we could show a counterparty at all? INPUT ONLY — it is the
+// owner have a CONFIRMED name we could show a counterparty at all? Since MYR-583
+// a resolvable-but-unconfirmed owner is refused exactly like an unnameable one —
+// same 409, same copy, same sweeper hold — because the ruling makes them the same
+// state, and because a car offered under a name its owner never approved is the
+// dishonest ride this gate exists to prevent. INPUT ONLY — it is the
 // one thing the ride-request enforcement path reads, so the P1 value itself
 // never enters it (the MYR-578 raw-badge precedent: carry the input, not the
 // display value).

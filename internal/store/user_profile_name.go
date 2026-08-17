@@ -51,10 +51,40 @@
 // deletion step, and no reader change anywhere, because the rungs it writes are
 // the rungs the readers already read.
 //
+// MYR-583 THEN PAID PART OF THAT PRICE ANYWAY, for a different fact. It added a
+// migration, a table and a §7.6 deletion step for the CONFIRMATION — and the
+// distinction is worth keeping straight, because it is why the rejected design is
+// still rejected: `go_profile_name_confirmations` holds no name and is no rung. It
+// records that the person approved whatever the ladder resolves to, so the three
+// name UPDATEs above remain the whole of the name write and the four readers still
+// read the rungs they always read.
+//
 // NO ROW IS EVER CREATED, deliberately. All three statements are UPDATEs. An
 // INSERT into `go_users` for an id that lives in `"User"` would fork one human
 // across two identity sources — the exact shape MYR-452's convergence table
 // exists to clean up after — and would collide with `idx_go_users_email`.
+//
+// ── MYR-583: THE WRITE IS ALSO THE CONFIRMATION ──────────────────────────────
+//
+// A successful PATCH now UPSERTS a `go_profile_name_confirmations` row for the
+// caller, in THIS transaction, as its last statement. That row is what makes the
+// name COUNT: since MYR-583 the catalog's `ownerFirstName`, the share listing's
+// `acceptedByName` and the offerability gate all read the name only when it
+// exists (profile_name_confirmation.go owns that SQL).
+//
+// WHY IT MUST BE THE SAME TRANSACTION, and it is not symmetry-for-its-own-sake.
+// The two failure directions are unequal, and only one of them is tolerable. A
+// confirmation that committed while the name write rolled back would mark a STALE
+// name — an Apple-consent name, or the legacy web placeholder — as approved by the
+// person, permanently and invisibly: exactly the state the ruling exists to
+// eliminate, created by the feature that implements it. The other direction (name
+// written, confirmation lost) merely leaves the caller unconfirmed, which the
+// client's prompt resolves by asking again. Joining the existing transaction makes
+// the bad direction unreachable and costs one statement.
+//
+// AND WHY IT IS CONDITIONED ON `affected > 0`: an id with no row on any rung has
+// no name to have confirmed. That path returns the 404 the handler already had,
+// having written nothing.
 //
 // ── ON OVERWRITING THE APPLE FIRST-CONSENT NAME ─────────────────────────────
 //
@@ -145,6 +175,11 @@ func NewProfileNameRepo(pool *pgxpool.Pool) *ProfileNameRepo {
 // which is the precedence bug in the file header arriving by a different route:
 // the readers would serve the stale name while the endpoint had reported success.
 // All three rungs move together or none does.
+//
+// THE MYR-583 CONFIRMATION JOINS THAT TRANSACTION (see the section above). It is
+// the LAST statement rather than the first, so it can be conditioned on the write
+// having actually landed, and it is inside the same `tx` so the two facts commit
+// or fail as one.
 func (r *ProfileNameRepo) UpdateUserName(ctx context.Context, userID, name string) (bool, error) {
 	if name == "" {
 		return false, errors.New("ProfileNameRepo.UpdateUserName: empty name is not a rename")
@@ -170,8 +205,21 @@ func (r *ProfileNameRepo) UpdateUserName(ctx context.Context, userID, name strin
 		affected += tag.RowsAffected()
 	}
 
+	// NO RUNG MATCHED — an orphaned token, the endpoint's 404 arm. Return WITHOUT
+	// committing: there is no account here, so there is nothing to have confirmed,
+	// and the deferred rollback discards the empty transaction. Writing a
+	// confirmation for an id with no name anywhere would be a row asserting that
+	// somebody approved a name that does not exist.
+	if affected == 0 {
+		return false, nil
+	}
+
+	if _, err := tx.Exec(ctx, queryUpsertProfileNameConfirmation, userID); err != nil {
+		return false, fmt.Errorf("ProfileNameRepo.UpdateUserName(user=%s): confirm: %w", userID, err)
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("ProfileNameRepo.UpdateUserName(user=%s): commit: %w", userID, err)
 	}
-	return affected > 0, nil
+	return true, nil
 }

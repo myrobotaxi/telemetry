@@ -35,8 +35,25 @@ package store
 // It rides every statement that projects shareColumns, including the resend
 // RETURNING — where the rows are pending by definition and it resolves NULL,
 // which is correct and costs a comparison against NULL.
-const acceptedByNameExpr = `COALESCE(
+//
+// ── MYR-583: THE GRANTEE MUST HAVE CONFIRMED THE NAME TOO ────────────────────
+//
+// Same conjunction as the vehicle catalog's, keyed on the same accepting account,
+// and for the same reason: the ladder's Apple rung is a first-consent payload the
+// person never approved and its `"User"` rung may hold the legacy web placeholder.
+// The client's ruling is about what a COUNTERPARTY is shown, and this row is a
+// grantee's name shown to the car's owner — the mirror image of `ownerFirstName`,
+// so it gets the mirror treatment. An `accepted` row whose grantee has a
+// resolvable but unconfirmed name now renders exactly like one whose grantee has
+// no name at all: the field is OMITTED. That collapse was already contractual —
+// §7.5.2 states pending and name-less rows are deliberately indistinguishable
+// because `status` tells them apart — so MYR-583 adds a third member to an
+// existing equivalence class rather than a new wire state.
+//
+// The confirmation probe short-circuits the three rung probes for an unconfirmed
+// grantee, so the common case gets cheaper.
+const acceptedByNameExpr = `CASE WHEN ` + acceptedByNameConfirmedExpr + ` THEN COALESCE(
 		NULLIF(TRIM((SELECT u."name" FROM "User" u WHERE u."id" = accepted_by_user_id)), ''),
 		NULLIF(TRIM((SELECT a."name" FROM go_identity_apple a WHERE a.user_id = accepted_by_user_id ORDER BY a.last_login_at DESC LIMIT 1)), ''),
 		NULLIF(TRIM((SELECT g."name" FROM go_users g WHERE g.id = accepted_by_user_id)), '')
-	) AS accepted_by_name`
+	) END AS accepted_by_name`

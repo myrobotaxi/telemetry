@@ -13,11 +13,20 @@ import "log/slog"
 //
 // WHY IT IS A BACKSTOP RATHER THAN A LIVE GATE, and why that makes it different
 // in kind from the pause probe it sits immediately after: namelessness only ever
-// resolves FORWARD. The profile writer refuses the empty string on every rung it
-// touches, so no path in this server can un-name an account, and a car that
-// becomes offerable stays offerable. What this layer catches is therefore
-// reservations accepted BEFORE the create gate existed — a finite, shrinking
-// population — not a condition that can come back. The full argument is in
+// resolves FORWARD at runtime. The profile writer refuses the empty string on
+// every rung it touches and MYR-583's confirmation row is never deleted short of
+// account deletion, so no request path in this server can un-name an account, and
+// a car that becomes offerable stays offerable. What this layer catches is
+// therefore reservations accepted BEFORE the create gate refused them — a finite,
+// shrinking population — not a condition that can come back.
+//
+// SINCE MYR-583 THE HOLD ALSO COVERS A RESOLVABLE-BUT-UNCONFIRMED NAME, and that
+// widened the population this layer exists for exactly once: reservations accepted
+// under a name the owner never confirmed were legal when they were accepted and
+// are held now. They resolve the same way they always did — the owner confirms
+// inside the lateness window and the dispatch proceeds, or the reservation expires
+// honestly. `state.OwnerNamed` already carries both halves as one bit, so nothing
+// here changed but the comment. The full argument is in
 // internal/telemetry/owner_name_gate.go, which owns the other two layers.
 //
 // HOLDS RATHER THAN EXPIRES, beside the pause arm and BEFORE the claim, and

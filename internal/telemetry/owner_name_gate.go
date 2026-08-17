@@ -12,8 +12,17 @@ import (
 // (§7.8 POST /api/ride-requests/{id}/accept). Modelled on ride_share_gate.go,
 // which it sits immediately after on both paths.
 //
-// WHAT IT REFUSES. A car whose OWNER has no display name in any of the three
-// identity sources. A ride is a transaction between two people, and every
+// WHAT IT REFUSES. A car whose OWNER has no CONFIRMED display name. Until
+// MYR-583 that meant "no name in any of the three identity sources"; the client
+// then ruled that a name nobody confirmed does not count either ("Any names not
+// entered/confirmed should be in Setting Up"), so a car whose owner has a
+// perfectly resolvable Apple-consent or legacy-web name they never approved is
+// refused on the same terms. The store folds both halves into one boolean
+// (internal/store/owner_name.go, internal/store/profile_name_confirmation.go), so
+// nothing in this file distinguishes them — and nothing should: they are one
+// state with one remedy, the name prompt.
+//
+// A ride is a transaction between two people, and every
 // surface that renders one — the incoming request card, the accept toast, the
 // Live Activity, the push copy — names the counterparty. With no name to render,
 // the client falls back to the make, which is how "Tesla wants a ride" came to be
@@ -33,17 +42,26 @@ import (
 // MONOTONICITY, NOT REVERSIBILITY — and this is why the three layers are shaped
 // differently from MYR-342's. The pause is a switch an owner flips both ways, so
 // its layers exist to catch a pause that lands mid-flight. Namelessness only
-// ever resolves FORWARD: the only `UPDATE "User"` in this repository is
+// ever resolves FORWARD at RUNTIME: the only `UPDATE "User"` in the server is
 // `ProfileNameRepo` and it REFUSES the empty string outright (as does every rung
-// it writes), so no code path can un-name an account. A car that is offerable
-// stays offerable.
+// it writes), and MYR-583's confirmation row is never deleted except by account
+// deletion, which takes the car with it. So no request this server serves can
+// un-name an account, and a car that is offerable stays offerable.
+//
+// TWO ONE-TIME EXCEPTIONS, BOTH DEPLOYS RATHER THAN REQUESTS, and pretending
+// otherwise would make the backstop argument below look stronger than it is.
+// MYR-583's own deploy moves every car whose owner never confirmed from offerable
+// to not — that is the point of it — and the accompanying operator scrub clears
+// the legacy 'Tesla User' placeholder from one production account. Both are
+// deliberate, both happen once, and neither is reachable from a request path.
 //
 // The consequence is that layers 2 and 3 are BACKSTOPS FOR PRE-DEPLOY RIDES, not
-// for a race: the population they catch is requests and reservations that were
-// created before the create gate existed. That population is finite and shrinking,
-// which is the honest argument for keeping the backstops cheap (both ride reads
-// the enclosing gate was already doing) rather than the argument that the
-// condition might come back.
+// for a race: the population they catch is requests and reservations created
+// before the create gate refused them — first the MYR-581 population (no name at
+// all), now also the MYR-583 one (a name nobody confirmed). Each population is
+// finite and shrinking from the moment its deploy lands, which is the honest
+// argument for keeping the backstops cheap (both ride reads the enclosing gate was
+// already doing) rather than the argument that the condition might come back.
 //
 // WHERE THE GATE SITS. AFTER the access/ownership check on both paths, always —
 // for the same reason as the pause: a caller with no business with the vehicle
