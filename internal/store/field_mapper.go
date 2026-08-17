@@ -16,11 +16,14 @@ type fieldApplier func(u *VehicleUpdate, val events.TelemetryValue) bool
 
 // fieldAppliers maps each tracked telemetry field to its applier function.
 var fieldAppliers = map[telemetry.FieldName]fieldApplier{
-	telemetry.FieldSpeed:            applyFloatAsInt(func(u *VehicleUpdate) **int { return &u.Speed }),
-	telemetry.FieldHeading:          applyFloatAsInt(func(u *VehicleUpdate) **int { return &u.Heading }),
-	telemetry.FieldSOC:              applyFloatAsInt(func(u *VehicleUpdate) **int { return &u.ChargeLevel }),
-	telemetry.FieldBatteryLevel:     applyFloatAsInt(func(u *VehicleUpdate) **int { return &u.ChargeLevel }),
-	telemetry.FieldEstBatteryRange:  applyFloatAsInt(func(u *VehicleUpdate) **int { return &u.EstimatedRange }),
+	telemetry.FieldSpeed:        applyFloatAsInt(func(u *VehicleUpdate) **int { return &u.Speed }),
+	telemetry.FieldHeading:      applyFloatAsInt(func(u *VehicleUpdate) **int { return &u.Heading }),
+	telemetry.FieldSOC:          applyFloatAsInt(func(u *VehicleUpdate) **int { return &u.ChargeLevel }),
+	telemetry.FieldBatteryLevel: applyFloatAsInt(func(u *VehicleUpdate) **int { return &u.ChargeLevel }),
+	// MYR-532 item 2 — the column (and therefore the wire) folds from RATED
+	// range, the dash's own figure; the consumption estimate is streamed but
+	// unconsumed. See internal/telemetry/fields.go for the decision.
+	telemetry.FieldRatedRange:       applyFloatAsInt(func(u *VehicleUpdate) **int { return &u.EstimatedRange }),
 	telemetry.FieldChargeState:      applyString(func(u *VehicleUpdate) **string { return &u.ChargeState }),
 	telemetry.FieldTimeToFull:       applyFloat(func(u *VehicleUpdate) **float64 { return &u.TimeToFull }),
 	telemetry.FieldInsideTemp:       applyFloatAsInt(func(u *VehicleUpdate) **int { return &u.InteriorTemp }),

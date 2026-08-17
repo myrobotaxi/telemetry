@@ -41,7 +41,9 @@ func buildData(state ScenarioState) []*tpb.Datum {
 		stringDatum(tpb.Field_GpsHeading, state.Heading),
 		gearDatum(state.GearPosition),
 		stringDatum(tpb.Field_Soc, float64(state.ChargeLevel)),
-		stringDatum(tpb.Field_EstBatteryRange, float64(state.EstimatedRange)),
+		// MYR-532 — the wire's estimatedRange sources from RATED range now; the
+		// simulator emits the field the pipeline actually consumes.
+		stringDatum(tpb.Field_RatedRange, float64(state.EstimatedRange)),
 		stringDatum(tpb.Field_InsideTemp, float64(state.InteriorTemp)),
 		stringDatum(tpb.Field_OutsideTemp, float64(state.ExteriorTemp)),
 		stringDatum(tpb.Field_Odometer, state.OdometerMiles),
