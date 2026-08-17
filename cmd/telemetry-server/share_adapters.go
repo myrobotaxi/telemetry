@@ -228,6 +228,12 @@ func toSharedVehicleRows(rows []store.SharedVehicleSummary) []telemetry.SharedVe
 				// shared car gets to say it is a Plaid rather than an "UltraRed".
 				TrimLabel: row.TrimLabel,
 				Trim:      row.Trim,
+				// MYR-581: viewers see the owner's first name, and this is the
+				// role the field was added for — the whole report was a rider
+				// being shown "Tesla" where a person's name belonged. Owners get
+				// it too (their own row names them), so all three §7.0 producers
+				// share one projection.
+				OwnerFirstName: row.OwnerFirstName,
 				// MYR-515: viewers see the position too — the same value the
 				// viewer mask already retains on the streaming path for these
 				// very cars, which is what makes the picker's per-row pickup
@@ -247,7 +253,10 @@ func toSharedVehicleRows(rows []store.SharedVehicleSummary) []telemetry.SharedVe
 }
 
 // toShareInviteRow drops the two server-only columns (accepted_by_user_id,
-// revoked_at) that the owner-facing wire shape deliberately never carries.
+// revoked_at) that the owner-facing wire shape deliberately never carries — and
+// since MYR-581 carries the resolved NAME of that same accepting account, which
+// is the point: the owner may know who holds their grant, not the opaque id of
+// the account that holds it.
 func toShareInviteRow(row *store.VehicleShare) telemetry.ShareInviteRow {
 	return telemetry.ShareInviteRow{
 		ID:         row.ID,
@@ -267,6 +276,11 @@ func toShareInviteRow(row *store.VehicleShare) telemetry.ShareInviteRow {
 		CreatedAt:  row.CreatedAt,
 		ExpiresAt:  row.ExpiresAt,
 		AcceptedAt: row.AcceptedAt,
+		// MYR-581: WHO ACTUALLY HOLDS THE GRANT, already reduced to a first name
+		// by the store. It crosses this boundary where `AcceptedByUserID` does
+		// NOT — the id stays server-side (see this function's doc), and the name
+		// is the owner-facing projection of it.
+		AcceptedByName: row.AcceptedByName,
 	}
 }
 

@@ -45,7 +45,9 @@ JOIN go_ride_members gm
 //
 // The literal keeps the scan in lockstep with scanSharedVehicleSummaryRow
 // rather than forking a second column list that must be maintained in
-// parallel; the rows are re-typed at the adapter boundary.
+// parallel; the rows are re-typed at the adapter boundary. Every column the
+// other two catalog reads gain has to be added HERE too, in the SAME position,
+// for exactly that reason — MYR-581's owner-name expression is the most recent.
 //
 // DISTINCT ON collapses the residual double-membership case (a reservation
 // plus an instant ride on one car — the same boundary rest-api.md's
@@ -55,6 +57,7 @@ const queryVehiclesForRideMember = `SELECT DISTINCT ON ("Vehicle"."id") ` + shar
 	gcs.service_etc, gcs.service_expected_end_at,
 	` + rideShareEnabledExpr + `,
 	` + catalogTrimLabelExpr + `,
+	` + catalogOwnerNameExpr + `,
 	` + setupScheduleColumns + `,
 	FALSE
 FROM "Vehicle"` + memberSummaryJoin + `

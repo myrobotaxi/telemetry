@@ -88,6 +88,29 @@ type vehicleSummary struct {
 	// told us the trim" is an explicit null — never `""`, which a descriptor
 	// builder would happily render as an empty fragment between two separators.
 	TrimLabel *string `json:"trimLabel"`
+	// OwnerFirstName is the FIRST NAME of the person who owns this car
+	// (MYR-581, contracts v0.37.0) — resolved by the platform's three-source
+	// identity ladder ("User".name → the Apple first-consent name → go_users)
+	// and reduced to its first token, the SAME resolution and the SAME
+	// reduction behind `RideRequest.requesterName` and
+	// `RedeemShareInviteResponse.ownerFirstName`.
+	//
+	// FIRST NAMES ONLY is the P1 policy for anything delivered to a
+	// counterparty, and it is why this is not simply `"User".name`: a
+	// counterparty gets "Amruth", never "Amruth Kelkar".
+	//
+	// On the CATALOG because the catalog is the only surface on which a RIDER
+	// meets the person whose car they were granted. Without it the client had no
+	// name to render and fell back to the make — which is how an incoming ride
+	// card came to read "Tesla wants a ride" about a human being (MYR-532 item
+	// 4). Emitted on BOTH roles: an owner's own row naming them is harmless and
+	// keeps one projection for all three producers.
+	//
+	// A pointer with NO omitempty, the trimLabel convention: the key is always
+	// present, and "this owner has no resolvable name" is an explicit null —
+	// never `""`, which a possessive-descriptor builder would happily render as
+	// "'s Model X".
+	OwnerFirstName *string `json:"ownerFirstName"`
 	// Location is where this car was last known to be (MYR-515,
 	// contracts v0.31.0) — the SAME coordinate pair the §7.1 snapshot and the
 	// live `vehicle_update` frame carry, from the same encrypted columns.
@@ -202,6 +225,15 @@ func (v vehicleSummary) baseMaskMap() map[string]any {
 		// uses for this SAME field, so an unset trim maps to an untyped nil on
 		// both surfaces rather than a typed (*string)(nil) on one of them.
 		"trimLabel": derefOrNil(v.TrimLabel),
+		// MYR-581 — the owner's first name, emitted raw (the ladder and the
+		// first-token reduction both ran in the store). In the BASE map, not the
+		// viewer branch below: BOTH role allow-lists carry it, and the VIEWER is
+		// the party the field exists for — see internal/mask/tables.go for why a
+		// first name is the right disclosure and a full name is not.
+		// derefOrNil for the same reason as `trimLabel` above: an unset name
+		// must map to an untyped nil rather than a typed (*string)(nil), which
+		// marshals to `null` but is not `== nil` to a mask predicate or a test.
+		"ownerFirstName": derefOrNil(v.OwnerFirstName),
 		// MYR-515 — already resolved (atomic pair + sentinel collapse) by
 		// newVehicleSummary; this is the emitted value, not a raw column pair.
 		// In the BASE map: BOTH role allow-lists carry it, and the viewer is the

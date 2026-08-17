@@ -11,9 +11,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// queryVehicleDispatchState reads, for one vehicle, the two facts the
-// reservation sweeper must agree on before it claims: the persisted status and
-// the owner's ride-sharing switch.
+// queryVehicleDispatchState reads, for one vehicle, the three facts the
+// reservation sweeper must agree on before it claims: the persisted status, the
+// owner's ride-sharing switch, and (MYR-581) whether the owner has a name at
+// all.
 //
 // A READ of the Prisma-owned "Vehicle" table on its primary key, LEFT JOINed to
 // the Go-owned control-state side table — the same join shape queryVehicleByID
@@ -33,15 +34,28 @@ import (
 // accept gate on both, the sweeper on `in_service` only. A SQL literal here
 // would be a second definition that could not express that difference and that
 // nobody would think to update.
+// THE OWNER-NAME ARM (MYR-581) rides the same read, as the SAME
+// `ownerNamedPredicate` expression the snapshot read and therefore both
+// request-time gates use — one ladder, three enforcement layers, no second
+// definition to drift. It reads the owner off the vehicle row this statement is
+// already anchored on, so it needs no join and no extra parameter.
+//
+// The relation is spelled `"Vehicle"` rather than aliased `v` purely so the
+// shared expression — which qualifies its subselects with `"Vehicle"."userId"`
+// — drops in unchanged. An alias here would have forced a second, parameterized
+// copy of the ladder, which is exactly the thing owner_name.go exists to
+// prevent.
 const queryVehicleDispatchState = `
-SELECT v."status",
-       COALESCE(gcs.ride_share_enabled, TRUE)
-FROM "Vehicle" v
-LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = v."id"
-WHERE v."id" = $1`
+SELECT "Vehicle"."status",
+       COALESCE(gcs.ride_share_enabled, TRUE),
+       ` + ownerNamedPredicate + `
+FROM "Vehicle"
+LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"
+WHERE "Vehicle"."id" = $1`
 
-// GetDispatchState returns one vehicle's persisted status and its owner's
-// ride-sharing switch, from a single statement.
+// GetDispatchState returns one vehicle's persisted status, its owner's
+// ride-sharing switch, and whether that owner has a resolvable name, from a
+// single statement.
 //
 // Unknown vehicle ids are ErrVehicleNotFound, NOT a fabricated pair. This is
 // the opposite reading from RideShareEnabled taken alone, and deliberately so:
@@ -49,21 +63,38 @@ WHERE v."id" = $1`
 // exist, whereas this one is anchored on the vehicle row itself, where absence
 // is a real and reportable fact. The sweeper treats the error as "unknown,
 // therefore hold", which is the recoverable answer either way.
-func (r *VehicleRepo) GetDispatchState(ctx context.Context, vehicleID string) (VehicleStatus, bool, error) {
+func (r *VehicleRepo) GetDispatchState(ctx context.Context, vehicleID string) (DispatchState, error) {
 	start := time.Now()
-	var (
-		status           VehicleStatus
-		rideShareEnabled bool
-	)
-	err := r.pool.QueryRow(ctx, queryVehicleDispatchState, vehicleID).Scan(&status, &rideShareEnabled)
+	var out DispatchState
+	err := r.pool.QueryRow(ctx, queryVehicleDispatchState, vehicleID).
+		Scan(&out.Status, &out.RideShareEnabled, &out.OwnerNamed)
 	r.metrics.ObserveQueryDuration("vehicle.get_dispatch_state", time.Since(start).Seconds())
 	if errors.Is(err, pgx.ErrNoRows) {
 		r.metrics.IncQueryError("vehicle.get_dispatch_state")
-		return "", false, fmt.Errorf("VehicleRepo.GetDispatchState(%s): %w", vehicleID, ErrVehicleNotFound)
+		return DispatchState{}, fmt.Errorf("VehicleRepo.GetDispatchState(%s): %w", vehicleID, ErrVehicleNotFound)
 	}
 	if err != nil {
 		r.metrics.IncQueryError("vehicle.get_dispatch_state")
-		return "", false, fmt.Errorf("VehicleRepo.GetDispatchState(%s): %w", vehicleID, err)
+		return DispatchState{}, fmt.Errorf("VehicleRepo.GetDispatchState(%s): %w", vehicleID, err)
 	}
-	return status, rideShareEnabled, nil
+	return out, nil
+}
+
+// DispatchState is what one GetDispatchState read answers.
+//
+// A STRUCT as of MYR-581, replacing a `(VehicleStatus, bool, error)` triple. The
+// third fact was the tipping point: two same-typed bools in a positional return
+// are a transposition waiting to happen, and transposing THESE two would make a
+// paused car dispatchable and a named owner's car un-dispatchable at the same
+// time. Named fields foreclose it.
+//
+// Both booleans are stated POSITIVELY — true means the reservation may proceed
+// on that axis — matching dispatch.VehicleDispatchState, so no caller has to
+// keep an inverted flag straight across the adapter boundary.
+type DispatchState struct {
+	Status           VehicleStatus
+	RideShareEnabled bool
+	// OwnerNamed is false when the vehicle's owner has no resolvable display
+	// name (MYR-581). The sweeper HOLDS on it rather than expiring.
+	OwnerNamed bool
 }

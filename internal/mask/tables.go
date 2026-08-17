@@ -620,6 +620,39 @@ var vehicleSummaryOwnerFields = []string{
 	// null-when-absent rather than the (0,0) sentinel — a sentinel a consumer
 	// forgot to re-interpret is a coordinate leak of a different kind.
 	"location",
+	// MYR-581 — the owner's FIRST NAME, and the SECOND P1 field on this
+	// resource after `location` (third counting `licensePlate`).
+	//
+	// WHY IT IS IN BOTH ROLE ALLOW-LISTS. The viewer is the party this field
+	// exists for, and the disclosure is one the platform has already made to
+	// exactly this party on other surfaces: `RedeemShareInviteResponse.
+	// ownerFirstName` hands the redeeming viewer this same owner's first name at
+	// the moment they join, the signed share link carries it as `from`, and the
+	// push payloads carry a first name in both directions. A viewer holding a
+	// live accepted grant on a car has already been told whose car it is; the
+	// catalog row is where they can still see it a week later. Withholding it is
+	// what left an incoming ride card reading "Tesla wants a ride" about a
+	// person (MYR-532 item 4).
+	//
+	// The owner's own row naming the owner is a non-disclosure — they are the
+	// subject — so it stays in the base list rather than becoming a viewer-only
+	// entry; that also keeps one projection for all three §7.0 producers.
+	//
+	// FIRST NAMES ONLY, enforced upstream in the store's first-token reduction
+	// rather than here. That is the platform's P1 counterparty policy, and it is
+	// the reason this entry is not a full-name field: a mask cannot shorten a
+	// value, only drop it, so the narrowing has to happen before the map is
+	// built. What reaches this allow-list is already "Amruth", never "Amruth
+	// Kelkar".
+	//
+	// P1 handling binds in full: NEVER logged (data-classification.md §2.2),
+	// never emitted outside the vehicle's party (the shared-catalog query's join
+	// IS the access check, so a suspended or revoked grant yields no row and
+	// therefore no name), and NOT on any WebSocket delta for this resource.
+	// `null` — the owner has no resolvable name — is the ordinary state for an
+	// Apple-native account that was never asked, and is deliberately not the
+	// empty string.
+	"ownerFirstName",
 }
 
 // vehicleSummaryViewerFields is the owner list PLUS `sharePermission`, with
@@ -783,6 +816,25 @@ var inviteOwnerFields = []string{
 	"createdAt",
 	"expiresAt",
 	"acceptedAt",
+	// acceptedByName (MYR-581) is the first name of the account that REDEEMED
+	// this invite. P1 — a person's name — and, like `label`, owner-only by
+	// construction: the viewer role has no entry in this resource at all.
+	//
+	// It is the CORRECTION to `label`, not a duplicate of it. `label` is the
+	// owner's own memo about who they meant to invite, typed before anybody
+	// redeemed anything and never resolved against an account, so a forwarded
+	// code makes it flatly wrong; this is who actually holds the grant. An owner
+	// deciding whether to revoke or suspend needs the second, not the first.
+	//
+	// FIRST NAMES ONLY, narrowed upstream in the store — a mask can drop a value
+	// but cannot shorten one, so the reduction has to happen before the map is
+	// built. Same policy in the same direction as the owner's own first name
+	// going to a redeemer.
+	//
+	// Listed here rather than folded into `label` for the reason `shareUrl` is
+	// listed separately from `code`: the mask is a flat allow-list of wire names,
+	// and an entry missing here is a field silently dropped from the response.
+	"acceptedByName",
 }
 
 // setFromFields converts a slice of field names into a set keyed by

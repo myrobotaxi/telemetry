@@ -595,14 +595,43 @@ func TestVehicleShareRepo_OwnerFirstName(t *testing.T) {
 	})
 }
 
-// TestNewShareCode_Distribution is a coarse sanity check on the code minter: no
-// duplicates in a large batch, every code well-formed, and every alphabet
-// symbol reachable. The last one is what catches a rejection-sampling bug that
-// silently narrows the space.
+// TestNewShareCode_Distribution is a coarse sanity check on the code minter:
+// every code well-formed, every alphabet symbol reachable, and collisions no more
+// frequent than the birthday bound allows. The symbol check is what catches a
+// rejection-sampling bug that silently narrows the space.
+//
+// ⚠ THE COLLISION ASSERTION IS A BOUND, NOT ZERO, AND IT HAS TO BE.
+//
+// This test asserted zero duplicates across 4000 draws, which made it a FLAKE
+// rather than a check — and it duly failed on an unrelated PR. The arithmetic:
+// the code space is 36^6 = 2,176,782,336, so the expected number of colliding
+// pairs in n draws is about n²/2N = 4000²/(2·2.18e9) ≈ 0.0037, i.e. a CORRECT
+// minter produces a duplicate roughly once every 270 runs of this test. On a repo
+// where every PR runs the suite, "once every 270 runs" is a recurring red build
+// that says nothing about the code.
+//
+// So the assertion is now the one the test actually means. `maxCollisions` = 2
+// leaves the check's teeth fully intact, because the failure mode it exists to
+// catch is not subtle: a sampler narrowed to 10^6 values would produce ~8
+// collisions here, one narrowed to 10^5 would produce ~80, and a genuinely broken
+// entropy source (a constant seed, a zeroed buffer) would produce ~4000. The
+// probability of a CORRECT minter exceeding 2 is on the order of 1e-8 — which is
+// the difference between a check and a coin toss.
+//
+// The bound is deliberately NOT loosened by lowering `draws`: the symbol-coverage
+// assertion below needs the volume (36 symbols across 6 positions needs a few
+// thousand draws before absence means anything), and that assertion is the one
+// with real diagnostic power.
 func TestNewShareCode_Distribution(t *testing.T) {
-	const draws = 4000
+	const (
+		draws = 4000
+		// See the doc comment: 0 is wrong (a correct minter collides ~0.37% of
+		// runs), and anything a broken minter would produce is far above this.
+		maxCollisions = 2
+	)
 	seen := make(map[string]struct{}, draws)
 	symbols := make(map[rune]struct{}, 36)
+	collisions := 0
 
 	for i := 0; i < draws; i++ {
 		code, err := store.NewShareCodeForTest()
@@ -613,12 +642,17 @@ func TestNewShareCode_Distribution(t *testing.T) {
 			t.Fatalf("draw %d is malformed (length %d)", i, len(code))
 		}
 		if _, dup := seen[code]; dup {
-			t.Fatalf("duplicate code in %d draws — the entropy source is not random", draws)
+			collisions++
 		}
 		seen[code] = struct{}{}
 		for _, r := range code {
 			symbols[r] = struct{}{}
 		}
+	}
+	if collisions > maxCollisions {
+		t.Errorf("%d duplicate codes in %d draws (bound %d) — the entropy source has narrowed; "+
+			"a correct 36^6 minter expects ~0.004 collisions here",
+			collisions, draws, maxCollisions)
 	}
 	if len(symbols) != 36 {
 		t.Errorf("only %d of 36 alphabet symbols appeared in %d draws (%d characters); the sampler is biased or the alphabet is truncated",

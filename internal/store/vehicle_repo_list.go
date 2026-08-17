@@ -92,6 +92,25 @@ type VehicleSummary struct {
 	// the Prisma-owned "Vehicle" row whose "not read yet" spelling is `''`.
 	TrimLabel *string
 
+	// OwnerFirstName is the FIRST NAME of the person who owns this car
+	// (MYR-581), resolved inline by the three-source identity ladder in
+	// owner_name.go and reduced to its first token by the MYR-229 reduction
+	// before it lands here — so what this field holds is already the
+	// first-names-only value the wire carries, never a full name.
+	//
+	// P1. NEVER logged, on any path.
+	//
+	// A POINTER, and nil is load-bearing: it means the owner has NO resolvable
+	// name in any of the three sources, which is a real and common state (Apple
+	// supplies a name only on the first authorization). The empty string is
+	// deliberately unreachable — TRIM/NULLIF in the SQL and the token reduction
+	// in Go both collapse to nil — so "nameless" has exactly one spelling.
+	//
+	// The SAME ladder answers the ride-request gate as a boolean
+	// (`Vehicle.OwnerNamed`), from the same constant, so a row that shows a name
+	// and a gate that calls the owner nameless cannot coexist.
+	OwnerFirstName *string
+
 	// Trim is the RAW BADGE CODE ("p100d"), carried since MYR-578 as the second
 	// rung of the trim resolver's ladder — NEVER emitted raw on this surface.
 	// The handler resolves label → badge → VIN drive-unit and emits the answer.
@@ -210,6 +229,11 @@ func (r *VehicleRepo) scanVehicleSummaryRow(row rowScanner) (VehicleSummary, err
 		status string
 		gps    summaryGPSScan
 		ss     setupScheduleScan
+		// The ladder's RAW answer (a full display name, or NULL). Reduced to
+		// its first token below rather than scanned straight onto the struct,
+		// so the only value that ever reaches VehicleSummary is the
+		// first-names-only one the wire is allowed to carry.
+		ownerName *string
 	)
 	dests := append([]any{
 		&v.ID,
@@ -232,6 +256,7 @@ func (r *VehicleRepo) scanVehicleSummaryRow(row rowScanner) (VehicleSummary, err
 		&v.RideShareEnabled,
 		&v.TrimLabel,
 		&v.Trim,
+		&ownerName,
 	}, ss.dests()...)
 	if err := row.Scan(dests...); err != nil {
 		return VehicleSummary{}, fmt.Errorf("scan vehicle summary: %w", err)
@@ -239,6 +264,7 @@ func (r *VehicleRepo) scanVehicleSummaryRow(row rowScanner) (VehicleSummary, err
 	v.Status = VehicleStatus(status)
 	v.SetupSchedule = ss.value()
 	v.Latitude, v.Longitude = gps.resolve(r)
+	v.OwnerFirstName = ownerFirstNameToken(ownerName)
 	return v, nil
 }
 

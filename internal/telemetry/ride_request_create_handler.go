@@ -2,8 +2,8 @@
 // to bring that file back under the 300-line rule; nothing about the behaviour
 // moves with it. Create is the natural seam — it is the only endpoint on this
 // handler with its own multi-stage precondition chain (vehicle access, ride-
-// sharing pause, service window, one-active-ride) and its own error mapper,
-// while everything left behind is cancel plus the shared plumbing.
+// sharing pause, nameless owner, service window, one-active-ride) and its own
+// error mapper, while everything left behind is cancel plus the shared plumbing.
 
 package telemetry
 
@@ -71,6 +71,17 @@ func (h *RideRequestHandler) ServeCreate(w http.ResponseWriter, r *http.Request)
 	// The flag is read off `row`, the very lookup that resolved the owner, so
 	// access and availability come from one statement and cannot disagree.
 	if rejectIfRideSharePaused(w, h.logger, "ride-request create", row, userID) {
+		return
+	}
+	// MYR-581: a car whose OWNER has no display name is not offerable at all.
+	// Immediately after the pause and for the same placement reason — the access
+	// denial still comes first, so this never becomes an oracle about a
+	// stranger's account. Covers SELF-RIDES deliberately (see owner_name_gate.go:
+	// the subject is the car's offerability, and the owner who only self-rides is
+	// exactly the one who would otherwise never meet the name sheet). The flag is
+	// a BOOLEAN off the same `row` that resolved the owner, so the P1 name never
+	// reaches this path.
+	if rejectIfOwnerNameless(w, h.logger, "ride-request create", row, userID) {
 		return
 	}
 

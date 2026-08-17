@@ -60,6 +60,13 @@ const sharedSummaryColumns = `"Vehicle"."id", "Vehicle"."userId", "Vehicle"."vin
 // would emit a tier the server no longer enforces and, for that legacy row, one
 // it no longer recognizes.
 //
+// MYR-581 threads the owner-name ladder through here too, and THIS is the role
+// the field exists for: an owner reading their own list already knows whose car
+// it is, while a viewer had no way at all to learn the name of the person whose
+// car they were granted. Emitting it on both roles rather than the viewer alone
+// keeps one projection for three producers — the alternative, a viewer-only
+// column, would fork the scan.
+//
 // $2 is an OPTIONAL id filter. NULL means "every vehicle shared with me" (the
 // catalog list); a non-null array narrows to a specific set (the redeem
 // response, which reports only what that redemption granted). Expressing it as
@@ -70,6 +77,7 @@ const queryVehiclesSharedWithUser = `SELECT ` + sharedSummaryColumns + `,
 	gcs.service_etc, gcs.service_expected_end_at,
 	` + rideShareEnabledExpr + `,
 	` + catalogTrimLabelExpr + `,
+	` + catalogOwnerNameExpr + `,
 	` + setupScheduleColumns + `,
 	s.allow_rides
 FROM "Vehicle"` + sharedSummaryJoin + `
@@ -151,6 +159,9 @@ func (r *VehicleRepo) scanSharedVehicleSummaryRow(row rowScanner) (SharedVehicle
 		status string
 		gps    summaryGPSScan
 		ss     setupScheduleScan
+		// Raw ladder answer; reduced to a first name below. Same discipline as
+		// the owner-side scan — the full name never lands on the struct.
+		ownerName *string
 	)
 	dests := append([]any{
 		&v.ID,
@@ -173,6 +184,7 @@ func (r *VehicleRepo) scanSharedVehicleSummaryRow(row rowScanner) (SharedVehicle
 		&v.RideShareEnabled,
 		&v.TrimLabel,
 		&v.Trim,
+		&ownerName,
 	}, ss.dests()...)
 	// `allow_rides` is selected AFTER the setup block, so it is appended last —
 	// the scan order is the SELECT order, not the struct order.
@@ -183,5 +195,6 @@ func (r *VehicleRepo) scanSharedVehicleSummaryRow(row rowScanner) (SharedVehicle
 	v.Status = VehicleStatus(status)
 	v.SetupSchedule = ss.value()
 	v.Latitude, v.Longitude = gps.resolve(r)
+	v.OwnerFirstName = ownerFirstNameToken(ownerName)
 	return v, nil
 }

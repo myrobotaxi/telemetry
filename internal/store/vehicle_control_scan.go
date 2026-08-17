@@ -90,6 +90,21 @@ type controlStateScan struct {
 	// scans as true rather than nil. There is no "never observed" state to
 	// carry — a car nobody has paused is accepting rides.
 	rideShareEnabled bool
+
+	// MYR-581 nameless-owner gate. NOT a control-state column at all — it is
+	// the `ownerNamedPredicate` expression (owner_name.go), a derived boolean
+	// selected immediately after the switch above. It rides this bag rather
+	// than gaining a bag of its own because the bag IS queryVehicleByID's
+	// trailing-destination list and its whole purpose is to keep the scan a
+	// three-liner; the column order comment above is what keeps that honest.
+	//
+	// Non-pointer for a different reason than its neighbour: `IS NOT NULL`
+	// cannot itself be NULL, so there is no third state. FALSE means "this
+	// car's owner has no resolvable name in any identity source" — and, like
+	// rideShareEnabled, the zero value POINTS THE WRONG WAY on any path that
+	// does not select it (GetByVIN, the wide ListByUser), where it reads as
+	// nameless. Only enforce it off a GetByID row.
+	ownerNamed bool
 }
 
 // dests returns the scan destinations in queryVehicleByID's column order, for
@@ -111,6 +126,7 @@ func (c *controlStateScan) dests() []any {
 		&c.serviceETC, &c.serviceExpectedEndAt,
 		&c.trimLabel, &c.fsdVersion,
 		&c.rideShareEnabled,
+		&c.ownerNamed,
 	}
 }
 
@@ -155,4 +171,5 @@ func (c *controlStateScan) applyTo(v *Vehicle) {
 	v.TrimLabel = c.trimLabel
 	v.FSDVersion = c.fsdVersion
 	v.RideShareEnabled = c.rideShareEnabled
+	v.OwnerNamed = c.ownerNamed
 }

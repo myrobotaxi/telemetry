@@ -61,10 +61,11 @@ type DueReservation struct {
 	TripVersion int
 }
 
-// VehicleDispatchState is the one-read answer to the two vehicle-level
-// questions the sweeper asks before claiming a due reservation. Both fields
-// are stated POSITIVELY (true = the reservation may proceed on that axis) so
-// no caller has to keep an inverted boolean straight.
+// VehicleDispatchState is the one-read answer to the vehicle-level questions
+// the sweeper asks before claiming a due reservation. Every field is stated
+// POSITIVELY (true = the reservation may proceed on that axis) EXCEPT InService,
+// whose name is the condition rather than the permission — so no caller has to
+// keep an inverted boolean straight.
 type VehicleDispatchState struct {
 	// InService: the owner has the car in for service. Holds the reservation.
 	InService bool
@@ -72,6 +73,12 @@ type VehicleDispatchState struct {
 	// (MYR-342). False means PAUSED — nothing about the vehicle itself. A car
 	// with no control-state row reads as enabled.
 	RideShareEnabled bool
+	// OwnerNamed: the car's owner has a display name the platform can show a
+	// counterparty (MYR-581). False means the car is not offerable at all —
+	// again nothing about the vehicle, and unlike the pause it is not something
+	// the owner chose. A car whose owner cannot be looked up at all also reads
+	// false, which is the fail-closed direction.
+	OwnerNamed bool
 }
 
 // ReservationStore is the sweeper's store seam. Satisfied by the ride-request
@@ -111,9 +118,10 @@ type ReservationStore interface {
 	// VehicleHasActiveInstantRide reports whether the vehicle is mid-ride on
 	// an active INSTANT ride (the MYR-266 per-vehicle busy predicate).
 	VehicleHasActiveInstantRide(ctx context.Context, vehicleID string) (bool, error)
-	// VehicleDispatchState reads, in ONE statement, the two vehicle-level
-	// facts the sweeper must agree on before it claims: whether the car is in
-	// service (MYR-372) and whether its owner still accepts rides (MYR-342).
+	// VehicleDispatchState reads, in ONE statement, the vehicle-level facts
+	// the sweeper must agree on before it claims: whether the car is in
+	// service (MYR-372), whether its owner still accepts rides (MYR-342), and
+	// whether that owner has a name at all (MYR-581).
 	//
 	// One read rather than two, matching the discipline the accept gate keeps
 	// deliberately — that path resolves ownership and availability from a

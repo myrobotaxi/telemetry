@@ -80,6 +80,20 @@ type VehicleCatalogRow struct {
 	// NEVER emitted on this surface — input only.
 	Trim *string
 
+	// OwnerFirstName is the FIRST NAME of the person who owns this car
+	// (MYR-581), resolved by the store's three-source identity ladder and
+	// already reduced to its first token before it crosses this boundary — the
+	// full name never reaches this package.
+	//
+	// Emitted RAW (there is nothing left to resolve), as
+	// `VehicleSummary.ownerFirstName`. Nil means the owner has no resolvable
+	// name in any identity source, which is a real and common state and NOT the
+	// empty string: a descriptor built from it must drop the whole possessive
+	// fragment rather than render "'s Model X".
+	//
+	// P1. NEVER logged.
+	OwnerFirstName *string
+
 	// Latitude / Longitude are the car's freshest known position (MYR-515),
 	// already decrypted by the store from the SAME `latitudeEnc`/`longitudeEnc`
 	// pair the /snapshot serves. An ATOMIC PAIR: both set or both nil.

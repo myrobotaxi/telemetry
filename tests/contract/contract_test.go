@@ -154,7 +154,14 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	);
 
 	CREATE TABLE "User" (
-		"id" TEXT PRIMARY KEY
+		"id"   TEXT PRIMARY KEY,
+		-- MYR-581: the TOP RUNG of the display-name ladder. Every catalog read
+		-- and the snapshot read now resolve the vehicle owner's name through
+		-- ownerNameLadderExpr (internal/store/owner_name.go), which selects
+		-- u."name" here. Without the column the whole statement fails and every
+		-- REST /api/vehicles and /snapshot request answers 500 — which is
+		-- exactly how this harness caught the gap.
+		"name" TEXT
 	);
 
 	-- go_users: the Go-owned identity table (migration 0003, MYR-193).
@@ -162,9 +169,30 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	-- EITHER "User" OR go_users (Apple-native users have no Prisma row),
 	-- so the harness MUST provision both tables or every authenticated
 	-- request fails closed when the go_users EXISTS sub-probe hits a
-	-- missing relation. Minimal shape — the check only reads "id".
+	-- missing relation. The check only reads "id"; name is the MYR-581
+	-- ladder's BOTTOM RUNG.
 	CREATE TABLE go_users (
-		"id" TEXT PRIMARY KEY
+		"id"   TEXT PRIMARY KEY,
+		"name" TEXT
+	);
+
+	-- go_identity_apple: the apple_sub -> user_id binding (migration 0003,
+	-- MYR-193), and the MIDDLE RUNG of the MYR-581 display-name ladder — the
+	-- rung that matters most, because it is the only one an Apple-native
+	-- account carries a real name on.
+	--
+	-- Only the columns the ladder reads are provisioned: user_id (the key),
+	-- name (the value) and last_login_at (the tie-break — that rung is
+	-- ORDER BY last_login_at DESC LIMIT 1, because one user may hold several
+	-- bindings). apple_sub comes along as the primary key. Whatever else the
+	-- identity module needs is out of scope: this harness exercises the REST
+	-- surface, and the REST surface reads names and nothing else from here.
+	CREATE TABLE go_identity_apple (
+		apple_sub     TEXT PRIMARY KEY,
+		user_id       TEXT NOT NULL,
+		email         TEXT,
+		name          TEXT,
+		last_login_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);
 
 	CREATE TABLE "Vehicle" (
@@ -511,6 +539,21 @@ func (a *contractVehicleLister) ListByUser(ctx context.Context, userID string) (
 			// false reads as PAUSED, so leaving it out would make the harness
 			// assert against a withdrawn vehicle the store never produced.
 			RideShareEnabled: v.RideShareEnabled,
+			// MYR-581: the owner's first name, already resolved AND already
+			// reduced by the store's ladder. Copied explicitly for the same
+			// reason as the line above — an omission here is not visible as a
+			// compile error, it just makes every owner look nameless, which on
+			// this field means "and their car refuses ride requests".
+			//
+			// This adapter is a HAND-WRITTEN MIRROR of
+			// cmd/telemetry-server/adapters.go, so a field added to the catalog
+			// and not added here is silently dropped for the whole contract
+			// suite — the harness would then validate a payload production never
+			// emits. That is a known hazard of the mirror (several other fields
+			// are already missing from it and their tests happen not to notice);
+			// it is called out here rather than fixed wholesale, because a field
+			// this one's tests DO depend on must not join them.
+			OwnerFirstName: v.OwnerFirstName,
 			// MYR-491: raw schedule, mirroring cmd/telemetry-server's
 			// setupScheduleRow. The handler derives the wire state from it
 			// together with Status and LastUpdated above, so all three must
@@ -689,6 +732,12 @@ func cleanTables(t *testing.T, pool *pgxpool.Pool) {
 	if _, err := pool.Exec(ctx, `DELETE FROM go_users`); err != nil {
 		t.Fatalf("clean go_users: %v", err)
 	}
+	// MYR-581: the ladder's middle rung. Left behind, a stale binding would
+	// OUT-RANK the next test's go_users name and resolve a name from a previous
+	// test's owner — a cross-test leak that would look like a resolution bug.
+	if _, err := pool.Exec(ctx, `DELETE FROM go_identity_apple`); err != nil {
+		t.Fatalf("clean go_identity_apple: %v", err)
+	}
 }
 
 // seedUser inserts a minimal User row so the JWTAuthenticator's FR-10.1
@@ -699,6 +748,51 @@ func (h *seedHelpers) seedUser(ctx context.Context, t *testing.T, userID string)
 	t.Helper()
 	if _, err := h.pool.Exec(ctx, `INSERT INTO "User" ("id") VALUES ($1)`, userID); err != nil {
 		t.Fatalf("seedUser(%s): %v", userID, err)
+	}
+}
+
+// The three MYR-581 display-name rungs, one seeder each, deliberately SEPARATE
+// from seedUser.
+//
+// seedUser plants a NAMELESS account, and it must stay that way: that is the
+// ordinary state of an Apple-native account, it is what every other contract test
+// in this package means by "an owner", and it is the state the nameless-owner gate
+// refuses. A test that wants a name says so.
+//
+// Each helper writes exactly ONE rung so a test can prove which rung the ladder's
+// COALESCE actually picked. Seeding two rungs at once and asserting the result
+// would pass against a ladder in any order.
+
+// setUserName writes the TOP rung — the Prisma "User" row seedUser already made.
+func (h *seedHelpers) setUserName(ctx context.Context, t *testing.T, userID, name string) {
+	t.Helper()
+	if _, err := h.pool.Exec(ctx,
+		`UPDATE "User" SET "name" = $2 WHERE "id" = $1`, userID, name); err != nil {
+		t.Fatalf("setUserName(%s): %v", userID, err)
+	}
+}
+
+// seedAppleBinding writes the MIDDLE rung — the Apple first-consent name, the only
+// rung an Apple-native account carries a real name on, and therefore the rung a
+// `"User".name`-only lookup gets wrong.
+func (h *seedHelpers) seedAppleBinding(ctx context.Context, t *testing.T, appleSub, userID, name string) {
+	t.Helper()
+	if _, err := h.pool.Exec(ctx,
+		`INSERT INTO go_identity_apple (apple_sub, user_id, name) VALUES ($1, $2, NULLIF($3, ''))`,
+		appleSub, userID, name); err != nil {
+		t.Fatalf("seedAppleBinding(%s): %v", userID, err)
+	}
+}
+
+// setGoUserName writes the BOTTOM rung. An UPSERT rather than an UPDATE: seedUser
+// creates only the `"User"` row, so an Apple-native shape has no go_users row for
+// an UPDATE to find.
+func (h *seedHelpers) setGoUserName(ctx context.Context, t *testing.T, userID, name string) {
+	t.Helper()
+	if _, err := h.pool.Exec(ctx,
+		`INSERT INTO go_users ("id", "name") VALUES ($1, $2)
+		 ON CONFLICT ("id") DO UPDATE SET "name" = EXCLUDED."name"`, userID, name); err != nil {
+		t.Fatalf("setGoUserName(%s): %v", userID, err)
 	}
 }
 

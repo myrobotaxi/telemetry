@@ -68,6 +68,15 @@ WHERE "vin" = $1`
 // migration FK, so CG-DL-9 does not apply. The base columns stay unqualified
 // (unambiguous — the side table's snake_case columns share no name with the
 // quoted camelCase "Vehicle" columns); "id" is qualified to name the join key.
+//
+// MYR-581 appends `ownerNamedPredicate` — a BOOLEAN, never the name. This read
+// is what both request-time layers of the nameless-owner gate act on (the
+// ride-request create gate and the owner-accept backstop), and they act on it
+// for the same reason the MYR-342 pause rides this row: both already call
+// GetByID to establish access or status, so taking the gate off the SAME row
+// means access and offerability come from one statement and cannot disagree.
+// INPUT ONLY — the P1 name itself never enters the enforcement path, the same
+// discipline MYR-578 applies to the raw trim badge.
 const queryVehicleByID = `SELECT ` + vehicleSelectColumns + `,
 	gcs.is_locked, gcs.frunk_open, gcs.trunk_open, gcs.is_climate_on, gcs.charge_port_open,
 	gcs.driver_temp_setting, gcs.passenger_temp_setting, gcs.fan_speed,
@@ -84,6 +93,7 @@ const queryVehicleByID = `SELECT ` + vehicleSelectColumns + `,
 	gcs.service_etc, gcs.service_expected_end_at,
 	gcs.trim_label, gcs.fsd_version,
 	` + rideShareEnabledExpr + `,
+	` + ownerNamedPredicate + `,
 	` + setupScheduleColumns + `
 FROM "Vehicle"
 LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"` + setupScheduleJoin + `
@@ -130,6 +140,15 @@ const rideShareEnabledExpr = `COALESCE(gcs.ride_share_enabled, TRUE) AS "rideSha
 // MYR-316 service window and the MYR-342 switch, so this rides an existing
 // probe of the vehicle_id PRIMARY KEY and adds two short text columns.
 const catalogTrimLabelExpr = `gcs.trim_label, gcs.trim`
+
+// The owner-name pair — `catalogOwnerNameExpr` (the wire value) and
+// `ownerNamedPredicate` (the gate) — is the THIRD member of this family of
+// shared read expressions and lives in owner_name.go rather than here (MYR-581).
+// It is a bigger fragment than its two siblings above, it carries a Go-side
+// reducer alongside the SQL, and this file is already well past the 300-line
+// rule; splitting it keeps the whole owner-name argument in one readable place.
+// Both spellings derive from ONE ladder constant there, which is what makes the
+// catalog value and the ride-request gate structurally unable to disagree.
 
 const queryVehiclesByUser = `SELECT ` + vehicleSelectColumns + `
 FROM "Vehicle"
@@ -240,6 +259,13 @@ const activeInstantRidePredicate = `r.scheduled_for IS NULL
 // instead would be an N+1 on the catalog, and the rider-side picker is the
 // consumer that most needs the value (MYR-437: "setting up", not "offline"), so
 // it cannot be pushed onto the snapshot alone.
+// MYR-581: the OWNER'S NAME rides no join at all — it is three correlated
+// index probes per row (owner_name.go) — and it is emitted, as
+// VehicleSummary.ownerFirstName, so the same invariant holds. It is on the
+// catalog for the same reason `trimLabel` is: the catalog is the only
+// vehicle-identity surface a RIDER has, and without it a shared car's owner can
+// only be named by the display fallback, which is how "Tesla wants a ride" came
+// to be a person.
 // MYR-507: `trim_label` rides the SAME go_vehicle_control_state join as the two
 // blocks above and is emitted verbatim as VehicleSummary.trimLabel, so the same
 // invariant holds — one short text column, no new probe. It is on the catalog
@@ -251,6 +277,7 @@ const queryVehiclesByUserList = `SELECT ` + vehicleListSummaryColumns + `,
 	gcs.service_etc, gcs.service_expected_end_at,
 	` + rideShareEnabledExpr + `,
 	` + catalogTrimLabelExpr + `,
+	` + catalogOwnerNameExpr + `,
 	` + setupScheduleColumns + `
 FROM "Vehicle"
 LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"` + setupScheduleJoin + `

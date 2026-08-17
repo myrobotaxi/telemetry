@@ -164,6 +164,23 @@ type Vehicle struct {
 	// statement instead of a vehicle read at all.
 	RideShareEnabled bool
 
+	// OwnerNamed reports whether this car's OWNER has a display name the
+	// platform could show a counterparty (MYR-581) — resolved by the same
+	// three-source ladder that produces VehicleSummary.OwnerFirstName, from the
+	// same SQL constant (owner_name.go), so the offerability gate and the
+	// catalog's name cannot contradict each other.
+	//
+	// A BOOLEAN AND NOTHING ELSE, deliberately. This is the value the two
+	// request-time layers of the nameless-owner gate act on, and the gate has no
+	// business handling P1 data: carrying the name here would put a person's
+	// name into an enforcement path that only ever needs to know whether one
+	// exists. Same discipline as MYR-578's raw trim badge — input only.
+	//
+	// POPULATED ONLY BY GetByID, and like RideShareEnabled the zero value POINTS
+	// THE WRONG WAY: a Vehicle from GetByVIN or the wide ListByUser carries
+	// false, which reads as NAMELESS. Do not enforce it off those paths.
+	OwnerNamed bool
+
 	// SetupSchedule is this car's go_fleet_config_attempts row (MYR-491), LEFT
 	// JOINed by the snapshot read. RAW STORAGE for the derived wire field
 	// VehicleState.setupState — the precedence-and-gates reading lives in

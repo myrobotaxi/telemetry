@@ -117,8 +117,10 @@ func (s *ReservationSweeper) handleDue(ctx context.Context, r *DueReservation) s
 	}
 }
 
-// holdIfVehicleBlocked answers, from ONE vehicle read, both "is this car in
-// for service?" (MYR-372) and "does its owner still accept rides?" (MYR-342).
+// holdIfVehicleBlocked answers, from ONE vehicle read, three questions: "is this
+// car in for service?" (MYR-372), "does its owner still accept rides?" (MYR-342)
+// and "does its owner have a name we can show a rider?" (MYR-581, whose arm is in
+// reservation_owner_name.go).
 //
 // WHAT THE SERVICE ARM CATCHES. The accept gate asks "can this car be
 // dispatched right now?" and, for a reservation, correctly declines to answer —
@@ -237,6 +239,11 @@ func (s *ReservationSweeper) holdIfVehicleBlocked(ctx context.Context, r *DueRes
 			slog.String("vehicle_id", r.VehicleID),
 			slog.Time("scheduled_for", r.ScheduledFor),
 		)
+		return true
+	}
+	// MYR-581's arm rides this same read (one statement, three facts) and lives in
+	// reservation_owner_name.go — a BACKSTOP, not a live gate; see it for why.
+	if s.holdIfOwnerNameless(r, state) {
 		return true
 	}
 	return false

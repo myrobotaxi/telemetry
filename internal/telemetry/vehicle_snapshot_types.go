@@ -134,6 +134,28 @@ type VehicleSnapshotRow struct {
 	// another.
 	RideShareEnabled bool
 
+	// MYR-581 nameless-owner gate: does this car's owner have a display name the
+	// platform could show a counterparty? Resolved by the store's three-source
+	// identity ladder, from the SAME SQL constant that produces
+	// `VehicleSummary.ownerFirstName` on §7.0 — so the name a rider sees on the
+	// catalog and the gate that decides whether they may request the car cannot
+	// contradict each other.
+	//
+	// A BOOLEAN AND NOTHING ELSE. This field is READ ONLY BY THE TWO REQUEST-TIME
+	// GATES (create and the accept backstop), which need to know whether a name
+	// exists and have no business handling the name itself — so the P1 value never
+	// enters the enforcement path. Same discipline as MYR-578's raw trim badge,
+	// applied to something sharper.
+	//
+	// NOT EMITTED ON THE §7.1 WIRE. `buildSnapshotResponse` builds its fields
+	// explicitly and does not carry this one: the snapshot has no consumer for it,
+	// and a boolean about somebody's account is not vehicle state.
+	//
+	// Like RideShareEnabled beside it, this is POPULATED ONLY BY GetByID and its
+	// zero value POINTS THE WRONG WAY — false reads as NAMELESS. A hand-built row
+	// or a row from a path that does not select it must not be gated on.
+	OwnerNamed bool
+
 	// MYR-491 fleet-config setup schedule, LEFT JOINed from the Go-owned
 	// go_fleet_config_attempts table (a SECOND side table on this read, not the
 	// control-state one above). RAW STORAGE: the wire field `setupState` is
