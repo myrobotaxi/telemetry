@@ -26,6 +26,25 @@ func WithES256Resolver(r ES256KeyResolver) Option {
 	return func(a *JWTAuthenticator) { a.es256 = r }
 }
 
+// WithActivityStamper enables MYR-592 last-seen tracking: every successful
+// ValidateToken records that its subject was seen, throttled to roughly one
+// write per account-hour. When unset, nothing is recorded and the inactivity
+// sweeper — which requires positive evidence of an owner before it will act —
+// suspends nothing.
+func WithActivityStamper(s *UserActivityStamper) Option {
+	return func(a *JWTAuthenticator) {
+		// A typed-nil pointer stored into the interface would make the
+		// `a.activity != nil` guard in ValidateToken true while every call
+		// panicked, so the nil case is filtered here rather than in the hot
+		// path. (Stamp itself is also nil-receiver safe; belt and braces,
+		// because this is inside authentication.)
+		if s == nil {
+			return
+		}
+		a.activity = s
+	}
+}
+
 // validMethods returns the algorithm allowlist for this authenticator. HS256
 // is always allowed (legacy shared-secret tokens); ES256 is added only when
 // an ES256 resolver is configured. `none` and every other alg are rejected

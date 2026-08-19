@@ -45,6 +45,12 @@ type JWTAuthenticator struct {
 	// es256 optionally verifies ES256 tokens minted by the identity module
 	// (ADR-001 §3). Nil => HS256-only (legacy behaviour, unchanged).
 	es256 ES256KeyResolver
+	// activity optionally records that the token's subject was seen
+	// (MYR-592). Nil means last-seen tracking is unwired, which the
+	// inactivity sweeper reads as "we have observed nobody" and therefore
+	// suspends nothing — see user_activity.go for why one hook here covers
+	// both the REST handlers and the WebSocket handshake.
+	activity activityStamper
 }
 
 // Compile-time interface check.
@@ -143,6 +149,15 @@ func (a *JWTAuthenticator) ValidateToken(ctx context.Context, token string) (str
 		if !exists {
 			return "", fmt.Errorf("auth.ValidateToken: %w: %w", ErrInvalidToken, ErrUserNotFound)
 		}
+	}
+
+	// MYR-592 last-seen stamp. LAST, and only on the success path: the value
+	// this records is "an accepted bearer belonging to this account arrived",
+	// so a token that failed any check above must not move it. Throttled to
+	// ~one write per account-hour and swallow-on-error by construction — see
+	// user_activity.go for why an authentication may never fail over it.
+	if a.activity != nil {
+		a.activity.Stamp(ctx, sub)
 	}
 
 	return sub, nil

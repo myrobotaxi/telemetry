@@ -1,0 +1,121 @@
+-- 0044_telemetry_suspensions.up.sql
+--
+-- MYR-592: go_vehicle_telemetry_suspensions — the per-vehicle EPISODE record for
+-- owner-inactivity telemetry suspension. It holds both halves of the story the
+-- sweeper has to remember: whether this episode's day-4 warning has already been
+-- sent, and whether the fleet-telemetry config has already been removed.
+--
+-- ── WHY THIS IS A GO-OWNED SIDE TABLE AND NOT A COLUMN ON "Vehicle" ──────────
+--
+-- The obvious shape is `"Vehicle"."telemetrySuspendedAt"`, and it is FORBIDDEN
+-- rather than merely unfashionable. `"Vehicle"` is Prisma-owned, and CG-DL-9
+-- (docs/contracts/data-lifecycle.md §7) prohibits any file under
+-- internal/store/migrations/ from naming a Prisma-owned table AT ALL — the CI
+-- gate greps for the identifier, so an `ALTER TABLE "Vehicle"` here fails the
+-- build before it can fail a deploy. The §1.4 carve-outs that DO write
+-- `"Vehicle"` (plate, colour, model/year) are all runtime UPDATEs of columns
+-- Prisma already declares; not one of them adds a column, and each says so
+-- explicitly. A new column would have to be authored in the sibling app's Prisma
+-- schema and land in that repo's migration, which is a cross-repo dependency
+-- this feature does not need.
+--
+-- So the value lives here and the §7.0 catalog reads it through a LEFT JOIN,
+-- exactly as `trim_label`, `ride_share_enabled` and the setup schedule already
+-- reach the same three queries from go_vehicle_control_state and
+-- go_fleet_config_attempts. The wire shape is unaffected: consumers see
+-- `VehicleSummary.telemetrySuspendedAt` (contracts v0.38.0) and cannot tell
+-- which table answered.
+--
+-- ── WHY ONE ROW CARRIES BOTH TIMESTAMPS ─────────────────────────────────────
+--
+-- An EPISODE is one continuous stretch of owner silence. Its two events are
+-- ordered and at most one of each can happen, so they are two nullable columns
+-- on one row rather than an event log: (NULL, NULL) is expressible but never
+-- stored, (warned, NULL) is a warned-not-yet-suspended episode, (NULL,
+-- suspended) is a suspension the warning never preceded (a server that was down
+-- on day four — the threshold is what suspends, not the warning), and (warned,
+-- suspended) is the ordinary path.
+--
+-- ROW PRESENCE IS THE EPISODE. There is no `episode_id`, no counter and no
+-- history, because nothing asks how many times a car has been suspended. The
+-- reset is therefore a DELETE, which is what makes "the owner came back" a
+-- single statement with no state left behind to disagree with the next episode.
+--
+-- ── WHAT RESETS AN EPISODE, AND WHAT DELIBERATELY DOES NOT ──────────────────
+--
+--   * OWNER ACTIVITY BEFORE SUSPENSION deletes the row (the sweeper's first
+--     statement each pass). A warned owner who opens the app is simply no longer
+--     inactive, and the next episode must start from a clean warning.
+--   * THE OWNER'S RECONNECT (POST …/reconnect, rest-api.md §7.28) deletes the
+--     row after the config is re-created. That is the ONLY thing that clears a
+--     SUSPENDED episode.
+--   * OWNER ACTIVITY AFTER SUSPENSION DOES NOT. This is the one asymmetry worth
+--     stating twice: suspension removed a config at Tesla, and no amount of app
+--     usage puts it back — only an explicit re-create does. The contract
+--     (vehicle-summary.schema.json) is written on this reading: the owner is
+--     shown a disconnect notice with two offers, RE-CONNECT and UNLINK
+--     COMPLETELY. Auto-resuming on the next app open would make the notice a
+--     lie and would silently re-start per-vehicle billing the owner never asked
+--     to re-start.
+--   * FULL TEARDOWN (DELETE /api/tesla/vehicles/{vehicleId}) deletes the row in
+--     the same transaction as the vehicle, so an unlink cannot leave a
+--     suspension stamp keyed to a car that no longer exists.
+--
+-- ── STRICTLY THE OWNER'S ACTIVITY ───────────────────────────────────────────
+--
+-- Explicit client ruling: rider and viewer usage does NOT defer suspension. A
+-- shared car whose owner has been away five days is suspended even while a rider
+-- is looking at it. Nothing in this table knows about riders, and that absence
+-- is the enforcement.
+--
+-- ── NO FK (CG-DL-9) ─────────────────────────────────────────────────────────
+--
+-- vehicle_id is a plain TEXT column holding the Prisma "Vehicle"."id" cuid, the
+-- same keying go_fleet_config_attempts (migration 0031) uses and for the same
+-- reason. A stale row for a deleted vehicle is inert — every reader reaches this
+-- table through a join from a live vehicle — and the teardown deletes it anyway.
+--
+-- ── CLASSIFICATION ──────────────────────────────────────────────────────────
+--
+-- P0 in full (docs/contracts/data-classification.md §1.22): an opaque cuid and
+-- two timestamps about a platform action on a car. No VIN, no token, no
+-- coordinate, no person. `suspended_at` is the one value here that IS
+-- wire-exposed — as VehicleSummary.telemetrySuspendedAt, on BOTH roles, which
+-- the contract argues at length is correct: a viewer seeing a suspended car
+-- should render the ordinary no-live-telemetry state, and can only do that if it
+-- knows. `warned_at` is server-side only and reaches no consumer.
+
+CREATE TABLE IF NOT EXISTS go_vehicle_telemetry_suspensions (
+    -- The car. Opaque Prisma cuid, no FK (CG-DL-9). PRIMARY KEY rather than a
+    -- surrogate id with a UNIQUE on top: a vehicle is in at most one episode at
+    -- a time, so a second row would not be a second fact.
+    vehicle_id   TEXT PRIMARY KEY,
+
+    -- When this episode's day-4 warning push was handed to the notifier. NULL
+    -- means "not warned yet in this episode" — the state every episode starts
+    -- in, and the only thing that makes the warning fire ONCE. Nullable rather
+    -- than a `warned BOOLEAN` because the instant answers the operator question
+    -- ("did James get a day's notice?") that the boolean cannot.
+    warned_at    TIMESTAMPTZ,
+
+    -- When the fleet-telemetry config was removed. NULL means streaming is
+    -- still configured. This is the value the §7.0 catalog emits as
+    -- `telemetrySuspendedAt`, so it is the instant of the ACTION and never a
+    -- deadline: the contract forbids a consumer counting down from it.
+    --
+    -- Written only AFTER the Tesla-side delete returns without error. Stamping
+    -- first and deleting second would produce the one state the platform cannot
+    -- explain — a car the catalog says is disconnected that is still streaming
+    -- and still being billed — whereas the other order's failure mode is a
+    -- retry on the next pass.
+    suspended_at TIMESTAMPTZ
+);
+
+-- Serves the sweeper's reset statement, which deletes every UN-suspended episode
+-- whose owner has come back. Partial, because the suspended rows it excludes are
+-- the ones that accumulate: a suspended car keeps its row until its owner
+-- reconnects or unlinks, potentially forever, and they must not weigh on the
+-- statement that runs every hour.
+CREATE INDEX IF NOT EXISTS idx_go_vehicle_telemetry_suspensions_open
+    ON go_vehicle_telemetry_suspensions (vehicle_id)
+    WHERE suspended_at IS NULL;

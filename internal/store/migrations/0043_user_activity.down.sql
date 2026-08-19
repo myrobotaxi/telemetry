@@ -1,0 +1,34 @@
+-- 0043_user_activity.down.sql
+--
+-- Reverts MYR-592's half of the owner-inactivity story that observes people:
+-- drops the Go-owned go_user_activity table.
+--
+-- REVERTING FAILS OPEN, AND IN THE DIRECTION THAT COSTS MONEY RATHER THAN THE
+-- ONE THAT BREAKS CARS — which is the right direction, but say it out loud
+-- rather than discover it. Two readers are compiled against this table: the
+-- stamp on `auth.JWTAuthenticator.ValidateToken` and the inactivity sweeper's
+-- candidate query. A server carrying MYR-592 against a database without this
+-- table gets `relation "go_user_activity" does not exist` from both. The stamp
+-- SWALLOWS that (a last-seen write may never fail an authentication — see
+-- internal/auth/user_activity.go), so sign-in keeps working; the sweeper's tick
+-- errors out and logs, so it warns nobody and suspends nobody. Streaming
+-- therefore continues for every vehicle, exactly as it did before MYR-592.
+--
+-- Roll the SERVER back first anyway, then this migration, so the sweeper is not
+-- logging an error every hour in between.
+--
+-- IT IS DESTRUCTIVE AND THE LOSS IS SELF-HEALING. Every stored last-seen instant
+-- is discarded. Re-applying the up-migration gives back an EMPTY table, which
+-- the sweeper must NOT read as "everybody has been idle forever" — it does not,
+-- because the candidate query requires a row to exist before a vehicle can be
+-- warned or suspended (an owner with no row is a person we have never observed,
+-- not a person we have observed to be absent). Every account re-stamps on its
+-- next authenticated request, so the table refills within one active session per
+-- person and the sweeper resumes with true data rather than with an inference.
+--
+-- Schema rollback only. No sibling-owned data is touched, and nothing here
+-- un-suspends a vehicle that was already suspended — that state lives in
+-- go_vehicle_telemetry_suspensions (migration 0044) and is cleared only by the
+-- owner's reconnect or by that migration's own down file.
+
+DROP TABLE IF EXISTS go_user_activity;

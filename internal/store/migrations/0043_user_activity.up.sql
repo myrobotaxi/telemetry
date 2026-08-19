@@ -1,0 +1,105 @@
+-- 0043_user_activity.up.sql
+--
+-- MYR-592: go_user_activity — the one fact the owner-inactivity telemetry
+-- sweeper needs and the platform did not have. WHEN DID THIS ACCOUNT LAST
+-- AUTHENTICATE?
+--
+-- WHY IT EXISTS. Tesla bills Fleet Telemetry streaming PER VEHICLE, so a car
+-- whose owner stopped using the app costs money every day for frames nobody
+-- reads. The client's cost-control ruling is to stop streaming after five
+-- consecutive days of owner silence and to warn on day four
+-- (docs/contracts/rest-api.md §7.27). Both arms need a last-seen instant per
+-- ACCOUNT, and nothing in this schema carried one:
+--
+--   * `"User"."updatedAt"` is Prisma's row-mutation clock. It moves when a
+--     profile write happens and at no other time, so a person who opens the app
+--     twice a day for a month never touches it. It is also Prisma-owned, which
+--     CG-DL-9 puts out of reach of this file entirely.
+--   * `"Vehicle"."lastUpdated"` is the STREAMING clock — it says the car is
+--     alive, which is precisely the thing we are about to stop paying for, and
+--     says nothing about the person.
+--   * `go_push_devices.last_seen_at` is the closest existing analogue and is
+--     genuinely a per-PERSON liveness signal, but it moves only on device
+--     registration, so it reports a phone that still holds a token rather than a
+--     person who still opens the app.
+--
+-- So the signal has to be the AUTHENTICATED REQUEST ITSELF. Every REST call and
+-- every WebSocket handshake resolves a bearer through one function
+-- (`auth.JWTAuthenticator.ValidateToken`), and that is the single place this
+-- table is written from — see internal/auth/user_activity.go for why one hook
+-- covers both surfaces.
+--
+-- EVERY ACCOUNT STAMPS; ONLY OWNERS ARE EVER READ. The writer does not know or
+-- care whether the caller owns a car — asking would turn a one-statement upsert
+-- into a join on the hot path, and the answer changes over an account's life
+-- anyway (today's rider is tomorrow's owner). A rider's row is a few dozen bytes
+-- that no sweeper query ever selects.
+--
+-- THE COST ARGUMENT, WHICH IS THE WHOLE REASON FOR THE `WHERE` ON THE UPSERT.
+-- A naive stamp is one UPDATE per authenticated request — a WebSocket client
+-- alone revalidates continuously, so this would be the busiest write in the
+-- database, for a value read twice a day by an hourly sweeper against a
+-- four-DAY threshold. The upsert therefore carries its own throttle
+-- (`WHERE go_user_activity.last_seen_at < $3`, see user_activity.go), so a row
+-- moves at most once per user-hour no matter how many requests arrive, and the
+-- server additionally short-circuits in memory so the statement is usually not
+-- issued at all. The resulting lag — a stored value up to one hour behind
+-- reality — is immaterial against a threshold measured in days, and it is
+-- always CONSERVATIVE in the safe direction: a stale row makes the owner look
+-- slightly less recent than they are, and the sweeper's response to "less
+-- recent" is to warn a person who is present, never to suspend one who is.
+--
+-- NO FK, NO CASCADE (CG-DL-9). `user_id` is a plain TEXT column holding a cuid
+-- that identifies a row in the Prisma-owned `"User"` table OR in `go_users` —
+-- an Apple-native account has no `"User"` row at all, exactly as migration 0042
+-- records for go_profile_name_confirmations. A row for a deleted account is
+-- swept explicitly by step 8c of the rest-api.md §7.6 account-deletion sequence;
+-- a stale one that somehow survived is inert, since the sweeper reaches rows
+-- only through a join against a live vehicle.
+--
+-- user_id IS THE PRIMARY KEY. A person has one last-seen instant. A second row
+-- would not be a second fact, it would be a bug — the same argument migrations
+-- 0022 and 0042 give for their single-column keys.
+--
+-- NO `first_seen_at`, NO COUNTER, NO HISTORY. This is not analytics. The table
+-- answers exactly one question asked by exactly one worker, and every additional
+-- column would be a behavioural record we would then have to justify keeping
+-- (see the classification note below).
+--
+-- CLASSIFICATION: P1, and that is a deliberate step UP from the P0 its
+-- neighbours go_profile_name_confirmations and go_removed_vehicles carry
+-- (docs/contracts/data-classification.md §1.21). An opaque cuid and a timestamp
+-- look P0 by shape, but the SEMANTICS are not: this column is a BEHAVIOURAL
+-- observation about a person — when they were last using the product — and read
+-- across the table it is a usage-pattern signal about identifiable individuals,
+-- which the confirmation timestamp (a one-time consent fact) and the tombstone
+-- (a fact about a car) are not. It is therefore log-redacted like the other P1
+-- values, never emitted on any wire, and never placed in a URL. It is NOT
+-- exposed to clients in any form: the only thing that reaches a consumer is the
+-- CONSEQUENCE, `VehicleSummary.telemetrySuspendedAt`.
+
+CREATE TABLE IF NOT EXISTS go_user_activity (
+    -- The authenticated account. Opaque cuid, no FK (CG-DL-9). This is the JWT
+    -- `sub` claim verbatim — the same subject every other Go-owned table in this
+    -- schema is keyed by — so a person's activity and their confirmations,
+    -- devices and preferences can never be filed under different ids.
+    user_id      TEXT        NOT NULL,
+
+    -- The most recent authenticated request from this account, to within the
+    -- writer's one-hour throttle. NOT NULL: a row exists because a request
+    -- arrived, so there is no state a NULL could describe, and a nullable column
+    -- would give the sweeper's `<= now - interval` predicate a third answer to
+    -- get wrong.
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT go_user_activity_pkey PRIMARY KEY (user_id)
+);
+
+-- No secondary index, and the absence is reasoned rather than an oversight. The
+-- writer is a point upsert on the primary key. The READER is the sweeper, which
+-- drives its scan from the (small) set of vehicles whose telemetry is configured
+-- and joins to this table by user_id — so it too arrives through the primary
+-- key's own index. An index on last_seen_at would serve a query nobody runs
+-- ("list everyone idle since X" is not how the sweeper is written, precisely so
+-- that it cannot examine accounts that own no car) while adding a second write
+-- to every stamp.
