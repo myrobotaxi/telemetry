@@ -36,8 +36,15 @@ type RideContext struct {
 	Status string
 	// VehicleName is the car's nickname, "" when it has none.
 	VehicleName string
-	// Destination is the dropoff's short label. P1.
+	// Destination is the dropoff's short label — the trip's END. P1.
+	//
+	// It is no longer necessarily what the card says (MYR-587): on a multi-stop
+	// trip mid-journey the wire `destination` names the stop the car is driving
+	// to instead. See legDestination.
 	Destination string
+	// Stops is the trip's intermediate stops in travel order, empty on a
+	// two-endpoint ride. Server-owned statuses; P1 labels. See legDestination.
+	Stops []TripStop
 	// ETAMinutes is the car's carried navigation ETA in whole minutes, nil when
 	// the car has no active route.
 	ETAMinutes *int

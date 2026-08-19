@@ -83,8 +83,16 @@ type ActivityContentState struct {
 	// client renders its own fallback, as the alert copy does).
 	VehicleName string `json:"vehicleName"`
 
-	// Destination is the dropoff's short label — the name the RIDER chose for
-	// the place when booking, e.g. "Home".
+	// Destination is THE PLACE THE `eta` IS ABOUT — the short label of the
+	// place the car is driving to, e.g. "Home".
+	//
+	// On a two-endpoint ride that is the dropoff the rider named when booking,
+	// which is all this field ever was before MYR-587. On a multi-stop trip
+	// mid-journey it is the STOP the car is currently heading for, because the
+	// `eta` beside it always describes the leg the car is driving (MYR-485) and
+	// a card pairing the next stop's arrival time with the trip's final place
+	// name states something untrue in two lines of true values. See
+	// legDestination for the ladder and the statuses it applies to.
 	//
 	// P1. See data-classification.md §1.18: this is the one field on this
 	// surface that the alert-copy policy in copy.go would not permit, and it is
@@ -93,6 +101,28 @@ type ActivityContentState struct {
 	// the car is taking you is not the feature. It is never sent to the owner's
 	// Activity, and never appears in an alert body.
 	Destination string `json:"destination"`
+
+	// DestinationIsStop says that `destination` names an INTERMEDIATE STOP
+	// rather than the trip's final dropoff, omitted entirely when it does not
+	// (MYR-587).
+	//
+	// It exists because the headline and the subline are one sentence: the card
+	// reads "{h:mm} dropoff" over "Heading to {destination}", and naming the
+	// stop while the noun above it still says "dropoff" would fix half a lie.
+	// The word itself stays the CLIENT'S — §7.21.3's rule is that this surface
+	// sends the enum and never prose — so what goes on the wire is the
+	// discriminator the client cannot compute for itself: stop statuses are
+	// server-owned and advance on arrival detection (MYR-538) while the phone is
+	// asleep, and the itinerary can be edited mid-ride.
+	//
+	// P0, on the same test `progress` passes: a boolean saying WHAT KIND of
+	// place is already named beside it locates nobody and names nothing.
+	//
+	// FALSE IS THE ABSENT KEY, and that is what keeps every two-endpoint ride
+	// byte-identical to what it sent before this field existed — including
+	// every push on `accepted`, `arrived` and every terminal status, which
+	// always name the dropoff.
+	DestinationIsStop bool `json:"destinationIsStop,omitempty"`
 
 	// Progress is how far along the CURRENT leg the car is, 0..1, omitted
 	// entirely when we cannot say (MYR-398).

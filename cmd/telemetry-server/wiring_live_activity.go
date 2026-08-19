@@ -132,6 +132,7 @@ func (a *liveActivityStoreAdapter) RideContextFor(ctx context.Context, rideReque
 		Status:             string(row.Status),
 		VehicleName:        row.VehicleName,
 		Destination:        row.DropoffLabel,
+		Stops:              tripStopsFromRows(row.Stops),
 		ETAMinutes:         row.ETAMinutes,
 		TripMilesRemaining: row.TripMilesRemaining,
 		NavUpdatedAt:       row.NavUpdatedAt,
@@ -191,6 +192,7 @@ func (a *liveActivityStoreAdapter) ActiveLegs(ctx context.Context, limit int) ([
 				Status:             string(row.Status),
 				VehicleName:        row.VehicleName,
 				Destination:        row.DropoffLabel,
+				Stops:              tripStopsFromRows(row.Stops),
 				ETAMinutes:         row.ETAMinutes,
 				TripMilesRemaining: row.TripMilesRemaining,
 				NavUpdatedAt:       row.NavUpdatedAt,
@@ -277,6 +279,24 @@ func (a *liveActivityRegistryAdapter) RegisterActivity(ctx context.Context, ride
 
 func (a *liveActivityRegistryAdapter) EndActivity(ctx context.Context, rideRequestID, userID string) (bool, error) {
 	return a.repo.EndActivity(ctx, rideRequestID, userID)
+}
+
+// tripStopsFromRows converts a ride's stop list to the notifier's own shape
+// (MYR-587) — the status the copy rule reads and the label it would print, and
+// nothing else. Nil in, nil out: a two-endpoint ride carries no stops and the
+// content-state's ladder falls straight through to the dropoff.
+func tripStopsFromRows(rows []store.ActivityStop) []push.TripStop {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]push.TripStop, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, push.TripStop{
+			Status: string(row.Status),
+			Label:  row.Label,
+		})
+	}
+	return out
 }
 
 // activityFromRow converts a store row to the notifier's own shape. Written out

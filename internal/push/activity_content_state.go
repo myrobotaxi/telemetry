@@ -22,12 +22,21 @@ import (
 // value means no route, and the key is omitted rather than guessed. The other
 // is computeProgress, which turns "how far is left" into "how far along" and is
 // documented where it lives.
+//
+// THE PLACE AND THE TIME ARE CHOSEN TOGETHER (MYR-587). The instant above is
+// the car's ETA to the leg it is driving NOW, so the label beside it is
+// legDestination's answer to the same question — on a multi-stop trip that is
+// the stop the car is heading for, not the trip's end. One function decides it
+// for both send paths, because a card composed two ways is a card that can
+// disagree with itself.
 func contentState(rc RideContext, prev ProgressAnchor, now time.Time) (ActivityContentState, ProgressAnchor) {
+	destination, isStop := legDestination(rc)
 	state := ActivityContentState{
-		Version:     ActivityContentStateVersion,
-		Status:      rc.Status,
-		VehicleName: truncateLabel(rc.VehicleName),
-		Destination: truncateLabel(rc.Destination),
+		Version:           ActivityContentStateVersion,
+		Status:            rc.Status,
+		VehicleName:       truncateLabel(rc.VehicleName),
+		Destination:       truncateLabel(destination),
+		DestinationIsStop: isStop,
 	}
 	if etaKnown(rc) {
 		eta := now.Add(time.Duration(*rc.ETAMinutes) * time.Minute).Unix()
