@@ -166,4 +166,23 @@ const (
 	// close must be scoped to the grantee. Folding them together would
 	// make a suspension tear down the owner's own session.
 	TopicShareAccessRevoked Topic = "share.access_revoked"
+
+	// TopicVehicleTelemetryWarning is published by the owner-inactivity
+	// sweeper on the FOURTH day of an owner's silence, one day before the
+	// vehicle's fleet-telemetry config is removed (MYR-592, rest-api.md
+	// §7.27). The payload is VehicleTelemetryWarningEvent. Consumer: the
+	// push notifier, which sends the OWNER a TRANSACTIONAL alert — an
+	// operational account notice about their service, not a subscribable
+	// feed, so it is the one push in this service the §7.19 category
+	// switches do not reach.
+	//
+	// Internal-only and never broadcast to WS clients: the client-visible
+	// signal is the §7.0 catalog's telemetrySuspendedAt, which only becomes
+	// non-null a day later if the owner does not return.
+	//
+	// There is deliberately NO sibling topic for the suspension itself. The
+	// client asked for the in-app notice plus this one warning; a push at
+	// the moment of suspension would tell somebody who has not opened the
+	// app in five days about a thing they were warned of yesterday.
+	TopicVehicleTelemetryWarning Topic = "vehicle.telemetry.warning"
 )

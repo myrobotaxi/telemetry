@@ -234,6 +234,8 @@ func toSharedVehicleRows(rows []store.SharedVehicleSummary) []telemetry.SharedVe
 				// it too (their own row names them), so all three §7.0 producers
 				// share one projection.
 				OwnerFirstName: row.OwnerFirstName,
+				// MYR-592 — carried on viewer and member rows too.
+				TelemetrySuspendedAt: row.TelemetrySuspendedAt,
 				// MYR-515: viewers see the position too — the same value the
 				// viewer mask already retains on the streaming path for these
 				// very cars, which is what makes the picker's per-row pickup

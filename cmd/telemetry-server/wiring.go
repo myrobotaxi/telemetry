@@ -166,6 +166,27 @@ func setupAuthenticator(cfg *config.Config, dbPool *pgxpool.Pool, devMode bool, 
 		opts = append(opts, auth.WithES256Resolver(es256))
 		logger.Info("ES256 access-token validation enabled (identity module keystore)")
 	}
+
+	// MYR-592 last-seen stamping. Hooked HERE and nowhere else: this is the one
+	// function the ~30 self-authenticating REST handlers and the WebSocket
+	// handshake share, so one hook covers both surfaces and there is no second
+	// site to drift. Throttled to roughly one write per account-hour by an
+	// in-process gate plus the SQL guard, and swallow-on-error by construction —
+	// a last-seen write may never fail an authentication.
+	//
+	// NOTE THE DEV-MODE GAP, stated rather than discovered: the branch above
+	// returns a NoopAuthenticator, which never reaches this constructor, so a
+	// --dev server records nobody. That is correct — a dev server accepts any
+	// token and its "activity" is meaningless — and harmless, because the
+	// inactivity sweeper requires positive evidence of an owner and therefore
+	// suspends nothing for an account it has never observed.
+	opts = append(opts, auth.WithActivityStamper(
+		auth.NewUserActivityStamper(
+			store.NewUserActivityRepo(dbPool),
+			logger.With(slog.String("component", "user-activity")),
+		),
+	))
+
 	logger.Info("JWT authentication enabled for WebSocket clients")
 	return auth.NewJWTAuthenticator(
 		cfg.Auth().Secret,
@@ -346,6 +367,7 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 	setupVehicleCompleteSetupEndpoint(deps)
 	setupVehicleServiceWindowEndpoint(deps)
 	setupVehicleRideShareEndpoint(deps)
+	setupVehicleReconnectEndpoint(deps)
 	setupVehicleCommandEndpoint(deps, snapshotAdapter)
 	setupPushDeviceEndpoints(deps)
 	setupPushPrefsEndpoints(deps)

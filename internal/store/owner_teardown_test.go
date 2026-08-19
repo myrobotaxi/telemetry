@@ -76,6 +76,20 @@ CREATE TRIGGER trg_vehicle_deleted AFTER DELETE ON "Vehicle"
 func ensureTeardownSchema(t *testing.T) {
 	t.Helper()
 	ensureOwnerSchema(t) // Settings + Account
+	// The Go-owned namespace, from the migrations themselves rather than from a
+	// hand-copy: the teardown transaction touches go_ride_requests (0002),
+	// go_vehicle_shares (0020), go_removed_vehicles (0006) and, since MYR-592,
+	// go_vehicle_telemetry_suspensions (0044) — none of which the shared TestMain
+	// builds.
+	//
+	// Added with MYR-592, and it closes a PRE-EXISTING fragility rather than one
+	// this feature introduced: these tests already passed only because another
+	// file in the package (`migration_00xx_test.go`) happens to sort earlier and
+	// applies the migrations as a side effect. Run `-run TestOwnerTeardown` alone
+	// before this line and the suite fails on a missing go_vehicle_shares. A
+	// passing test for the wrong reason is one edit away from a failing one for
+	// no reason. RunMigrations is idempotent, so calling it per test is free.
+	mustApplyGoMigrations(t)
 	if _, err := testPool.Exec(context.Background(), teardownSchemaSQL); err != nil {
 		t.Fatalf("apply teardown schema: %v", err)
 	}
@@ -88,7 +102,7 @@ func cleanTeardownTables(t *testing.T) {
 	// mask-audit integration test installs the prevent-mutation triggers, so a
 	// DELETE would raise SQLSTATE P0001). Every audit assertion below filters
 	// by a per-test-unique userId/targetId, so residual rows never collide.
-	for _, tbl := range []string{`go_ride_requests`, `go_removed_vehicles`, `"TripStop"`, `"Drive"`, `"Vehicle"`, `"Account"`, `"Settings"`, `"User"`} {
+	for _, tbl := range []string{`go_ride_requests`, `go_removed_vehicles`, `go_vehicle_telemetry_suspensions`, `"TripStop"`, `"Drive"`, `"Vehicle"`, `"Account"`, `"Settings"`, `"User"`} {
 		if _, err := testPool.Exec(ctx, "DELETE FROM "+tbl); err != nil {
 			t.Fatalf("clean %s: %v", tbl, err)
 		}
@@ -551,4 +565,69 @@ func containsTombstonedTrue(metadata []byte) bool {
 		return false
 	}
 	return m.Tombstoned
+}
+
+// TestOwnerTeardown_ClearsTelemetrySuspension pins the UNLINK COMPLETELY half of
+// the two offers the MYR-592 disconnect notice makes (rest-api.md §7.0): it has
+// to actually finish.
+//
+// No FK reaches this table (CG-DL-9), so nothing cascades — the DELETE is
+// explicit or it does not happen. A surviving row would be a suspension stamp
+// keyed to a car that no longer exists: inert today, because every reader joins
+// from a live vehicle, and a landmine the moment a cuid is reused or somebody
+// reads the table directly.
+func TestOwnerTeardown_ClearsTelemetrySuspension(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable")
+	}
+	ensureTeardownSchema(t)
+	cleanTeardownTables(t)
+
+	const userID, vehicleID, vin = "user_susp_td", "veh_susp_td", "5YJ3E1EA1PF000310"
+	seedOwnerUser(t, userID, "Owner", userID+"@example.com")
+	seedTeardownVehicle(t, vehicleID, userID, vin)
+
+	ctx := context.Background()
+	if _, err := testPool.Exec(ctx,
+		`INSERT INTO go_vehicle_telemetry_suspensions (vehicle_id, warned_at, suspended_at)
+		 VALUES ($1, NOW() - INTERVAL '25 hours', NOW() - INTERVAL '1 hour')`, vehicleID); err != nil {
+		t.Fatalf("seed suspension: %v", err)
+	}
+
+	if _, err := newTestTeardown().RemoveVehicle(ctx, userID, vehicleID); err != nil {
+		t.Fatalf("RemoveVehicle: %v", err)
+	}
+
+	var n int
+	if err := testPool.QueryRow(ctx,
+		`SELECT count(*) FROM go_vehicle_telemetry_suspensions WHERE vehicle_id = $1`, vehicleID).Scan(&n); err != nil {
+		t.Fatalf("count suspensions: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("suspension rows after teardown = %d, want 0 — an unlinked car must not leave a "+
+			"disconnection stamp behind it", n)
+	}
+}
+
+// TestOwnerTeardown_NoSuspensionIsStillClean is the overwhelmingly common case:
+// the vast majority of teardowns are of cars that were never suspended, so the
+// DELETE has to be a clean no-op rather than something the transaction notices.
+func TestOwnerTeardown_NoSuspensionIsStillClean(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable")
+	}
+	ensureTeardownSchema(t)
+	cleanTeardownTables(t)
+
+	const userID, vehicleID, vin = "user_nosusp_td", "veh_nosusp_td", "5YJ3E1EA1PF000311"
+	seedOwnerUser(t, userID, "Owner", userID+"@example.com")
+	seedTeardownVehicle(t, vehicleID, userID, vin)
+
+	res, err := newTestTeardown().RemoveVehicle(context.Background(), userID, vehicleID)
+	if err != nil {
+		t.Fatalf("RemoveVehicle: %v", err)
+	}
+	if !res.Removed {
+		t.Errorf("result = %+v, want Removed", res)
+	}
 }

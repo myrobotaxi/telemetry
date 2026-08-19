@@ -409,6 +409,35 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		-- absence of a pairing epoch.
 		"signed_command_at" TIMESTAMPTZ,
 		"forced_repush_at"  TIMESTAMPTZ
+	);
+
+	-- go_vehicle_telemetry_suspensions: the Go-owned owner-inactivity episode
+	-- (migration 0044, MYR-592). All three catalog reads LEFT JOIN it to emit
+	-- VehicleSummary.telemetrySuspendedAt, so the harness MUST provision it or
+	-- GET /api/vehicles hits a missing relation and 500s — the same way
+	-- go_fleet_config_attempts above announced itself when its join landed.
+	--
+	-- Full shape rather than the reader's one column: warned_at is what makes
+	-- the day-4 warning fire once per episode, and a harness missing it would
+	-- refuse any seed a future suspension test wants to plant.
+	CREATE TABLE go_vehicle_telemetry_suspensions (
+		"vehicle_id"   TEXT PRIMARY KEY,
+		-- Both nullable with NO default, exactly as migration 0044 declares
+		-- them: NULL means "has not happened in this episode", which the
+		-- catalog reads as "streaming normally".
+		"warned_at"    TIMESTAMPTZ,
+		"suspended_at" TIMESTAMPTZ
+	);
+
+	-- go_user_activity: the Go-owned per-account last-seen row (migration 0043,
+	-- MYR-592). NOT read by any endpoint the harness mounts — only the §7.27
+	-- sweeper reads it — but the auth path WRITES it on every validated bearer,
+	-- and the harness authenticates on every request. Without the table the
+	-- stamp's swallow-and-log arm would fire on each one, which is survivable by
+	-- design and still exactly the kind of noise that hides a real failure.
+	CREATE TABLE go_user_activity (
+		"user_id"      TEXT PRIMARY KEY,
+		"last_seen_at" TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);`
 	if _, err := pool.Exec(ctx, schema); err != nil {
 		return fmt.Errorf("create schema: %w", err)
@@ -565,7 +594,8 @@ func (a *contractVehicleLister) ListByUser(ctx context.Context, userID string) (
 			// are already missing from it and their tests happen not to notice);
 			// it is called out here rather than fixed wholesale, because a field
 			// this one's tests DO depend on must not join them.
-			OwnerFirstName: v.OwnerFirstName,
+			OwnerFirstName:       v.OwnerFirstName,
+			TelemetrySuspendedAt: v.TelemetrySuspendedAt,
 			// MYR-491: raw schedule, mirroring cmd/telemetry-server's
 			// setupScheduleRow. The handler derives the wire state from it
 			// together with Status and LastUpdated above, so all three must

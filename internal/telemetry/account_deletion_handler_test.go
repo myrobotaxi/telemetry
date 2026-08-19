@@ -112,6 +112,9 @@ type fakeAccountData struct {
 	// MYR-583: the display-name confirmation row, step 8b.
 	confirmationsDeleted int
 	confirmationsErr     error
+	// MYR-592 step 8c — the last-seen row.
+	activityDeleted int
+	activityErr     error
 
 	membershipsDeleted int
 	membershipsErr     error
@@ -213,6 +216,17 @@ func (f *fakeAccountData) DeleteProfileNameConfirmation(_ context.Context, id st
 	}
 	n := f.confirmationsDeleted
 	f.confirmationsDeleted = 0 // idempotent: a re-run deletes nothing
+	return n, nil
+}
+
+func (f *fakeAccountData) DeleteUserActivity(_ context.Context, id string) (int, error) {
+	f.note("delete_user_activity")
+	f.seenIDs = append(f.seenIDs, id)
+	if f.activityErr != nil {
+		return 0, f.activityErr
+	}
+	n := f.activityDeleted
+	f.activityDeleted = 0 // idempotent: a re-run deletes nothing
 	return n, nil
 }
 
@@ -408,6 +422,11 @@ func TestAccountDeletion_OwnerWithSharesRunsEveryStepInOrder(t *testing.T) {
 		// delete_identity, so that no record of a person having approved a
 		// display name outlives the account the name belonged to.
 		"delete_profile_name_confirmation",
+		// MYR-592, step 8c. Beside the two above for the same reason, with one
+		// difference worth the line: it is P1 behavioural data (when this person
+		// last used the product), so it MUST precede delete_identity as an
+		// erasure obligation rather than as hygiene.
+		"delete_user_activity",
 		"revoke_tokens",
 		"delete_identity",
 	}
@@ -819,7 +838,7 @@ func TestAccountDeletion_ConvergedScopeRunsEveryStepOverEveryID(t *testing.T) {
 
 	// Every SQL step saw both ids. Counting per step rather than checking the
 	// set as a whole is what catches one straggler still keyed on the subject.
-	const sqlSteps = 8 // drives, shares, labels, memberships, devices, places, name confirmation, tokens
+	const sqlSteps = 9 // drives, shares, labels, memberships, devices, places, name confirmation, activity, tokens
 	if len(data.seenIDs) != sqlSteps*2 {
 		t.Fatalf("steps ran on %d ids, want %d (every step over both)", len(data.seenIDs), sqlSteps*2)
 	}

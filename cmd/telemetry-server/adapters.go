@@ -233,6 +233,8 @@ func (a *vehicleListerAdapter) ListByUser(ctx context.Context, userID string) ([
 			// reduced to its first token by the store — this boundary carries a
 			// display-ready value, never a full name.
 			OwnerFirstName: v.OwnerFirstName,
+			// MYR-592 — the owner-inactivity suspension instant, straight through.
+			TelemetrySuspendedAt: v.TelemetrySuspendedAt,
 			// MYR-515: the decrypted position pair; the handler applies the
 			// (0,0) sentinel collapse and builds the wire object.
 			Latitude:  v.Latitude,

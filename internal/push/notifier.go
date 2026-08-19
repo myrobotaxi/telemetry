@@ -166,9 +166,10 @@ func (n *Notifier) WithRequesterNames(r RequesterNamer) *Notifier {
 // active reports whether a send would actually reach Apple.
 func (n *Notifier) active() bool { return n.cfg.Enabled && n.sender != nil }
 
-// Subscribe registers the notifier on the three ride-lifecycle topics. On a
-// partial failure it unsubscribes whatever it already registered, so a failed
-// Subscribe leaves no half-wired consumer behind.
+// Subscribe registers the notifier on the ride-lifecycle topics plus the
+// MYR-592 telemetry-warning topic. On a partial failure it unsubscribes
+// whatever it already registered, so a failed Subscribe leaves no half-wired
+// consumer behind.
 func (n *Notifier) Subscribe(bus events.Bus) error {
 	n.mu.Lock()
 	n.bus = bus
@@ -183,6 +184,9 @@ func (n *Notifier) Subscribe(bus events.Bus) error {
 		{events.TopicRideDue, n.handleDue},
 		{events.TopicRideNavUnapplied, n.handleNavUnapplied},
 		{events.TopicRideTripChanged, n.handleTripChanged},
+		// MYR-592 — the one non-ride topic this notifier serves. See
+		// notifier_telemetry_warning.go.
+		{events.TopicVehicleTelemetryWarning, n.handleTelemetryWarning},
 	}
 
 	for _, reg := range registrations {

@@ -184,6 +184,20 @@ func (a *AccountDeleter) DeleteProfileNameConfirmation(ctx context.Context, user
 	return a.execCount(ctx, "DeleteProfileNameConfirmation", queryDeleteProfileNameConfirmationForUser, userID)
 }
 
+// DeleteUserActivity removes the person's last-seen row (MYR-592), so the
+// behavioural record of when they last used the product does not outlive the
+// account. Returns the number of rows deleted (0 or 1). Idempotent.
+//
+// Ordering note: it sits with the personal effects, immediately after the
+// display-name confirmation, and its position there is unconstrained for the
+// same reasons — keyed only by user_id, read by nothing later in the sequence,
+// and depended on by no teardown, cascade or event. Unlike the confirmation it
+// is P1 rather than P0, which is what makes deleting it an erasure obligation
+// rather than tidiness: see queryDeleteUserActivityForUser.
+func (a *AccountDeleter) DeleteUserActivity(ctx context.Context, userID string) (int, error) {
+	return a.execCount(ctx, "DeleteUserActivity", queryDeleteUserActivityForUser, userID)
+}
+
 // DeleteRideMemberships removes every group-ride membership the user holds
 // (MYR-540), so a deleted account cannot keep appearing in a live ride's
 // `members` array or in the access set that admits a WebSocket to that ride's

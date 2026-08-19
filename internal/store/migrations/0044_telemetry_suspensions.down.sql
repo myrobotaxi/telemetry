@@ -1,0 +1,31 @@
+-- 0044_telemetry_suspensions.down.sql
+--
+-- Reverts MYR-592's episode record: drops the Go-owned
+-- go_vehicle_telemetry_suspensions table.
+--
+-- READ THIS BEFORE RUNNING IT. Dropping this table does NOT un-suspend anything.
+-- The suspension is a state AT TESLA — the vehicle's fleet-telemetry config was
+-- deleted — and this table only remembers that we did it. Discarding the memory
+-- leaves every already-suspended car exactly as silent as it is now, while
+-- removing the only record that explains why, the only value the catalog can
+-- emit as `telemetrySuspendedAt`, and the only thing the reconnect endpoint
+-- clears. Owners of those cars would see a normal-looking row that never
+-- streams, with no disconnect notice and nothing to press.
+--
+-- IF THE INTENT IS TO UNDO THE FEATURE, un-suspend first and revert second:
+-- have each affected owner POST the §7.28 reconnect endpoint (or run the
+-- equivalent fleet-config push out of band for every vehicle with a non-null
+-- suspended_at), confirm the table is empty of suspended rows, then roll the
+-- server back, then run this.
+--
+-- FAILURE MODE IF RUN AGAINST A LIVE SERVER: three readers are compiled against
+-- this table — the §7.0 catalog's LEFT JOIN, the sweeper's candidate query and
+-- the reconnect handler's clear — and all three fail with `relation
+-- "go_vehicle_telemetry_suspensions" does not exist`. That takes the vehicle
+-- LIST down for every user, not just affected owners, because the join is in the
+-- same statement that serves the catalog. Roll the SERVER back first. Always.
+--
+-- Schema rollback only; no sibling-owned data is touched, and no Tesla-side call
+-- is made. In particular nothing here re-creates a fleet-telemetry config.
+
+DROP TABLE IF EXISTS go_vehicle_telemetry_suspensions;

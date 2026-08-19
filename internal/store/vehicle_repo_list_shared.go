@@ -78,10 +78,12 @@ const queryVehiclesSharedWithUser = `SELECT ` + sharedSummaryColumns + `,
 	` + rideShareEnabledExpr + `,
 	` + catalogTrimLabelExpr + `,
 	` + catalogOwnerNameExpr + `,
+	` + catalogTelemetrySuspendedExpr + `,
 	` + setupScheduleColumns + `,
 	s.allow_rides
 FROM "Vehicle"` + sharedSummaryJoin + `
-LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"` + setupScheduleJoin + `
+LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"` +
+	catalogTelemetrySuspendedJoin + setupScheduleJoin + `
 WHERE ($2::text[] IS NULL OR "Vehicle"."id" = ANY($2))
 ORDER BY "Vehicle"."name", "Vehicle"."vin"`
 
@@ -185,6 +187,7 @@ func (r *VehicleRepo) scanSharedVehicleSummaryRow(row rowScanner) (SharedVehicle
 		&v.TrimLabel,
 		&v.Trim,
 		&ownerName,
+		&v.TelemetrySuspendedAt,
 	}, ss.dests()...)
 	// `allow_rides` is selected AFTER the setup block, so it is appended last —
 	// the scan order is the SELECT order, not the struct order.

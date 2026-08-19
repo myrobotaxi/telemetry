@@ -46,6 +46,10 @@ type AccountDataDeleter interface {
 	DeletePushDevices(ctx context.Context, userID string) (int, error)
 	DeleteSavedPlaces(ctx context.Context, userID string) (int, error)
 	DeleteProfileNameConfirmation(ctx context.Context, userID string) (int, error)
+	// DeleteUserActivity drops the account's last-seen row (MYR-592,
+	// data-lifecycle.md §3.1 step 8c). P1 behavioural data; see the store
+	// query for why it is a delete and not a tombstone.
+	DeleteUserActivity(ctx context.Context, userID string) (int, error)
 	DeleteRideMemberships(ctx context.Context, userID string) (int, error)
 	RevokeRefreshTokens(ctx context.Context, userID string) (int, error)
 	DeleteIdentity(ctx context.Context, scope AccountDeletionScope, counts AccountDeletionCounts) (AccountIdentityOutcome, error)
@@ -90,6 +94,10 @@ type AccountDeletionCounts struct {
 	// ProfileNameConfirmationsDeleted counts the display-name confirmation rows
 	// removed (MYR-583) — 0 or 1, since the table is keyed by user id.
 	ProfileNameConfirmationsDeleted int
+	// UserActivityRowsDeleted counts the last-seen rows removed (MYR-592).
+	// 0 or 1 per identity in the deletion scope; 0 for an account that never
+	// authenticated after migration 0043 shipped.
+	UserActivityRowsDeleted int
 	// RideMembershipsDeleted counts the GROUP-RIDE memberships the account
 	// held (MYR-540) — the rides they JOINED, as against RidesCancelled, the
 	// rides they BOOKED.

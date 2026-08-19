@@ -99,6 +99,11 @@ func (a *accountDataDeleterAdapter) DeleteProfileNameConfirmation(ctx context.Co
 	return a.deleter.DeleteProfileNameConfirmation(ctx, userID)
 }
 
+// DeleteUserActivity drops the account's last-seen row (MYR-592, §3.1 step 8c).
+func (a *accountDataDeleterAdapter) DeleteUserActivity(ctx context.Context, userID string) (int, error) {
+	return a.deleter.DeleteUserActivity(ctx, userID)
+}
+
 func (a *accountDataDeleterAdapter) RevokeRefreshTokens(ctx context.Context, userID string) (int, error) {
 	return a.deleter.RevokeRefreshTokens(ctx, userID)
 }

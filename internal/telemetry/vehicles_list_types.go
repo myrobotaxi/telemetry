@@ -111,6 +111,31 @@ type vehicleSummary struct {
 	// never `""`, which a possessive-descriptor builder would happily render as
 	// "'s Model X".
 	OwnerFirstName *string `json:"ownerFirstName"`
+	// TelemetrySuspendedAt is WHEN OWNER-INACTIVITY SUSPENDED THIS VEHICLE'S
+	// TELEMETRY STREAMING (MYR-592, contracts v0.38.0), or null while streaming
+	// is configured normally.
+	//
+	// THE POLICY BEHIND IT: after five consecutive days without any
+	// authenticated activity from the vehicle's OWNER, the platform removes the
+	// car's fleet-telemetry configuration to stop the per-vehicle streaming
+	// cost. Nothing else is touched — the OAuth grant, the virtual key, the
+	// vehicle row and every share survive — which is what makes the §7.28
+	// reconnect a single call.
+	//
+	// STRICTLY THE OWNER'S ACTIVITY (explicit client ruling): rider and viewer
+	// usage does NOT defer suspension. So a viewer can meet a suspended car
+	// whose owner has been away, and the honest rendering for them is the
+	// ordinary no-live-telemetry state — never an error, never "broken".
+	//
+	// Emitted on BOTH roles. The owner is the one offered the two actions
+	// (reconnect, unlink completely); the viewer is told so their UI can stop
+	// waiting for frames that are not coming.
+	//
+	// THE INSTANT IS WHEN THE CONFIG WAS REMOVED — for copy ("disconnected 3
+	// days ago"), never for a countdown. A pointer with NO omitempty, the
+	// trimLabel convention: the key is always present and "streaming normally"
+	// is an explicit null.
+	TelemetrySuspendedAt *string `json:"telemetrySuspendedAt"`
 	// Location is where this car was last known to be (MYR-515,
 	// contracts v0.31.0) — the SAME coordinate pair the §7.1 snapshot and the
 	// live `vehicle_update` frame carry, from the same encrypted columns.
@@ -234,6 +259,16 @@ func (v vehicleSummary) baseMaskMap() map[string]any {
 		// must map to an untyped nil rather than a typed (*string)(nil), which
 		// marshals to `null` but is not `== nil` to a mask predicate or a test.
 		"ownerFirstName": derefOrNil(v.OwnerFirstName),
+		// MYR-592 — the suspension instant. In the BASE map, so BOTH role
+		// allow-lists carry it: a viewer who is not told simply renders a
+		// permanent spinner over a car that will never stream again, which is
+		// the failure the contract explicitly forbids. It discloses nothing a
+		// viewer could not already infer from the silence.
+		// derefOrNil for the same reason as `trimLabel` and `ownerFirstName`
+		// above: an unsuspended car must map to an UNTYPED nil, not a typed
+		// (*string)(nil), which marshals to `null` but is not `== nil` to a
+		// mask predicate or a test.
+		"telemetrySuspendedAt": derefOrNil(v.TelemetrySuspendedAt),
 		// MYR-515 — already resolved (atomic pair + sentinel collapse) by
 		// newVehicleSummary; this is the emitted value, not a raw column pair.
 		// In the BASE map: BOTH role allow-lists carry it, and the viewer is the

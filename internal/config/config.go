@@ -42,6 +42,9 @@ type Config struct {
 	autoArrivalEnabled bool
 	// arrivalFlashEnabled is the MYR-542 arrival light-flash kill-switch.
 	arrivalFlashEnabled bool
+	// telemetryInactivitySuspensionEnabled is the MYR-592 owner-inactivity
+	// telemetry-suspension kill-switch.
+	telemetryInactivitySuspensionEnabled bool
 }
 
 // MonitoringConfig holds observability probe settings.
@@ -373,6 +376,23 @@ func (c *Config) AutoArrivalEnabled() bool { return c.autoArrivalEnabled }
 // it. Defaults to true; set ARRIVAL_FLASH_ENABLED=false to disable without a
 // deploy.
 func (c *Config) ArrivalFlashEnabled() bool { return c.arrivalFlashEnabled }
+
+// TelemetryInactivitySuspensionEnabled is the MYR-592 kill-switch for the
+// owner-inactivity telemetry sweeper (rest-api.md §7.27). When false the
+// hourly pass does not run: no warning pushes are sent and no vehicle's
+// fleet-telemetry config is removed, so the platform keeps paying Tesla for
+// every idle car — a cost with no user-visible symptom, which is why an
+// operator who turns it off should watch the sweep's log line rather than
+// waiting for something to look wrong.
+//
+// A BRAKE, NEVER A REVERSE GEAR. It stops NEW suspensions and un-suspends
+// nothing: a car whose config is already gone at Tesla stays silent until its
+// owner presses reconnect (§7.28), because the suspension lives at Tesla and no
+// flag in this process reaches it. Defaults to true; set
+// TELEMETRY_INACTIVITY_SUSPENSION_ENABLED=false to disable without a deploy.
+func (c *Config) TelemetryInactivitySuspensionEnabled() bool {
+	return c.telemetryInactivitySuspensionEnabled
+}
 
 // ServiceRepollEnabled is the MYR-320 in-service re-poll kill-switch. False
 // leaves the ServiceStatusMonitor reading on connectivity / ServiceMode EDGES

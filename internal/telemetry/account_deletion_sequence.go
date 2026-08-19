@@ -396,6 +396,18 @@ func (h *AccountDeletionHandler) runPersonalEffects(
 	}
 	counts.ProfileNameConfirmationsDeleted = confirmations
 
+	// (8c) The last-seen row (MYR-592). Grouped with the personal effects for
+	// the same reasons as 8b — keyed only by user_id, read by nothing later in
+	// the sequence — but it is P1 rather than P0, so removing it is an erasure
+	// obligation and not only hygiene: it is a behavioural record of when this
+	// person was last using the product. It also stops the inactivity sweeper
+	// believing in an account that no longer exists.
+	activity, err := h.sumOverScope(ctx, scope, h.deps.Data.DeleteUserActivity)
+	if err != nil {
+		return &accountDeletionError{step: "delete_user_activity", cause: err}
+	}
+	counts.UserActivityRowsDeleted = activity
+
 	// (9) Refresh tokens — revoked so no stored session can mint a new access
 	// token. The CURRENT access token deliberately keeps working until step 11,
 	// because it is what authenticates a re-run if step 10 fails.

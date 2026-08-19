@@ -81,6 +81,28 @@ DELETE FROM go_push_devices WHERE user_id = $1`
 const queryDeleteSavedPlacesForUser = `
 DELETE FROM go_saved_places WHERE user_id = $1`
 
+// queryDeleteUserActivityForUser drops the person's last-seen row (MYR-592,
+// migration 0043).
+//
+// A DELETE rather than a tombstone, and the reason is the value's TIER rather
+// than its shape. The row is a cuid and one timestamp, but the timestamp is a
+// BEHAVIOURAL observation about a person — when they were last using the
+// product — which is why it is classified P1 (data-classification.md §1.21)
+// while its structurally identical neighbour go_profile_name_confirmations is
+// P0. Keeping a behavioural record after somebody has exercised their right to
+// erasure is exactly the thing erasure is for, and no counterparty is owed it:
+// unlike a revoked share, nobody else's audit trail contains this fact.
+//
+// It also has to go for a plainer reason. The inactivity sweeper reads this
+// table; a surviving row for a deleted account is a person the sweeper still
+// believes in. Today nothing follows from that (the candidate query joins from
+// a live vehicle, and the account's vehicles went in step 3), but the row would
+// be waiting for the first query that forgets to.
+//
+// Deleting zero rows on a re-run is a clean no-op.
+const queryDeleteUserActivityForUser = `
+DELETE FROM go_user_activity WHERE user_id = $1`
+
 // queryRevokeRefreshTokensForUser revokes every unrevoked refresh token in the
 // deleted user's name. Revoke rather than delete, matching the reuse-detection
 // model in migration 0003: the rotation lineage is evidence and stays. reason

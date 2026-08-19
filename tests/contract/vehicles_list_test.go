@@ -221,6 +221,29 @@ func TestContract_GETVehicles(t *testing.T) {
 						"on any identity rung)", owner)
 				}
 
+				// MYR-592: `telemetrySuspendedAt` is OPTIONAL in the
+				// schema on the same terms (absence = a pre-v0.38.0
+				// server, read exactly like null), and THIS server
+				// always emits the key. The seeded car has no
+				// go_vehicle_telemetry_suspensions row at all, which
+				// is the ordinary state of every streaming vehicle,
+				// so the honest answer is an explicit null.
+				//
+				// Asserting NULL rather than presence is what makes
+				// this arm worth its lines: the value arrives through
+				// a LEFT JOIN, and the failure mode a LEFT JOIN
+				// invites is a non-null answer assembled from the
+				// wrong row. A car reported as disconnected while it
+				// is streaming would put a disconnect notice and a
+				// live map on the same screen.
+				susp, ok := row["telemetrySuspendedAt"]
+				if !ok {
+					t.Errorf("missing `telemetrySuspendedAt` in items[0]; row keys: %v", keysOf(row))
+				} else if susp != nil {
+					t.Errorf("telemetrySuspendedAt = %v, want null (the seeded car has no "+
+						"inactivity episode)", susp)
+				}
+
 				// Cross-check against the canonical schema so any
 				// future field rename / type change surfaces here.
 				// The file's root is the LIST ENVELOPE (VehicleListResponse);

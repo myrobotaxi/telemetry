@@ -195,3 +195,30 @@ func ownerTripChangedAlert(requesterName *string, part string) alert {
 	}
 	return alert{title: "Your rider changed the " + part, body: bodySeeDetails}
 }
+
+// telemetryWarningAlert is the OWNER's copy for the day-4 inactivity warning
+// (MYR-592): their car's live telemetry stops tomorrow unless they open the app.
+//
+// THE BODY NAMES THE FIX, and that is what makes this alert different from every
+// other one in this file. The others report something that already happened;
+// this one reports something that has NOT happened yet and that the recipient
+// can prevent with the smallest action there is. None of the shared bodies says
+// what opening the app would accomplish, and here that is the only information
+// worth carrying.
+//
+// NO DATE, NO COUNTDOWN, NO TIMESTAMP. "Tomorrow" is deliberately coarse: the
+// sweeper runs hourly against a day-granularity threshold, so a precise instant
+// would be precise about the wrong thing, and a countdown on a lock screen
+// invites somebody to wait it out. The contract makes the same ruling about the
+// suspension instant itself (vehicle-summary.schema.json: use it for copy, never
+// for any countdown).
+//
+// PAYLOAD POLICY holds unchanged (copy.go): the vehicle nickname is the only
+// interpolation, and it travels through vehicleLabel, which trims it, caps it
+// and falls back to "Your car" for a car with no name.
+func telemetryWarningAlert(vehicleName string) alert {
+	return alert{
+		title: vehicleLabel(vehicleName) + " will be disconnected tomorrow",
+		body:  "Open the app to keep it connected.",
+	}
+}

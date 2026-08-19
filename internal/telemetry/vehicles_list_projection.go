@@ -67,6 +67,10 @@ func newVehicleSummary(v *VehicleCatalogRow, role auth.Role, grant auth.ShareGra
 		// `requesterName` and the redeem screen's `ownerFirstName` all shorten a
 		// name the same way, and there is no second rule to drift.
 		OwnerFirstName: v.OwnerFirstName,
+		// MYR-592: carried on BOTH roles, formatted through the same
+		// RFC 3339 helper the MYR-316 service window uses so the two nullable
+		// instants on this row cannot be rendered two different ways.
+		TelemetrySuspendedAt: formatInstantOrNil(v.TelemetrySuspendedAt),
 		// MYR-515: resolved here so the atomic-pair rule and the (0,0)
 		// sentinel collapse are applied exactly once per surface, in the same
 		// place the MYR-316 window resolves its precedence.

@@ -278,9 +278,11 @@ const queryVehiclesByUserList = `SELECT ` + vehicleListSummaryColumns + `,
 	` + rideShareEnabledExpr + `,
 	` + catalogTrimLabelExpr + `,
 	` + catalogOwnerNameExpr + `,
+	` + catalogTelemetrySuspendedExpr + `,
 	` + setupScheduleColumns + `
 FROM "Vehicle"
-LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"` + setupScheduleJoin + `
+LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"` +
+	catalogTelemetrySuspendedJoin + setupScheduleJoin + `
 WHERE "userId" = $1
 ORDER BY "name", "vin"`
 

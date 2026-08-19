@@ -20,9 +20,36 @@ type delivery struct {
 	userID string
 	rideID string
 	topic  string
-	// category is the preference this notification answers to. Every fan-out
-	// site must name one; there is no unset value that means "always send".
+	// category is the preference this notification answers to. Every
+	// preference-gated fan-out site must name one; there is no unset value
+	// that means "always send" — the ONLY way past the gate is the explicit
+	// `transactional` flag below, and fanOut refuses a delivery that claims
+	// neither.
 	category Category
+	// transactional marks an OPERATIONAL ACCOUNT NOTICE rather than a
+	// subscribable feed, and it is the one thing that bypasses the §7.19
+	// preference gate (MYR-592, rest-api.md §7.19.4).
+	//
+	// WHY A FLAG AND NOT A SIXTH CATEGORY. A category is a switch, and the
+	// premise of a switch is that turning it off is a choice the platform will
+	// honour. The day-4 inactivity warning is not that kind of message: it is
+	// the platform telling an owner it is about to stop a service they are
+	// paying for, one day before it does, and the only alternative channel is
+	// an in-app notice they will not see precisely because not opening the app
+	// is what triggered it. Minting a `telemetrySuspension` category would have
+	// put a toggle on the owner's Settings screen whose honest label is "do not
+	// warn me before I lose live telemetry" — a switch nobody wants, that
+	// silently defeats the feature, and that §7.19's own framing forbids
+	// ("These are DELIVERY preferences, not authorization... A category that is
+	// off is a silence").
+	//
+	// USE IT ONLY FOR NOTICES THAT MEET ALL THREE TESTS: the platform is acting
+	// on the account rather than reporting somebody else's action, the recipient
+	// can still prevent or reverse it, and no other channel reaches them in
+	// time. Ride news fails the first test; a marketing message fails all three.
+	// Today this is the only such delivery in the service, and it should stay
+	// rare enough to enumerate.
+	transactional bool
 	// islandAlerts marks a delivery whose news the recipient's Live Activity
 	// is ALSO about to deliver, by expanding the Dynamic Island (MYR-413).
 	//
@@ -55,9 +82,26 @@ func (n *Notifier) fanOut(ctx context.Context, d delivery, a alert) {
 		return
 	}
 
+	// MYR-592 — a delivery must declare itself: either it answers to a
+	// preference switch or it is an operational account notice. NEITHER is a
+	// programming error, and it is refused rather than sent, because the
+	// pre-existing fall-through was a SILENT BYPASS — Prefs.Allows returns true
+	// for a category it does not recognise (the safe direction for a column the
+	// model has not grown yet), so an empty category sailed past the gate and
+	// looked exactly like a transactional send nobody authorised.
+	if d.category == "" && !d.transactional {
+		n.logger.Error("push: delivery declares neither a category nor transactional intent; refusing",
+			slog.String("topic", topic),
+			slog.String("user_id", userID),
+		)
+		return
+	}
+
 	// MYR-349 — the recipient's own switch, checked BEFORE the device lookup so
 	// a silenced category costs one point read instead of a fan-out.
-	if !n.allowed(ctx, userID, d.category, topic) {
+	//
+	// MYR-592 — skipped entirely for a transactional notice. See delivery.
+	if !d.transactional && !n.allowed(ctx, userID, d.category, topic) {
 		return
 	}
 
