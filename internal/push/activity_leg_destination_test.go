@@ -316,6 +316,36 @@ func TestBothSendPathsNameTheSameStop(t *testing.T) {
 	})
 }
 
+// TestDestinationIsStopRawJSONKey pins the WIRE KEY, not the Go field.
+//
+// The MYR-362 lesson, applied to the newest key on this payload: the Swift
+// ContentState decodes the exact string `destinationIsStop`, and a Go-side
+// rename that every struct-level assertion in this file would sail through is a
+// silent decode failure on every installed phone. Its absent-when-false twin is
+// already pinned by TestActivityPayloadRawJSONKeys, whose fixture has no stops.
+func TestDestinationIsStopRawJSONKey(t *testing.T) {
+	n := testActivityNotification()
+	n.ContentState.Destination = "TARGET"
+	n.ContentState.DestinationIsStop = true
+
+	got := captureActivity(t, n)
+
+	var payload struct {
+		APS struct {
+			ContentState map[string]any `json:"content-state"`
+		} `json:"aps"`
+	}
+	if err := json.Unmarshal(got.body, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if v, ok := payload.APS.ContentState["destinationIsStop"]; !ok || v != true {
+		t.Errorf("content-state.destinationIsStop = %v (present=%v), want true", v, ok)
+	}
+	if v := payload.APS.ContentState["destination"]; v != "TARGET" {
+		t.Errorf("content-state.destination = %v, want TARGET", v)
+	}
+}
+
 func assertNamesTheStop(t *testing.T, state ActivityContentState) {
 	t.Helper()
 	if state.Destination != "TARGET" {
