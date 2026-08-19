@@ -55,6 +55,10 @@ type RideActivityContext struct {
 	NavUpdatedAt       *time.Time
 	PickupDispatchedAt *time.Time
 	DispatchUnderway   bool
+	// Stops is the trip's intermediate stops in travel order, empty on a
+	// two-endpoint ride (MYR-587). It is what lets the card name the place the
+	// ETA is about rather than the trip's end. See ActivityStopsForRides.
+	Stops []ActivityStop
 }
 
 // ActivityContextForRide reads the content-state inputs for one ride.
@@ -81,5 +85,18 @@ func (r *LiveActivityRepo) ActivityContextForRide(ctx context.Context, rideReque
 	if err != nil {
 		return RideActivityContext{}, fmt.Errorf("store.ActivityContextForRide(%s): %w", rideRequestID, err)
 	}
+
+	// The stop list is a SECOND statement for the reason live_activity_stops.go
+	// gives, and it is read here rather than by the caller so that this path and
+	// the ticker's list cannot end up projecting different cards for one ride.
+	// A failure propagates rather than degrading to an empty list: silently
+	// dropping the stops is exactly the wrong claim MYR-587 is about, and a
+	// database that cannot serve this index scan did not serve the read above
+	// either.
+	stops, err := r.ActivityStopsForRides(ctx, []string{rideRequestID})
+	if err != nil {
+		return RideActivityContext{}, fmt.Errorf("store.ActivityContextForRide(%s): %w", rideRequestID, err)
+	}
+	out.Stops = stops[rideRequestID]
 	return out, nil
 }

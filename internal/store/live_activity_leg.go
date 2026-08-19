@@ -84,6 +84,11 @@ type LiveActivityLeg struct {
 	// otherwise anchor and advance a track toward a pickup a day away
 	// (MYR-398). See computeProgress.
 	DispatchUnderway bool
+	// Stops is the trip's intermediate stops in travel order, empty on a
+	// two-endpoint ride (MYR-587) — the same field, filled from the same
+	// statement shape, as RideActivityContext.Stops next door. It is what lets
+	// the card name the place the ETA is about rather than the trip's end.
+	Stops []ActivityStop
 }
 
 // ActiveLegStatuses is the set of ride statuses that keep an Activity ticking.
@@ -233,6 +238,10 @@ func (r *LiveActivityRepo) ListActiveLegActivities(ctx context.Context, limit in
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store.ListActiveLegActivities: iterate: %w", err)
+	}
+
+	if err := r.attachStops(ctx, out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
