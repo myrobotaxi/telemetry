@@ -89,6 +89,14 @@ func (r *LiveActivityRepo) ActivityStopsForRides(ctx context.Context, rideIDs []
 // the same list: the stops belong to the trip, not to whoever is watching it.
 // A pass with no listed Activity, which is the ordinary state, issues no
 // statement at all.
+//
+// NOT FILTERED BY RIDE STATUS, deliberately. The copy rule reads the list only
+// on `enroute` today (push.legDestination), and narrowing the read to that
+// status would encode one package's copy decision in the other's SQL — so the
+// day the card wants to say "At {stop}" while the car dwells, the projection
+// would silently deliver nothing and the bug would look like a copy bug. The
+// read is one index scan over at most a pass's worth of ride ids, which is not
+// a budget worth buying that coupling with.
 func (r *LiveActivityRepo) attachStops(ctx context.Context, legs []LiveActivityLeg) error {
 	if len(legs) == 0 {
 		return nil
