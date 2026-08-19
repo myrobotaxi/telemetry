@@ -653,6 +653,31 @@ var vehicleSummaryOwnerFields = []string{
 	// Apple-native account that was never asked, and is deliberately not the
 	// empty string.
 	"ownerFirstName",
+	// MYR-592 — the owner-inactivity suspension instant (contracts v0.38.0).
+	//
+	// P0, like its neighbour `status`: an operational fact about a platform
+	// action on a car, correlating to no person. The BEHAVIOURAL signal it is
+	// derived from — the owner's last-seen instant in go_user_activity — is P1
+	// and never leaves the server. What crosses the wire is only the
+	// consequence, and only for a car the caller is already party to.
+	//
+	// IN BOTH ROLE ALLOW-LISTS, and the viewer's case is the one that had to be
+	// argued. A viewer is told about a suspension they did not cause and cannot
+	// undo — which sounds like a disclosure until you consider the alternative:
+	// an un-told viewer renders a permanent spinner over a car that will never
+	// stream again, or worse, an error. The contract forbids exactly that
+	// ("Consumers MUST NOT render a suspended vehicle as broken, in-service, or
+	// offline-forever"), and a client can only obey a rule it has the input for.
+	// The suspension is also inferable from the silence alone, so withholding it
+	// buys no privacy and costs the honest rendering.
+	//
+	// The ACTIONS are what differ by role, not the field: only the owner is
+	// offered §7.28 reconnect and §7.12 unlink. That asymmetry lives in the
+	// client, and on the server in those two endpoints' owner-only gates.
+	//
+	// NOT on any WebSocket delta for this resource — a suspended vehicle emits
+	// no frames at all, which is the whole point.
+	"telemetrySuspendedAt",
 }
 
 // vehicleSummaryViewerFields is the owner list PLUS `sharePermission`, with

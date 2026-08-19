@@ -565,7 +565,8 @@ func (a *contractVehicleLister) ListByUser(ctx context.Context, userID string) (
 			// are already missing from it and their tests happen not to notice);
 			// it is called out here rather than fixed wholesale, because a field
 			// this one's tests DO depend on must not join them.
-			OwnerFirstName: v.OwnerFirstName,
+			OwnerFirstName:       v.OwnerFirstName,
+			TelemetrySuspendedAt: v.TelemetrySuspendedAt,
 			// MYR-491: raw schedule, mirroring cmd/telemetry-server's
 			// setupScheduleRow. The handler derives the wire state from it
 			// together with Status and LastUpdated above, so all three must

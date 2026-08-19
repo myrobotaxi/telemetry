@@ -106,6 +106,29 @@ func applyDispatchEnvOverrides(fc *fileConfig) error {
 	}
 	fc.arrivalFlashEnabled = arrivalFlash
 
+	// TELEMETRY_INACTIVITY_SUSPENSION_ENABLED is the MYR-592 kill-switch for
+	// the owner-inactivity sweeper. It rides in this loader for the same reason
+	// the two retention switches do: it is a background sweeper an operator
+	// must be able to stop without a deploy.
+	//
+	// IT IS THE MOST CONSEQUENTIAL SWITCH IN THIS FILE, and the asymmetry is
+	// worth stating. Turning it OFF stops NEW suspensions and un-suspends
+	// NOTHING: a car whose config is already gone at Tesla stays silent until
+	// its owner presses reconnect, because the config lives at Tesla and no
+	// flag here reaches it. So this is a brake, never a reverse gear — if a
+	// batch of cars was wrongly suspended, flipping this stops the bleeding and
+	// the repair is a fleet-config push per car, not a redeploy.
+	//
+	// Turning it off also has a cost with no alarm attached: the platform
+	// quietly resumes paying Tesla for every idle car, and nothing in the
+	// product looks wrong. Watch the sweep's own log line while it is off.
+	// Same fail-fast parse as its neighbours.
+	suspension, err := parseKillSwitchEnv("TELEMETRY_INACTIVITY_SUSPENSION_ENABLED")
+	if err != nil {
+		return err
+	}
+	fc.telemetryInactivitySuspensionEnabled = suspension
+
 	return nil
 }
 

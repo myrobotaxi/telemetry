@@ -103,6 +103,12 @@ SELECT "teslaVehicleId", "vin" FROM "Vehicle" WHERE "id" = $1`
 const queryTeardownDeleteRideRequests = `
 DELETE FROM go_ride_requests WHERE vehicle_id = $1`
 
+// queryTeardownClearTelemetrySuspension removes the car's owner-inactivity
+// episode (MYR-592, migration 0044). Idempotent: the overwhelming majority of
+// teardowns are of cars that were never suspended, and a missing row is success.
+const queryTeardownClearTelemetrySuspension = `
+DELETE FROM go_vehicle_telemetry_suspensions WHERE vehicle_id = $1`
+
 // queryTeardownDeleteVehicle deletes the target vehicle, owner-scoped. The
 // Prisma FKs cascade Drive / TripStop / vehicle-scoped Invite / the encrypted
 // route blobs, and the Next.js-owned AFTER DELETE trigger fires the
@@ -283,6 +289,16 @@ func applyTeardownDeletes(ctx context.Context, tx pgx.Tx, d teardownDeletion) er
 	// statement has to be here rather than implied.
 	if _, err := tx.Exec(ctx, queryRevokeSharesForVehicle, d.vehicleID); err != nil {
 		return fmt.Errorf("store.RemoveVehicle(user=%s): revoke vehicle shares: %w", d.userID, err)
+	}
+	// MYR-592: take the owner-inactivity episode with the car, IN THIS
+	// TRANSACTION and BEFORE the vehicle row goes. There is no FK to cascade
+	// (CG-DL-9 forbids one), so a surviving row would be a suspension stamp
+	// keyed to a car that no longer exists — inert today, because every reader
+	// joins from a live vehicle, and a landmine the moment a cuid is reused or
+	// a debugging query reads the table directly. UNLINK COMPLETELY is one of
+	// the two offers the disconnect notice makes; it has to actually finish.
+	if _, err := tx.Exec(ctx, queryTeardownClearTelemetrySuspension, d.vehicleID); err != nil {
+		return fmt.Errorf("store.RemoveVehicle(user=%s): clear telemetry suspension: %w", d.userID, err)
 	}
 	if _, err := tx.Exec(ctx, queryTeardownDeleteVehicle, d.vehicleID, d.userID); err != nil {
 		return fmt.Errorf("store.RemoveVehicle(user=%s): delete vehicle: %w", d.userID, err)

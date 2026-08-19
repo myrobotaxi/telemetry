@@ -735,7 +735,7 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	// --- HTTP server + route registration ---
 	srv := server.New(cfg.Server(), logger, db, reg, cfg.TeslaPublicKey())
 	originPatterns := resolveWSOriginPatterns(cfg.WebSocket().AllowedOrigins, *devMode, logger)
-	setupHTTPHandlers(httpRouteDeps{
+	routeDeps := httpRouteDeps{
 		cfg:           cfg,
 		srv:           srv,
 		hub:           hub,
@@ -778,7 +778,15 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 		// reconciler that a signed command applied.
 		fleetConfigReconciler: fleetConfigReconciler,
 		logger:                logger,
-	})
+	}
+	setupHTTPHandlers(routeDeps)
+
+	// --- Owner-inactivity telemetry suspension (MYR-592, rest-api.md §7.27) ---
+	// Hourly: warn an owner on the fourth day of silence, remove their car's
+	// fleet-telemetry config on the fifth. Started AFTER the routes so the
+	// §7.28 reconnect endpoint — the owner's way back — is already mounted
+	// before anything can be suspended.
+	startFleetSuspendSweeper(ctx, cfg, routeDeps, bus, logger)
 
 	// --- Identity module endpoints (MYR-193, ADR-001) ---
 	// Native Sign in with Apple, ES256 access-token minting, refresh

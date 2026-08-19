@@ -94,6 +94,12 @@ type VehicleCatalogRow struct {
 	// P1. NEVER logged.
 	OwnerFirstName *string
 
+	// TelemetrySuspendedAt is when owner-inactivity suspension removed this
+	// car's fleet-telemetry config (MYR-592), or nil while streaming is
+	// configured normally. Formatted to RFC 3339 at the wire layer, like the
+	// sibling service window.
+	TelemetrySuspendedAt *time.Time
+
 	// Latitude / Longitude are the car's freshest known position (MYR-515),
 	// already decrypted by the store from the SAME `latitudeEnc`/`longitudeEnc`
 	// pair the /snapshot serves. An ATOMIC PAIR: both set or both nil.

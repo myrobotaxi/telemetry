@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -250,8 +251,8 @@ func TestTelemetrySuspensionRepo_CandidateArms(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cleanTables(t, testPool)
 			cleanSuspensionTables(t)
-			vehicleID := "veh_susp_" + string(rune('a'+i))
-			ownerID := "user_susp_" + string(rune('a'+i))
+			vehicleID := fmt.Sprintf("veh_susp_%d", i)
+			ownerID := fmt.Sprintf("user_susp_%d", i)
 			seedVehicleForOwner(t, testPool, vehicleID, vinForIndex(600+i), ownerID)
 			tc.seed(t, vehicleID, ownerID)
 

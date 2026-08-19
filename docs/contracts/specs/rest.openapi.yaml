@@ -1295,6 +1295,43 @@ components:
             ride requests are refused.
           example: Amruth
           x-classification: P1
+        telemetrySuspendedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            OPTIONAL (MYR-592, contracts v0.38.0). WHEN OWNER-INACTIVITY
+            SUSPENDED THIS VEHICLE'S TELEMETRY STREAMING, or null while
+            streaming is configured normally.
+            THE POLICY: after FIVE consecutive days without any authenticated
+            activity from the vehicle's OWNER (server-observed; a real app open
+            necessarily produces it), the platform removes the car's
+            fleet-telemetry configuration to stop the per-vehicle streaming
+            cost Tesla bills. NOTHING ELSE IS TOUCHED — the OAuth grant, the
+            virtual key, the vehicle row and every share survive — which is
+            exactly what makes re-connecting seamless: no OAuth, no
+            lock/unlock, those belong to FIRST pairing only.
+            STRICTLY THE OWNER'S ACTIVITY: rider/viewer usage does NOT defer
+            suspension (explicit client decision), so a viewer may meet a
+            suspended car whose owner has been away — the honest rendering for
+            them is the ordinary no-live-telemetry state, never an error.
+            THE OWNER-FACING RENDERING is the point: the owning account's app
+            MUST show a disconnect notice with exactly TWO offers — RE-CONNECT
+            (POST /api/tesla/vehicles/{vehicleId}/reconnect, §7.28; streaming
+            resumes and this field returns to null on the next read) and UNLINK
+            COMPLETELY (the §7.12 teardown). Consumers MUST NOT render a
+            suspended vehicle as broken, in-service, or offline-forever: it is a
+            deliberate, reversible platform action with a timestamp.
+            THE INSTANT IS WHEN THE CONFIG WAS REMOVED — use it for copy
+            ("disconnected 3 days ago"), NEVER for a countdown. A warning push
+            precedes suspension by one day; that is push-side and carries no
+            field here.
+            An ABSENT key means a server predating v0.38.0 and reads exactly
+            like null. RBAC: BOTH roles. REST-read-time only — no WebSocket
+            frame carries it, because a suspended vehicle emits no frames at
+            all, which is the whole point.
+          example: "2026-08-19T05:00:00Z"
+          x-classification: P0
         location:
           type: object
           nullable: true

@@ -111,6 +111,23 @@ type VehicleSummary struct {
 	// and a gate that calls the owner nameless cannot coexist.
 	OwnerFirstName *string
 
+	// TelemetrySuspendedAt is when owner-inactivity suspension removed this
+	// vehicle's fleet-telemetry config (MYR-592), LEFT JOINed from the Go-owned
+	// go_vehicle_telemetry_suspensions episode row (migration 0044).
+	//
+	// A POINTER, and nil is the ordinary state: streaming is configured. Nil
+	// covers three storage states a consumer must never be asked to tell apart
+	// — no episode row, an episode warned but not yet suspended, and an episode
+	// a reconnect cleared. Only the third column of that table is a fact about
+	// the car's connection; the warning is bookkeeping and stops here.
+	//
+	// It is NOT on "Vehicle" and could not have been: CG-DL-9 forbids a Go
+	// migration from naming a Prisma-owned table (migration 0044's header
+	// argues it in full).
+	//
+	// P0 — a platform action on a car, the tier of its neighbour `status`.
+	TelemetrySuspendedAt *time.Time
+
 	// Trim is the RAW BADGE CODE ("p100d"), carried since MYR-578 as the second
 	// rung of the trim resolver's ladder — NEVER emitted raw on this surface.
 	// The handler resolves label → badge → VIN drive-unit and emits the answer.
@@ -257,6 +274,7 @@ func (r *VehicleRepo) scanVehicleSummaryRow(row rowScanner) (VehicleSummary, err
 		&v.TrimLabel,
 		&v.Trim,
 		&ownerName,
+		&v.TelemetrySuspendedAt,
 	}, ss.dests()...)
 	if err := row.Scan(dests...); err != nil {
 		return VehicleSummary{}, fmt.Errorf("scan vehicle summary: %w", err)

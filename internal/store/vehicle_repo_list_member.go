@@ -47,7 +47,8 @@ JOIN go_ride_members gm
 // rather than forking a second column list that must be maintained in
 // parallel; the rows are re-typed at the adapter boundary. Every column the
 // other two catalog reads gain has to be added HERE too, in the SAME position,
-// for exactly that reason — MYR-581's owner-name expression is the most recent.
+// for exactly that reason — MYR-592's telemetry-suspension expression is the
+// most recent, after MYR-581's owner-name one.
 //
 // DISTINCT ON collapses the residual double-membership case (a reservation
 // plus an instant ride on one car — the same boundary rest-api.md's
@@ -58,10 +59,12 @@ const queryVehiclesForRideMember = `SELECT DISTINCT ON ("Vehicle"."id") ` + shar
 	` + rideShareEnabledExpr + `,
 	` + catalogTrimLabelExpr + `,
 	` + catalogOwnerNameExpr + `,
+	` + catalogTelemetrySuspendedExpr + `,
 	` + setupScheduleColumns + `,
 	FALSE
 FROM "Vehicle"` + memberSummaryJoin + `
-LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"` + setupScheduleJoin + `
+LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"` +
+	catalogTelemetrySuspendedJoin + setupScheduleJoin + `
 ORDER BY "Vehicle"."id"`
 
 // ListMemberVehicleSummaries returns the vehicles serving live group rides the
