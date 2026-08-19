@@ -133,6 +133,18 @@ func (s *Sweeper) handle(ctx context.Context, c *Candidate, now, suspendBefore t
 	defer cancel()
 
 	if !c.OwnerLastSeenAt.After(suspendBefore) {
+		// ONE EXCEPTION to "suspension is checked first", and it exists so this
+		// package's own promise is literally true rather than nearly true. On a
+		// deploy with no fleet-config path wired, `suspend` can only HOLD — so a
+		// car first observed past BOTH thresholds would fall straight through
+		// the warn arm into a permanent hold and its owner would never hear
+		// anything, on a server whose doc header says it "still WARNS but never
+		// suspends". Warning is the only thing such a deploy CAN do, it is
+		// strictly better than silence, and the next pass finds warned_at set
+		// and holds exactly as before.
+		if !s.canSuspend() && c.WarnedAt == nil {
+			return s.warn(workCtx, c, now)
+		}
 		return s.suspend(workCtx, c, now)
 	}
 	if c.WarnedAt == nil {
@@ -141,6 +153,13 @@ func (s *Sweeper) handle(ctx context.Context, c *Candidate, now, suspendBefore t
 	// Warned, not yet due. Nothing to do until the fifth day.
 	return decisionNone
 }
+
+// canSuspend reports whether a Tesla config delete is reachable at all.
+//
+// Both halves are required and neither substitutes for the other: with no
+// remover there is no call to make, and with no token source there is nothing to
+// authenticate it with.
+func (s *Sweeper) canSuspend() bool { return s.configs != nil && s.tokens != nil }
 
 // warn publishes the day-4 notice, once per episode.
 //
@@ -202,7 +221,7 @@ func (s *Sweeper) warn(ctx context.Context, c *Candidate, now time.Time) decisio
 // write, no vehicle-row update. That is the property the §7.28 reconnect
 // depends on, and it is the reason this function is three statements long.
 func (s *Sweeper) suspend(ctx context.Context, c *Candidate, now time.Time) decision {
-	if s.configs == nil || s.tokens == nil {
+	if !s.canSuspend() {
 		// The proxy is unconfigured. We cannot remove a config, so we must not
 		// claim to have removed one — a stamp here would tell every consumer a
 		// streaming car is disconnected and would hide it behind a reconnect

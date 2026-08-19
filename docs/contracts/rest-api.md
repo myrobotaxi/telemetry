@@ -5618,7 +5618,7 @@ No failure advances a vehicle toward an irreversible action. Each arm below leav
 | Owner's Tesla token unresolvable | **Hold before any Tesla call.** The truth is unknown and the next pass costs one lookup |
 | Tesla config delete fails | Hold, **no stamp**. The delete is idempotent, so retrying is free |
 | Config removed but the stamp fails | Hold. The catalog under-reports (the car reads connected while silent) until a later pass succeeds — indistinguishable from any offline car, and far better than the inverse |
-| **No tesla-http-proxy configured** | The sweeper still WARNS but **never suspends**. Claiming a suspension we could not perform would tell every consumer a streaming, still-billing car is disconnected, behind a reconnect button that also cannot work |
+| **No tesla-http-proxy configured** | The sweeper still WARNS but **never suspends**. Claiming a suspension we could not perform would tell every consumer a streaming, still-billing car is disconnected, behind a reconnect button that also cannot work. **Including past BOTH thresholds:** a car first observed already past day five on such a deploy is WARNED rather than held, because warning is the only thing that deploy can do and the alternative is that its owner never hears anything at all. Once per episode, exactly like every other warning |
 
 **THE ORDER IS TESLA FIRST, STAMP SECOND**, and it is the same argument in both directions: stamping first would produce the one state the platform cannot explain to anybody — a catalog row saying "disconnected" for a car that is still streaming and still being billed, with an owner reading a disconnect notice while their live map updates behind it.
 

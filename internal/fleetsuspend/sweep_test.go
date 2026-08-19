@@ -375,21 +375,47 @@ func TestSweepOnce_HoldsOnEveryFailure(t *testing.T) {
 }
 
 // TestSweepOnce_UnwiredProxyWarnsButNeverSuspends is the CI/test shape and the
-// shape of any deploy without a proxy.
+// shape of any deploy without a proxy. It pins BOTH halves of the promise the
+// package header makes — "still WARNS but never suspends" — including the
+// past-both-thresholds case, where warning is the only thing such a deploy can
+// do and silence would be the alternative.
 func TestSweepOnce_UnwiredProxyWarnsButNeverSuspends(t *testing.T) {
+	warnedYesterday := sweepNow.Add(-25 * time.Hour)
+
 	tests := []struct {
-		name   string
-		cfgs   ConfigRemover
-		tokens TokenSource
+		name       string
+		cfgs       ConfigRemover
+		tokens     TokenSource
+		candidate  Candidate
+		wantWarned bool
+		reason     string
 	}{
-		{"no config remover", nil, fakeTokens{token: "tok"}},
-		{"no token source", &fakeConfigs{}, nil},
-		{"neither", nil, nil},
+		{
+			name: "no config remover", cfgs: nil, tokens: fakeTokens{token: "tok"},
+			candidate: candidate(6*24*time.Hour, nil), wantWarned: true,
+			reason: "no call to make, so nothing can be suspended",
+		},
+		{
+			name: "no token source", cfgs: &fakeConfigs{}, tokens: nil,
+			candidate: candidate(6*24*time.Hour, nil), wantWarned: true,
+			reason: "nothing to authenticate the call with; neither half substitutes for the other",
+		},
+		{
+			name: "neither", cfgs: nil, tokens: nil,
+			candidate: candidate(6*24*time.Hour, nil), wantWarned: true,
+			reason: "a car first observed past BOTH thresholds still gets its notice — " +
+				"falling through to a permanent hold would mean its owner never hears anything at all",
+		},
+		{
+			name: "already warned, still cannot suspend", cfgs: nil, tokens: nil,
+			candidate: candidate(6*24*time.Hour, &warnedYesterday), wantWarned: false,
+			reason: "the fallback fires ONCE per episode, like every other warning",
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			st := newFakeStore(candidate(6*24*time.Hour, nil))
+			st := newFakeStore(tc.candidate)
 			s := newHarness(t, st, tc.cfgs, tc.tokens, &countingBus{})
 
 			res := s.SweepOnce(context.Background())
@@ -398,8 +424,14 @@ func TestSweepOnce_UnwiredProxyWarnsButNeverSuspends(t *testing.T) {
 				t.Error("stamped a suspension it could not perform — every consumer would then " +
 					"read a streaming, still-billing car as disconnected, behind a reconnect that also cannot work")
 			}
-			if res.Held != 1 {
-				t.Errorf("Held = %d, want 1", res.Held)
+			if st.wasWarned("veh_1") != tc.wantWarned {
+				t.Errorf("warned = %v, want %v (%s)", st.wasWarned("veh_1"), tc.wantWarned, tc.reason)
+			}
+			if tc.wantWarned && res.Warned != 1 {
+				t.Errorf("Warned = %d, want 1 (%s)", res.Warned, tc.reason)
+			}
+			if !tc.wantWarned && res.Held != 1 {
+				t.Errorf("Held = %d, want 1 (%s)", res.Held, tc.reason)
 			}
 		})
 	}
@@ -443,7 +475,16 @@ func TestSweepOnce_ResetIsCountedAndRunsFirst(t *testing.T) {
 }
 
 func TestSweepOnce_ShutdownHoldsRemainingVehicles(t *testing.T) {
-	st := newFakeStore(candidate(6*24*time.Hour, nil), candidate(6*24*time.Hour, nil))
+	// Two DISTINCT vehicles, because a real candidate list cannot contain the
+	// same car twice and because the assertion below is that NEITHER of them
+	// moved — which a single repeated id could not tell apart from one of them
+	// moving.
+	first := candidate(6*24*time.Hour, nil)
+	second := candidate(6*24*time.Hour, nil)
+	second.VehicleID = "veh_2"
+	second.VIN = "5YJ3E1EA7KF000002"
+
+	st := newFakeStore(first, second)
 	cfgs := &fakeConfigs{}
 	s := newHarness(t, st, cfgs, fakeTokens{token: "tok"}, &countingBus{})
 
@@ -454,6 +495,11 @@ func TestSweepOnce_ShutdownHoldsRemainingVehicles(t *testing.T) {
 
 	if len(cfgs.calls()) != 0 {
 		t.Errorf("config deletes during shutdown = %d, want 0", len(cfgs.calls()))
+	}
+	// Shutdown is honoured at the only free point — between vehicles, before
+	// anything irreversible has started — so neither car is warned either.
+	if st.wasWarned("veh_1") || st.wasWarned("veh_2") {
+		t.Error("a vehicle was warned during shutdown; the pass must stop at the item boundary")
 	}
 	if res.Held != 2 {
 		t.Errorf("Held = %d, want 2", res.Held)
