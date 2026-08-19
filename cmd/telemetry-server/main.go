@@ -786,7 +786,7 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	// fleet-telemetry config on the fifth. Started AFTER the routes so the
 	// §7.28 reconnect endpoint — the owner's way back — is already mounted
 	// before anything can be suspended.
-	startFleetSuspendSweeper(ctx, cfg, routeDeps, bus, logger)
+	startFleetSuspendSweeper(ctx, routeDeps, bus)
 
 	// --- Identity module endpoints (MYR-193, ADR-001) ---
 	// Native Sign in with Apple, ES256 access-token minting, refresh

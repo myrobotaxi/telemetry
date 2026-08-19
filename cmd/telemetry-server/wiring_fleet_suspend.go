@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/myrobotaxi/telemetry/internal/config"
 	"github.com/myrobotaxi/telemetry/internal/events"
 	"github.com/myrobotaxi/telemetry/internal/fleetsuspend"
 	"github.com/myrobotaxi/telemetry/internal/store"
@@ -61,14 +60,9 @@ const (
 // live. That is the correct degradation: warning somebody about a disconnect
 // that cannot happen is noise, but claiming a suspension we did not perform
 // would tell every consumer a streaming, still-billing car is disconnected.
-func startFleetSuspendSweeper(
-	ctx context.Context,
-	cfg *config.Config,
-	deps httpRouteDeps,
-	bus events.Bus,
-	logger *slog.Logger,
-) *fleetsuspend.Sweeper {
-	log := logger.With(slog.String("component", "telemetry-inactivity-sweeper"))
+func startFleetSuspendSweeper(ctx context.Context, deps httpRouteDeps, bus events.Bus) *fleetsuspend.Sweeper {
+	cfg := deps.cfg
+	log := deps.logger.With(slog.String("component", "telemetry-inactivity-sweeper"))
 
 	var configs fleetsuspend.ConfigRemover
 	var tokens fleetsuspend.TokenSource
