@@ -206,6 +206,7 @@ func TestAccountDeleter_DeleteIdentity_WritesTheAuditRow(t *testing.T) {
 		VehicleCount: 2, DriveCount: 9, RidesCancelled: 1,
 		SharesRevoked: 3, ShareLabelsScrubbed: 3, PushDevicesDeleted: 1,
 		SavedPlacesDeleted: 2, RefreshTokensRevoked: 4,
+		UserActivityRowsDeleted: 1, TeslaTokenKeepaliveRowsDeleted: 1,
 	}
 	res, err := newAccountDeleter(t).DeleteIdentity(context.Background(), soloScope(delUserApple), counts)
 	if err != nil {
@@ -256,6 +257,16 @@ func TestAccountDeleter_DeleteIdentity_WritesTheAuditRow(t *testing.T) {
 		// it confirms, so unlike its neighbours here there is nothing P1 this
 		// count could have leaked even by accident.
 		"profileNameConfirmationsDeleted": true,
+		// MYR-592/594 (plumbed by the MYR-594 follow-up). COUNTS of the
+		// last-seen row (step 8c) and the token-keepalive bookkeeping row
+		// (step 8d) removed — each 0 or 1, keyed by user id. Both tables are
+		// P0-only BY SHAPE: go_user_activity holds a cuid and a timestamp (the
+		// P1 behavioural signal never leaves the server), and
+		// go_tesla_token_keepalive records that a rotation was ATTEMPTED,
+		// never the credential. CG-DL-5 satisfied the same way
+		// profileNameConfirmationsDeleted is.
+		"userActivityRowsDeleted":        true,
+		"teslaTokenKeepaliveRowsDeleted": true,
 	}
 	for k, v := range got {
 		if !allowed[k] {
@@ -263,7 +274,9 @@ func TestAccountDeleter_DeleteIdentity_WritesTheAuditRow(t *testing.T) {
 		}
 	}
 	if got["vehicleCount"] != float64(2) || got["sharesRevoked"] != float64(3) ||
-		got["savedPlacesDeleted"] != float64(2) {
+		got["savedPlacesDeleted"] != float64(2) ||
+		got["userActivityRowsDeleted"] != float64(1) ||
+		got["teslaTokenKeepaliveRowsDeleted"] != float64(1) {
 		t.Fatalf("audit metadata counts = %v", got)
 	}
 

@@ -160,6 +160,8 @@ func (a *accountDataDeleterAdapter) DeleteIdentity(ctx context.Context, scope te
 		RefreshTokensRevoked:   counts.RefreshTokensRevoked,
 
 		ProfileNameConfirmationsDeleted: counts.ProfileNameConfirmationsDeleted,
+		UserActivityRowsDeleted:         counts.UserActivityRowsDeleted,
+		TeslaTokenKeepaliveRowsDeleted:  counts.TeslaTokenKeepaliveRowsDeleted,
 	})
 	if err != nil {
 		return telemetry.AccountIdentityOutcome{}, err

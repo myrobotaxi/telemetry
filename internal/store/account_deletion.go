@@ -98,6 +98,19 @@ type AccountDeletionCounts struct {
 	RideMembershipsDeleted int `json:"rideMembershipsDeleted"`
 	// RefreshTokensRevoked is the number of live refresh tokens revoked.
 	RefreshTokensRevoked int `json:"refreshTokensRevoked"`
+	// UserActivityRowsDeleted is the number of last-seen rows removed
+	// (MYR-592, §3.1 step 8c) — 0 or 1, since go_user_activity is keyed by the
+	// user id. A count of a P0-only row (opaque cuid + timestamp; the P1
+	// last-seen SIGNAL never leaves the server). Recorded so the audit trail
+	// answers "did the deletion reach the activity table" the same way it
+	// answers it for every sibling go_ table.
+	UserActivityRowsDeleted int `json:"userActivityRowsDeleted"`
+	// TeslaTokenKeepaliveRowsDeleted is the number of keepalive bookkeeping
+	// rows removed (MYR-594, §3.1 step 8d) — 0 or 1, keyed by user id. Every
+	// column of that table is P0 by design (it records that a rotation was
+	// ATTEMPTED, never the credential), so the count is as safe as its
+	// siblings above.
+	TeslaTokenKeepaliveRowsDeleted int `json:"teslaTokenKeepaliveRowsDeleted"`
 	// HadPrismaUser records whether a sibling-schema "User" row existed —
 	// the dual-source identity fact, and the one thing that distinguishes an
 	// Apple-native account from a legacy web one in the audit trail.
