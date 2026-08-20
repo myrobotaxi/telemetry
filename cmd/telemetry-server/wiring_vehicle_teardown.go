@@ -26,13 +26,7 @@ func setupVehicleTeardownEndpoint(deps httpRouteDeps) {
 	// Tesla-side config deleter + token resolver: only meaningful when the
 	// tesla-http-proxy is configured. When absent, fleet stays nil (the
 	// handler skips the best-effort Tesla call).
-	var fleet telemetry.FleetConfigDeleter
-	if deps.cfg.Proxy().URL != "" {
-		fleet = telemetry.NewFleetAPIClient(telemetry.FleetAPIConfig{
-			BaseURL:    deps.cfg.Proxy().URL,
-			HTTPClient: proxyHTTPClient(deps.cfg.Proxy().URL, logger),
-		}, logger.With(slog.String("subcomponent", "fleet")))
-	}
+	fleet := newFleetConfigDeleter(deps.cfg, logger)
 
 	resolver := newTeslaTokenResolver(deps.cfg, deps.accountRepo, logger)
 
@@ -73,6 +67,26 @@ func setupVehicleTeardownEndpoint(deps httpRouteDeps) {
 		slog.Bool("tesla_stream_config_delete", fleet != nil),
 		slog.Bool("tesla_grant_revocation", len(grantOpts) > 0),
 	)
+}
+
+// newFleetConfigDeleter builds the Tesla-side fleet-telemetry-config deleter
+// shared by the per-vehicle teardown endpoint and the account-deletion sequence
+// (MYR-593). Returns a nil interface when no tesla-http-proxy is configured, so
+// tests/CI and proxy-less deployments make no outbound Tesla call at all — and
+// so the account-deletion handler can tell "not configured" from "configured
+// and it failed", which are very different lines in an operator's log.
+//
+// It targets the PROXY base URL rather than the direct Fleet API, matching
+// FleetAPIClient.DeleteTelemetryConfig's own doc: a DELETE carries no config
+// body to sign, so the proxy plain-forwards it to Tesla with the bearer token.
+func newFleetConfigDeleter(cfg *config.Config, logger *slog.Logger) telemetry.FleetConfigDeleter {
+	if cfg.Proxy().URL == "" {
+		return nil
+	}
+	return telemetry.NewFleetAPIClient(telemetry.FleetAPIConfig{
+		BaseURL:    cfg.Proxy().URL,
+		HTTPClient: proxyHTTPClient(cfg.Proxy().URL, logger),
+	}, logger.With(slog.String("subcomponent", "fleet")))
 }
 
 // newTeslaLinkRevoker builds the MYR-366 Tesla grant revoker shared by the

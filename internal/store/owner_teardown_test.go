@@ -79,8 +79,8 @@ func ensureTeardownSchema(t *testing.T) {
 	// The Go-owned namespace, from the migrations themselves rather than from a
 	// hand-copy: the teardown transaction touches go_ride_requests (0002),
 	// go_vehicle_shares (0020), go_removed_vehicles (0006) and, since MYR-592,
-	// go_vehicle_telemetry_suspensions (0044) — none of which the shared TestMain
-	// builds.
+	// go_vehicle_telemetry_suspensions (0044) and go_fleet_config_attempts
+	// (0031) — none of which the shared TestMain builds.
 	//
 	// Added with MYR-592, and it closes a PRE-EXISTING fragility rather than one
 	// this feature introduced: these tests already passed only because another
@@ -102,7 +102,8 @@ func cleanTeardownTables(t *testing.T) {
 	// mask-audit integration test installs the prevent-mutation triggers, so a
 	// DELETE would raise SQLSTATE P0001). Every audit assertion below filters
 	// by a per-test-unique userId/targetId, so residual rows never collide.
-	for _, tbl := range []string{`go_ride_requests`, `go_removed_vehicles`, `go_vehicle_telemetry_suspensions`, `"TripStop"`, `"Drive"`, `"Vehicle"`, `"Account"`, `"Settings"`, `"User"`} {
+	for _, tbl := range []string{`go_ride_requests`, `go_removed_vehicles`, `go_vehicle_telemetry_suspensions`,
+		`go_fleet_config_attempts`, `"TripStop"`, `"Drive"`, `"Vehicle"`, `"Account"`, `"Settings"`, `"User"`} {
 		if _, err := testPool.Exec(ctx, "DELETE FROM "+tbl); err != nil {
 			t.Fatalf("clean %s: %v", tbl, err)
 		}
@@ -606,6 +607,65 @@ func TestOwnerTeardown_ClearsTelemetrySuspension(t *testing.T) {
 	if n != 0 {
 		t.Errorf("suspension rows after teardown = %d, want 0 — an unlinked car must not leave a "+
 			"disconnection stamp behind it", n)
+	}
+}
+
+// TestOwnerTeardown_ClearsFleetConfigAttempts pins the MYR-593 sibling fix.
+//
+// Migration 0031's header has claimed since it landed that "a deleted car's row
+// is swept by the same DELETE path when the vehicle is torn down". No such
+// statement existed, in this transaction or anywhere else, so every torn-down
+// car that had ever failed a config push left its retry schedule behind — and
+// the table the migration calls self-draining was quietly accumulating a row
+// per removed car, forever. Same shape as the suspension row above: Go-owned,
+// keyed by vehicle id, no FK to cascade it (CG-DL-9), so the DELETE is explicit
+// or it does not happen.
+func TestOwnerTeardown_ClearsFleetConfigAttempts(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable")
+	}
+	ensureTeardownSchema(t)
+	cleanTeardownTables(t)
+
+	const userID, vehicleID, vin = "user_fca_td", "veh_fca_td", "5YJ3E1EA1PF000312"
+	const keptID, keptVIN = "veh_fca_keep", "5YJ3E1EA1PF000313"
+	seedOwnerUser(t, userID, "Owner", userID+"@example.com")
+	seedTeardownVehicle(t, vehicleID, userID, vin)
+	// A second car, so this is a mid-fleet removal and the assertion below can
+	// prove the DELETE is keyed on the removed vehicle rather than on the owner.
+	seedTeardownVehicle(t, keptID, userID, keptVIN)
+
+	ctx := context.Background()
+	for _, id := range []string{vehicleID, keptID} {
+		if _, err := testPool.Exec(ctx,
+			`INSERT INTO go_fleet_config_attempts (vehicle_id, attempt_count, last_outcome)
+			 VALUES ($1, 4, 'awaiting_virtual_key')`, id); err != nil {
+			t.Fatalf("seed fleet-config attempt for %s: %v", id, err)
+		}
+	}
+
+	if _, err := newTestTeardown().RemoveVehicle(ctx, userID, vehicleID); err != nil {
+		t.Fatalf("RemoveVehicle: %v", err)
+	}
+
+	var gone int
+	if err := testPool.QueryRow(ctx,
+		`SELECT count(*) FROM go_fleet_config_attempts WHERE vehicle_id = $1`, vehicleID).Scan(&gone); err != nil {
+		t.Fatalf("count attempts for the removed car: %v", err)
+	}
+	if gone != 0 {
+		t.Errorf("fleet-config attempt rows for the removed car = %d, want 0 — migration 0031 promises "+
+			"this sweep and the table is only self-draining if it happens", gone)
+	}
+
+	var kept int
+	if err := testPool.QueryRow(ctx,
+		`SELECT count(*) FROM go_fleet_config_attempts WHERE vehicle_id = $1`, keptID).Scan(&kept); err != nil {
+		t.Fatalf("count attempts for the kept car: %v", err)
+	}
+	if kept != 1 {
+		t.Errorf("fleet-config attempt rows for the KEPT car = %d, want 1 — the delete must be keyed on "+
+			"the removed vehicle, not on its owner", kept)
 	}
 }
 

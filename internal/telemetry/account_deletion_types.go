@@ -7,11 +7,52 @@ import "context"
 // endpoint's whole design is to COMPOSE the machinery the per-vehicle teardown
 // and the ride lifecycle already provide rather than to reimplement deletion.
 
-// AccountOwnedVehicleLister lists the vehicle ids a user owns, so the handler
-// can drive one existing per-vehicle teardown per car. Backed by
-// store.VehicleRepo.ListByUser.
+// AccountOwnedVehicleLister lists the vehicle ids a user owns. Backed by
+// store.VehicleRepo.ListByUser. Used by TeslaLinkRevoker's last-vehicle
+// pre-check; the deletion sequence itself needs VINs too and so reads through
+// AccountOwnedVehicleReader below.
 type AccountOwnedVehicleLister interface {
 	ListOwnedVehicleIDs(ctx context.Context, userID string) ([]string, error)
+}
+
+// OwnedVehicle is the two facts the deletion sequence needs about one owned
+// car: which row to tear down, and which VIN to stop streaming at Tesla.
+//
+// The VIN is here rather than resolved per-car later because the two uses must
+// come from ONE read. Listing the fleet twice — once to delete configs, once to
+// delete rows — would let a car added or removed between the two reads be
+// billed-but-not-torn-down, or torn down with its config left running, which is
+// the exact failure MYR-593 is about.
+type OwnedVehicle struct {
+	// ID is the Prisma "Vehicle"."id" cuid the teardown transaction is keyed on.
+	ID string
+	// VIN may be empty: the Prisma column is nullable, and a car linked but
+	// never synced has no VIN yet. An empty VIN has no Tesla-side config to
+	// delete and is skipped for that step alone — the row teardown still runs.
+	VIN string
+}
+
+// AccountOwnedVehicleReader lists the cars an account owns, id AND VIN, so the
+// deletion sequence can both stop them streaming at Tesla and tear down their
+// rows from a single view of the fleet. Backed by store.VehicleRepo.ListByUser
+// through the same adapter that serves AccountOwnedVehicleLister.
+type AccountOwnedVehicleReader interface {
+	ListOwnedVehicles(ctx context.Context, userID string) ([]OwnedVehicle, error)
+}
+
+// AccountStreamConfigDeleter stops ONE owned car streaming at Tesla, keyed by
+// the owner whose token authenticates the call. Satisfied by
+// *StreamConfigTeardown — the same value the per-vehicle teardown endpoint
+// holds, which is the point: MYR-593 was two implementations of "remove a
+// vehicle", one of which forgot Tesla.
+//
+// The bool is "did Tesla accept it". There is no error in the signature, for
+// the same reason AccountTeslaLinkRevoker has none: a value that cannot be
+// returned up the stack cannot accidentally fail somebody's account deletion.
+// Nil is legal and means the deployment has no tesla-http-proxy configured, so
+// there is no call to make.
+type AccountStreamConfigDeleter interface {
+	DeleteStreamConfig(ctx context.Context, userID, vin string) bool
 }
 
 // AccountRideCanceller lists the user's OPEN rides as RIDER and transitions
@@ -136,8 +177,13 @@ type AccountSessionInvalidator interface {
 // handler struct stays under the 7-field decomposition rule and so the
 // composition root names every seam explicitly at the call site.
 type AccountDeletionDeps struct {
-	// Vehicles lists the caller's owned cars (step 1).
-	Vehicles AccountOwnedVehicleLister
+	// Vehicles reads the caller's owned cars — id and VIN — once, for both the
+	// Tesla-side config delete and the row teardown.
+	Vehicles AccountOwnedVehicleReader
+	// StreamConfigs stops each owned car streaming at Tesla (MYR-593), before
+	// TeslaLink revokes the grant those calls authenticate with. Nil skips the
+	// step, which is the state of any deployment with no proxy configured.
+	StreamConfigs AccountStreamConfigDeleter
 	// TeslaLink revokes the caller's Tesla OAuth grant at Tesla before any
 	// step deletes the stored tokens (MYR-366). Nil skips the revoke.
 	TeslaLink AccountTeslaLinkRevoker

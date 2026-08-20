@@ -28,7 +28,17 @@ import (
 // atomicity the endpoint guarantees that every step is idempotent and the
 // whole sequence is RE-RUNNABLE:
 //
-//  1. Count drives (audit metadata only; a failure here is not fatal).
+//  1. Count drives (audit metadata only; a failure here is not fatal). Then,
+//     still inside step 1 and numbered 1b/1c in the code: read the owned fleet
+//     ONCE — id and VIN, so the two steps that follow agree on which cars they
+//     are about — and DELETE each of those cars' fleet-telemetry config AT
+//     TESLA (MYR-593), through the same StreamConfigTeardown the per-vehicle
+//     teardown endpoint uses. That config delete is the FIRST Tesla call of the
+//     sequence and has to be: step 2 revokes the grant and step 3 deletes the
+//     tokens, so after either there is nothing left to authenticate it with.
+//     Skipping it is a pure cost leak — the config outlives the account by up
+//     to 350 days, still streaming and still billing, and unreachable the
+//     moment the Vehicle row is gone.
 //  2. Revoke the Tesla OAuth grant AT TESLA (MYR-366), while the stored
 //     refresh token still exists to present. Best-effort and non-fatal:
 //     Tesla's availability must not be able to block a person's deletion of
@@ -130,6 +140,12 @@ func (h *AccountDeletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		slog.String("user_id", userID),
 		slog.Bool("already_gone", result.AlreadyGone),
 		slog.Int("vehicles_torn_down", result.Counts.VehicleCount),
+		// MYR-593. A COUNT only, and the one number in this line that is about
+		// MONEY rather than data: every owned car whose Tesla-side config this
+		// run did NOT remove keeps streaming and keeps billing until the
+		// config's 350-day exp, with no local row left to find it by. When it
+		// trails vehicles_torn_down, that gap is the leak.
+		slog.Int("tesla_stream_configs_deleted", result.StreamConfigsDeleted),
 		slog.Int("rides_cancelled", result.Counts.RidesCancelled),
 		slog.Int("shares_revoked", result.Counts.SharesRevoked),
 		slog.Int("push_devices_deleted", result.Counts.PushDevicesDeleted),
