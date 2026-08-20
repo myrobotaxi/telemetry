@@ -210,3 +210,129 @@ func TestOrphanFleetConfigAttempts(t *testing.T) {
 		}
 	})
 }
+
+// --- MYR-596: the legacy orphaned-tombstone purge --------------------------
+
+// tombstonePurgeFixture builds on orphanFixture and additionally clears the
+// three identity sources plus the convergence graph, because "orphaned" is
+// defined by the ABSENCE of a row in any of them.
+func tombstonePurgeFixture(t *testing.T) *store.FleetConfigOrphanRepo {
+	t.Helper()
+	repo := orphanFixture(t)
+	ctx := context.Background()
+	for _, stmt := range []string{
+		`DELETE FROM go_identity_convergence`,
+		`DELETE FROM go_identity_apple`,
+		`DELETE FROM go_users`,
+		`DELETE FROM "User"`,
+	} {
+		if _, err := testPool.Exec(ctx, stmt); err != nil {
+			t.Fatalf("clean (%s): %v", stmt, err)
+		}
+	}
+	return repo
+}
+
+func seedPurgeTombstone(t *testing.T, userID, teslaVehicleID, vin string) {
+	t.Helper()
+	if _, err := testPool.Exec(context.Background(), `
+		INSERT INTO go_removed_vehicles (user_id, tesla_vehicle_id, vin, removed_at)
+		VALUES ($1, $2, NULLIF($3, ''), NOW())`, userID, teslaVehicleID, vin); err != nil {
+		t.Fatalf("seed tombstone %s/%s: %v", userID, teslaVehicleID, err)
+	}
+}
+
+// TestFleetConfigOrphanRepo_OrphanedTombstonePurge is the predicate test, and
+// the arms that matter are the ones it must NOT delete.
+//
+// A tombstone is orphaned only when its user_id resolves nowhere. Each of the
+// four identity probes gets an arm here, because dropping any one of them turns
+// a live person's tombstone into a purge target — and a purged tombstone lets
+// that person's next Tesla sync resurrect a car they deliberately removed,
+// which is the MYR-261 bug arriving by a new road.
+func TestFleetConfigOrphanRepo_OrphanedTombstonePurge(t *testing.T) {
+	repo := tombstonePurgeFixture(t)
+	ctx := context.Background()
+
+	// The target: an account deleted before MYR-596 shipped. No identity row of
+	// any kind, no convergence edge, just the tombstones it left behind.
+	seedPurgeTombstone(t, "cghost0000000000000000001", "tesla_ghost_a", "5YJ3E1EA1JF000101")
+	seedPurgeTombstone(t, "cghost0000000000000000001", "tesla_ghost_b", "5YJ3E1EA1JF000102")
+
+	// Four survivors, one per identity probe.
+	seedPurgeTombstone(t, "clegacy000000000000000001", "tesla_legacy", "5YJ3E1EA1JF000103")
+	if _, err := testPool.Exec(ctx,
+		`INSERT INTO "User" ("id", "updatedAt") VALUES ($1, NOW())`,
+		"clegacy000000000000000001"); err != nil {
+		t.Fatalf("seed User: %v", err)
+	}
+
+	seedPurgeTombstone(t, "capple0000000000000000001", "tesla_apple", "5YJ3E1EA1JF000104")
+	if _, err := testPool.Exec(ctx,
+		`INSERT INTO go_users (id) VALUES ($1)`, "capple0000000000000000001"); err != nil {
+		t.Fatalf("seed go_users: %v", err)
+	}
+
+	seedPurgeTombstone(t, "cbound0000000000000000001", "tesla_bound", "5YJ3E1EA1JF000105")
+	if _, err := testPool.Exec(ctx,
+		`INSERT INTO go_identity_apple (apple_sub, user_id) VALUES ($1, $2)`,
+		"apple-sub-bound", "cbound0000000000000000001"); err != nil {
+		t.Fatalf("seed go_identity_apple: %v", err)
+	}
+
+	// THE IMPORTANT ONE. A converged person's ABANDONED cuid: their Apple
+	// binding and go_users row moved to the canonical id, so this id carries no
+	// identity row of its own — and its tombstones are still a LIVE person's
+	// (MYR-452). Only the convergence edge distinguishes it from the ghost above.
+	seedPurgeTombstone(t, "cabandoned000000000000001", "tesla_abandoned", "5YJ3E1EA1JF000106")
+	if _, err := testPool.Exec(ctx,
+		`INSERT INTO go_identity_convergence (from_user_id, to_user_id) VALUES ($1, $2)`,
+		"cabandoned000000000000001", "ccanonical00000000000001"); err != nil {
+		t.Fatalf("seed go_identity_convergence: %v", err)
+	}
+
+	n, err := repo.CountOrphanedTombstones(ctx)
+	if err != nil {
+		t.Fatalf("CountOrphanedTombstones: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("counted %d orphaned tombstone(s), want 2 (the ghost's pair only)", n)
+	}
+
+	deleted, err := repo.PurgeOrphanedTombstones(ctx)
+	if err != nil {
+		t.Fatalf("PurgeOrphanedTombstones: %v", err)
+	}
+	if deleted != 2 {
+		t.Fatalf("purged %d row(s), want 2", deleted)
+	}
+
+	for _, survivor := range []string{
+		"clegacy000000000000000001",
+		"capple0000000000000000001",
+		"cbound0000000000000000001",
+		"cabandoned000000000000001",
+	} {
+		if got := countQuery(t,
+			`SELECT count(*) FROM go_removed_vehicles WHERE user_id = $1`, survivor); got != 1 {
+			t.Errorf("tombstone for %s was purged (%d left, want 1)", survivor, got)
+		}
+	}
+	if got := countQuery(t,
+		`SELECT count(*) FROM go_removed_vehicles WHERE user_id = $1`,
+		"cghost0000000000000000001"); got != 0 {
+		t.Errorf("%d ghost tombstone(s) survived the purge", got)
+	}
+
+	// Idempotent: a second pass finds none and removes none.
+	again, err := repo.PurgeOrphanedTombstones(ctx)
+	if err != nil {
+		t.Fatalf("re-purge: %v", err)
+	}
+	if again != 0 {
+		t.Fatalf("re-purge removed %d row(s), want 0", again)
+	}
+	if n, err := repo.CountOrphanedTombstones(ctx); err != nil || n != 0 {
+		t.Fatalf("re-count = %d (err %v), want 0", n, err)
+	}
+}

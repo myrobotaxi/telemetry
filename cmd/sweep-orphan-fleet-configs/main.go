@@ -27,11 +27,27 @@
 // So read `deleted` / `would_delete` alongside `unreachable_no_token`. The
 // second number is the part of the leak that stays open.
 //
+// SINCE MYR-596 THAT SECOND NUMBER ALSO SHRINKS FOR THE WRONG REASON, and this
+// is the paragraph to read before comparing two runs. Step 8e of the account
+// deletion sequence now removes a person's go_removed_vehicles tombstones along
+// with their account. Source A below is those tombstones. So for every account
+// deleted from MYR-596 onward, its VINs never enter this report AT ALL — not as
+// `unreachable_no_token`, not as anything. Nothing changed about the leak: a
+// config whose owner is deleted was never reachable from here and still is not.
+// What changed is that this tool stopped being able to NAME it. A falling
+// `unreachable_no_token` is therefore no longer evidence of progress.
+//
+// Accounts deleted BEFORE MYR-596 shipped still have their tombstones, and that
+// backlog is finite and closed — nothing adds to it. `-purge-orphan-tombstones`
+// clears it (see the flag section below).
+//
 // ── WHAT IT LOOKS AT ────────────────────────────────────────────────────────
 //
 //	A. go_removed_vehicles tombstones (migration 0006) carrying a VIN that no
 //	   "Vehicle" row claims. The tombstone's user_id is the only handle on a
-//	   token — if that account is gone, so is the token.
+//	   token — if that account is gone, so is the token. Since MYR-596 a
+//	   DELETED account leaves no tombstone at all, so this source now sees only
+//	   live owners' removals plus the pre-MYR-596 backlog.
 //	B. For every user with a Tesla "Account" row: GET /api/1/vehicles, diffed
 //	   against the VINs we hold for them. The genuinely reachable set.
 //	C. go_fleet_config_attempts rows (migration 0031) whose vehicle_id matches
@@ -65,6 +81,33 @@
 // could be built the run downgrades itself back to a dry run rather than
 // reporting deletions that did not happen.
 //
+// ── -purge-orphan-tombstones: THE MYR-596 LEGACY BACKLOG ────────────────────
+//
+// `go_removed_vehicles` rows whose `user_id` resolves to NO identity source —
+// no "User", no go_users, no go_identity_apple, no convergence edge — belong to
+// accounts deleted before MYR-596's step 8e existed. Each is a (cuid, VIN) pair
+// naming a person who is gone. `-purge-orphan-tombstones` counts them; with
+// `-apply` it deletes them. It is opt-in and is NOT implied by `-apply`.
+//
+// IT IS OPT-IN BECAUSE IT COSTS SOMETHING. Those rows are source A. Purging
+// them means this tool can never again name the VINs of already-deleted owners,
+// so `unreachable_no_token` drops to whatever the LIVE owners contribute. The
+// configs are no more and no less unreachable than they were — there is no
+// token either way — but the visibility is gone for good.
+//
+// So the sequence to run is: a plain dry run FIRST, keep the JSON (it carries
+// the full VINs), then purge. The purge deliberately runs LAST within a single
+// invocation for the same reason — every VIN the run could see is already in
+// the report by the time the rows naming them are removed — so
+// `-apply -purge-orphan-tombstones` in one go is safe, provided the stdout
+// report is kept.
+//
+// The predicate deliberately spares a CONVERGED person's abandoned cuid, which
+// can hold tombstones while carrying no identity row of its own (MYR-452).
+// Deleting those would let a live owner's next Tesla sync resurrect a car they
+// removed — the MYR-261 bug, reinstated. See
+// internal/store/orphan_tombstone_purge.go.
+//
 // ── WHICH BASE URL THE DELETE USES, AND WHY ─────────────────────────────────
 //
 // All three Tesla calls (list, config read, config delete) go to the DIRECT
@@ -97,6 +140,8 @@
 //	sweep-orphan-fleet-configs                # DRY RUN (default): report only
 //	sweep-orphan-fleet-configs -apply         # delete what it can reach
 //	sweep-orphan-fleet-configs -max-tombstones 50
+//	sweep-orphan-fleet-configs -purge-orphan-tombstones          # count the backlog
+//	sweep-orphan-fleet-configs -apply -purge-orphan-tombstones   # and clear it
 //
 // Exit codes:
 //
@@ -148,6 +193,10 @@ func run() int {
 		"actually delete. Default is a dry run that writes nothing and issues no Tesla DELETE.")
 	maxTombstones := flag.Int("max-tombstones", 0,
 		"cap the removed-vehicle tombstone read (0 = package default).")
+	purgeOrphanTombstones := flag.Bool("purge-orphan-tombstones", false,
+		"also clear the MYR-596 legacy backlog: go_removed_vehicles rows whose owner no longer "+
+			"exists in any identity source. Counted on a dry run, deleted under -apply. "+
+			"READ THE HEADER: this destroys source A, so those VINs stop being reported at all.")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -169,8 +218,9 @@ func run() int {
 	}
 
 	rep, runErr := fleetorphan.New(deps, fleetorphan.Config{
-		Apply:         *apply,
-		MaxTombstones: *maxTombstones,
+		Apply:                 *apply,
+		MaxTombstones:         *maxTombstones,
+		PurgeOrphanTombstones: *purgeOrphanTombstones,
 	}, logger).Run(ctx)
 	if runErr != nil {
 		fmt.Fprintf(os.Stderr, "sweep-orphan-fleet-configs: %s\n", runErr)
