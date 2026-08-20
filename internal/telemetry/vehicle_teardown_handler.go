@@ -22,10 +22,13 @@ import (
 //     GetByID; the caller MUST own the vehicle (enforced here AND, defensively,
 //     at the SQL layer inside the teardown writer).
 //  2. Resolve the Tesla token (best-effort). If absent, skip step 3.
-//  3. Best-effort DELETE fleet_telemetry_config at Tesla (non-fatal — the local
-//     teardown is authoritative and a stale config self-expires while our
-//     receiver rejects the stream regardless). Skipped for an empty VIN or when
-//     no config-deleter is wired (tests/CI, or no proxy configured).
+//  3. Best-effort DELETE fleet_telemetry_config at Tesla, through the shared
+//     StreamConfigTeardown (non-fatal — the local teardown is authoritative and
+//     a stale config self-expires while our receiver rejects the stream
+//     regardless). Skipped for an empty VIN or when no config-deleter is wired
+//     (tests/CI, or no proxy configured). SHARED, since MYR-593, with the
+//     account-deletion sequence, which tears down the same cars through the
+//     same store transaction and used to skip this step entirely.
 //     3a. ON A LAST-VEHICLE REMOVAL ONLY: best-effort POST to Tesla's OAuth
 //     revocation endpoint, killing the grant itself (MYR-366). It runs HERE,
 //     before step 4, because step 4 deletes the refresh token the call needs.
@@ -46,10 +49,13 @@ import (
 type VehicleTeardownHandler struct {
 	auth     tokenValidator
 	vehicles VehicleSnapshotReader
-	tokens   teslaTokenResolver
-	fleet    FleetConfigDeleter // nil disables the Tesla-side config delete
-	teardown VehicleTeardownWriter
-	cfg      VehicleTeardownConfig
+	// streamConfig is the shared MYR-593 Tesla-side config delete, held by this
+	// handler AND by the account-deletion sequence so the two severing paths
+	// cannot mean different things by "remove a vehicle". Never nil; it reports
+	// a skip when no deleter or token source was wired.
+	streamConfig *StreamConfigTeardown
+	teardown     VehicleTeardownWriter
+	cfg          VehicleTeardownConfig
 	// grant actively revokes the Tesla OAuth grant on a last-vehicle removal
 	// (MYR-366). Optional — nil when no Tesla OAuth client is configured, in
 	// which case the tokens are simply deleted without a revoke call, exactly
@@ -88,13 +94,12 @@ func NewVehicleTeardownHandler(
 	opts ...VehicleTeardownOption,
 ) *VehicleTeardownHandler {
 	h := &VehicleTeardownHandler{
-		auth:     auth,
-		vehicles: vehicles,
-		tokens:   tokens,
-		fleet:    fleet,
-		teardown: teardown,
-		cfg:      cfg,
-		logger:   logger,
+		auth:         auth,
+		vehicles:     vehicles,
+		streamConfig: NewStreamConfigTeardown(fleet, tokens, logger),
+		teardown:     teardown,
+		cfg:          cfg,
+		logger:       logger,
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -142,7 +147,7 @@ func (h *VehicleTeardownHandler) handle(w http.ResponseWriter, r *http.Request) 
 
 	// Best-effort Tesla-side stream-config delete (must run before the token is
 	// cleared). Non-fatal — the local teardown is authoritative.
-	streamConfigDeleted := h.deleteStreamConfig(ctx, userID, vin)
+	streamConfigDeleted := h.streamConfig.DeleteStreamConfig(ctx, userID, vin)
 
 	// Best-effort active revocation of the Tesla OAuth grant, on a last-vehicle
 	// removal only. Also before the teardown, and for a sharper reason: the
@@ -225,36 +230,6 @@ func (h *VehicleTeardownHandler) resolveOwnedVIN(ctx context.Context, w http.Res
 	}
 
 	return row.VIN, true
-}
-
-// deleteStreamConfig best-effort deletes the vehicle's Tesla telemetry config.
-// Returns whether the delete succeeded. Never fails the request: a missing
-// token, empty VIN, unwired deleter, or a Tesla error are all logged and
-// swallowed (car-offboarding.md §5.2).
-func (h *VehicleTeardownHandler) deleteStreamConfig(ctx context.Context, userID, vin string) bool {
-	if h.fleet == nil || vin == "" {
-		return false
-	}
-
-	tok, err := h.tokens.Resolve(ctx, userID)
-	if err != nil {
-		h.logger.Warn("vehicle teardown: no Tesla token — skipping stream-config delete",
-			slog.String("user_id", userID),
-			slog.String("vin", redactVIN(vin)),
-		)
-		return false
-	}
-
-	if err := h.fleet.DeleteTelemetryConfig(ctx, tok.AccessToken, vin); err != nil {
-		// Non-fatal: the local teardown still removes the owner's data, and a
-		// stale config self-expires while our receiver rejects the stream.
-		h.logger.Warn("vehicle teardown: stream-config delete failed (non-fatal)",
-			slog.String("vin", redactVIN(vin)),
-			slog.String("error", err.Error()),
-		)
-		return false
-	}
-	return true
 }
 
 // revokeTeslaGrant best-effort revokes the owner's Tesla OAuth grant when this
