@@ -132,6 +132,14 @@ func (a *accountDataDeleterAdapter) DeleteTeslaTokenKeepalive(ctx context.Contex
 	return a.deleter.DeleteTeslaTokenKeepalive(ctx, userID)
 }
 
+// DeleteRemovedVehicleTombstones drops the account's removed-vehicle tombstones
+// (MYR-596, §3.1 step 8e), which guard a live account's next Tesla sync and
+// guard nothing once the account is gone. Ordered after the per-vehicle
+// teardown, which writes one per car.
+func (a *accountDataDeleterAdapter) DeleteRemovedVehicleTombstones(ctx context.Context, userID string) (int, error) {
+	return a.deleter.DeleteRemovedVehicleTombstones(ctx, userID)
+}
+
 func (a *accountDataDeleterAdapter) RevokeRefreshTokens(ctx context.Context, userID string) (int, error) {
 	return a.deleter.RevokeRefreshTokens(ctx, userID)
 }
@@ -162,6 +170,7 @@ func (a *accountDataDeleterAdapter) DeleteIdentity(ctx context.Context, scope te
 		ProfileNameConfirmationsDeleted: counts.ProfileNameConfirmationsDeleted,
 		UserActivityRowsDeleted:         counts.UserActivityRowsDeleted,
 		TeslaTokenKeepaliveRowsDeleted:  counts.TeslaTokenKeepaliveRowsDeleted,
+		RemovedVehicleTombstonesDeleted: counts.RemovedVehicleTombstonesDeleted,
 	})
 	if err != nil {
 		return telemetry.AccountIdentityOutcome{}, err

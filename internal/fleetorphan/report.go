@@ -98,6 +98,12 @@ type Store interface {
 	ListVehicleVINsByUser(ctx context.Context, userID string) ([]string, error)
 	ListOrphanFleetConfigAttempts(ctx context.Context) ([]string, error)
 	DeleteFleetConfigAttempts(ctx context.Context, vehicleIDs []string) (int64, error)
+	// CountOrphanedTombstones / PurgeOrphanedTombstones cover the MYR-596
+	// legacy backlog: go_removed_vehicles rows whose user_id resolves to no
+	// identity at all, left behind by accounts deleted before step 8e existed.
+	// Opt-in — see Config.PurgeOrphanTombstones.
+	CountOrphanedTombstones(ctx context.Context) (int64, error)
+	PurgeOrphanedTombstones(ctx context.Context) (int64, error)
 }
 
 // FleetLister enumerates a Tesla account's vehicles.
@@ -157,6 +163,22 @@ type AttemptsReport struct {
 	Deleted int64 `json:"deleted"`
 }
 
+// TombstonePurgeReport covers the MYR-596 legacy backlog: go_removed_vehicles
+// rows belonging to accounts that were deleted before step 8e of the deletion
+// sequence started taking them. Opt-in, and reported even when it did nothing
+// so the report's shape does not change between runs.
+type TombstonePurgeReport struct {
+	// Requested is true when -purge-orphan-tombstones was passed. When false
+	// the two numbers below are zero and mean nothing was looked at, which is
+	// NOT the same as "there were none".
+	Requested bool `json:"requested"`
+	// Orphaned is how many rows matched the orphan predicate — the size of the
+	// backlog, counted whether or not it was then deleted.
+	Orphaned int64 `json:"orphaned"`
+	// Deleted is how many were removed. Always 0 on a dry run.
+	Deleted int64 `json:"deleted"`
+}
+
 // Report is the whole run.
 type Report struct {
 	// DryRun is true when nothing was written and no DELETE was issued.
@@ -168,6 +190,9 @@ type Report struct {
 	VINs []VINOutcome `json:"vins"`
 	// Attempts is the source-C result.
 	Attempts AttemptsReport `json:"attempts"`
+	// Tombstones is the MYR-596 legacy-backlog purge, which runs LAST so the
+	// VINs above are reported before the rows naming them are removed.
+	Tombstones TombstonePurgeReport `json:"tombstones"`
 	// Errors are run-scoped failures that are not attributable to one VIN —
 	// a candidate enumeration that failed, an owner whose fleet list errored.
 	// VIN-scrubbed and length-capped like Detail. Their presence means the

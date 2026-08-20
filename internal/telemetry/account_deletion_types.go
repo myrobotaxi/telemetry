@@ -95,6 +95,11 @@ type AccountDataDeleter interface {
 	// (MYR-594, data-lifecycle.md §3.1 step 8d). P0 hygiene rather than an
 	// erasure obligation; see the store query for why it goes regardless.
 	DeleteTeslaTokenKeepalive(ctx context.Context, userID string) (int, error)
+	// DeleteRemovedVehicleTombstones drops the account's removed-vehicle
+	// tombstones (MYR-596, data-lifecycle.md §3.1 step 8e). It is the ONE
+	// position-constrained member of the 8-family: the per-vehicle teardown
+	// writes a tombstone per car, so this must run after it.
+	DeleteRemovedVehicleTombstones(ctx context.Context, userID string) (int, error)
 	DeleteRideMemberships(ctx context.Context, userID string) (int, error)
 	RevokeRefreshTokens(ctx context.Context, userID string) (int, error)
 	DeleteIdentity(ctx context.Context, scope AccountDeletionScope, counts AccountDeletionCounts) (AccountIdentityOutcome, error)
@@ -147,6 +152,10 @@ type AccountDeletionCounts struct {
 	// removed (MYR-594). 0 for every account the keepalive arm never tried,
 	// which is almost all of them.
 	TeslaTokenKeepaliveRowsDeleted int
+	// RemovedVehicleTombstonesDeleted counts the removed-vehicle tombstones
+	// removed (MYR-596) — one per car this person ever removed, 0 for the
+	// large majority who never removed one.
+	RemovedVehicleTombstonesDeleted int
 	// RideMembershipsDeleted counts the GROUP-RIDE memberships the account
 	// held (MYR-540) — the rides they JOINED, as against RidesCancelled, the
 	// rides they BOOKED.

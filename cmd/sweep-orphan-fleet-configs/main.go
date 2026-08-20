@@ -1,107 +1,8 @@
-// Binary sweep-orphan-fleet-configs is MYR-593's one-off operator sweep for
-// Tesla fleet-telemetry configs whose local "Vehicle" row no longer exists.
-//
-// Tesla bills fleet-telemetry PER VEHICLE and a config's `exp` is 350 days, so
-// a config left behind by a car we deleted keeps costing money and streams to a
-// receiver that rejects it. MYR-593 makes the teardown delete the Tesla-side
-// config going forward; this clears the backlog that predates it.
-//
-// ── READ THIS BEFORE YOU BELIEVE THE OUTPUT ─────────────────────────────────
-//
-// THERE IS NO PARTNER TOKEN IN THIS CODEBASE. Every FleetAPIClient call
-// authenticates with a per-call OAuth2 OWNER bearer token; there is no
-// client_credentials grant and no partner_accounts call anywhere in the repo.
-// The consequence is blunt:
-//
-//   - A config belonging to an account we have ALREADY DELETED is NOT reachable
-//     by this tool. The tokens that could authenticate the DELETE were
-//     destroyed with the account. Those VINs are reported `unreachable_no_token`
-//     and they will keep streaming and billing until their 350-day exp lapses.
-//     Nothing in this binary can change that. Fixing it would need a Tesla
-//     partner token, which we do not have and do not obtain here.
-//   - What this tool CAN reach: VINs whose owner still has a live Tesla link —
-//     mid-fleet car removals where the Tesla-side delete failed or was skipped,
-//     and cars provisioned then removed. Plus the DB-only
-//     go_fleet_config_attempts garbage, which needs no token at all.
-//
-// So read `deleted` / `would_delete` alongside `unreachable_no_token`. The
-// second number is the part of the leak that stays open.
-//
-// ── WHAT IT LOOKS AT ────────────────────────────────────────────────────────
-//
-//	A. go_removed_vehicles tombstones (migration 0006) carrying a VIN that no
-//	   "Vehicle" row claims. The tombstone's user_id is the only handle on a
-//	   token — if that account is gone, so is the token.
-//	B. For every user with a Tesla "Account" row: GET /api/1/vehicles, diffed
-//	   against the VINs we hold for them. The genuinely reachable set.
-//	C. go_fleet_config_attempts rows (migration 0031) whose vehicle_id matches
-//	   no "Vehicle"."id". No VIN, so no Tesla call — pure DB garbage, deleted
-//	   under -apply. This half runs FIRST and completes even if Tesla is
-//	   unreachable.
-//
-// ── PER-VIN LABELS ──────────────────────────────────────────────────────────
-//
-//	would_delete          a config exists; -apply would remove it
-//	deleted               the DELETE succeeded
-//	no_config             Tesla reports nothing configured (or 404s)
-//	unreachable_no_token  the owner has no Tesla "Account" row — see above
-//	failed                Tesla or the token path errored; never aborts the run
-//
-// An EXPIRED-but-unrefreshable token is `failed`, not `unreachable_no_token`:
-// a refresh failure can be transient or Tesla-side and is worth retrying,
-// whereas a missing account row is permanent. Don't conflate the two.
-//
-// ── VIN REDACTION ───────────────────────────────────────────────────────────
-//
-// The slog lines on stderr carry redacted VINs (last 4, data-classification.md
-// §2.1). The JSON report on stdout carries FULL VINs: this is an operator
-// artifact run by hand against production, and a redacted tail cannot be acted
-// on. Treat the report as P1 and don't paste it into a ticket.
-//
-// ── DRY RUN BY DEFAULT ──────────────────────────────────────────────────────
-//
-// The default run writes NOTHING and issues no Tesla DELETE — the reads are the
-// point. -apply is the only thing that changes that, and if no config deleter
-// could be built the run downgrades itself back to a dry run rather than
-// reporting deletions that did not happen.
-//
-// ── WHICH BASE URL THE DELETE USES, AND WHY ─────────────────────────────────
-//
-// All three Tesla calls (list, config read, config delete) go to the DIRECT
-// Fleet API base, not through the tesla-http-proxy. The server sends its
-// DELETE through the proxy, but FleetAPIClient.DeleteTelemetryConfig's own doc
-// explains why that is incidental: a DELETE carries no config body to sign, so
-// the proxy plain-forwards it to Tesla with the bearer token, unmodified.
-// Going direct is the same request with one hop fewer. It also means this
-// binary needs no TESLA_PROXY_URL and no loopback-TLS exception — which
-// matters, because the proxy is a sidecar next to the server and an operator
-// running this from a laptop cannot reach it.
-//
-// Configuration is env-driven, matching the running telemetry-server:
-//
-//	DATABASE_URL          Postgres connection string (required)
-//	DATABASE_DISABLE_PREPARED_STATEMENTS
-//	                      "true" for PgBouncer (Supabase 6543); auto-detected
-//	                      when the URL contains :6543
-//	ENCRYPTION_KEY        base64(32B) — REQUIRED. Tesla tokens are stored as
-//	                      AES-256-GCM ciphertext and there is no plaintext
-//	                      fallback (MYR-433), so without the key every VIN
-//	                      reports unreachable_no_token and the run is a lie.
-//	                      ENCRYPTION_KEY_V<N> versioned form also works.
-//	FLEET_API_BASE_URL    optional; defaults to the NA prod Fleet API
-//	AUTH_TESLA_ID         optional; with AUTH_TESLA_SECRET, enables OAuth
-//	AUTH_TESLA_SECRET     refresh so expired-but-refreshable tokens still work
-//
-// Usage:
-//
-//	sweep-orphan-fleet-configs                # DRY RUN (default): report only
-//	sweep-orphan-fleet-configs -apply         # delete what it can reach
-//	sweep-orphan-fleet-configs -max-tombstones 50
-//
-// Exit codes:
-//
-//	0  the sweep ran (per-VIN failures are IN the report, not in this code)
-//	2  fatal — config, DB, or a sweep that could not start
+// The sweep binary itself. Its full operator documentation — the honest
+// limits, the per-VIN labels, the flags and the environment — is the package
+// comment in doc.go, split out for the 300-line file cap. READ IT before
+// acting on this tool's output.
+
 package main
 
 import (
@@ -148,6 +49,10 @@ func run() int {
 		"actually delete. Default is a dry run that writes nothing and issues no Tesla DELETE.")
 	maxTombstones := flag.Int("max-tombstones", 0,
 		"cap the removed-vehicle tombstone read (0 = package default).")
+	purgeOrphanTombstones := flag.Bool("purge-orphan-tombstones", false,
+		"also clear the MYR-596 legacy backlog: go_removed_vehicles rows whose owner no longer "+
+			"exists in any identity source. Counted on a dry run, deleted under -apply. "+
+			"READ THE HEADER: this destroys source A, so those VINs stop being reported at all.")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -169,8 +74,9 @@ func run() int {
 	}
 
 	rep, runErr := fleetorphan.New(deps, fleetorphan.Config{
-		Apply:         *apply,
-		MaxTombstones: *maxTombstones,
+		Apply:                 *apply,
+		MaxTombstones:         *maxTombstones,
+		PurgeOrphanTombstones: *purgeOrphanTombstones,
 	}, logger).Run(ctx)
 	if runErr != nil {
 		fmt.Fprintf(os.Stderr, "sweep-orphan-fleet-configs: %s\n", runErr)

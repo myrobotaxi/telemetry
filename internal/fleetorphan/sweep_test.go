@@ -29,6 +29,14 @@ type fakeStore struct {
 	orphanAttemptsErr error
 	deleted           []string
 	deleteErr         error
+
+	// MYR-596 legacy backlog. orphanTombstones is the count the predicate
+	// matches; purgedTombstones records that the DELETE actually ran, which is
+	// what separates "counted on a dry run" from "cleared under -apply".
+	orphanTombstones    int64
+	orphanTombstonesErr error
+	purgedTombstones    int
+	purgeTombstonesErr  error
 }
 
 func (f *fakeStore) ListTombstonedOrphanVINs(_ context.Context, _ int) ([]TombstonedOrphan, error) {
@@ -56,6 +64,20 @@ func (f *fakeStore) DeleteFleetConfigAttempts(_ context.Context, ids []string) (
 	}
 	f.deleted = append(f.deleted, ids...)
 	return int64(len(ids)), nil
+}
+
+func (f *fakeStore) CountOrphanedTombstones(_ context.Context) (int64, error) {
+	return f.orphanTombstones, f.orphanTombstonesErr
+}
+
+func (f *fakeStore) PurgeOrphanedTombstones(_ context.Context) (int64, error) {
+	if f.purgeTombstonesErr != nil {
+		return 0, f.purgeTombstonesErr
+	}
+	f.purgedTombstones++
+	n := f.orphanTombstones
+	f.orphanTombstones = 0 // idempotent: a re-run finds none
+	return n, nil
 }
 
 type fakeFleet struct {
@@ -359,6 +381,118 @@ func TestApplyWithoutADeleterDowngradesToADryRun(t *testing.T) {
 	}
 	if len(st.deleted) != 0 {
 		t.Fatalf("the DB half wrote anyway: %v", st.deleted)
+	}
+}
+
+// --- MYR-596 legacy tombstone backlog --------------------------------------
+
+// The purge is OPT-IN. -apply alone must not touch go_removed_vehicles: those
+// rows are source A, and destroying an operator's only handle on a deleted
+// owner's VINs is not something the ordinary cleanup run should do silently.
+func TestOrphanTombstonesAreUntouchedWithoutTheFlag(t *testing.T) {
+	st := &fakeStore{orphanTombstones: 7, orphanAttempts: []string{"veh_dead_1"}}
+	s := New(Deps{Store: st, Fleet: &fakeFleet{}, Reader: &fakeTesla{}, Deleter: &fakeTesla{}, Tokens: &fakeTokens{}},
+		Config{Apply: true}, nil)
+
+	rep, err := s.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Tombstones.Requested {
+		t.Fatal("Tombstones.Requested = true without -purge-orphan-tombstones")
+	}
+	if st.purgedTombstones != 0 {
+		t.Fatalf("the purge ran %d time(s) unasked", st.purgedTombstones)
+	}
+	if rep.Tombstones.Orphaned != 0 || rep.Tombstones.Deleted != 0 {
+		t.Fatalf("Tombstones = %+v, want zeroes when not requested", rep.Tombstones)
+	}
+}
+
+// Requested but not applied: count the backlog, write nothing. This is the run
+// an operator should do first, because the JSON it produces is the last record
+// of those VINs that will ever exist.
+func TestOrphanTombstonesAreOnlyCountedOnADryRun(t *testing.T) {
+	st := &fakeStore{orphanTombstones: 7}
+	s := New(Deps{Store: st, Fleet: &fakeFleet{}, Reader: &fakeTesla{}, Deleter: &fakeTesla{}, Tokens: &fakeTokens{}},
+		Config{PurgeOrphanTombstones: true}, nil)
+
+	rep, err := s.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !rep.Tombstones.Requested || rep.Tombstones.Orphaned != 7 {
+		t.Fatalf("Tombstones = %+v, want requested with 7 orphans", rep.Tombstones)
+	}
+	if rep.Tombstones.Deleted != 0 || st.purgedTombstones != 0 {
+		t.Fatalf("a dry run deleted %d rows (store purges: %d)", rep.Tombstones.Deleted, st.purgedTombstones)
+	}
+}
+
+// Under -apply the backlog goes, and a re-run finds nothing — the idempotency
+// every step of this program depends on.
+func TestApplyWithTheFlagClearsTheTombstoneBacklog(t *testing.T) {
+	st := &fakeStore{orphanTombstones: 7}
+	deps := Deps{Store: st, Fleet: &fakeFleet{}, Reader: &fakeTesla{}, Deleter: &fakeTesla{}, Tokens: &fakeTokens{}}
+	cfg := Config{Apply: true, PurgeOrphanTombstones: true}
+
+	rep, err := New(deps, cfg, nil).Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Tombstones.Orphaned != 7 || rep.Tombstones.Deleted != 7 {
+		t.Fatalf("Tombstones = %+v, want 7 found and 7 deleted", rep.Tombstones)
+	}
+
+	again, err := New(deps, cfg, nil).Run(context.Background())
+	if err != nil {
+		t.Fatalf("re-run: %v", err)
+	}
+	if again.Tombstones.Orphaned != 0 || again.Tombstones.Deleted != 0 {
+		t.Fatalf("re-run Tombstones = %+v, want zeroes", again.Tombstones)
+	}
+}
+
+// The purge runs LAST, so a report that names a VIN is produced before the row
+// naming it is removed. Pinned by asserting the VIN pass still populated the
+// report in the very run that emptied the table.
+func TestTombstonePurgeRunsAfterTheVINPass(t *testing.T) {
+	st := &fakeStore{
+		tombstones:       []TombstonedOrphan{{UserID: "gone", VIN: vinA}},
+		orphanTombstones: 1,
+	}
+	s := New(Deps{Store: st, Fleet: &fakeFleet{}, Reader: &fakeTesla{}, Deleter: &fakeTesla{}, Tokens: &fakeTokens{}},
+		Config{Apply: true, PurgeOrphanTombstones: true}, nil)
+
+	rep, err := s.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Tombstones.Deleted != 1 {
+		t.Fatalf("Tombstones.Deleted = %d, want 1", rep.Tombstones.Deleted)
+	}
+	// The whole point: the VIN is still IN the report the purge ran inside of.
+	if outcomeFor(t, rep, vinA).Outcome != OutcomeUnreachableNoToken {
+		t.Fatalf("vinA = %+v, want it reported before its tombstone went", outcomeFor(t, rep, vinA))
+	}
+}
+
+// A purge failure is a report line, never a fatal — the VIN work above it is
+// worth returning whatever the database did.
+func TestTombstonePurgeFailureIsReportedNotFatal(t *testing.T) {
+	st := &fakeStore{orphanTombstones: 3, purgeTombstonesErr: errors.New("db down")}
+	s := New(Deps{Store: st, Fleet: &fakeFleet{}, Reader: &fakeTesla{}, Deleter: &fakeTesla{}, Tokens: &fakeTokens{}},
+		Config{Apply: true, PurgeOrphanTombstones: true}, nil)
+
+	rep, err := s.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run must not fail on a purge error: %v", err)
+	}
+	if rep.Tombstones.Deleted != 0 {
+		t.Fatalf("Tombstones.Deleted = %d after a failed purge", rep.Tombstones.Deleted)
+	}
+	if len(rep.Errors) == 0 {
+		t.Fatal("a failed purge must be reported")
 	}
 }
 

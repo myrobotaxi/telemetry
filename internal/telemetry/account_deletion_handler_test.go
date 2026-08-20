@@ -60,14 +60,46 @@ func (f *fakeOwnedVehicleLister) vinFor(id string) string {
 	return vin[:17]
 }
 
+// fakeTombstoneTable stands in for go_removed_vehicles, and it is shared BY
+// POINTER between the teardown fake and the data fake on purpose (MYR-596).
+//
+// It is the only way to test step 8e's ordering constraint at this level. The
+// real per-vehicle teardown WRITES a tombstone for each car it removes, in the
+// same transaction as the Vehicle delete (§1.4.1), so the purge is correct only
+// downstream of it. One shared map reproduces exactly that: move the purge
+// above the teardown and the table is refilled car-for-car, which is what
+// TestAccountDeletion_RemovedVehicleTombstonesGoAfterTheTeardown catches.
+//
+// Nil is the default everywhere else, so the existing cases keep the simple
+// counter semantics every other step's fake uses.
+type fakeTombstoneTable struct {
+	rows map[string]bool
+}
+
+func newFakeTombstoneTable() *fakeTombstoneTable {
+	return &fakeTombstoneTable{rows: map[string]bool{}}
+}
+
+// write is the teardown's half: one row per car removed.
+func (t *fakeTombstoneTable) write(vehicleID string) { t.rows[vehicleID] = true }
+
+// purge is step 8e's half, and it reports the row count the audit tally carries.
+func (t *fakeTombstoneTable) purge() int {
+	n := len(t.rows)
+	clear(t.rows)
+	return n
+}
+
 // fakeAccountTeardown records every vehicle handed to it and can fail on a
 // nominated id, which is how the mid-failure re-run cases are built.
 type fakeAccountTeardown struct {
-	removed  map[string]bool // ids already torn down (survives across runs)
-	failOn   string
-	seen     []string
-	order    *[]string
-	failures int
+	removed map[string]bool // ids already torn down (survives across runs)
+	// tombstones, when set, models MYR-261's same-transaction tombstone write.
+	tombstones *fakeTombstoneTable
+	failOn     string
+	seen       []string
+	order      *[]string
+	failures   int
 }
 
 func newFakeAccountTeardown() *fakeAccountTeardown {
@@ -88,6 +120,12 @@ func (f *fakeAccountTeardown) RemoveVehicle(_ context.Context, _, vehicleID stri
 		return VehicleTeardownResult{AlreadyGone: true}, nil
 	}
 	f.removed[vehicleID] = true
+	if f.tombstones != nil {
+		// MYR-261: the real teardown writes the tombstone in the SAME
+		// transaction as the Vehicle delete. Anything that purges tombstones
+		// before this point is undone right here.
+		f.tombstones.write(vehicleID)
+	}
 	return VehicleTeardownResult{Removed: true, DriveCount: 2}, nil
 }
 
@@ -152,6 +190,13 @@ type fakeAccountData struct {
 
 	keepaliveDeleted int
 	keepaliveErr     error
+
+	// MYR-596 step 8e — the removed-vehicle tombstones. tombstones, when set,
+	// is the shared table the teardown fake also writes to; without it the
+	// counter alone is used, like every sibling step above.
+	tombstonesDeleted int
+	tombstones        *fakeTombstoneTable
+	tombstonesErr     error
 
 	membershipsDeleted int
 	membershipsErr     error
@@ -275,6 +320,20 @@ func (f *fakeAccountData) DeleteUserActivity(_ context.Context, id string) (int,
 	}
 	n := f.activityDeleted
 	f.activityDeleted = 0 // idempotent: a re-run deletes nothing
+	return n, nil
+}
+
+func (f *fakeAccountData) DeleteRemovedVehicleTombstones(_ context.Context, id string) (int, error) {
+	f.note("delete_removed_vehicle_tombstones")
+	f.seenIDs = append(f.seenIDs, id)
+	if f.tombstonesErr != nil {
+		return 0, f.tombstonesErr
+	}
+	if f.tombstones != nil {
+		return f.tombstones.purge(), nil
+	}
+	n := f.tombstonesDeleted
+	f.tombstonesDeleted = 0 // idempotent: a re-run deletes nothing
 	return n, nil
 }
 
@@ -480,6 +539,12 @@ func TestAccountDeletion_OwnerWithSharesRunsEveryStepInOrder(t *testing.T) {
 		// not behaviour of a person). It MUST precede delete_identity all the
 		// same, so no keepalive cooldown outlives the account it names.
 		"delete_tesla_token_keepalive",
+		// MYR-596, step 8e. The ONE member of this family whose position is
+		// constrained against a step outside it: the teardowns above WRITE a
+		// tombstone per car, so this has to sit downstream of them or it purges
+		// a table the teardown then refills. See
+		// TestAccountDeletion_RemovedVehicleTombstonesGoAfterTheTeardown.
+		"delete_removed_vehicle_tombstones",
 		"revoke_tokens",
 		"delete_identity",
 	}
@@ -777,6 +842,79 @@ func TestAccountDeletion_SavedPlacesGoBeforeTheIdentity(t *testing.T) {
 	}
 }
 
+// TestAccountDeletion_RemovedVehicleTombstonesGoAfterTheTeardown is the
+// ordering guard for MYR-596 step 8e, and it is the arm that fails if the step
+// is ever hoisted above step 3.
+//
+// The tombstone is written BY the deletion sequence itself: the per-vehicle
+// teardown writes one per car, in the same transaction as the Vehicle delete
+// (MYR-261, §1.4.1). A purge placed before the teardown would therefore delete
+// the historical rows, watch the teardown write a fresh one for every car the
+// account owned, and leave the account deleted with a full set of tombstones —
+// the precise failure this test exists to make impossible. The shared
+// fakeTombstoneTable reproduces that write, so the assertion is "ZERO rows
+// remain", not merely "the step ran".
+func TestAccountDeletion_RemovedVehicleTombstonesGoAfterTheTeardown(t *testing.T) {
+	var order []string
+	table := newFakeTombstoneTable()
+	// A car this owner removed some time ago — the historical tombstone, the
+	// one that predates this request and has nothing to do with the teardown.
+	table.write("cveh_removed_last_year")
+
+	teardown := newFakeAccountTeardown()
+	teardown.order = &order
+	teardown.tombstones = table
+
+	data := &fakeAccountData{order: &order, tombstones: table}
+
+	h := newDeletionHandler(t, AccountDeletionDeps{
+		Vehicles: &fakeOwnedVehicleLister{ids: []string{"cveh_a", "cveh_b"}},
+		Teardown: teardown,
+		Rides:    &fakeRideCanceller{},
+		Data:     data,
+	})
+
+	if got := callDelete(h).Code; got != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", got)
+	}
+
+	// THE ASSERTION THAT MATTERS. Not "the purge ran" — "nothing survived it".
+	if n := len(table.rows); n != 0 {
+		t.Fatalf("%d removed-vehicle tombstone(s) survived the deletion: %v", n, table.rows)
+	}
+
+	// Three rows went: the historical one plus the two the teardown wrote on
+	// its way past. A purge running before the teardown would report 1 here and
+	// leave 2 behind, which the check above already catches — this pins the
+	// tally the audit row carries.
+	if got := data.identityCounts.RemovedVehicleTombstonesDeleted; got != 3 {
+		t.Fatalf("audit tally removedVehicleTombstonesDeleted = %d, want 3", got)
+	}
+
+	// And the ordering itself, stated directly rather than inferred: every
+	// teardown precedes the purge.
+	purgeAt := slices.Index(order, "delete_removed_vehicle_tombstones")
+	if purgeAt < 0 {
+		t.Fatalf("delete_removed_vehicle_tombstones never ran; sequence = %v", order)
+	}
+	for _, veh := range []string{"cveh_a", "cveh_b"} {
+		if at := slices.Index(order, "teardown:"+veh); at < 0 || at > purgeAt {
+			t.Fatalf("teardown of %s must precede the tombstone purge; sequence = %v", veh, order)
+		}
+	}
+	if identityAt := slices.Index(order, "delete_identity"); purgeAt > identityAt {
+		t.Fatalf("tombstones must go before the identity rows; sequence = %v", order)
+	}
+
+	// Idempotent: a re-run finds an empty table and is still a 204.
+	if got := callDelete(h).Code; got != http.StatusNoContent {
+		t.Fatalf("re-run status = %d, want 204", got)
+	}
+	if got := data.identityCounts.RemovedVehicleTombstonesDeleted; got != 0 {
+		t.Fatalf("re-run tally removedVehicleTombstonesDeleted = %d, want 0", got)
+	}
+}
+
 // A SECOND successful call is still a 204 and writes NO second audit row —
 // which is what makes the client's retry-on-error path safe to offer.
 func TestAccountDeletion_SecondCallAfterSuccessIsStill204AndWritesNoSecondAudit(t *testing.T) {
@@ -891,7 +1029,7 @@ func TestAccountDeletion_ConvergedScopeRunsEveryStepOverEveryID(t *testing.T) {
 
 	// Every SQL step saw both ids. Counting per step rather than checking the
 	// set as a whole is what catches one straggler still keyed on the subject.
-	const sqlSteps = 10 // drives, shares, labels, memberships, devices, places, name confirmation, activity, keepalive, tokens
+	const sqlSteps = 11 // drives, shares, labels, memberships, devices, places, name confirmation, activity, keepalive, tombstones, tokens
 	if len(data.seenIDs) != sqlSteps*2 {
 		t.Fatalf("steps ran on %d ids, want %d (every step over both)", len(data.seenIDs), sqlSteps*2)
 	}

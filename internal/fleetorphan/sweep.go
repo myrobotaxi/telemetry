@@ -28,6 +28,21 @@
 // That split is the report's main product. Do not read the counts as "cost
 // recovered" without reading `unreachable_no_token` alongside them.
 //
+// ── AND SINCE MYR-596, `unreachable_no_token` UNDER-COUNTS ──────────────────
+//
+// Step 8e of the account-deletion sequence removes a person's
+// go_removed_vehicles tombstones with their account. Those tombstones are this
+// package's source A — the only handle it ever had on a deleted owner's VINs.
+// So for every account deleted from MYR-596 onward, its orphaned configs do not
+// appear in this report in ANY category. The leak itself is unchanged (they
+// were never reachable without a token, and still are not); what is gone is the
+// ability to name them. A run whose `unreachable_no_token` fell is not
+// necessarily a run where anything improved.
+//
+// The pre-MYR-596 backlog still exists and is finite. Config.PurgeOrphanTombstones
+// clears it, opt-in, LAST in the run so the VIN pass reports before the rows
+// naming those VINs go.
+//
 // ── SHAPE ───────────────────────────────────────────────────────────────────
 //
 // Serial and best-effort throughout. One VIN's failure is a `failed` line and
@@ -63,6 +78,20 @@ type Config struct {
 	Apply bool
 	// MaxTombstones caps the source-A read. Zero means defaultMaxTombstones.
 	MaxTombstones int
+	// PurgeOrphanTombstones opts into the MYR-596 legacy-backlog cleanup:
+	// go_removed_vehicles rows whose user_id resolves to no identity at all,
+	// left by accounts deleted before step 8e of the deletion sequence started
+	// taking them.
+	//
+	// OPT-IN AND NOT PART OF -apply, deliberately. Those rows are this sweep's
+	// SOURCE A — its only handle on the VINs of deleted owners — so purging
+	// them makes an unreachable config permanently invisible to this tool as
+	// well as unfixable by it. That is an acceptable trade (the config cannot be
+	// authenticated either way, and the client ruled the rows go) but it is not
+	// one an operator should make by reflex, so it takes its own flag and runs
+	// only when asked. Honours Apply like everything else: without it the
+	// backlog is counted and nothing is written.
+	PurgeOrphanTombstones bool
 	// CallTimeout bounds each individual Tesla call and each DB statement.
 	CallTimeout time.Duration
 }
@@ -143,6 +172,13 @@ func (s *Sweeper) Run(ctx context.Context) (Report, error) {
 		rep.VINs = append(rep.VINs, out)
 	}
 
+	// MYR-596, LAST AND IT MATTERS THAT IT IS LAST. This removes the
+	// go_removed_vehicles rows that source A reads, so running it before the
+	// VIN pass would delete the tool's own candidate list mid-run and produce a
+	// report that named fewer VINs than existed when it started. Here, every
+	// VIN the run could see has already been examined and written into rep.
+	s.purgeOrphanTombstones(ctx, apply, &rep)
+
 	s.logger.Info("orphan fleet-config sweep complete",
 		slog.Bool("dry_run", rep.DryRun),
 		slog.Int("candidate_vins", len(rep.VINs)),
@@ -153,33 +189,11 @@ func (s *Sweeper) Run(ctx context.Context) (Report, error) {
 		slog.Int("failed", rep.Counts[OutcomeFailed]),
 		slog.Int("orphan_attempt_rows", len(rep.Attempts.OrphanRows)),
 		slog.Int64("attempt_rows_deleted", rep.Attempts.Deleted),
+		slog.Bool("tombstone_purge_requested", rep.Tombstones.Requested),
+		slog.Int64("orphan_tombstones", rep.Tombstones.Orphaned),
+		slog.Int64("orphan_tombstones_deleted", rep.Tombstones.Deleted),
 	)
 	return rep, nil
-}
-
-// sweepAttempts handles source C: go_fleet_config_attempts rows whose vehicle
-// no longer exists. No VIN, so nothing to ask Tesla — pure DB garbage.
-func (s *Sweeper) sweepAttempts(ctx context.Context, apply bool, rep *Report) {
-	callCtx, cancel := context.WithTimeout(ctx, s.cfg.CallTimeout)
-	rows, err := s.deps.Store.ListOrphanFleetConfigAttempts(callCtx)
-	cancel()
-	if err != nil {
-		rep.Errors = append(rep.Errors, "list orphan fleet-config attempts: "+errText(err))
-		return
-	}
-	rep.Attempts.OrphanRows = rows
-	if len(rows) == 0 || !apply {
-		return
-	}
-
-	delCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.CallTimeout)
-	defer cancel()
-	n, err := s.deps.Store.DeleteFleetConfigAttempts(delCtx, rows)
-	if err != nil {
-		rep.Errors = append(rep.Errors, "delete orphan fleet-config attempts: "+errText(err))
-		return
-	}
-	rep.Attempts.Deleted = n
 }
 
 // resolveVIN decides and, under apply, acts on one candidate.
