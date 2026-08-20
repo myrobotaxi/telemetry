@@ -103,6 +103,33 @@ DELETE FROM go_saved_places WHERE user_id = $1`
 const queryDeleteUserActivityForUser = `
 DELETE FROM go_user_activity WHERE user_id = $1`
 
+// queryDeleteTeslaTokenKeepaliveForUser drops the person's keepalive
+// bookkeeping (MYR-594, migration 0045).
+//
+// HYGIENE RATHER THAN AN ERASURE OBLIGATION, which is the difference from its
+// neighbour above and worth stating so a later reader does not assume the
+// stronger duty applies here too. Every column is P0
+// (data-classification.md §1.23): an opaque cuid, three timestamps about a
+// PLATFORM ACTION, and a copy of an expiry integer. Nothing in it is a
+// behavioural observation about the person, and nothing in it is a credential —
+// the grant itself lives encrypted on the "Account" row that step 10 removes.
+//
+// It goes anyway, for the reason the last-seen row's comment gives second: a
+// surviving row is an account the keepalive arm still holds a cooldown for,
+// keyed by a cuid nothing resolves. Nothing follows from that today — the
+// candidate query joins from a live suspended vehicle (gone in step 3) and a
+// live Tesla OAuth row (gone in step 10), so the arm cannot reach it — but a
+// row waiting for the first query that forgets to join is exactly the orphan
+// class this sequence exists to prevent.
+//
+// Deleting zero rows on a re-run is a clean no-op, and zero is the ordinary
+// result: a row exists only for an owner the keepalive arm has actually tried.
+//
+// #nosec G101 -- a table name containing "token", not a credential. The table
+// holds no token material at all; that is the point of it.
+const queryDeleteTeslaTokenKeepaliveForUser = `
+DELETE FROM go_tesla_token_keepalive WHERE user_id = $1`
+
 // queryRevokeRefreshTokensForUser revokes every unrevoked refresh token in the
 // deleted user's name. Revoke rather than delete, matching the reuse-detection
 // model in migration 0003: the rotation lineage is evidence and stays. reason

@@ -89,8 +89,16 @@ func startFleetSuspendSweeper(ctx context.Context, deps httpRouteDeps, bus event
 			MaxPerSweep:    fleetSuspendMaxPerSweep,
 			PassTimeout:    fleetSuspendPassTimeout,
 			VehicleTimeout: fleetSuspendVehicleTimeout,
+			Keepalive: fleetsuspend.KeepaliveConfig{
+				RefreshAfter:    fleetSuspendKeepaliveAfter,
+				RetryAfter:      fleetSuspendKeepaliveRetryAfter,
+				FailureCooldown: fleetSuspendKeepaliveCooldown,
+				MaxPerSweep:     fleetSuspendKeepaliveMaxPerSweep,
+				Timeout:         fleetSuspendKeepaliveTimeout,
+			},
 		},
 		log,
+		keepaliveOption(deps, log),
 	)
 	go sweeper.Run(ctx)
 	return sweeper

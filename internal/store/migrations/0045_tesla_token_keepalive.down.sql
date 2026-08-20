@@ -1,0 +1,36 @@
+-- 0045_tesla_token_keepalive.down.sql
+--
+-- Reverts MYR-594's keepalive bookkeeping: drops the Go-owned
+-- go_tesla_token_keepalive table.
+--
+-- SAFE IN THE DIRECTION THAT MATTERS, UNLIKE 0044's. This table holds no state
+-- any user or any contract can see. Dropping it destroys no credential, moves
+-- no token, un-suspends nothing and changes nothing at Tesla. Every OAuth pair
+-- is exactly where it was, on the row this table never touched.
+--
+-- WHAT IS LOST IS THE ARM'S RESTRAINT, and that is the reason to roll the
+-- SERVER back first. With the table gone but the keepalive arm still compiled
+-- in, three things happen at once:
+--
+--   * the arm's candidate query fails outright with `relation
+--     "go_tesla_token_keepalive" does not exist`, so the whole keepalive pass
+--     logs an error and does nothing. On a server that is only rolled BACK this
+--     is the benign case — the arm goes quiet and dormant tokens resume ageing
+--     exactly as they did before MYR-594, which is a regression measured in
+--     months, not minutes.
+--   * if instead the table is re-created empty later, every cooldown is
+--     forgotten: accounts whose grants Tesla has already refused become
+--     candidates again and are re-asked once each, which is one wasted signed
+--     call apiece and then a fresh cooldown. Recoverable, noisy, not harmful.
+--   * `last_attempt_at` — the brake that stops the arm re-rotating an account
+--     whose store write is failing — is forgotten with it. That is the one loss
+--     with teeth, and it is why the arm's per-pass cap is not the only guard.
+--
+-- The warn and suspend arms (MYR-592) are untouched by this file and keep
+-- working; the keepalive arm is additive and its absence is the pre-MYR-594
+-- status quo.
+--
+-- Schema rollback only. No sibling-owned data is read or written, and no Tesla
+-- call is made.
+
+DROP TABLE IF EXISTS go_tesla_token_keepalive;

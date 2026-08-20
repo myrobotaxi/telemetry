@@ -37,6 +37,9 @@ type Result struct {
 	Warned     int
 	Suspended  int
 	Held       int
+	// Keepalive is the MYR-594 arm's own tally. Zero-valued when the arm is
+	// unwired or the kill switch is off.
+	Keepalive KeepaliveResult
 }
 
 func (r *Result) count(d decision) {
@@ -106,6 +109,13 @@ func (s *Sweeper) SweepOnce(ctx context.Context) Result {
 		}
 		res.count(s.handle(ctx, &candidates[i], now, suspendBefore))
 	}
+
+	// LAST, and only on a pass that got this far. The warn and suspend arms are
+	// the irreversible ones and must not queue behind a run of Tesla OAuth
+	// calls; and a pass that already held on an unreadable episode reset or
+	// candidate list has told us the database is sick, which is not the moment
+	// to start spending single-use credentials against it.
+	res.Keepalive = s.KeepaliveOnce(ctx)
 
 	if res.Candidates > 0 || res.Reset > 0 {
 		s.logger.Info("telemetry inactivity sweep",

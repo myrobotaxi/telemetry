@@ -420,6 +420,17 @@ func (h *AccountDeletionHandler) runPersonalEffects(
 	}
 	counts.UserActivityRowsDeleted = activity
 
+	// (8d) The keepalive bookkeeping (MYR-594). Same grouping and the same
+	// unconstrained position as 8b and 8c, but P0 hygiene rather than an
+	// erasure obligation: it records platform actions on a credential, not
+	// behaviour of a person. It goes so no cooldown outlives the account it
+	// was recorded against.
+	keepalive, err := h.sumOverScope(ctx, scope, h.deps.Data.DeleteTeslaTokenKeepalive)
+	if err != nil {
+		return &accountDeletionError{step: "delete_tesla_token_keepalive", cause: err}
+	}
+	counts.TeslaTokenKeepaliveRowsDeleted = keepalive
+
 	// (9) Refresh tokens — revoked so no stored session can mint a new access
 	// token. The CURRENT access token deliberately keeps working until step 11,
 	// because it is what authenticates a re-run if step 10 fails.

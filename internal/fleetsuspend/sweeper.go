@@ -145,6 +145,9 @@ type Config struct {
 	PassTimeout time.Duration
 	// VehicleTimeout bounds one vehicle's Tesla call plus its writes.
 	VehicleTimeout time.Duration
+	// Keepalive tunes the MYR-594 arm that stops a suspended owner's Tesla
+	// refresh token lapsing. Nested so the policy above stays one group.
+	Keepalive KeepaliveConfig
 }
 
 const (
@@ -182,19 +185,27 @@ func (c Config) withDefaults() Config {
 	if c.VehicleTimeout <= 0 {
 		c.VehicleTimeout = defaultVehicleTimeout
 	}
+	c.Keepalive = c.Keepalive.withDefaults()
 	return c
 }
 
-// Sweeper warns and then suspends the vehicles of inactive owners.
+// Sweeper warns and then suspends the vehicles of inactive owners, and keeps
+// the suspended ones' Tesla grants from lapsing while they are away.
 type Sweeper struct {
 	store   Store
 	configs ConfigRemover
 	tokens  TokenSource
 	bus     Publisher
+	keep    *keepaliveArm // nil disables the MYR-594 keepalive arm entirely
 	cfg     Config
 	logger  *slog.Logger
 	now     func() time.Time
 }
+
+// SweeperOption configures optional collaborators. An option rather than a
+// constructor parameter because every existing caller predates the keepalive
+// arm and none of them should have to say "no" to it.
+type SweeperOption func(*Sweeper)
 
 // NewSweeper builds a sweeper. A nil logger discards.
 //
@@ -208,6 +219,9 @@ type Sweeper struct {
 //     we did not perform would tell every consumer a streaming car is
 //     disconnected.
 //   - bus nil → warnings are decided and recorded but nothing is delivered.
+//   - no WithKeepalive option → the MYR-594 arm does not exist and no pass
+//     touches a Tesla grant, so suspended owners' refresh tokens age exactly as
+//     they did before that issue.
 func NewSweeper(
 	st Store,
 	configs ConfigRemover,
@@ -215,11 +229,12 @@ func NewSweeper(
 	bus Publisher,
 	cfg Config,
 	logger *slog.Logger,
+	opts ...SweeperOption,
 ) *Sweeper {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(discardWriter{}, nil))
 	}
-	return &Sweeper{
+	s := &Sweeper{
 		store:   st,
 		configs: configs,
 		tokens:  tokens,
@@ -228,6 +243,10 @@ func NewSweeper(
 		logger:  logger,
 		now:     time.Now,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // withClock injects a clock for deterministic threshold tests.
@@ -259,6 +278,7 @@ func (s *Sweeper) Run(ctx context.Context) {
 		slog.Duration("suspend_after", s.cfg.SuspendAfter),
 		slog.Int("max_per_sweep", s.cfg.MaxPerSweep),
 		slog.Bool("can_suspend", s.configs != nil && s.tokens != nil),
+		slog.Bool("keepalive", s.keep != nil),
 	)
 
 	ticker := time.NewTicker(s.cfg.Interval)

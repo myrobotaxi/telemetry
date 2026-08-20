@@ -198,6 +198,18 @@ func (a *AccountDeleter) DeleteUserActivity(ctx context.Context, userID string) 
 	return a.execCount(ctx, "DeleteUserActivity", queryDeleteUserActivityForUser, userID)
 }
 
+// DeleteTeslaTokenKeepalive removes the person's keepalive bookkeeping
+// (MYR-594), so no cooldown outlives the account it was recorded against.
+// Returns the number of rows deleted (0 or 1). Idempotent.
+//
+// Sits immediately after the last-seen row and is unconstrained in the same
+// way — keyed only by user_id, read by nothing later in the sequence. Unlike
+// its neighbour it is P0 hygiene rather than a P1 erasure obligation; see
+// queryDeleteTeslaTokenKeepaliveForUser for why it goes regardless.
+func (a *AccountDeleter) DeleteTeslaTokenKeepalive(ctx context.Context, userID string) (int, error) {
+	return a.execCount(ctx, "DeleteTeslaTokenKeepalive", queryDeleteTeslaTokenKeepaliveForUser, userID)
+}
+
 // DeleteRideMemberships removes every group-ride membership the user holds
 // (MYR-540), so a deleted account cannot keep appearing in a live ride's
 // `members` array or in the access set that admits a WebSocket to that ride's

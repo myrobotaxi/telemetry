@@ -91,6 +91,10 @@ type AccountDataDeleter interface {
 	// data-lifecycle.md §3.1 step 8c). P1 behavioural data; see the store
 	// query for why it is a delete and not a tombstone.
 	DeleteUserActivity(ctx context.Context, userID string) (int, error)
+	// DeleteTeslaTokenKeepalive drops the account's keepalive bookkeeping
+	// (MYR-594, data-lifecycle.md §3.1 step 8d). P0 hygiene rather than an
+	// erasure obligation; see the store query for why it goes regardless.
+	DeleteTeslaTokenKeepalive(ctx context.Context, userID string) (int, error)
 	DeleteRideMemberships(ctx context.Context, userID string) (int, error)
 	RevokeRefreshTokens(ctx context.Context, userID string) (int, error)
 	DeleteIdentity(ctx context.Context, scope AccountDeletionScope, counts AccountDeletionCounts) (AccountIdentityOutcome, error)
@@ -139,6 +143,10 @@ type AccountDeletionCounts struct {
 	// 0 or 1 per identity in the deletion scope; 0 for an account that never
 	// authenticated after migration 0043 shipped.
 	UserActivityRowsDeleted int
+	// TeslaTokenKeepaliveRowsDeleted counts the keepalive bookkeeping rows
+	// removed (MYR-594). 0 for every account the keepalive arm never tried,
+	// which is almost all of them.
+	TeslaTokenKeepaliveRowsDeleted int
 	// RideMembershipsDeleted counts the GROUP-RIDE memberships the account
 	// held (MYR-540) — the rides they JOINED, as against RidesCancelled, the
 	// rides they BOOKED.
