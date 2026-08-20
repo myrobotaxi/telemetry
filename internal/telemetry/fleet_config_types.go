@@ -65,6 +65,14 @@ func WithTokenRefresher(refresher TeslaTokenRefresher, updater TeslaTokenUpdater
 	}
 }
 
+// WithTokenRotator serializes the refresh through the account row's lock
+// (MYR-595), so two pushes racing for one owner cannot both spend the same
+// single-use refresh token and hand one of them a spurious "re-link your Tesla
+// account". Without it the refresh runs the old unserialized way.
+func WithTokenRotator(rotator TeslaTokenRotator) FleetConfigOption {
+	return func(h *FleetConfigHandler) { h.rotator = rotator }
+}
+
 // extractBearerToken extracts the token from an "Authorization: Bearer <token>"
 // header. Returns empty string if the header is missing or malformed.
 func extractBearerToken(r *http.Request) string {

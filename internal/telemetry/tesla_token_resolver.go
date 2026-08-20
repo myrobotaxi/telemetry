@@ -3,9 +3,7 @@ package telemetry
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
-	"time"
 )
 
 // TeslaTokenResolver resolves a vehicle owner's Tesla OAuth access token
@@ -15,12 +13,18 @@ import (
 // needs owner-token resolution with no request context; sharing this type
 // keeps the refresh semantics identical across the two surfaces.
 //
-// The refresher/updater are optional: with no refresher an expired token is a
-// hard ErrTeslaTokenExpired (mirrors the handlers, which 401 without one).
+// Since MYR-595 all three surfaces share the path itself (teslaTokenRefresh in
+// tesla_token_refresh.go) rather than a description of it, so the serialization
+// cannot be present on one and missing on another.
+//
+// The refresher/updater/rotator are optional: with no refresher an expired
+// token is a hard ErrTeslaTokenExpired (mirrors the handlers, which 401 without
+// one), and with no rotator the refresh runs unserialized.
 type TeslaTokenResolver struct {
 	tokens    TeslaTokenProvider
 	refresher TeslaTokenRefresher // nil disables auto-refresh
 	updater   TeslaTokenUpdater   // nil disables DB persistence of a refresh
+	rotator   TeslaTokenRotator   // nil disables serialization of a refresh
 	logger    *slog.Logger
 }
 
@@ -34,6 +38,15 @@ func WithResolverRefresher(refresher TeslaTokenRefresher, updater TeslaTokenUpda
 		r.refresher = refresher
 		r.updater = updater
 	}
+}
+
+// WithResolverRotator serializes the refresh leg through rotator's row lock
+// (MYR-595), which also makes a failed persist fail the resolve instead of
+// returning a token that exists nowhere but in memory. Wire it wherever an
+// account repository is available; without it the refresh runs the old
+// unserialized way.
+func WithResolverRotator(rotator TeslaTokenRotator) TeslaTokenResolverOption {
+	return func(r *TeslaTokenResolver) { r.rotator = rotator }
 }
 
 // NewTeslaTokenResolver builds a resolver over the given token provider.
@@ -60,47 +73,17 @@ var (
 )
 
 // Resolve returns a currently-valid Tesla token for userID, refreshing an
-// expired one when a refresher is configured. It never blocks on I/O beyond
-// the provider/refresher calls and honors ctx cancellation through them.
+// expired one when a refresher is configured. A fresh token is answered from a
+// plain read; only the refresh leg takes the account's row lock, and it may wait
+// a bounded moment for it when another refresh of the same account is in flight.
 func (r *TeslaTokenResolver) Resolve(ctx context.Context, userID string) (TeslaToken, error) {
-	tok, err := r.tokens.GetTeslaToken(ctx, userID)
-	if err != nil {
-		// Multi-%w (Go 1.20+): errors.Is still matches the sentinel, but the
-		// underlying provider error (DB failure, not-found, …) is preserved
-		// for logs and for the caller to inspect via errors.As.
-		return TeslaToken{}, fmt.Errorf("resolve tesla token: %w: %w", ErrTeslaTokenUnavailable, err)
-	}
-
-	if tok.ExpiresAt.IsZero() || !tok.ExpiresAt.Before(time.Now()) {
-		return tok, nil
-	}
-
-	if r.refresher == nil || tok.RefreshToken == "" {
-		return TeslaToken{}, fmt.Errorf("resolve tesla token: %w", ErrTeslaTokenExpired)
-	}
-
-	refreshed, err := r.refresher.Refresh(ctx, tok.RefreshToken)
-	if err != nil {
-		// Multi-%w: keep the sentinel match AND the refresh failure cause.
-		return TeslaToken{}, fmt.Errorf("resolve tesla token: refresh failed: %w: %w", ErrTeslaTokenExpired, err)
-	}
-
-	expiresAt := refreshed.ExpiresAt()
-	if r.updater != nil {
-		if uErr := r.updater.UpdateTeslaToken(ctx, userID, refreshed.AccessToken, refreshed.RefreshToken, expiresAt.Unix()); uErr != nil {
-			// Non-fatal: we still return the fresh token; the next resolve
-			// re-refreshes if persistence keeps failing.
-			r.logger.Warn("tesla token resolver: failed to persist refreshed token",
-				slog.String("user_id", userID),
-			)
-		}
-	}
-
-	return TeslaToken{
-		AccessToken:  refreshed.AccessToken,
-		RefreshToken: refreshed.RefreshToken,
-		ExpiresAt:    expiresAt,
-	}, nil
+	return teslaTokenRefresh{
+		tokens:    r.tokens,
+		refresher: r.refresher,
+		updater:   r.updater,
+		rotator:   r.rotator,
+		logger:    r.logger,
+	}.resolve(ctx, userID)
 }
 
 // discardWriter drops log output for the nil-logger default.

@@ -33,6 +33,7 @@ type VehicleCommandHandler struct {
 	tokens    TeslaTokenProvider
 	refresher TeslaTokenRefresher // nil disables auto-refresh
 	updater   TeslaTokenUpdater   // nil disables DB persistence of refresh
+	rotator   TeslaTokenRotator   // nil disables serialization of a refresh
 	executor  commandExecutor
 	cooldown  *vehicleCooldown
 	logger    *slog.Logger
@@ -48,6 +49,14 @@ func WithCommandTokenRefresher(refresher TeslaTokenRefresher, updater TeslaToken
 		h.refresher = refresher
 		h.updater = updater
 	}
+}
+
+// WithCommandTokenRotator serializes the refresh through the account row's lock
+// (MYR-595). A user tapping two commands at once is exactly the race that used
+// to spend one single-use refresh token twice; with this the second tap waits
+// for the first and then adopts its result.
+func WithCommandTokenRotator(rotator TeslaTokenRotator) VehicleCommandOption {
+	return func(h *VehicleCommandHandler) { h.rotator = rotator }
 }
 
 // NewVehicleCommandHandler constructs the handler.

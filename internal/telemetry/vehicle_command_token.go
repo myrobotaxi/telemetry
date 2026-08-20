@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sync"
 	"time"
@@ -51,41 +52,25 @@ func (c *vehicleCooldown) allow(vehicleID string) bool {
 }
 
 // resolveTeslaToken fetches the caller's Tesla OAuth token, refreshing it if
-// expired (when a refresher is configured). Mirrors the fleet-config
-// handler's token path so both surfaces share the same refresh semantics.
-// On failure it writes the error response and returns ok=false.
+// expired (when a refresher is configured). Runs the SHARED on-demand path
+// (teslaTokenRefresh), so this surface and the fleet-config handler cannot
+// differ on whether a refresh is serialized. On failure it writes the error
+// response and returns ok=false.
 func (h *VehicleCommandHandler) resolveTeslaToken(ctx context.Context, w http.ResponseWriter, userID string) (TeslaToken, bool) {
-	tok, err := h.tokens.GetTeslaToken(ctx, userID)
-	if err != nil {
+	tok, err := teslaTokenRefresh{
+		tokens:    h.tokens,
+		refresher: h.refresher,
+		updater:   h.updater,
+		rotator:   h.rotator,
+		logger:    h.logger,
+	}.resolve(ctx, userID)
+	switch {
+	case errors.Is(err, ErrTeslaTokenUnavailable):
 		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed, "Tesla account not linked")
 		return TeslaToken{}, false
-	}
-
-	if tok.ExpiresAt.IsZero() || !tok.ExpiresAt.Before(time.Now()) {
-		return tok, true
-	}
-
-	if h.refresher == nil || tok.RefreshToken == "" {
+	case err != nil:
 		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed, "Tesla token expired — re-link your Tesla account")
 		return TeslaToken{}, false
 	}
-
-	refreshed, err := h.refresher.Refresh(ctx, tok.RefreshToken)
-	if err != nil {
-		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed, "Tesla token expired — re-link your Tesla account")
-		return TeslaToken{}, false
-	}
-
-	expiresAt := refreshed.ExpiresAt()
-	if h.updater != nil {
-		if uErr := h.updater.UpdateTeslaToken(ctx, userID, refreshed.AccessToken, refreshed.RefreshToken, expiresAt.Unix()); uErr != nil {
-			h.logger.Error("vehicle command: failed to persist refreshed token")
-		}
-	}
-
-	return TeslaToken{
-		AccessToken:  refreshed.AccessToken,
-		RefreshToken: refreshed.RefreshToken,
-		ExpiresAt:    expiresAt,
-	}, true
+	return tok, true
 }
