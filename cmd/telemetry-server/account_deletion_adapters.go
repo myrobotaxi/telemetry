@@ -104,6 +104,12 @@ func (a *accountDataDeleterAdapter) DeleteUserActivity(ctx context.Context, user
 	return a.deleter.DeleteUserActivity(ctx, userID)
 }
 
+// DeleteTeslaTokenKeepalive drops the account's keepalive bookkeeping
+// (MYR-594, §3.1 step 8d), so no cooldown outlives the account.
+func (a *accountDataDeleterAdapter) DeleteTeslaTokenKeepalive(ctx context.Context, userID string) (int, error) {
+	return a.deleter.DeleteTeslaTokenKeepalive(ctx, userID)
+}
+
 func (a *accountDataDeleterAdapter) RevokeRefreshTokens(ctx context.Context, userID string) (int, error) {
 	return a.deleter.RevokeRefreshTokens(ctx, userID)
 }

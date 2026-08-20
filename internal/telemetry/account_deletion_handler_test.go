@@ -116,6 +116,9 @@ type fakeAccountData struct {
 	activityDeleted int
 	activityErr     error
 
+	keepaliveDeleted int
+	keepaliveErr     error
+
 	membershipsDeleted int
 	membershipsErr     error
 
@@ -216,6 +219,17 @@ func (f *fakeAccountData) DeleteProfileNameConfirmation(_ context.Context, id st
 	}
 	n := f.confirmationsDeleted
 	f.confirmationsDeleted = 0 // idempotent: a re-run deletes nothing
+	return n, nil
+}
+
+func (f *fakeAccountData) DeleteTeslaTokenKeepalive(_ context.Context, id string) (int, error) {
+	f.note("delete_tesla_token_keepalive")
+	f.seenIDs = append(f.seenIDs, id)
+	if f.keepaliveErr != nil {
+		return 0, f.keepaliveErr
+	}
+	n := f.keepaliveDeleted
+	f.keepaliveDeleted = 0 // idempotent: a re-run deletes nothing
 	return n, nil
 }
 
@@ -427,6 +441,11 @@ func TestAccountDeletion_OwnerWithSharesRunsEveryStepInOrder(t *testing.T) {
 		// last used the product), so it MUST precede delete_identity as an
 		// erasure obligation rather than as hygiene.
 		"delete_user_activity",
+		// MYR-594, step 8d. Beside the three above, and back to HYGIENE rather
+		// than erasure: every column is P0 (platform actions on a credential,
+		// not behaviour of a person). It MUST precede delete_identity all the
+		// same, so no keepalive cooldown outlives the account it names.
+		"delete_tesla_token_keepalive",
 		"revoke_tokens",
 		"delete_identity",
 	}
@@ -838,7 +857,7 @@ func TestAccountDeletion_ConvergedScopeRunsEveryStepOverEveryID(t *testing.T) {
 
 	// Every SQL step saw both ids. Counting per step rather than checking the
 	// set as a whole is what catches one straggler still keyed on the subject.
-	const sqlSteps = 9 // drives, shares, labels, memberships, devices, places, name confirmation, activity, tokens
+	const sqlSteps = 10 // drives, shares, labels, memberships, devices, places, name confirmation, activity, keepalive, tokens
 	if len(data.seenIDs) != sqlSteps*2 {
 		t.Fatalf("steps ran on %d ids, want %d (every step over both)", len(data.seenIDs), sqlSteps*2)
 	}
