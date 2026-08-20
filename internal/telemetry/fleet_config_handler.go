@@ -24,6 +24,7 @@ type FleetConfigHandler struct {
 	tokens    TeslaTokenProvider
 	refresher TeslaTokenRefresher // nil disables auto-refresh
 	updater   TeslaTokenUpdater   // nil disables DB updates after refresh
+	rotator   TeslaTokenRotator   // nil disables serialization of a refresh
 	fleet     *FleetAPIClient
 	endpoint  EndpointConfig
 	logger    *slog.Logger
@@ -199,51 +200,29 @@ func (h *FleetConfigHandler) verifyOwnership(ctx context.Context, w http.Respons
 }
 
 // resolveTeslaToken fetches the user's Tesla OAuth token and validates its
-// expiry. If the token is expired and a refresh_token is available, it
-// attempts to refresh the token automatically. Returns the token and true
-// on success. On failure it writes an HTTP error response and returns false.
+// expiry, refreshing an expired one through the SHARED on-demand path
+// (teslaTokenRefresh) — a plain read when the token is fresh, a row-locked
+// rotation when it is not. Returns the token and true on success. On failure it
+// writes an HTTP error response and returns false.
 func (h *FleetConfigHandler) resolveTeslaToken(ctx context.Context, w http.ResponseWriter, userID string) (TeslaToken, bool) {
-	tok, err := h.tokens.GetTeslaToken(ctx, userID)
-	if err != nil {
+	tok, err := teslaTokenRefresh{
+		tokens:    h.tokens,
+		refresher: h.refresher,
+		updater:   h.updater,
+		rotator:   h.rotator,
+		logger:    h.logger,
+	}.resolve(ctx, userID)
+	switch {
+	case errors.Is(err, ErrTeslaTokenUnavailable):
+		// The provider's own cause rides along under multi-%w, so the
+		// sdk.ErrNotFound branch inside still fires for an unlinked account.
 		h.handleTeslaTokenError(w, userID, err)
 		return TeslaToken{}, false
-	}
-
-	if tok.ExpiresAt.IsZero() || !tok.ExpiresAt.Before(time.Now()) {
-		return tok, true
-	}
-
-	// Token is expired — attempt auto-refresh if possible.
-	if refreshed, ok := h.tryRefreshToken(ctx, w, userID, tok); ok {
-		return refreshed, true
-	}
-	return TeslaToken{}, false
-}
-
-// tryRefreshToken attempts to refresh an expired Tesla token. Returns the
-// refreshed token and true on success. On failure it writes an HTTP error
-// and returns false.
-func (h *FleetConfigHandler) tryRefreshToken(ctx context.Context, w http.ResponseWriter, userID string, tok TeslaToken) (TeslaToken, bool) {
-	if h.refresher == nil || tok.RefreshToken == "" {
-		h.logger.Warn("fleet config: Tesla token expired, no refresh available",
-			slog.String("user_id", userID),
-			slog.Time("expired_at", tok.ExpiresAt),
-			slog.Bool("has_refresher", h.refresher != nil),
-			slog.Bool("has_refresh_token", tok.RefreshToken != ""),
-		)
-		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed,
-			"Tesla token expired — re-link your Tesla account")
-		return TeslaToken{}, false
-	}
-
-	h.logger.Info("fleet config: refreshing expired Tesla token",
-		slog.String("user_id", userID),
-		slog.Time("expired_at", tok.ExpiresAt),
-	)
-
-	refreshed, err := h.refresher.Refresh(ctx, tok.RefreshToken)
-	if err != nil {
-		h.logger.Error("fleet config: Tesla token refresh failed",
+	case err != nil:
+		// Expired and not refreshable — including a rotation that Tesla
+		// refused. NOT including a lost race: the loser of one now adopts the
+		// winner's pair inside the lock rather than surfacing this (MYR-595).
+		h.logger.Warn("fleet config: Tesla token expired and could not be refreshed",
 			slog.String("user_id", userID),
 			slog.String("error", err.Error()),
 		)
@@ -251,28 +230,7 @@ func (h *FleetConfigHandler) tryRefreshToken(ctx context.Context, w http.Respons
 			"Tesla token expired — re-link your Tesla account")
 		return TeslaToken{}, false
 	}
-
-	// Compute expiry once — ExpiresAt() calls time.Now() internally,
-	// so reuse the same value for DB and in-memory consistency.
-	expiresAt := refreshed.ExpiresAt()
-
-	// Persist the refreshed token if an updater is available.
-	if h.updater != nil {
-		if err := h.updater.UpdateTeslaToken(ctx, userID,
-			refreshed.AccessToken, refreshed.RefreshToken, expiresAt.Unix()); err != nil {
-			h.logger.Error("fleet config: failed to persist refreshed token",
-				slog.String("user_id", userID),
-				slog.String("error", err.Error()),
-			)
-			// Continue with the refreshed token even if persistence fails.
-		}
-	}
-
-	return TeslaToken{
-		AccessToken:  refreshed.AccessToken,
-		RefreshToken: refreshed.RefreshToken,
-		ExpiresAt:    expiresAt,
-	}, true
+	return tok, true
 }
 
 // writeJSON marshals v as JSON and writes it with the given status code.

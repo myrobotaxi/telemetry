@@ -570,7 +570,13 @@ func setupFleetConfigEndpoint(
 			ClientSecret: cfg.TeslaOAuth().ClientSecret,
 		}, logger.With(slog.String("component", "token-refresh")))
 		updater := &teslaTokenUpdaterAdapter{repo: accountRepo}
-		fleetOpts = append(fleetOpts, telemetry.WithTokenRefresher(refresher, updater))
+		fleetOpts = append(fleetOpts,
+			telemetry.WithTokenRefresher(refresher, updater),
+			// MYR-595: the refresh leg runs under the account row's lock, so two
+			// pushes racing for one owner cannot both spend the same single-use
+			// refresh token.
+			telemetry.WithTokenRotator(&teslaTokenRotatorAdapter{repo: accountRepo}),
+		)
 		logger.Info("Tesla token auto-refresh enabled")
 	} else {
 		logger.Warn("Tesla token auto-refresh disabled: AUTH_TESLA_ID not set")
@@ -638,7 +644,10 @@ func setupVehicleCommandEndpoint(deps httpRouteDeps, vehicles telemetry.VehicleS
 			ClientID:     deps.cfg.TeslaOAuth().ClientID,
 			ClientSecret: deps.cfg.TeslaOAuth().ClientSecret,
 		}, deps.logger.With(slog.String("component", "command-token-refresh")))
-		opts = append(opts, telemetry.WithCommandTokenRefresher(refresher, &teslaTokenUpdaterAdapter{repo: deps.accountRepo}))
+		opts = append(opts,
+			telemetry.WithCommandTokenRefresher(refresher, &teslaTokenUpdaterAdapter{repo: deps.accountRepo}),
+			telemetry.WithCommandTokenRotator(&teslaTokenRotatorAdapter{repo: deps.accountRepo}),
+		)
 	}
 
 	handler := telemetry.NewVehicleCommandHandler(

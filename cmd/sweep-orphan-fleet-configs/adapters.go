@@ -165,3 +165,60 @@ func (a *tokenUpdater) UpdateTeslaToken(
 ) error {
 	return a.repo.UpdateTeslaToken(ctx, userID, accessToken, refreshToken, expiresAt)
 }
+
+// tokenRotator serializes a refresh through the account row's lock (MYR-595),
+// the same seam cmd/telemetry-server wires — replicated here because that one is
+// package-private to the server binary, like tokenProvider above.
+//
+// THIS SWEEP IS EXACTLY THE CONCURRENT WRITER THE LOCK EXISTS FOR: it walks
+// owners' tokens from a batch job while the live server is refreshing the same
+// accounts on demand, and a refresh token spent twice hands a user a spurious
+// "re-link your Tesla account". Waiting for the lock and then re-reading is also
+// strictly cheaper here than a lost race — the sweep has no user waiting on it.
+type tokenRotator struct {
+	repo *store.AccountRepo
+}
+
+// teslaTokenLockWait bounds the queue for the row lock. Generous relative to the
+// server's own budget: nothing in a batch sweep is latency-sensitive, and
+// abandoning would only put the sweep back on the unserialized path.
+const teslaTokenLockWait = 10 * time.Second
+
+func (a *tokenRotator) RotateTeslaToken(
+	ctx context.Context,
+	userID string,
+	rotate func(ctx context.Context, stored telemetry.TeslaToken) (telemetry.TeslaToken, bool, error),
+) (telemetry.TeslaToken, error) {
+	snap, err := a.repo.RotateTeslaTokenLockedWaiting(ctx, userID, teslaTokenLockWait,
+		func(ctx context.Context, stored store.TeslaTokenSnapshot) (store.TeslaTokenPair, bool, error) {
+			next, rotated, rErr := rotate(ctx, teslaTokenFromSnapshot(stored))
+			if rErr != nil || !rotated {
+				return store.TeslaTokenPair{}, false, rErr
+			}
+			return store.TeslaTokenPair{
+				AccessToken:  next.AccessToken,
+				RefreshToken: next.RefreshToken,
+				ExpiresAt:    next.ExpiresAt.Unix(),
+			}, true, nil
+		})
+	if errors.Is(err, store.ErrTeslaTokenRowBusy) {
+		return telemetry.TeslaToken{}, fmt.Errorf("rotate tesla token(user=%s): %w", userID, telemetry.ErrTeslaTokenRowBusy)
+	}
+	if err != nil {
+		return telemetry.TeslaToken{}, err
+	}
+	return teslaTokenFromSnapshot(snap), nil
+}
+
+// teslaTokenFromSnapshot maps the column's 0/NULL expiry onto the zero time that
+// means "unknown" in the telemetry layer.
+func teslaTokenFromSnapshot(snap store.TeslaTokenSnapshot) telemetry.TeslaToken {
+	tok := telemetry.TeslaToken{
+		AccessToken:  snap.AccessToken,
+		RefreshToken: snap.RefreshToken,
+	}
+	if snap.ExpiresAt != 0 {
+		tok.ExpiresAt = time.Unix(snap.ExpiresAt, 0)
+	}
+	return tok
+}
