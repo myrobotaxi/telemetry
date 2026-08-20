@@ -65,6 +65,7 @@ func setupAccountDeletion(t *testing.T) {
 		`DELETE FROM go_identity_apple`,
 		`DELETE FROM go_users`,
 		`DELETE FROM go_ride_requests`,
+		`DELETE FROM go_removed_vehicles`,
 	} {
 		if _, err := testPool.Exec(ctx, stmt); err != nil {
 			t.Fatalf("clean (%s): %v", stmt, err)
@@ -115,6 +116,19 @@ func seedRefreshToken(t *testing.T, hash, userID string) {
 		VALUES ($1, $2, $3, NOW() + INTERVAL '90 days')`,
 		hash, "fam-"+hash, userID); err != nil {
 		t.Fatalf("seed refresh token %s: %v", hash, err)
+	}
+}
+
+// seedRemovedVehicleTombstone inserts one go_removed_vehicles row — the MYR-261
+// tombstone that stops a live account's next Tesla sync resurrecting a car its
+// owner deliberately removed, and that MYR-596's step 8e takes with the account.
+func seedRemovedVehicleTombstone(t *testing.T, userID, teslaVehicleID, vin string) {
+	t.Helper()
+	if _, err := testPool.Exec(context.Background(), `
+		INSERT INTO go_removed_vehicles (user_id, tesla_vehicle_id, vin, removed_at)
+		VALUES ($1, $2, NULLIF($3, ''), NOW())`,
+		userID, teslaVehicleID, vin); err != nil {
+		t.Fatalf("seed removed-vehicle tombstone %s/%s: %v", userID, teslaVehicleID, err)
 	}
 }
 
@@ -207,6 +221,7 @@ func TestAccountDeleter_DeleteIdentity_WritesTheAuditRow(t *testing.T) {
 		SharesRevoked: 3, ShareLabelsScrubbed: 3, PushDevicesDeleted: 1,
 		SavedPlacesDeleted: 2, RefreshTokensRevoked: 4,
 		UserActivityRowsDeleted: 1, TeslaTokenKeepaliveRowsDeleted: 1,
+		RemovedVehicleTombstonesDeleted: 2,
 	}
 	res, err := newAccountDeleter(t).DeleteIdentity(context.Background(), soloScope(delUserApple), counts)
 	if err != nil {
@@ -267,6 +282,16 @@ func TestAccountDeleter_DeleteIdentity_WritesTheAuditRow(t *testing.T) {
 		// profileNameConfirmationsDeleted is.
 		"userActivityRowsDeleted":        true,
 		"teslaTokenKeepaliveRowsDeleted": true,
+		// MYR-596. A COUNT of the removed-vehicle tombstones deleted (step 8e)
+		// — one per car this person ever removed. THIS ONE NEEDED THE
+		// ARGUMENT, because unlike its two neighbours above the row it counts
+		// is NOT P0 by shape: go_removed_vehicles pairs an opaque cuid with a
+		// VIN, and a VIN is P1 (data-classification.md §2.1). The count is
+		// still P0 — "how many cars this account had tombstoned" says nothing
+		// about which — so what crosses the CG-DL-5 boundary is the number and
+		// only ever the number. Recording a VIN, or a redacted tail of one,
+		// here would be the violation.
+		"removedVehicleTombstonesDeleted": true,
 	}
 	for k, v := range got {
 		if !allowed[k] {
@@ -276,13 +301,17 @@ func TestAccountDeleter_DeleteIdentity_WritesTheAuditRow(t *testing.T) {
 	if got["vehicleCount"] != float64(2) || got["sharesRevoked"] != float64(3) ||
 		got["savedPlacesDeleted"] != float64(2) ||
 		got["userActivityRowsDeleted"] != float64(1) ||
-		got["teslaTokenKeepaliveRowsDeleted"] != float64(1) {
+		got["teslaTokenKeepaliveRowsDeleted"] != float64(1) ||
+		got["removedVehicleTombstonesDeleted"] != float64(2) {
 		t.Fatalf("audit metadata counts = %v", got)
 	}
 
 	// The audit row must not have grown a coordinate or a label alongside the
 	// count. Asserted on the RAW JSON so a nested object could not hide one.
-	for _, leak := range []string{"latitude", "longitude", "lat", "lng", "label", "places\":["} {
+	// "vin" joins the list with MYR-596: the tombstone count is the one entry
+	// here whose source row carries a P1 VIN, so the raw-JSON check is what
+	// stops a future "helpful" addition of the VINs it counted.
+	for _, leak := range []string{"latitude", "longitude", "lat", "lng", "label", "places\":[", "vin"} {
 		if strings.Contains(string(metadata), leak) {
 			t.Errorf("audit metadata leaked %q (CG-DL-5, P0-only): %s", leak, metadata)
 		}
@@ -334,6 +363,11 @@ func TestAccountDeleter_StepsAreScopedAndIdempotent(t *testing.T) {
 	seedPushDevice(t, "cpush_b", delUserOther, "token-b")
 	seedRefreshToken(t, "hash-a", delUserApple)
 	seedRefreshToken(t, "hash-b", delUserOther)
+	// Two cars the deleted person removed over the account's life + one
+	// somebody else removed (MYR-596).
+	seedRemovedVehicleTombstone(t, delUserApple, "tesla_1", "5YJ3E1EA1JF000001")
+	seedRemovedVehicleTombstone(t, delUserApple, "tesla_2", "5YJ3E1EA1JF000002")
+	seedRemovedVehicleTombstone(t, delUserOther, "tesla_3", "5YJ3E1EA1JF000003")
 
 	steps := []struct {
 		name    string
@@ -367,6 +401,21 @@ func TestAccountDeleter_StepsAreScopedAndIdempotent(t *testing.T) {
 			survive: func(t *testing.T) {
 				if n := countQuery(t, `SELECT count(*) FROM go_push_devices WHERE user_id = $1`, delUserOther); n != 1 {
 					t.Fatal("another person's device registration was deleted")
+				}
+			},
+		},
+		{
+			// MYR-596 step 8e. Both of this person's tombstones go; nobody
+			// else's does. The tombstone is keyed (user_id, tesla_vehicle_id)
+			// and the statement is keyed on user_id alone, so "every car this
+			// account ever removed" is exactly the row set.
+			name: "delete removed-vehicle tombstones",
+			run:  func() (int, error) { return deleter.DeleteRemovedVehicleTombstones(ctx, delUserApple) },
+			want: 2,
+			survive: func(t *testing.T) {
+				if n := countQuery(t,
+					`SELECT count(*) FROM go_removed_vehicles WHERE user_id = $1`, delUserOther); n != 1 {
+					t.Fatalf("another owner's tombstone was deleted (%d left, want 1)", n)
 				}
 			},
 		},
@@ -412,6 +461,65 @@ func TestAccountDeleter_StepsAreScopedAndIdempotent(t *testing.T) {
 				t.Fatalf("%s re-run affected %d rows, want 0", tc.name, again)
 			}
 		})
+	}
+}
+
+// TestAccountDeleter_DeleteRemovedVehicleTombstones_AcrossTheClosure covers the
+// converged-identity case for MYR-596 step 8e.
+//
+// After an identity convergence a person's rows are split across two cuids:
+// whatever their token still names, and the canonical id the Tesla link
+// re-pointed them onto (MYR-452, §3.1.1). Tombstones are no different — a car
+// removed before the convergence is filed under the old id and one removed
+// after under the new — so the step is run once per id in the closure, exactly
+// like every sibling. Deleting under one id alone is how half a person's rows
+// survive their own deletion.
+func TestAccountDeleter_DeleteRemovedVehicleTombstones_AcrossTheClosure(t *testing.T) {
+	setupAccountDeletion(t)
+	ctx := context.Background()
+	deleter := newAccountDeleter(t)
+
+	// One closure, two ids, one tombstone filed under each.
+	seedRemovedVehicleTombstone(t, delUserApple, "tesla_pre", "5YJ3E1EA1JF000011")
+	seedRemovedVehicleTombstone(t, delUserLegacy, "tesla_post", "5YJ3E1EA1JF000012")
+	// A third person, untouched throughout.
+	seedRemovedVehicleTombstone(t, delUserOther, "tesla_other", "5YJ3E1EA1JF000013")
+
+	total := 0
+	for _, id := range []string{delUserApple, delUserLegacy} {
+		n, err := deleter.DeleteRemovedVehicleTombstones(ctx, id)
+		if err != nil {
+			t.Fatalf("DeleteRemovedVehicleTombstones(%s): %v", id, err)
+		}
+		total += n
+	}
+	if total != 2 {
+		t.Fatalf("deleted %d tombstone(s) across the closure, want 2", total)
+	}
+	for _, id := range []string{delUserApple, delUserLegacy} {
+		if n := countQuery(t, `SELECT count(*) FROM go_removed_vehicles WHERE user_id = $1`, id); n != 0 {
+			t.Fatalf("%d tombstone(s) survived under %s", n, id)
+		}
+	}
+	if n := countQuery(t, `SELECT count(*) FROM go_removed_vehicles WHERE user_id = $1`, delUserOther); n != 1 {
+		t.Fatalf("a bystander's tombstone was deleted (%d left, want 1)", n)
+	}
+
+	// Idempotent per id — the property the whole endpoint's re-run path rests on.
+	for _, id := range []string{delUserApple, delUserLegacy} {
+		again, err := deleter.DeleteRemovedVehicleTombstones(ctx, id)
+		if err != nil {
+			t.Fatalf("re-run(%s): %v", id, err)
+		}
+		if again != 0 {
+			t.Fatalf("re-run(%s) affected %d rows, want 0", id, again)
+		}
+	}
+
+	// An empty id is refused rather than being allowed to match nothing
+	// quietly, matching every other step on this type.
+	if _, err := deleter.DeleteRemovedVehicleTombstones(ctx, "  "); err == nil {
+		t.Fatal("an empty user id must be refused")
 	}
 }
 
