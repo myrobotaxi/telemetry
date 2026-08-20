@@ -130,6 +130,34 @@ DELETE FROM go_user_activity WHERE user_id = $1`
 const queryDeleteTeslaTokenKeepaliveForUser = `
 DELETE FROM go_tesla_token_keepalive WHERE user_id = $1`
 
+// queryDeleteRemovedVehiclesForUser drops the person's removed-vehicle
+// tombstones (MYR-596; the table is MYR-261, migration 0006).
+//
+// THE TOMBSTONE PROTECTS A LIVE ACCOUNT AND NOTHING ELSE. Its whole job is to
+// stop the best-effort post-link sync (OwnerProvisioner.UpsertOwnedVehicle)
+// re-inserting a VIN the owner deliberately removed. That sync runs only for an
+// account with a Tesla link, and after this sequence there is no account, no
+// link and no sync — so a surviving row defends against a code path that can no
+// longer execute. What is left is a (user_id, VIN) pair filed against a person
+// who no longer exists, which is the orphan class §1.4.2 and §1.4.3 are already
+// written against. The client ruled it goes ("remove everything", 2026-08-20).
+//
+// ORDERING IS NORMATIVE AND THIS IS THE ONE STEP IN THE 8-FAMILY THAT HAS ONE.
+// Step 3 — the per-vehicle teardown — WRITES a tombstone for every car it
+// removes, in the same transaction as the Vehicle delete (§1.4.1). So this
+// DELETE must run AFTER step 3, or the teardown simply re-creates every row it
+// just removed and the account exits the sequence with a full set of fresh
+// tombstones. Step 8e satisfies that; nothing after step 3 writes one.
+//
+// P0 throughout (data-classification.md §1.3): an opaque cuid, an opaque Tesla
+// vehicle id, a redactable VIN and a timestamp. Removing it is hygiene rather
+// than an erasure obligation, like 8d and unlike 8c.
+//
+// Deleting zero rows on a re-run is a clean no-op, and zero is the ordinary
+// result — most accounts never removed a car.
+const queryDeleteRemovedVehiclesForUser = `
+DELETE FROM go_removed_vehicles WHERE user_id = $1`
+
 // queryRevokeRefreshTokensForUser revokes every unrevoked refresh token in the
 // deleted user's name. Revoke rather than delete, matching the reuse-detection
 // model in migration 0003: the rotation lineage is evidence and stays. reason

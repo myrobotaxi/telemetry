@@ -111,6 +111,15 @@ type AccountDeletionCounts struct {
 	// ATTEMPTED, never the credential), so the count is as safe as its
 	// siblings above.
 	TeslaTokenKeepaliveRowsDeleted int `json:"teslaTokenKeepaliveRowsDeleted"`
+	// RemovedVehicleTombstonesDeleted is the number of removed-vehicle
+	// tombstones removed (MYR-596, §3.1 step 8e) — one per car this person ever
+	// removed, usually 0. A COUNT and never the VINs: the row pairs an opaque
+	// cuid with a VIN, and a VIN is P1 (data-classification.md §2.1), so the
+	// only thing this field may carry across the CG-DL-5 boundary is how many
+	// went. Recorded because the audit trail is how a deletion is shown to have
+	// reached every table that named the person, and this is the last go_ table
+	// that used to be exempt.
+	RemovedVehicleTombstonesDeleted int `json:"removedVehicleTombstonesDeleted"`
 	// HadPrismaUser records whether a sibling-schema "User" row existed —
 	// the dual-source identity fact, and the one thing that distinguishes an
 	// Apple-native account from a legacy web one in the audit trail.
@@ -221,6 +230,21 @@ func (a *AccountDeleter) DeleteUserActivity(ctx context.Context, userID string) 
 // queryDeleteTeslaTokenKeepaliveForUser for why it goes regardless.
 func (a *AccountDeleter) DeleteTeslaTokenKeepalive(ctx context.Context, userID string) (int, error) {
 	return a.execCount(ctx, "DeleteTeslaTokenKeepalive", queryDeleteTeslaTokenKeepaliveForUser, userID)
+}
+
+// DeleteRemovedVehicleTombstones removes the person's removed-vehicle
+// tombstones (MYR-596), which protect a LIVE account's next Tesla sync and
+// protect nothing at all once the account is gone. Returns the number of rows
+// deleted (0..n, one per car this person ever removed). Idempotent.
+//
+// ORDERING IS NORMATIVE HERE, unlike every other member of the 8-family: it MUST
+// run AFTER step 3. The per-vehicle teardown writes a tombstone for each car it
+// removes, in the same transaction as the Vehicle delete (§1.4.1), so a purge
+// placed before it would be undone car-for-car and the account would finish the
+// sequence with a fresh, complete set of tombstones. See
+// queryDeleteRemovedVehiclesForUser for the rest of the argument.
+func (a *AccountDeleter) DeleteRemovedVehicleTombstones(ctx context.Context, userID string) (int, error) {
+	return a.execCount(ctx, "DeleteRemovedVehicleTombstones", queryDeleteRemovedVehiclesForUser, userID)
 }
 
 // DeleteRideMemberships removes every group-ride membership the user holds

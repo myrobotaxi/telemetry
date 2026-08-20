@@ -358,12 +358,20 @@ func accountDeletionCancellable(status string) bool {
 // of run (MYR-540 pushed it past the 80-line cap) rather than inlined, because
 // they share one argument and it is worth stating once.
 //
-// All three run BEFORE the identity delete, and their order among themselves is
-// unconstrained — nothing later in the sequence reads any of them, and no
+// All of them run BEFORE the identity delete, and their order among themselves
+// is unconstrained — nothing later in the sequence reads any of them, and no
 // teardown, cascade or event depends on them. What IS constrained is that they
 // precede step 10: a saved place that outlived its owner would be AES-256-GCM
 // ciphertext of where a deleted person lives, keyed by a cuid nothing can
 // resolve and reachable by nothing but a table scan.
+//
+// ONE EXCEPTION, and it is the reason to read this comment before moving
+// anything: step 8e (the removed-vehicle tombstones, MYR-596) is constrained
+// against a step OUTSIDE this helper. Step 3's per-vehicle teardown WRITES a
+// tombstone for every car it removes, so 8e is only correct downstream of it.
+// This whole helper runs after step 3, which is what makes the slot legal; a
+// future re-ordering that hoists any of this above the teardown breaks 8e and
+// nothing else here.
 //
 // counts is mutated in place; the caller hands the same tally to DeleteIdentity.
 func (h *AccountDeletionHandler) runPersonalEffects(
@@ -430,6 +438,30 @@ func (h *AccountDeletionHandler) runPersonalEffects(
 		return &accountDeletionError{step: "delete_tesla_token_keepalive", cause: err}
 	}
 	counts.TeslaTokenKeepaliveRowsDeleted = keepalive
+
+	// (8e) The removed-vehicle tombstones (MYR-596). Grouped with 8b-8d because
+	// the rows are keyed on this person alone and nothing later in the sequence
+	// reads them — but its position is NOT unconstrained the way theirs are, and
+	// this is the exception the helper's doc comment warns about.
+	//
+	// STEP 3 WRITES THESE ROWS. The per-vehicle teardown tombstones every car it
+	// removes, in the same transaction as the Vehicle delete (§1.4.1), which is
+	// exactly the mechanism MYR-261 added. So this purge has to sit AFTER the
+	// teardown — anywhere before it and the teardown re-creates the set
+	// car-for-car, and the account exits the deletion with a fresh, complete
+	// pile of tombstones instead of none. Nothing after step 3 writes one, so
+	// this slot is safe and so is anything later in this helper.
+	//
+	// Why they go at all: the tombstone stops a LIVE account's next Tesla sync
+	// from resurrecting a deliberately removed VIN. A deleted account has no
+	// Tesla link and no sync, so the row defends against a path that can no
+	// longer run, and what remains is a VIN filed against a person who does not
+	// exist. P0 hygiene like 8d, not a P1 erasure obligation like 8c.
+	tombstones, err := h.sumOverScope(ctx, scope, h.deps.Data.DeleteRemovedVehicleTombstones)
+	if err != nil {
+		return &accountDeletionError{step: "delete_removed_vehicle_tombstones", cause: err}
+	}
+	counts.RemovedVehicleTombstonesDeleted = tombstones
 
 	// (9) Refresh tokens — revoked so no stored session can mint a new access
 	// token. The CURRENT access token deliberately keeps working until step 11,
