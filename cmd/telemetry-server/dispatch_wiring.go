@@ -67,7 +67,10 @@ func setupNavDispatcher(
 			ClientID:     cfg.TeslaOAuth().ClientID,
 			ClientSecret: cfg.TeslaOAuth().ClientSecret,
 		}, logger.With(slog.String("component", "dispatch-token-refresh")))
-		tokenOpts = append(tokenOpts, telemetry.WithResolverRefresher(refresher, &teslaTokenUpdaterAdapter{repo: accountRepo}))
+		tokenOpts = append(tokenOpts,
+			telemetry.WithResolverRefresher(refresher, &teslaTokenUpdaterAdapter{repo: accountRepo}),
+			telemetry.WithResolverRotator(&teslaTokenRotatorAdapter{repo: accountRepo}),
+		)
 	}
 	resolver := telemetry.NewTeslaTokenResolver(
 		&teslaTokenAdapter{repo: accountRepo},

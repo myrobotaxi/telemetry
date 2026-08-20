@@ -124,7 +124,10 @@ func newTeslaTokenResolver(cfg *config.Config, accountRepo *store.AccountRepo, l
 			ClientID:     cfg.TeslaOAuth().ClientID,
 			ClientSecret: cfg.TeslaOAuth().ClientSecret,
 		}, logger.With(slog.String("subcomponent", "token-refresh")))
-		opts = append(opts, telemetry.WithResolverRefresher(refresher, &teslaTokenUpdaterAdapter{repo: accountRepo}))
+		opts = append(opts,
+			telemetry.WithResolverRefresher(refresher, &teslaTokenUpdaterAdapter{repo: accountRepo}),
+			telemetry.WithResolverRotator(&teslaTokenRotatorAdapter{repo: accountRepo}),
+		)
 	}
 	return telemetry.NewTeslaTokenResolver(
 		&teslaTokenAdapter{repo: accountRepo},

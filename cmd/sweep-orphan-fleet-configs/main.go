@@ -213,7 +213,10 @@ func buildDeps(pool *pgxpool.Pool, logger *slog.Logger) (fleetorphan.Deps, error
 			ClientID:     id,
 			ClientSecret: os.Getenv("AUTH_TESLA_SECRET"),
 		}, logger.With(slog.String("subcomponent", "token-refresh")))
-		opts = append(opts, telemetry.WithResolverRefresher(refresher, &tokenUpdater{repo: accountRepo}))
+		opts = append(opts,
+			telemetry.WithResolverRefresher(refresher, &tokenUpdater{repo: accountRepo}),
+			telemetry.WithResolverRotator(&tokenRotator{repo: accountRepo}),
+		)
 	} else {
 		logger.Warn("AUTH_TESLA_ID is unset: expired tokens cannot be refreshed, " +
 			"so some reachable VINs will report failed rather than being cleaned")
