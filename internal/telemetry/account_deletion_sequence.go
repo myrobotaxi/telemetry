@@ -17,6 +17,12 @@ type accountDeletionResult struct {
 	// AlreadyGone is true when the identity transaction found nothing left —
 	// a re-run of a completed deletion. Still a 204.
 	AlreadyGone bool
+	// StreamConfigsDeleted counts the Tesla-side telemetry configs this run
+	// actually removed (MYR-593). Deliberately NOT in Counts: Counts is
+	// mirrored field-for-field into the store's audit metadata, and this is an
+	// operational fact about a best-effort third-party call, not a statement
+	// about what was erased. It reaches the completion log line and stops there.
+	StreamConfigsDeleted int
 }
 
 // accountDeletionError names the step that failed alongside its cause, so the
@@ -78,6 +84,38 @@ func (h *AccountDeletionHandler) run(ctx context.Context, userID string) (accoun
 		counts.DriveCount = n
 	}
 
+	// (1b) Read the account's whole fleet, ONCE. Both of the next two steps
+	// operate on it — the Tesla-side config delete and the row teardown — and
+	// they must agree on which cars those are. Fatal on error for the same
+	// reason step 3 always was: a fleet we could not read is a fleet we cannot
+	// prove we finished, and a re-run costs one query.
+	owned, err := h.listOwnedVehicles(ctx, scope)
+	if err != nil {
+		return accountDeletionResult{}, &accountDeletionError{step: "list_owned_vehicles", cause: err}
+	}
+
+	// (1c) Stop every one of those cars streaming at Tesla (MYR-593).
+	//
+	// THIS IS THE FIRST TESLA CALL OF THE SEQUENCE, AND IT HAS TO BE. Two later
+	// steps destroy what authenticates it, in this order: step 2 revokes the
+	// OAuth GRANT at Tesla — after which the access token is dead at the far end
+	// however fresh our copy looks — and step 3's last-vehicle arm deletes the
+	// "Account" row the token is stored in. There is no position after either
+	// one from which this call can succeed, so it goes before both.
+	//
+	// WHAT IT COSTS TO SKIP, which is why it is here at all. The fleet config
+	// lives at Tesla with a 350-day `exp`, and nothing local expires it. Delete
+	// the Vehicle row without it and the car keeps streaming and keeps billing
+	// for the best part of a year, unreachable: the MYR-592 inactivity sweeper
+	// joins from a live Vehicle row and there is no longer one, and the owner
+	// who could revoke it by hand no longer has an account. This step is the
+	// only moment in the system's life when that config can be removed.
+	//
+	// Best-effort per car, like every other Tesla call in this sequence. A car
+	// that is unreachable, a token already dead, a 404 for a config that was
+	// never applied — each is logged and the next car is tried.
+	streamConfigsDeleted := h.deleteStreamConfigs(ctx, owned)
+
 	// (2) Revoke the Tesla OAuth grant at Tesla, while we still hold the
 	// refresh token. This MUST precede step 3: the last-vehicle arm of the
 	// teardown deletes the "Account" row, and step 10's "User" cascade takes
@@ -89,7 +127,7 @@ func (h *AccountDeletionHandler) run(ctx context.Context, userID string) (accoun
 
 	// (3) Tear down every owned vehicle through the existing MYR-258
 	// transaction — one per car.
-	torndown, err := h.tearDownOwnedVehicles(ctx, scope)
+	torndown, err := h.tearDownOwnedVehicles(ctx, owned)
 	if err != nil {
 		return accountDeletionResult{}, &accountDeletionError{step: "vehicle_teardown", cause: err}
 	}
@@ -157,7 +195,11 @@ func (h *AccountDeletionHandler) run(ctx context.Context, userID string) (accoun
 	// existence/access caches to expire on their own.
 	h.invalidateSessions(scope)
 
-	return accountDeletionResult{Counts: counts, AlreadyGone: outcome.AlreadyGone}, nil
+	return accountDeletionResult{
+		Counts:               counts,
+		AlreadyGone:          outcome.AlreadyGone,
+		StreamConfigsDeleted: streamConfigsDeleted,
+	}, nil
 }
 
 // sumOverScope runs one user-scoped step across every id in the closure and
@@ -182,36 +224,6 @@ func (h *AccountDeletionHandler) sumOverScope(
 		total += n
 	}
 	return total, nil
-}
-
-// tearDownOwnedVehicles runs the existing per-vehicle teardown for every car
-// the user owns, returning how many were actually removed. A car that is
-// already gone counts as done, not as a failure — that is what makes the step
-// re-runnable. The FIRST real failure aborts: the remaining cars keep their
-// data and a re-run picks them up, which is strictly better than pressing on
-// and reporting success over a half-finished teardown.
-// It runs per id in the closure: after an identity convergence the cars are
-// filed under the canonical id while the caller's token still names the
-// abandoned one, so listing by the subject alone would find no cars to tear
-// down and report a clean zero over a garage full of them.
-func (h *AccountDeletionHandler) tearDownOwnedVehicles(ctx context.Context, scope AccountDeletionScope) (int, error) {
-	removed := 0
-	for _, ownerID := range scope.IDs {
-		ids, err := h.deps.Vehicles.ListOwnedVehicleIDs(ctx, ownerID)
-		if err != nil {
-			return removed, fmt.Errorf("list owned vehicles: %w", err)
-		}
-		for _, id := range ids {
-			result, err := h.deps.Teardown.RemoveVehicle(ctx, ownerID, id)
-			if err != nil {
-				return removed, fmt.Errorf("remove vehicle %s: %w", id, err)
-			}
-			if result.Removed {
-				removed++
-			}
-		}
-	}
-	return removed, nil
 }
 
 // cancelOpenRides cancels every open ride the user holds as RIDER, through the

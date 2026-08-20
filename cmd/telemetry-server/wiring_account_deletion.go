@@ -10,9 +10,11 @@ import (
 // setupAccountDeletionEndpoint mounts DELETE /api/users/me — user-initiated
 // account deletion (MYR-355, rest-api.md §7.6, data-lifecycle.md §3).
 //
-// The route is ALWAYS mounted: every step is a local database operation, so
-// there is no proxy, no Tesla call and no optional dependency that could make
-// the endpoint unsafe to expose. An App Store review requirement must not be
+// The route is ALWAYS mounted. Every step that ERASES anything is a local
+// database operation, and the two Tesla calls in the sequence — the grant
+// revoke (MYR-366) and the per-car stream-config delete (MYR-593) — are
+// best-effort and independently nil-able, so no proxy and no Tesla credentials
+// are required to expose it. An App Store review requirement must not be
 // contingent on deployment shape.
 //
 // The session invalidator is the one nil-able seam: only the real
@@ -39,6 +41,20 @@ func setupAccountDeletionEndpoint(deps httpRouteDeps) {
 	if revoker := newTeslaLinkRevoker(deps, logger); revoker != nil {
 		deletionDeps.TeslaLink = revoker
 	}
+	// MYR-593: stop each owned car streaming at Tesla before the revoke above
+	// kills the grant those calls authenticate with. Same deleter and same
+	// resolver the per-vehicle teardown endpoint uses — a deleted account's cars
+	// must be severed exactly as an owner-removed car is, and the two paths
+	// having drifted apart is the whole of the bug. Guarded rather than always
+	// assigned so the handler can distinguish "no proxy configured" (a warning
+	// it emits) from a configured deleter that failed.
+	if fleet := newFleetConfigDeleter(deps.cfg, logger); fleet != nil {
+		deletionDeps.StreamConfigs = telemetry.NewStreamConfigTeardown(
+			fleet,
+			newTeslaTokenResolver(deps.cfg, deps.accountRepo, logger),
+			logger,
+		)
+	}
 
 	handler := telemetry.NewAccountDeletionHandler(deps.authenticator, deletionDeps, logger)
 
@@ -46,5 +62,6 @@ func setupAccountDeletionEndpoint(deps httpRouteDeps) {
 	logger.Info("account deletion endpoint enabled (DELETE /api/users/me)",
 		slog.Bool("session_invalidation", deps.sessionInvalidator != nil),
 		slog.Bool("tesla_grant_revocation", deletionDeps.TeslaLink != nil),
+		slog.Bool("tesla_stream_config_delete", deletionDeps.StreamConfigs != nil),
 	)
 }

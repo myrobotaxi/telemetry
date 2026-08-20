@@ -38,10 +38,18 @@
 -- self-draining in the same way 0016/0026/0028 are.
 --
 -- Not wire-exposed. Keyed by the Prisma "Vehicle"."id" (TEXT cuid), with no FK:
--- CG-DL-9 forbids a Go-owned table constraining a Prisma-owned one, and a
--- stale row for a deleted vehicle is harmless — it simply never matches the
--- candidate join again. (The reconciler prunes on success; a deleted car's row
--- is swept by the same DELETE path when the vehicle is torn down.)
+-- CG-DL-9 forbids a Go-owned table constraining a Prisma-owned one, so nothing
+-- cascades and every row has to be deleted by a statement that names it.
+--
+-- WHO DELETES A ROW. Two places, and this list was wrong for the table's whole
+-- first life. The reconciler prunes on a successful push. The owner teardown
+-- (store.applyTeardownDeletes) takes the row with the car, in the same
+-- transaction as the "Vehicle" delete. This header used to assert that second
+-- sweep as though it existed; it did not, in either the per-vehicle teardown or
+-- the account deletion, so every torn-down car that had ever failed a config
+-- push orphaned its schedule row forever and the "self-draining" claim below
+-- was false. MYR-593 wrote the statement. cmd/sweep-orphan-fleet-configs
+-- cleared the rows that accumulated in the meantime.
 --
 -- Classification: vehicle_id is P0 (opaque cuid). No VIN, no token, no
 -- coordinate, no PII. last_outcome is an internal enum-ish label

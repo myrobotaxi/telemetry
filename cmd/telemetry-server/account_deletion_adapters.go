@@ -12,7 +12,12 @@ import (
 // at the package boundary, so internal/telemetry never imports internal/store.
 
 // ownedVehicleListerAdapter projects store.VehicleRepo.ListByUser down to the
-// vehicle ids the deletion sequence needs.
+// two views of an owner's fleet the deletion machinery needs: ids alone, for
+// TeslaLinkRevoker's last-vehicle pre-check, and id+VIN for the deletion
+// sequence, which must also stop each car streaming at Tesla (MYR-593).
+//
+// ONE adapter over ONE repo call, deliberately. Two readers of "the cars this
+// owner has" is how the two answers start to differ.
 type ownedVehicleListerAdapter struct {
 	repo *store.VehicleRepo
 }
@@ -28,6 +33,23 @@ func (a *ownedVehicleListerAdapter) ListOwnedVehicleIDs(ctx context.Context, use
 		ids = append(ids, vehicles[i].ID)
 	}
 	return ids, nil
+}
+
+// ListOwnedVehicles carries the VIN too. store.Vehicle.VIN is the empty string
+// for a car whose Prisma column is NULL (linked but never synced); the deletion
+// sequence treats that as "no Tesla-side config to delete" and still tears the
+// row down.
+func (a *ownedVehicleListerAdapter) ListOwnedVehicles(ctx context.Context, userID string) ([]telemetry.OwnedVehicle, error) {
+	vehicles, err := a.repo.ListByUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]telemetry.OwnedVehicle, 0, len(vehicles))
+	// Indexed: store.Vehicle is a wide snapshot struct and only two fields are read.
+	for i := range vehicles {
+		out = append(out, telemetry.OwnedVehicle{ID: vehicles[i].ID, VIN: vehicles[i].VIN})
+	}
+	return out, nil
 }
 
 // accountRideCancellerAdapter reuses the SAME guarded UpdateStatusFrom the

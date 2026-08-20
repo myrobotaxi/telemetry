@@ -15,8 +15,16 @@ import (
 
 // --- fakes -----------------------------------------------------------------
 
+// fakeOwnedVehicleLister satisfies BOTH owned-vehicle seams: the id-only one
+// TeslaLinkRevoker's last-vehicle pre-check uses, and the id+VIN one the
+// deletion sequence reads so it can stop each car streaming at Tesla (MYR-593).
+// One fake for both, because there is one real adapter for both.
 type fakeOwnedVehicleLister struct {
-	ids   []string
+	ids []string
+	// vins overrides the VIN for a given vehicle id. Unset ids get a synthetic
+	// 17-character VIN, and an id mapped to "" models the nullable-VIN car (a
+	// row linked but never synced) that has no Tesla-side config to delete.
+	vins  map[string]string
 	err   error
 	calls int
 }
@@ -24,6 +32,32 @@ type fakeOwnedVehicleLister struct {
 func (f *fakeOwnedVehicleLister) ListOwnedVehicleIDs(_ context.Context, _ string) ([]string, error) {
 	f.calls++
 	return f.ids, f.err
+}
+
+func (f *fakeOwnedVehicleLister) ListOwnedVehicles(_ context.Context, _ string) ([]OwnedVehicle, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := make([]OwnedVehicle, 0, len(f.ids))
+	for _, id := range f.ids {
+		out = append(out, OwnedVehicle{ID: id, VIN: f.vinFor(id)})
+	}
+	return out, nil
+}
+
+// vinFor returns the configured VIN for a vehicle id, or a deterministic
+// 17-character stand-in so tests that do not care about VINs still exercise a
+// realistic value.
+func (f *fakeOwnedVehicleLister) vinFor(id string) string {
+	if vin, ok := f.vins[id]; ok {
+		return vin
+	}
+	vin := "5YJ3" + id
+	for len(vin) < 17 {
+		vin += "0"
+	}
+	return vin[:17]
 }
 
 // fakeAccountTeardown records every vehicle handed to it and can fail on a

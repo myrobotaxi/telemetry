@@ -109,6 +109,23 @@ DELETE FROM go_ride_requests WHERE vehicle_id = $1`
 const queryTeardownClearTelemetrySuspension = `
 DELETE FROM go_vehicle_telemetry_suspensions WHERE vehicle_id = $1`
 
+// queryTeardownDeleteFleetConfigAttempts removes the car's fleet-config retry
+// schedule (MYR-448, migration 0031).
+//
+// Migration 0031's header has claimed since the day it landed that "a deleted
+// car's row is swept by the same DELETE path when the vehicle is torn down".
+// It was not — no such statement existed anywhere — so every torn-down car that
+// had ever failed a config push left its schedule row behind permanently, and
+// the table the migration describes as self-draining was not. This statement is
+// what makes the header true (MYR-593).
+//
+// Keyed by "Vehicle"."id" with no FK (CG-DL-9 forbids a Go-owned table
+// constraining a Prisma-owned one), so nothing cascades and the row has to be
+// named here. Idempotent: most teardowns are of cars that never failed a push,
+// and a missing row is success.
+const queryTeardownDeleteFleetConfigAttempts = `
+DELETE FROM go_fleet_config_attempts WHERE vehicle_id = $1`
+
 // queryTeardownDeleteVehicle deletes the target vehicle, owner-scoped. The
 // Prisma FKs cascade Drive / TripStop / vehicle-scoped Invite / the encrypted
 // route blobs, and the Next.js-owned AFTER DELETE trigger fires the
@@ -273,7 +290,10 @@ type teardownDeletion struct {
 // applyTeardownDeletes runs the destructive tail of RemoveVehicle inside the
 // open transaction: (4a) delete the Go-owned ride-request rows (P1 GPS +
 // passenger PII, no FK cascade reaches them), (4a-bis) revoke every sharing
-// grant on the car (MYR-184), (4b) delete the vehicle (owner-scoped; cascades
+// grant on the car (MYR-184), clear the car's owner-inactivity episode
+// (MYR-592) and its fleet-config retry schedule (MYR-593) — three Go-owned
+// tables keyed by vehicle id that no FK reaches — (4b) delete the vehicle
+// (owner-scoped; cascades
 // + fires the NOTIFY), (4c) write the removed-vehicle tombstone (MYR-261) so a
 // later re-link sync cannot resurrect the still-Tesla-owned VIN, and (5) on the
 // owner's last vehicle clear the Tesla tokens + reset the link/pairing flags.
@@ -299,6 +319,13 @@ func applyTeardownDeletes(ctx context.Context, tx pgx.Tx, d teardownDeletion) er
 	// the two offers the disconnect notice makes; it has to actually finish.
 	if _, err := tx.Exec(ctx, queryTeardownClearTelemetrySuspension, d.vehicleID); err != nil {
 		return fmt.Errorf("store.RemoveVehicle(user=%s): clear telemetry suspension: %w", d.userID, err)
+	}
+	// MYR-593: and the fleet-config retry schedule, for exactly the same reason
+	// and with exactly the same shape — a Go-owned table keyed by vehicle id
+	// with no FK to cascade it away. Migration 0031 said this sweep existed;
+	// until now it did not.
+	if _, err := tx.Exec(ctx, queryTeardownDeleteFleetConfigAttempts, d.vehicleID); err != nil {
+		return fmt.Errorf("store.RemoveVehicle(user=%s): delete fleet-config attempts: %w", d.userID, err)
 	}
 	if _, err := tx.Exec(ctx, queryTeardownDeleteVehicle, d.vehicleID, d.userID); err != nil {
 		return fmt.Errorf("store.RemoveVehicle(user=%s): delete vehicle: %w", d.userID, err)
