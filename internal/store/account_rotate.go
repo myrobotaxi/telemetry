@@ -40,20 +40,25 @@
 //     call TESLA actually honoured — the loser of a race writes nothing, so it
 //     cannot clobber the winner.
 //
-// ── THE WINDOW THIS DOES NOT CLOSE, STATED HONESTLY ─────────────────────────
+// ── THE WINDOW THIS LEFT OPEN, AND WHO CLOSED IT ────────────────────────────
 //
-// The on-demand path reads its refresh token with a plain SELECT and takes its
-// lock only at the UPDATE, which is AFTER its Tesla call. So a caller that has
-// already read the token and is mid-flight at Tesla holds no lock, and this
-// function will happily acquire one and spend the same token. The outcome is
-// still not a stranded account — one of the two calls fails at Tesla and writes
-// nothing — but it IS a user-visible error on the on-demand side.
+// As shipped for MYR-594 this covered the keepalive alone: the on-demand path
+// read its refresh token with a plain SELECT and took its lock only at the
+// UPDATE, which is AFTER its Tesla call, so a caller already mid-flight at Tesla
+// held no lock and this function would happily acquire one and spend the same
+// token. Never a stranded account — one of the two calls fails at Tesla and
+// writes nothing — but a user-visible error on the on-demand side.
 //
-// The keepalive arm closes that window by population rather than by locking: it
-// only ever looks at owners whose vehicles are suspended AND who have not
-// authenticated in days, so the concurrent on-demand caller would have to be a
-// request from an account that by construction is making none. See
-// internal/fleetsuspend/keepalive.go.
+// MYR-595 closed it: the on-demand expired-token refresh now comes through
+// RotateTeslaTokenLockedWaiting in account_rotate_wait.go, the sibling entry
+// point on this same lock and transaction, so BOTH drivers of a rotation hold
+// the row while they spend the token. The keepalive keeps NOWAIT — see that
+// clause above; abandoning is right for a background arm and wrong for a
+// request somebody is waiting on.
+//
+// The keepalive's population gate remains as a second line: it only ever looks
+// at owners whose vehicles are suspended AND who have not authenticated in days.
+// See internal/fleetsuspend/keepalive.go.
 package store
 
 import (
@@ -71,8 +76,17 @@ import (
 var ErrTeslaTokenRowBusy = errors.New("tesla token row is locked by another writer")
 
 // pgLockNotAvailable is Postgres SQLSTATE 55P03, what FOR UPDATE NOWAIT raises
-// when the row is already locked.
+// when the row is already locked — and, for the waiting entry point in
+// account_rotate_wait.go, what a `lock_timeout` that ran out raises too.
 const pgLockNotAvailable = "55P03"
+
+// isLockNotAvailable reports whether err is Postgres refusing to give us the
+// row lock. Shared by both lock entry points so "busy" is one condition with one
+// SQLSTATE test rather than two copies that could drift.
+func isLockNotAvailable(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == pgLockNotAvailable
+}
 
 // TeslaTokenPair is one rotated Tesla OAuth pair, as returned by the rotation
 // callback. ExpiresAt is Unix seconds, matching the column.
@@ -167,8 +181,7 @@ func lockedRefreshToken(ctx context.Context, tx pgx.Tx, r *AccountRepo, userID s
 	var refreshEnc *string
 	err := tx.QueryRow(ctx, queryLockTeslaToken, userID).Scan(&refreshEnc)
 
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == pgLockNotAvailable {
+	if isLockNotAvailable(err) {
 		return "", fmt.Errorf("AccountRepo.RotateTeslaTokenLocked(user=%s): %w", userID, ErrTeslaTokenRowBusy)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
