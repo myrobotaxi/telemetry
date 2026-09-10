@@ -15,6 +15,74 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Classifies the diff so the expensive jobs can skip PROSE-ONLY changes
+  # (Actions-minutes trim, client-directed 2026-08-13). Two outputs:
+  #
+  #   code — false only when EVERY changed file is prose: *.md anywhere,
+  #          LICENSE, .gitignore. Deliberately NOT a docs/** glob:
+  #          docs/contracts/schemas/*.json feeds the contract-conformance
+  #          suite, so a schema edit must run the full pipeline. When
+  #          `code` is false, test/contract/security skip, and build/deploy
+  #          skip with them through `needs` — a docs-only merge to main
+  #          deploys nothing, which is correct: the server does not ship
+  #          its own docs.
+  #   deps — true when go.mod/go.sum/Dockerfile moved. Gates the Trivy
+  #          image scan on PRs: the image's vulnerability surface moves
+  #          with the base image and the dependency graph, not with
+  #          application code. Main pushes always scan.
+  #
+  # FAIL-SAFE: any classification error reports code=true, deps=true —
+  # the failure mode is "ran jobs it could have skipped", never a skipped
+  # gate. Skipped jobs satisfy branch protection (GitHub treats job-level
+  # `if` skips as passing for required checks); a workflow-level
+  # paths-ignore would instead leave required checks pending forever,
+  # which is why the gate is a job.
+  changes:
+    name: Classify the diff
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+      deps: ${{ steps.classify.outputs.deps }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed files
+        id: classify
+        run: |
+          set +e
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch -q origin "${{ github.base_ref }}"
+            files=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
+          else
+            before="${{ github.event.before }}"
+            case "$before" in
+              ""|0000000000000000000000000000000000000000) files="" ;;
+              *) files=$(git diff --name-only "$before" "${{ github.sha }}") ;;
+            esac
+          fi
+          if [ -z "$files" ]; then
+            echo "diff unavailable — failing safe to code=true"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "deps=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "$files"
+          code=false; deps=false
+          while IFS= read -r f; do
+            case "$f" in
+              *.md|LICENSE|.gitignore) ;;
+              go.mod|go.sum|Dockerfile*) code=true; deps=true ;;
+              *) code=true ;;
+            esac
+          done <<EOF
+          $files
+          EOF
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "deps=$deps" >> "$GITHUB_OUTPUT"
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -40,6 +108,8 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
 
     services:
       postgres:
@@ -114,6 +184,8 @@ jobs:
     name: Contract conformance
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
     # MYR-141: contract-level conformance tests for the Go REST surface.
     # These mount the real handlers from `internal/telemetry/*` against a
     # real Postgres (via testcontainers-go) and assert wire-shape adherence
@@ -139,6 +211,8 @@ jobs:
     name: Security
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
     steps:
       - uses: actions/checkout@v7
 
@@ -170,7 +244,7 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: [lint, test, contract, security]
+    needs: [changes, lint, test, contract, security]
     steps:
       - uses: actions/checkout@v7
 
@@ -195,7 +269,10 @@ jobs:
           tags: telemetry:${{ github.sha }}
 
       - name: Scan Docker image with Trivy
-        if: steps.dockerfile.outputs.exists == 'true'
+        # Scoped to dependency/Dockerfile changes on PRs (the image's vuln
+        # surface moves with the base image + module graph, not app code);
+        # every main push still scans, so nothing reaches prod unscanned.
+        if: steps.dockerfile.outputs.exists == 'true' && (needs.changes.outputs.deps == 'true' || github.ref == 'refs/heads/main')
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: telemetry:${{ github.sha }}
@@ -206,7 +283,7 @@ jobs:
 
       - name: Upload Trivy SARIF to Security tab
         uses: github/codeql-action/upload-sarif@v4
-        if: always() && steps.dockerfile.outputs.exists == 'true'
+        if: always() && steps.dockerfile.outputs.exists == 'true' && (needs.changes.outputs.deps == 'true' || github.ref == 'refs/heads/main')
         with:
           sarif_file: trivy-results.sarif
         continue-on-error: true
